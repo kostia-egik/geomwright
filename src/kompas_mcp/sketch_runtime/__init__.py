@@ -22,6 +22,7 @@ from .directions import DirectionAlias, DirectionAliasReport, DirectionAliasResu
 from .entities import Arc, Circle, Point, Segment, SketchModel, SketchPrimitive
 from .examples import FlatV60ThreadProfileSpec, build_flat_v60_thread_profile_preflight
 from .frames import Frame2D, FrameReport, Vector2, verify_frame
+from .hints import RepairHint, build_repair_hints
 from .measurements import MeasurementExpectation, MeasurementReport, MeasurementResult, verify_measurements
 from .orientation import (
     LoopOrientationExpectation,
@@ -64,6 +65,7 @@ __all__ = [
     "Point",
     "PointRelationExpectation",
     "PointRelationReport",
+    "RepairHint",
     "Segment",
     "SketchModel",
     "SketchPreflightPlan",
@@ -92,4 +94,5 @@ __all__ = [
     "build_flat_v60_thread_profile_preflight",
     "build_preflight_state_card",
     "build_readback_state_card",
+    "build_repair_hints",
 ]

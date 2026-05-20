@@ -18,6 +18,7 @@ Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
 - `readback.py`: dependency-free actual-vs-expected sketch snapshot checks for ids, coordinates, primitive shape, loop membership, construction flags and actual topology;
 - `examples.py`: COM-free reusable preflight factory for a flat V60 thread profile, showing how semantic entities, frame directions, staged constraints, relations, measurements, orientation and dimension bindings fit together;
 - `state_card.py`: compact model-facing summaries for preflight/readback reports with section status, closed loops and diagnostic codes/entities;
+- `hints.py`: deterministic repair hints for common diagnostic codes so the model gets likely-cause/suggested-fix context instead of raw failures only;
 - `diagnostics.py`: compact model-readable diagnostics shared by the preflight reports.
 
 These modules are intentionally dependency-free and do not call KOMPAS/COM yet. They are the first pure-python preflight/readback layer that future sketch builders can use before and after executing live commands.
