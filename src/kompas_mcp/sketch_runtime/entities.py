@@ -27,6 +27,7 @@ class Segment:
     end: PointId
     role: str = ""
     loop_id: str = "main"
+    construction: bool = False
 
     @property
     def kind(self) -> PrimitiveKind:
@@ -45,6 +46,7 @@ class Arc:
     direction: Literal["cw", "ccw"] = "ccw"
     role: str = ""
     loop_id: str = "main"
+    construction: bool = False
 
     @property
     def kind(self) -> PrimitiveKind:

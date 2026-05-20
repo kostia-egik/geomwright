@@ -83,6 +83,27 @@ class SketchRuntimeTopologyTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("unexpected_segment_intersection", [diagnostic.code for diagnostic in report.diagnostics])
 
+    def test_construction_geometry_in_expected_loop_is_diagnostic(self) -> None:
+        model = SketchModel(
+            points=(
+                Point("p1", 0.0, 0.0),
+                Point("p2", 10.0, 0.0),
+                Point("p3", 10.0, 5.0),
+                Point("p4", 0.0, 5.0),
+            ),
+            primitives=(
+                Segment("l1", "p1", "p2", construction=True),
+                Segment("l2", "p2", "p3"),
+                Segment("l3", "p3", "p4"),
+                Segment("l4", "p4", "p1"),
+            ),
+        )
+
+        report = verify_topology(model)
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.diagnostics[0].code, "construction_in_expected_loop")
+
 
 if __name__ == "__main__":
     unittest.main()

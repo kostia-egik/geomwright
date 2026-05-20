@@ -63,6 +63,15 @@ def verify_topology(model: SketchModel, *, stage: str = "topology") -> TopologyR
     primitives_by_loop: dict[str, list[SketchPrimitive]] = defaultdict(list)
     for primitive in model.primitives:
         primitives_by_loop[primitive.loop_id].append(primitive)
+        if primitive.loop_id in expected_loops and primitive.construction:
+            diagnostics.append(
+                Diagnostic(
+                    "construction_in_expected_loop",
+                    "Construction geometry must not be part of an expected profile loop",
+                    entity_ids=(primitive.id,),
+                    details={"loop_id": primitive.loop_id, "role": primitive.role},
+                )
+            )
         missing = [point_id for point_id in primitive.endpoint_ids() if point_id not in point_by_id]
         if missing:
             diagnostics.append(
