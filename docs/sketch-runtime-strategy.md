@@ -1,5 +1,17 @@
 # Sketch Runtime Strategy
 
+## Implementation status
+
+Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
+
+- `entities.py`: semantic points, segments, arcs, sketch model ids and roles;
+- `topology.py`: closed-loop, missing endpoint, dangling point and connectivity preflight checks;
+- `frames.py`: 2D local-frame checks for zero axes, orthogonality and handedness;
+- `dimensions.py`: variable/dimension binding checks for missing variables, missing targets and unknown expression references;
+- `diagnostics.py`: compact model-readable diagnostics shared by the preflight reports.
+
+These modules are intentionally dependency-free and do not call KOMPAS/COM yet. They are the first pure-python preflight layer that future sketch builders can use before executing live commands.
+
 Цель документа - зафиксировать первый нижний слой разработки `kompas-mcp`, который
 снимает с модели ручное управление мелкими, но постоянно повторяющимися действиями
 КОМПАСа.
