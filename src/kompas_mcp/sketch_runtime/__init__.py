@@ -19,6 +19,7 @@ from .orientation import (
     verify_loop_orientations,
 )
 from .readback import SketchReadbackExpectation, SketchReadbackReport, verify_sketch_readback
+from .relations import PointRelationExpectation, PointRelationReport, verify_point_relations
 from .topology import TopologyReport, verify_topology
 from .verify import SketchPreflightPlan, SketchPreflightReport, verify_sketch_preflight
 
@@ -39,6 +40,8 @@ __all__ = [
     "LoopOrientationReport",
     "LoopOrientationResult",
     "Point",
+    "PointRelationExpectation",
+    "PointRelationReport",
     "Segment",
     "SketchModel",
     "SketchPreflightPlan",
@@ -53,6 +56,7 @@ __all__ = [
     "verify_dimension_bindings",
     "verify_frame",
     "verify_loop_orientations",
+    "verify_point_relations",
     "verify_sketch_preflight",
     "verify_sketch_readback",
     "verify_topology",
