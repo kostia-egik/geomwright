@@ -1,0 +1,28 @@
+{
+  "scenario": "internal_cylindrical_step",
+  "output_name": "stepped_shaft_internal_stepped_bore_demo.m3d",
+  "params": {
+    "name": "Stepped shaft with internal stepped bore",
+    "parameter_prefix": "IBORE02",
+    "steps": [
+      { "length": 14, "diameter": 12 },
+      { "length": 10, "diameter": 18 },
+      { "length": 16, "diameter": 22 },
+      { "length": 12, "diameter": 16 }
+    ],
+    "axial_direction": "forward",
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Stepped shaft shell",
+      "parameter_prefix": "SHELL01",
+      "steps": [
+        { "length": 18, "diameter": 34 },
+        { "length": 20, "diameter": 26 },
+        { "length": 22, "diameter": 40 }
+      ]
+    },
+    "sketch": {
+      "dimension_display": "radius"
+    }
+  }
+}

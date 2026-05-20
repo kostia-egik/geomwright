@@ -1,0 +1,20 @@
+{
+  "scenario": "lcs",
+  "params": {
+    "mode": "object",
+    "name": "Step outer LCS",
+    "lcs_name": "LCS_STEP_2_OUTER",
+    "reference": {
+      "selector": "step_2_outer_face",
+      "source_scenario": "stepped_shaft",
+      "source_params": {
+        "name": "Step outer source shaft",
+        "steps": [
+          { "length": 20, "diameter": 10 },
+          { "length": 30, "diameter": 16 },
+          { "length": 10, "diameter": 12 }
+        ]
+      }
+    }
+  }
+}

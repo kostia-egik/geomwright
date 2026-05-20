@@ -1,0 +1,24 @@
+{
+  "scenario": "internal_cylindrical_step",
+  "output_name": "internal_cylindrical_step_demo.m3d",
+  "params": {
+    "name": "Internal stepped bore demo",
+    "parameter_prefix": "IBORE01",
+    "steps": [
+      { "length": 12, "diameter": 10 },
+      { "length": 8, "diameter": 16 },
+      { "length": 20, "diameter": 12 }
+    ],
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Base shaft",
+      "parameter_prefix": "BASE01",
+      "steps": [
+        { "length": 56, "diameter": 30 }
+      ]
+    },
+    "sketch": {
+      "dimension_display": "radius"
+    }
+  }
+}

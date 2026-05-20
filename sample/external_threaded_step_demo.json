@@ -1,0 +1,22 @@
+{
+  "scenario": "external_threaded_step",
+  "output_name": "external_threaded_step_demo.m3d",
+  "params": {
+    "name": "External threaded step demo",
+    "diameter": 20,
+    "pitch": 2.5,
+    "depth": 12,
+    "direction": "left",
+    "thread_standard": "metric",
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Thread source shaft",
+      "parameter_prefix": "THBASE1",
+      "steps": [
+        { "length": 20, "diameter": 20 },
+        { "length": 14, "diameter": 30 }
+      ]
+    },
+    "source_selector": "step_1_outer_face"
+  }
+}

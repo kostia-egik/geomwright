@@ -1,0 +1,21 @@
+{
+  "scenario": "stepped_shaft",
+  "output_name": "stepped_shaft_radius.m3d",
+  "params": {
+    "name": "Stepped shaft radius display",
+    "designation": "SHAFT-R-001",
+    "material": "Steel 45",
+    "sketch": {
+      "axis_line_style": "axial",
+      "profile_line_style": "normal",
+      "dimensions": true,
+      "constraints": true,
+      "dimension_display": "radius"
+    },
+    "steps": [
+      {"length": 18, "diameter": 16},
+      {"length": 28, "diameter": 26},
+      {"length": 14, "diameter": 20}
+    ]
+  }
+}

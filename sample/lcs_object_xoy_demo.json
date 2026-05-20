@@ -1,0 +1,11 @@
+{
+  "scenario": "lcs",
+  "params": {
+    "mode": "object",
+    "name": "XY based LCS",
+    "lcs_name": "LCS_XOY",
+    "reference": {
+      "system_object": "xoy_plane"
+    }
+  }
+}

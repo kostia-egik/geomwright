@@ -1,0 +1,85 @@
+{
+  "name": "Internal Cylindrical Step Workflow Demo",
+  "comment": "Workflow sample: stepped_shaft -> point center -> lcs -> internal cylindrical cut",
+  "output_name": "internal_cylindrical_step_workflow_demo.m3d",
+  "exports": {
+    "shaft_body": "rev01.body",
+    "tail_point": "pt_tail.point",
+    "tail_ref_point": "pt_tail_ref.point",
+    "tail_lcs": "lcs_tail.lcs",
+    "cut_body": "ibore01.body"
+  },
+  "operations": [
+    {
+      "id": "rev01",
+      "scenario": "stepped_shaft",
+      "params": {
+        "name": "Base shaft",
+        "parameter_prefix": "REV01",
+        "steps": [
+          { "length": 48, "diameter": 30 }
+        ]
+      }
+    },
+    {
+      "id": "pt_tail",
+      "scenario": "point",
+      "params": {
+        "mode": "center_of_object",
+        "point_name": "PT_TAIL",
+        "reference": {
+          "ref": "rev01.end_face"
+        }
+      }
+    },
+    {
+      "id": "pt_tail_ref",
+      "scenario": "point",
+      "params": {
+        "mode": "offset_from_point",
+        "point_name": "PT_TAIL_REF",
+        "reference": {
+          "ref": "pt_tail.point"
+        },
+        "offset": {
+          "dx": 0,
+          "dy": 0,
+          "dz": 0
+        }
+      }
+    },
+    {
+      "id": "lcs_tail",
+      "scenario": "lcs",
+      "params": {
+        "mode": "point",
+        "lcs_name": "LCS_TAIL",
+        "reference": {
+          "ref": "pt_tail_ref.point"
+        }
+      }
+    },
+    {
+      "id": "ibore01",
+      "scenario": "internal_cylindrical_step",
+      "params": {
+        "name": "Stepped bore cut",
+        "parameter_prefix": "IBORE01",
+        "steps": [
+          { "length": 10, "diameter": 10 },
+          { "length": 8, "diameter": 16 },
+          { "length": 12, "diameter": 12 }
+        ],
+        "axial_direction": "backward",
+        "placement": {
+          "base": {
+            "mode": "csys_ref",
+            "reference": {
+              "ref": "lcs_tail.lcs"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

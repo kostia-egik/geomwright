@@ -1,0 +1,63 @@
+{
+  "name": "Bolt Circle Holes Workflow Demo",
+  "comment": "Stepped shaft with bolt-circle holes on the far end face",
+  "output_name": "bolt_circle_holes_workflow_demo.m3d",
+  "operations": [
+    {
+      "id": "rev01",
+      "scenario": "stepped_shaft",
+      "params": {
+        "name": "Flange shaft",
+        "parameter_prefix": "REV01",
+        "steps": [
+          { "length": 20, "diameter": 42 },
+          { "length": 18, "diameter": 32 }
+        ]
+      }
+    },
+    {
+      "id": "pt_face",
+      "scenario": "point",
+      "params": {
+        "mode": "center_of_object",
+        "point_name": "PT_FACE",
+        "reference": {
+          "ref": "rev01.end_face"
+        }
+      }
+    },
+    {
+      "id": "lcs_face",
+      "scenario": "lcs",
+      "params": {
+        "mode": "point",
+        "lcs_name": "LCS_FACE",
+        "reference": {
+          "output_ref": "pt_face.point"
+        }
+      }
+    },
+    {
+      "id": "holes01",
+      "scenario": "bolt_circle_holes",
+      "params": {
+        "name": "End-face holes",
+        "parameter_prefix": "BCH01",
+        "hole_diameter": 6,
+        "depth": 10,
+        "bolt_circle_diameter": 24,
+        "count": 6,
+        "start_angle_degrees": 0,
+        "axial_direction": "backward",
+        "placement": {
+          "base": {
+            "mode": "csys_ref",
+            "reference": {
+              "output_ref": "lcs_face.lcs"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

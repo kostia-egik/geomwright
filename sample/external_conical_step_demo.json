@@ -1,0 +1,14 @@
+{
+  "scenario": "external_conical_step",
+  "output_name": "external_conical_step_demo.m3d",
+  "params": {
+    "name": "External conical step demo",
+    "parameter_prefix": "CONE01",
+    "length": 40,
+    "start_diameter": 30,
+    "end_diameter": 18,
+    "sketch": {
+      "dimension_display": "radius"
+    }
+  }
+}

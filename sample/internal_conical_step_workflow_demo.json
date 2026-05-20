@@ -1,0 +1,66 @@
+{
+  "name": "Internal Conical Step Workflow Demo",
+  "comment": "Workflow sample: stepped_shaft -> point center -> lcs -> internal conical cut",
+  "output_name": "internal_conical_step_workflow_demo.m3d",
+  "exports": {
+    "shaft_body": "rev01.body",
+    "tail_point": "pt_tail.point",
+    "tail_lcs": "lcs_tail.lcs",
+    "cut_body": "icut01.body"
+  },
+  "operations": [
+    {
+      "id": "rev01",
+      "scenario": "stepped_shaft",
+      "params": {
+        "name": "Base shaft",
+        "parameter_prefix": "REV01",
+        "steps": [
+          { "length": 48, "diameter": 30 }
+        ]
+      }
+    },
+    {
+      "id": "pt_tail",
+      "scenario": "point",
+      "params": {
+        "mode": "center_of_object",
+        "point_name": "PT_TAIL",
+        "reference": {
+          "ref": "rev01.start_face"
+        }
+      }
+    },
+    {
+      "id": "lcs_tail",
+      "scenario": "lcs",
+      "params": {
+        "mode": "point",
+        "lcs_name": "LCS_TAIL",
+        "reference": {
+          "ref": "pt_tail.point"
+        }
+      }
+    },
+    {
+      "id": "icut01",
+      "scenario": "internal_conical_step",
+      "params": {
+        "name": "Tail cone cut",
+        "parameter_prefix": "ICUT01",
+        "length": 20,
+        "start_diameter": 12,
+        "end_diameter": 4,
+        "axial_direction": "forward",
+        "placement": {
+          "base": {
+            "mode": "csys_ref",
+            "reference": {
+              "ref": "lcs_tail.lcs"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

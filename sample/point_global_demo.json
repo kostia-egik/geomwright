@@ -1,0 +1,8 @@
+{
+  "scenario": "point",
+  "params": {
+    "name": "Reference point demo",
+    "point_name": "PT_BASE",
+    "origin": [12, 8, 0]
+  }
+}

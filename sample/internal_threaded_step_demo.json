@@ -1,0 +1,29 @@
+{
+  "scenario": "internal_threaded_step",
+  "output_name": "internal_threaded_step_demo.m3d",
+  "params": {
+    "name": "Internal threaded step demo",
+    "diameter": 16,
+    "pitch": 2.0,
+    "depth": 10,
+    "direction": "right",
+    "thread_standard": "metric",
+    "source_scenario": "internal_cylindrical_step",
+    "source_params": {
+      "name": "Threaded bore source",
+      "parameter_prefix": "THBORE1",
+      "steps": [
+        { "length": 18, "diameter": 16 }
+      ],
+      "source_scenario": "stepped_shaft",
+      "source_params": {
+        "name": "Base shaft for threaded bore",
+        "parameter_prefix": "THBASE2",
+        "steps": [
+          { "length": 28, "diameter": 32 }
+        ]
+      }
+    },
+    "source_selector": "inner_face"
+  }
+}

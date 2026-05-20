@@ -1,0 +1,28 @@
+{
+  "name": "Eccentric Chain Demo",
+  "comment": "Integration sample: shaft -> center point -> offset point -> LCS -> shaft",
+  "output_name": "eccentric_chain_demo.m3d",
+  "point_names": {
+    "center": "PT_CENTER",
+    "offset": "PT_ECC"
+  },
+  "lcs_name": "LCS_ECC",
+  "offset": [0, 8, 0],
+  "primary_shaft": {
+    "name": "Primary shaft",
+    "parameter_prefix": "REV01",
+    "steps": [
+      { "length": 18, "diameter": 30 },
+      { "length": 24, "diameter": 22 },
+      { "length": 18, "diameter": 26 }
+    ]
+  },
+  "secondary_shaft": {
+    "name": "Eccentric journal",
+    "parameter_prefix": "REV02",
+    "steps": [
+      { "length": 16, "diameter": 18 },
+      { "length": 12, "diameter": 12 }
+    ]
+  }
+}

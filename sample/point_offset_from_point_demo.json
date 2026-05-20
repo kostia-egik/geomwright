@@ -1,0 +1,17 @@
+{
+  "scenario": "point",
+  "params": {
+    "mode": "offset_from_point",
+    "name": "Eccentric base point",
+    "point_name": "PT_ECC",
+    "reference": {
+      "name": "PT_BASE",
+      "origin": [40, 0, 0]
+    },
+    "offset": {
+      "dx": 0,
+      "dy": 8,
+      "dz": 0
+    }
+  }
+}

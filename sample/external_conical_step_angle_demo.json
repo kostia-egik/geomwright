@@ -1,0 +1,14 @@
+{
+  "scenario": "external_conical_step",
+  "output_name": "external_conical_step_angle_demo.m3d",
+  "params": {
+    "name": "External conical step by angle",
+    "parameter_prefix": "CONEANG01",
+    "start_diameter": 30,
+    "end_diameter": 18,
+    "cone_angle_degrees": 10,
+    "sketch": {
+      "dimension_display": "radius"
+    }
+  }
+}

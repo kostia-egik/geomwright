@@ -1,0 +1,32 @@
+{
+  "scenario": "internal_helical_thread",
+  "output_name": "internal_helical_thread_demo_spiral_fix_2026_05_07.m3d",
+  "params": {
+    "name": "InternalHelicalThreadDemoSpiralFix20260507",
+    "diameter": 16,
+    "pitch": 2.0,
+    "length": 10,
+    "depth": 1.0,
+    "clearance": 0.15,
+    "direction": "right",
+    "source_scenario": "internal_cylindrical_step",
+    "source_params": {
+      "name": "ThreadCarrierBoreSpiralFix20260507",
+      "steps": [
+        {
+          "length": 18,
+          "diameter": 16
+        }
+      ],
+      "source_scenario": "stepped_shaft",
+      "source_params": {
+        "steps": [
+          {
+            "length": 30,
+            "diameter": 36
+          }
+        ]
+      }
+    }
+  }
+}

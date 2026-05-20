@@ -1,0 +1,30 @@
+{
+  "scenario": "face_ring_groove",
+  "output_name": "face_ring_groove_wide_relief_demo.m3d",
+  "params": {
+    "name": "Face ring groove wide relief demo",
+    "parameter_prefix": "GROOVE02",
+    "inner_diameter": 26,
+    "outer_diameter": 44,
+    "depth": 5,
+    "inner_wall_angle_degrees": 14,
+    "outer_wall_angle_degrees": 3,
+    "axial_direction": "backward",
+    "placement": {
+      "mode": "csys",
+      "origin": [72, 0]
+    },
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Base shaft wide relief",
+      "parameter_prefix": "BASE02",
+      "steps": [
+        { "length": 46, "diameter": 52 },
+        { "length": 26, "diameter": 48 }
+      ]
+    },
+    "sketch": {
+      "dimension_display": "radius"
+    }
+  }
+}

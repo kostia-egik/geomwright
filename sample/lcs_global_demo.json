@@ -1,0 +1,13 @@
+{
+  "scenario": "lcs",
+  "params": {
+    "name": "LCS global demo",
+    "lcs_name": "LCS_GLOBAL_DEMO",
+    "origin": [40, 12, 0],
+    "rotation": {
+      "rx": 10,
+      "ry": 20,
+      "rz": 30
+    }
+  }
+}

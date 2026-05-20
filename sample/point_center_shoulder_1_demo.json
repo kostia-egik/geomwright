@@ -1,0 +1,20 @@
+{
+  "scenario": "point",
+  "params": {
+    "mode": "center_of_object",
+    "name": "Shoulder center point",
+    "point_name": "PT_SHOULDER_1",
+    "reference": {
+      "selector": "shoulder_1_face",
+      "source_scenario": "stepped_shaft",
+      "source_params": {
+        "name": "Shoulder source shaft",
+        "steps": [
+          { "length": 20, "diameter": 10 },
+          { "length": 30, "diameter": 16 },
+          { "length": 10, "diameter": 12 }
+        ]
+      }
+    }
+  }
+}

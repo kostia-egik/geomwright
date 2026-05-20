@@ -1,0 +1,29 @@
+{
+  "scenario": "face_ring_groove",
+  "output_name": "face_ring_groove_demo.m3d",
+  "params": {
+    "name": "Face ring groove demo",
+    "parameter_prefix": "GROOVE01",
+    "inner_diameter": 18,
+    "outer_diameter": 30,
+    "depth": 8,
+    "inner_wall_angle_degrees": 5,
+    "outer_wall_angle_degrees": 12,
+    "axial_direction": "backward",
+    "placement": {
+      "mode": "csys",
+      "origin": [60, 0]
+    },
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Base shaft",
+      "parameter_prefix": "BASE01",
+      "steps": [
+        { "length": 60, "diameter": 40 }
+      ]
+    },
+    "sketch": {
+      "dimension_display": "radius"
+    }
+  }
+}

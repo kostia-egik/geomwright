@@ -1,0 +1,27 @@
+{
+  "scenario": "lcs",
+  "output_name": "lcs_internal_cone_end_face_demo.m3d",
+  "params": {
+    "mode": "object",
+    "lcs_name": "LCS_ICONE_END",
+    "reference": {
+      "source_scenario": "internal_conical_step",
+      "source_params": {
+        "name": "Internal cone source",
+        "parameter_prefix": "ICONECHK",
+        "length": 14,
+        "start_diameter": 18,
+        "end_diameter": 10,
+        "source_scenario": "stepped_shaft",
+        "source_params": {
+          "name": "Shaft source",
+          "parameter_prefix": "SRCCHK",
+          "steps": [
+            { "length": 40, "diameter": 28 }
+          ]
+        }
+      },
+      "selector": "end_face"
+    }
+  }
+}

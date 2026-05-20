@@ -1,0 +1,835 @@
+from __future__ import annotations
+
+import os
+
+from mcp.server.fastmcp import FastMCP
+
+from .adapter import KompasAdapter
+from .analyzers import analyze_naming_issues as run_naming_analysis
+from .analyzers import analyze_spec_issues as run_spec_analysis
+from .changesets import preview_changeset as build_preview_changeset
+from .relink import preview_file_relink_paths as build_file_relink_preview
+from .relink import preview_file_relink_map_paths as build_file_relink_map_preview
+from .relink import build_file_relink_plan as build_file_relink_plan_payload
+from .relink import build_file_relink_map_plan as build_file_relink_map_plan_payload
+from .relink import relink_file_from_map_to_output as run_relink_file_from_map_to_output
+from .relink import relink_from_map as run_relink_from_map
+from .relink import relink_from_map_to_export as run_relink_from_map_to_export
+from .relink import relink_project_root as run_relink_project_root
+from .relink import relink_file_to_output as run_relink_file_to_output
+from .relink import relink_to_export as run_relink_to_export
+from .rules import load_rules
+from .thread_catalog import list_thread_catalog_standards as build_thread_catalog_standards
+from .thread_catalog import list_helical_thread_v1_candidates as build_helical_thread_v1_candidates
+from .thread_catalog import list_thread_standard_entries as build_thread_standard_entries
+from .thread_catalog import resolve_thread_designation_entry as build_thread_designation_entry
+from .workflow import cleanup_to_export as run_cleanup_to_export
+
+
+mcp = FastMCP("kompas-mcp", json_response=True)
+adapter = KompasAdapter()
+
+
+def _rules(rules_path: str | None = None) -> dict:
+    return load_rules(rules_path or os.environ.get("KOMPAS_RULES_PATH"))
+
+
+@mcp.tool()
+def list_thread_catalog_standards(database_path: str | None = None) -> dict:
+    """List thread standards from KOMPAS thread.db with helical-thread V1 compatibility hints."""
+    return build_thread_catalog_standards(database_path=database_path)
+
+
+@mcp.tool()
+def list_thread_catalog_entries(
+    standard: str,
+    database_path: str | None = None,
+    limit: int | None = 200,
+    offset: int | None = 0,
+    title_query: str | None = None,
+    diameter: float | None = None,
+    pitch: float | None = None,
+    diameter_min: float | None = None,
+    diameter_max: float | None = None,
+    pitch_min: float | None = None,
+    pitch_max: float | None = None,
+) -> dict:
+    """List size rows of one thread standard table (d/p/title), with helical-thread-friendly shaping."""
+    return build_thread_standard_entries(
+        standard,
+        database_path=database_path,
+        limit=limit,
+        offset=offset,
+        title_query=title_query,
+        diameter=diameter,
+        pitch=pitch,
+        diameter_min=diameter_min,
+        diameter_max=diameter_max,
+        pitch_min=pitch_min,
+        pitch_max=pitch_max,
+    )
+
+
+@mcp.tool()
+def list_helical_thread_v1_candidates(
+    database_path: str | None = None,
+    limit_per_standard: int | None = 20,
+    offset: int | None = 0,
+    title_query: str | None = None,
+    diameter_min: float | None = None,
+    diameter_max: float | None = None,
+    pitch_min: float | None = None,
+    pitch_max: float | None = None,
+) -> dict:
+    """List only helical-thread-V1-compatible metric standards with bundled size rows."""
+    return build_helical_thread_v1_candidates(
+        database_path=database_path,
+        limit_per_standard=limit_per_standard,
+        offset=offset,
+        title_query=title_query,
+        diameter_min=diameter_min,
+        diameter_max=diameter_max,
+        pitch_min=pitch_min,
+        pitch_max=pitch_max,
+    )
+
+
+@mcp.tool()
+def resolve_thread_catalog_designation(
+    designation: str,
+    standard: str | None = None,
+    thread_type: str | None = None,
+    database_path: str | None = None,
+) -> dict:
+    """Resolve a thread size by its designation/title within the default standard for a thread type (or an explicit standard)."""
+    return build_thread_designation_entry(
+        designation,
+        standard=standard,
+        thread_type=thread_type,
+        database_path=database_path,
+    )
+
+
+@mcp.tool()
+def get_session_state() -> dict:
+    """Return KOMPAS connection state and the active document."""
+    return adapter.get_session_state()
+
+
+@mcp.tool()
+def list_documents() -> dict:
+    """Return open KOMPAS documents."""
+    return adapter.list_documents()
+
+
+@mcp.tool()
+def check_file_access(path: str) -> dict:
+    """Check whether a file is visible and can be opened exclusively by this process."""
+    return adapter.check_file_access(path)
+
+
+@mcp.tool()
+def open_document(path: str, visible: bool = True, read_only: bool = False) -> dict:
+    """Open a document inside the automation-controlled KOMPAS instance."""
+    return adapter.open_document(path=path, visible=visible, read_only=read_only)
+
+
+@mcp.tool()
+def close_document(document_id: str | None = None, save: bool = False, close_mode: int = 0) -> dict:
+    """Close the selected or active document, optionally saving it first."""
+    return adapter.close_document(document_id=document_id, save=save, close_mode=close_mode)
+
+
+@mcp.tool()
+def shutdown_session(save: bool = False, close_mode: int = 0) -> dict:
+    """Close all open documents in the automation instance and try to quit KOMPAS."""
+    return adapter.shutdown_session(save=save, close_mode=close_mode)
+
+
+@mcp.tool()
+def smoke_check_session(path: str, output_dir: str | None = None, visible: bool = False) -> dict:
+    """Open, save-as-close, reopen-readonly and close a KOMPAS document to verify lifecycle handling."""
+    return adapter.smoke_check_session(path=path, output_dir=output_dir, visible=visible)
+
+
+@mcp.tool()
+def scan_model_files(
+    root: str,
+    recursive: bool = True,
+    extensions: list[str] | None = None,
+    include_locks: bool = False,
+    max_files: int | None = None,
+) -> dict:
+    """Scan a folder or a single file for KOMPAS model files without opening KOMPAS."""
+    return adapter.scan_model_files(
+        root=root,
+        recursive=recursive,
+        extensions=extensions,
+        include_locks=include_locks,
+        max_files=max_files,
+    )
+
+
+@mcp.tool()
+def batch_smoke_check_session(
+    root: str | None = None,
+    paths: list[str] | None = None,
+    recursive: bool = True,
+    extensions: list[str] | None = None,
+    include_locks: bool = False,
+    limit: int | None = 20,
+    output_dir: str | None = None,
+    visible: bool = False,
+    dry_run: bool = False,
+    continue_on_error: bool = True,
+    report_dir: str | None = None,
+    report_name: str | None = None,
+    report_formats: list[str] | None = None,
+) -> dict:
+    """Run lifecycle smoke-checks over a folder or explicit file list, continuing after per-file errors."""
+    return adapter.batch_smoke_check_session(
+        root=root,
+        paths=paths,
+        recursive=recursive,
+        extensions=extensions,
+        include_locks=include_locks,
+        limit=limit,
+        output_dir=output_dir,
+        visible=visible,
+        dry_run=dry_run,
+        continue_on_error=continue_on_error,
+        report_dir=report_dir,
+        report_name=report_name,
+        report_formats=report_formats,
+    )
+
+
+@mcp.tool()
+def batch_analyze_model_quality(
+    root: str | None = None,
+    paths: list[str] | None = None,
+    recursive: bool = True,
+    extensions: list[str] | None = None,
+    include_locks: bool = False,
+    limit: int | None = 20,
+    visible: bool = False,
+    analyses: list[str] | None = None,
+    rules_path: str | None = None,
+    continue_on_error: bool = True,
+    report_dir: str | None = None,
+    report_name: str | None = None,
+    report_formats: list[str] | None = None,
+) -> dict:
+    """Open models read-only, run naming/spec quality checks, close each document and continue after errors."""
+    return adapter.batch_analyze_model_quality(
+        root=root,
+        paths=paths,
+        recursive=recursive,
+        extensions=extensions,
+        include_locks=include_locks,
+        limit=limit,
+        visible=visible,
+        analyses=analyses,
+        rules=_rules(rules_path),
+        continue_on_error=continue_on_error,
+        report_dir=report_dir,
+        report_name=report_name,
+        report_formats=report_formats,
+    )
+
+
+@mcp.tool()
+def preview_part_scenario(scenario: str, params: dict) -> dict:
+    """Preview a parametric part scenario without creating a KOMPAS document."""
+    return adapter.preview_part_scenario(scenario=scenario, params=params)
+
+
+@mcp.tool()
+def create_part_from_scenario(
+    scenario: str,
+    params: dict,
+    output_path: str | None = None,
+    visible: bool = False,
+    close_after_save: bool | None = None,
+) -> dict:
+    """Create a KOMPAS part from a supported parametric scenario such as stepped_shaft."""
+    return adapter.create_part_from_scenario(
+        scenario=scenario,
+        params=params,
+        output_path=output_path,
+        visible=visible,
+        close_after_save=close_after_save,
+    )
+
+
+@mcp.tool()
+def get_file_composition(assembly_path: str) -> dict:
+    """Read the stored composition of an assembly file directly from the file itself."""
+    return adapter.get_file_composition(assembly_path)
+
+
+@mcp.tool()
+def get_document_composition(document_id: str | None = None) -> dict:
+    """Read the stored composition of the selected or active saved document."""
+    return adapter.get_document_composition(document_id=document_id)
+
+
+@mcp.tool()
+def get_specification_descriptions(document_id: str | None = None) -> dict:
+    """List available specification descriptions for the selected or active document."""
+    return adapter.get_specification_descriptions(document_id=document_id)
+
+
+@mcp.tool()
+def get_specification(
+    document_id: str | None = None,
+    description_index: int | None = None,
+    layout_name: str | None = None,
+    include_objects: bool = True,
+    max_objects: int = 200,
+) -> dict:
+    """Read the active or selected specification description with its objects and columns."""
+    return adapter.get_specification(
+        document_id=document_id,
+        description_index=description_index,
+        layout_name=layout_name,
+        include_objects=include_objects,
+        max_objects=max_objects,
+    )
+
+
+@mcp.tool()
+def preview_specification_generation(
+    document_id: str | None = None,
+    include_root: bool = False,
+) -> dict:
+    """Build a practical specification preview from the assembly tree."""
+    return adapter.preview_specification_generation(
+        document_id=document_id,
+        include_root=include_root,
+    )
+
+
+@mcp.tool()
+def preview_spw_generation(
+    document_id: str | None = None,
+    include_root: bool = False,
+    columns: list[dict] | None = None,
+    include_engineering: bool = False,
+    column_preset: str | None = None,
+) -> dict:
+    """Build a preview for a separate .spw specification document from the assembly tree.
+
+    columns maps row fields to .spw columns: field, column_type, block_number,
+    column_number, skip_unit_value. column_preset can be default/base or
+    engineering_comment_columns. Engineering fields require explicit opt-in.
+    """
+    return adapter.preview_spw_generation(
+        document_id=document_id,
+        include_root=include_root,
+        columns=columns,
+        include_engineering=include_engineering,
+        column_preset=column_preset,
+    )
+
+
+@mcp.tool()
+def create_spw_from_model(
+    document_id: str | None = None,
+    output_path: str | None = None,
+    include_root: bool = False,
+    layout_name: str = "graphic.lyt",
+    style_id: int = 1,
+    columns: list[dict] | None = None,
+    include_engineering: bool = False,
+    column_preset: str | None = None,
+) -> dict:
+    """Create a separate .spw specification document from the current model tree.
+
+    By default writes only position, designation, title, quantity, comment.
+    Engineering fields are written only when mapped by columns and opted in.
+    """
+    return adapter.create_spw_from_model(
+        document_id=document_id,
+        output_path=output_path,
+        include_root=include_root,
+        layout_name=layout_name,
+        style_id=style_id,
+        columns=columns,
+        include_engineering=include_engineering,
+        column_preset=column_preset,
+    )
+
+
+@mcp.tool()
+def create_specification(
+    document_id: str | None = None,
+    include_root: bool = False,
+    replace_existing: bool = False,
+    save: bool = False,
+    close_after_save: bool = False,
+    layout_name: str = "",
+    style_id: int = 0,
+    specification_name: str = "",
+) -> dict:
+    """Create a specification description and fill rows from the current assembly tree."""
+    return adapter.create_specification(
+        document_id=document_id,
+        include_root=include_root,
+        replace_existing=replace_existing,
+        save=save,
+        close_after_save=close_after_save,
+        layout_name=layout_name,
+        style_id=style_id,
+        specification_name=specification_name,
+    )
+
+
+@mcp.tool()
+def preview_specification_changes(
+    updates: list[dict],
+    document_id: str | None = None,
+    description_index: int | None = None,
+    layout_name: str | None = None,
+    max_objects: int = 2000,
+) -> dict:
+    """Preview edits for existing specification rows by object_id and standard fields."""
+    return adapter.preview_specification_changes(
+        updates=updates,
+        document_id=document_id,
+        description_index=description_index,
+        layout_name=layout_name,
+        max_objects=max_objects,
+    )
+
+
+@mcp.tool()
+def apply_specification_changes(
+    updates: list[dict],
+    document_id: str | None = None,
+    description_index: int | None = None,
+    layout_name: str | None = None,
+    save: bool = False,
+    close_after_save: bool = False,
+    max_objects: int = 2000,
+) -> dict:
+    """Apply edits to existing specification rows by object_id and standard fields."""
+    return adapter.apply_specification_changes(
+        updates=updates,
+        document_id=document_id,
+        description_index=description_index,
+        layout_name=layout_name,
+        save=save,
+        close_after_save=close_after_save,
+        max_objects=max_objects,
+    )
+
+
+@mcp.tool()
+def preview_specification_autofill(
+    document_id: str | None = None,
+    description_index: int | None = None,
+    layout_name: str | None = None,
+    include_root: bool = False,
+    fields: list[str] | None = None,
+    fill_only: bool = False,
+    max_objects: int = 2000,
+) -> dict:
+    """Build a safe preview of filling or syncing specification rows from the model tree."""
+    return adapter.preview_specification_autofill(
+        document_id=document_id,
+        description_index=description_index,
+        layout_name=layout_name,
+        include_root=include_root,
+        fields=fields,
+        fill_only=fill_only,
+        max_objects=max_objects,
+    )
+
+
+@mcp.tool()
+def apply_specification_autofill(
+    document_id: str | None = None,
+    description_index: int | None = None,
+    layout_name: str | None = None,
+    include_root: bool = False,
+    fields: list[str] | None = None,
+    fill_only: bool = False,
+    save: bool = False,
+    close_after_save: bool = False,
+    max_objects: int = 2000,
+) -> dict:
+    """Apply filling or syncing of specification rows from the model tree."""
+    return adapter.apply_specification_autofill(
+        document_id=document_id,
+        description_index=description_index,
+        layout_name=layout_name,
+        include_root=include_root,
+        fields=fields,
+        fill_only=fill_only,
+        save=save,
+        close_after_save=close_after_save,
+        max_objects=max_objects,
+    )
+
+
+@mcp.tool()
+def refresh_specification_from_model(
+    document_id: str | None = None,
+    include_root: bool = False,
+    replace_existing: bool = True,
+    save: bool = False,
+    close_after_save: bool = False,
+    layout_name: str = "",
+    style_id: int = 0,
+    specification_name: str = "",
+    fields: list[str] | None = None,
+    fill_only: bool = False,
+    max_objects: int = 2000,
+) -> dict:
+    """Recreate the active specification from the model and then apply safe autofill for supported fields."""
+    return adapter.refresh_specification_from_model(
+        document_id=document_id,
+        include_root=include_root,
+        replace_existing=replace_existing,
+        save=save,
+        close_after_save=close_after_save,
+        layout_name=layout_name,
+        style_id=style_id,
+        specification_name=specification_name,
+        fields=fields,
+        fill_only=fill_only,
+        max_objects=max_objects,
+    )
+
+
+@mcp.tool()
+def save_document(document_id: str | None = None, close_after_save: bool = True) -> dict:
+    """Save the selected or active document."""
+    return adapter.save_document(document_id=document_id, close_after_save=close_after_save)
+
+
+@mcp.tool()
+def save_document_as(path: str, document_id: str | None = None, close_after_save: bool = True) -> dict:
+    """Save the selected or active document to a new file path."""
+    return adapter.save_document_as(path=path, document_id=document_id, close_after_save=close_after_save)
+
+
+@mcp.tool()
+def save_export_copy(document_id: str | None = None, suffix: str = "codex", close_after_save: bool = True) -> dict:
+    """Save the active document to the default export directory with an ASCII-safe file name."""
+    return adapter.save_export_copy(
+        document_id=document_id,
+        suffix=suffix,
+        close_after_save=close_after_save,
+    )
+
+
+@mcp.tool()
+def cleanup_to_export(document_id: str | None = None, suffix: str = "clean", rules_path: str | None = None) -> dict:
+    """Apply the current cleanup rules, export a working copy, and write a report next to it."""
+    return run_cleanup_to_export(adapter, _rules(rules_path), document_id=document_id, suffix=suffix)
+
+
+@mcp.tool()
+def preview_relink_paths(document_id: str | None = None, search_root: str = "", relink_all: bool = False) -> dict:
+    """Find candidate component path updates by searching for matching filenames under a new root."""
+    composition_payload = adapter.get_document_composition(document_id=document_id)
+    return {
+        "document": composition_payload["document"],
+        "assembly_path": composition_payload["assembly_path"],
+        **build_file_relink_preview(composition_payload["assembly_path"], search_root, relink_all=relink_all),
+    }
+
+
+@mcp.tool()
+def preview_file_relink_paths(assembly_path: str, search_root: str, relink_all: bool = False) -> dict:
+    """Preview persistent relinks by reading the Sources entry of an assembly file directly."""
+    return build_file_relink_preview(assembly_path=assembly_path, search_root=search_root, relink_all=relink_all)
+
+
+@mcp.tool()
+def preview_file_relink_map_paths(assembly_path: str, mapping_path: str) -> dict:
+    """Preview relinks for a file assembly from an explicit mapping file."""
+    return build_file_relink_map_preview(assembly_path=assembly_path, mapping_path=mapping_path)
+
+
+@mcp.tool()
+def build_file_relink_plan(assembly_path: str, search_root: str, relink_all: bool = False) -> dict:
+    """Build a grouped actionable relink plan for an assembly file."""
+    return build_file_relink_plan_payload(
+        assembly_path=assembly_path,
+        search_root=search_root,
+        relink_all=relink_all,
+    )
+
+
+@mcp.tool()
+def build_file_relink_map_plan(assembly_path: str, mapping_path: str) -> dict:
+    """Build a grouped actionable relink plan from an explicit mapping file."""
+    return build_file_relink_map_plan_payload(
+        assembly_path=assembly_path,
+        mapping_path=mapping_path,
+    )
+
+
+@mcp.tool()
+def preview_relink_map_paths(document_id: str | None = None, mapping_path: str = "") -> dict:
+    """Preview relinks from an explicit old->new mapping file, useful when files were also renamed."""
+    composition_payload = adapter.get_document_composition(document_id=document_id)
+    return {
+        "document": composition_payload["document"],
+        "assembly_path": composition_payload["assembly_path"],
+        **build_file_relink_map_preview(composition_payload["assembly_path"], mapping_path),
+    }
+
+
+@mcp.tool()
+def build_relink_plan(document_id: str | None = None, search_root: str = "", relink_all: bool = False) -> dict:
+    """Build a grouped actionable relink plan for the selected or active document."""
+    composition_payload = adapter.get_document_composition(document_id=document_id)
+    return {
+        "document": composition_payload["document"],
+        **build_file_relink_plan_payload(
+            assembly_path=composition_payload["assembly_path"],
+            search_root=search_root,
+            relink_all=relink_all,
+        ),
+    }
+
+
+@mcp.tool()
+def build_relink_map_plan(document_id: str | None = None, mapping_path: str = "") -> dict:
+    """Build a grouped actionable relink plan for the selected or active document from a mapping file."""
+    composition_payload = adapter.get_document_composition(document_id=document_id)
+    return {
+        "document": composition_payload["document"],
+        **build_file_relink_map_plan_payload(
+            assembly_path=composition_payload["assembly_path"],
+            mapping_path=mapping_path,
+        ),
+    }
+
+
+@mcp.tool()
+def apply_relink_paths(
+    changes: list[dict],
+    document_id: str | None = None,
+    save: bool = False,
+    close_after_save: bool = False,
+) -> dict:
+    """Apply component source-path relinks to the selected or active assembly."""
+    return adapter.apply_relink_paths(
+        changes=changes,
+        document_id=document_id,
+        save=save,
+        close_after_save=close_after_save,
+    )
+
+
+@mcp.tool()
+def apply_file_relink_paths(
+    assembly_path: str,
+    changes: list[dict],
+    output_path: str | None = None,
+) -> dict:
+    """Apply relinks to an assembly file through KOMPAS itself and save the result to the target path."""
+    return adapter.relink_document_file(assembly_path=assembly_path, changes=changes, output_path=output_path)
+
+
+@mcp.tool()
+def relink_project_root(
+    search_root: str,
+    document_id: str | None = None,
+    relink_all: bool = False,
+    save: bool = False,
+) -> dict:
+    """Preview and apply assembly relinks by matching component filenames under a new root."""
+    return run_relink_project_root(
+        adapter,
+        search_root=search_root,
+        document_id=document_id,
+        relink_all=relink_all,
+        save=save,
+    )
+
+
+@mcp.tool()
+def relink_from_map(
+    mapping_path: str,
+    document_id: str | None = None,
+    save: bool = False,
+) -> dict:
+    """Preview and apply assembly relinks from an explicit mapping file."""
+    return run_relink_from_map(
+        adapter,
+        mapping_path=mapping_path,
+        document_id=document_id,
+        save=save,
+    )
+
+
+@mcp.tool()
+def relink_to_export(
+    search_root: str,
+    document_id: str | None = None,
+    relink_all: bool = False,
+    suffix: str = "relinked",
+) -> dict:
+    """Preview and apply assembly relinks, then save a safe exported copy with a relink report."""
+    return run_relink_to_export(
+        adapter,
+        search_root=search_root,
+        document_id=document_id,
+        relink_all=relink_all,
+        suffix=suffix,
+    )
+
+
+@mcp.tool()
+def relink_from_map_to_export(
+    mapping_path: str,
+    document_id: str | None = None,
+    suffix: str = "relinked",
+) -> dict:
+    """Apply relinks from an explicit mapping file and save a safe exported copy with a report."""
+    return run_relink_from_map_to_export(
+        adapter,
+        mapping_path=mapping_path,
+        document_id=document_id,
+        suffix=suffix,
+    )
+
+
+@mcp.tool()
+def relink_file_to_output(
+    assembly_path: str,
+    search_root: str,
+    output_path: str,
+    relink_all: bool = False,
+) -> dict:
+    """Preview and apply assembly relinks to a copied file through KOMPAS itself."""
+    return run_relink_file_to_output(
+        adapter,
+        assembly_path=assembly_path,
+        search_root=search_root,
+        output_path=output_path,
+        relink_all=relink_all,
+    )
+
+
+@mcp.tool()
+def relink_file_from_map_to_output(
+    assembly_path: str,
+    mapping_path: str,
+    output_path: str,
+) -> dict:
+    """Apply relinks from an explicit mapping file to a copied assembly through KOMPAS itself."""
+    return run_relink_file_from_map_to_output(
+        adapter,
+        assembly_path=assembly_path,
+        mapping_path=mapping_path,
+        output_path=output_path,
+    )
+
+
+@mcp.tool()
+def get_document_tree(document_id: str | None = None) -> dict:
+    """Return the assembly/model tree for the selected or active document."""
+    return adapter.get_document_tree(document_id=document_id)
+
+
+@mcp.tool()
+def get_items(document_id: str | None = None, item_ids: list[str] | None = None) -> dict:
+    """Return selected tree items with their current properties."""
+    return adapter.get_items(document_id=document_id, item_ids=item_ids)
+
+
+@mcp.tool()
+def get_item_properties(document_id: str | None = None, item_ids: list[str] | None = None) -> dict:
+    """Return a practical properties snapshot for selected items."""
+    return adapter.get_item_properties(document_id=document_id, item_ids=item_ids)
+
+
+@mcp.tool()
+def preview_property_changes(
+    updates: list[dict],
+    document_id: str | None = None,
+) -> dict:
+    """Preview direct property edits for writable item fields."""
+    return adapter.preview_property_changes(updates=updates, document_id=document_id)
+
+
+@mcp.tool()
+def set_item_properties(
+    updates: list[dict],
+    document_id: str | None = None,
+    save: bool = False,
+    close_after_save: bool = False,
+) -> dict:
+    """Apply direct property edits for writable item fields."""
+    return adapter.set_item_properties(
+        updates=updates,
+        document_id=document_id,
+        save=save,
+        close_after_save=close_after_save,
+    )
+
+
+@mcp.tool()
+def find_items(
+    document_id: str | None = None,
+    query: str = "",
+    kinds: list[str] | None = None,
+) -> dict:
+    """Search items by text and optional kinds."""
+    return adapter.find_items(document_id=document_id, query=query, kinds=kinds)
+
+
+@mcp.tool()
+def analyze_naming_issues(document_id: str | None = None, rules_path: str | None = None) -> dict:
+    """Analyze naming issues in the selected or active document."""
+    tree_payload = adapter.get_document_tree(document_id=document_id)
+    result = run_naming_analysis(tree_payload["tree"], _rules(rules_path))
+    return {
+        "document": tree_payload["document"],
+        **result.to_dict(),
+    }
+
+
+@mcp.tool()
+def analyze_spec_issues(document_id: str | None = None, rules_path: str | None = None) -> dict:
+    """Analyze basic specification issues in the selected or active document."""
+    tree_payload = adapter.get_document_tree(document_id=document_id)
+    result = run_spec_analysis(tree_payload["tree"], _rules(rules_path))
+    return {
+        "document": tree_payload["document"],
+        **result.to_dict(),
+    }
+
+
+@mcp.tool()
+def preview_changeset(document_id: str | None = None, rules_path: str | None = None) -> dict:
+    """Build a safe preview of name and designation changes."""
+    tree_payload = adapter.get_document_tree(document_id=document_id)
+    return build_preview_changeset(tree_payload["document"], tree_payload["tree"], _rules(rules_path))
+
+
+@mcp.tool()
+def apply_changeset(
+    changes: list[dict],
+    document_id: str | None = None,
+    save: bool = False,
+    close_after_save: bool = False,
+) -> dict:
+    """Apply a prepared changeset to writable fields only."""
+    return adapter.apply_changeset(
+        changes=changes,
+        document_id=document_id,
+        save=save,
+        close_after_save=close_after_save,
+    )
+
+
+def main() -> None:
+    mcp.run()

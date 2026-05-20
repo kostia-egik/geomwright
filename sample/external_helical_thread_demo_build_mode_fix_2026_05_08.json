@@ -1,0 +1,27 @@
+{
+  "scenario": "external_helical_thread",
+  "output_name": "external_helical_thread_demo_build_mode_fix_2026_05_08.m3d",
+  "params": {
+    "name": "ExternalHelicalThreadDemoBuildModeFix20260508",
+    "diameter": 20,
+    "pitch": 2.0,
+    "length": 12,
+    "depth": 1.1,
+    "clearance": 0.15,
+    "direction": "left",
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "ThreadCarrierShaftBuildModeFix20260508",
+      "steps": [
+        {
+          "length": 20,
+          "diameter": 20
+        },
+        {
+          "length": 12,
+          "diameter": 28
+        }
+      ]
+    }
+  }
+}

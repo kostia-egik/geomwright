@@ -1,0 +1,21 @@
+{
+  "scenario": "stepped_shaft",
+  "output_name": "stepped_shaft_diameter.m3d",
+  "params": {
+    "name": "Stepped shaft diameter display",
+    "designation": "SHAFT-D-001",
+    "material": "Steel 45",
+    "sketch": {
+      "axis_line_style": "axial",
+      "profile_line_style": "normal",
+      "dimensions": true,
+      "constraints": true,
+      "dimension_display": "diameter"
+    },
+    "steps": [
+      {"length": 18, "diameter": 16},
+      {"length": 28, "diameter": 26},
+      {"length": 14, "diameter": 20}
+    ]
+  }
+}

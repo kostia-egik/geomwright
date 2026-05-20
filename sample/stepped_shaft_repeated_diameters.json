@@ -1,0 +1,23 @@
+{
+  "scenario": "stepped_shaft",
+  "output_name": "stepped_shaft_repeated_diameters.m3d",
+  "params": {
+    "name": "Stepped shaft repeated diameters",
+    "designation": "SHAFT-RD-001",
+    "material": "Steel 45",
+    "sketch": {
+      "axis_line_style": "axial",
+      "profile_line_style": "normal",
+      "dimensions": true,
+      "constraints": true,
+      "dimension_display": "radius"
+    },
+    "steps": [
+      {"length": 14, "diameter": 20},
+      {"length": 20, "diameter": 20},
+      {"length": 10, "diameter": 32},
+      {"length": 18, "diameter": 32},
+      {"length": 12, "diameter": 18}
+    ]
+  }
+}

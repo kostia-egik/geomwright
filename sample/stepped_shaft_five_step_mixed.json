@@ -1,0 +1,23 @@
+{
+  "scenario": "stepped_shaft",
+  "output_name": "stepped_shaft_five_step_mixed.m3d",
+  "params": {
+    "name": "Stepped shaft five-step mixed",
+    "designation": "SHAFT-F5-001",
+    "material": "Steel 45",
+    "sketch": {
+      "axis_line_style": "axial",
+      "profile_line_style": "normal",
+      "dimensions": true,
+      "constraints": true,
+      "dimension_display": "radius"
+    },
+    "steps": [
+      {"length": 10, "diameter": 12},
+      {"length": 16, "diameter": 28},
+      {"length": 8, "diameter": 18},
+      {"length": 22, "diameter": 34},
+      {"length": 12, "diameter": 16}
+    ]
+  }
+}

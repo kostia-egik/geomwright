@@ -1,0 +1,81 @@
+{
+  "name": "Eccentric Chain Workflow Demo",
+  "comment": "Public workflow sample: shaft -> center point -> offset point -> LCS -> shaft",
+  "output_name": "eccentric_chain_workflow_demo.m3d",
+  "exports": {
+    "primary_body": "rev01.body",
+    "primary_end_face": "rev01.end_face",
+    "eccentric_point": "pt_ecc.point",
+    "eccentric_lcs": "lcs_ecc.lcs",
+    "journal_body": "rev02.body"
+  },
+  "operations": [
+    {
+      "id": "rev01",
+      "scenario": "stepped_shaft",
+      "params": {
+        "name": "Primary shaft",
+        "parameter_prefix": "REV01",
+        "steps": [
+          { "length": 18, "diameter": 30 },
+          { "length": 24, "diameter": 22 },
+          { "length": 18, "diameter": 26 }
+        ]
+      }
+    },
+    {
+      "id": "pt_center",
+      "scenario": "point",
+      "params": {
+        "mode": "center_of_object",
+        "point_name": "PT_CENTER",
+        "reference": {
+          "ref": "rev01.end_face"
+        }
+      }
+    },
+    {
+      "id": "pt_ecc",
+      "scenario": "point",
+      "params": {
+        "mode": "offset_from_point",
+        "point_name": "PT_ECC",
+        "reference": {
+          "ref": "pt_center.point"
+        },
+        "offset": { "dx": 0, "dy": 8, "dz": 0 }
+      }
+    },
+    {
+      "id": "lcs_ecc",
+      "scenario": "lcs",
+      "params": {
+        "mode": "point",
+        "lcs_name": "LCS_ECC",
+        "reference": {
+          "output_ref": "pt_ecc.point"
+        }
+      }
+    },
+    {
+      "id": "rev02",
+      "scenario": "stepped_shaft",
+      "params": {
+        "name": "Eccentric journal",
+        "parameter_prefix": "REV02",
+        "placement": {
+          "base": {
+            "mode": "csys_ref",
+            "reference": {
+              "output_ref": "lcs_ecc.lcs"
+            }
+          }
+        },
+        "steps": [
+          { "length": 16, "diameter": 18 },
+          { "length": 12, "diameter": 12 }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "scenario": "internal_helical_thread",
+  "output_name": "internal_helical_thread_demo_public_formula_fix_2026_05_09.m3d",
+  "params": {
+    "name": "InternalHelicalThreadDemoPublicFormulaFix20260509",
+    "diameter": 16,
+    "pitch": 2.0,
+    "length": 10,
+    "depth": 1.0,
+    "clearance": 0.15,
+    "profile_entry_offset": 2.2,
+    "profile_angle_degrees": 60.0,
+    "root_offset": 0.3,
+    "direction": "right",
+    "source_scenario": "internal_cylindrical_step",
+    "source_params": {
+      "name": "ThreadCarrierBorePublicFormulaFix20260509",
+      "steps": [
+        {
+          "length": 18,
+          "diameter": 16
+        }
+      ],
+      "source_scenario": "stepped_shaft",
+      "source_params": {
+        "steps": [
+          {
+            "length": 30,
+            "diameter": 36
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "scenario": "internal_flat_step",
+  "output_name": "internal_flat_step_1_flat_demo.m3d",
+  "params": {
+    "name": "Internal flat step, one flat",
+    "parameter_prefix": "IFLAT1",
+    "diameter": 18,
+    "length": 16,
+    "flat_depth": 3,
+    "flats_count": 1,
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Internal flat step source shaft 1",
+      "parameter_prefix": "SRCIF1",
+      "steps": [
+        {
+          "length": 30,
+          "diameter": 42
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "scenario": "external_polygonal_step",
+  "output_name": "external_polygonal_step_inscribed_standard_2026_05_07.m3d",
+  "params": {
+    "name": "External polygonal step inscribed standard 2026-05-07",
+    "parameter_prefix": "POLY01",
+    "diameter": 24,
+    "length": 18,
+    "side_count": 6,
+    "diameter_mode": "inscribed_circle"
+  }
+}

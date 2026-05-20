@@ -1,0 +1,23 @@
+{
+  "scenario": "internal_polygonal_step",
+  "output_name": "internal_polygonal_step_demo.m3d",
+  "params": {
+    "name": "Internal polygonal step demo",
+    "parameter_prefix": "IPOLY01",
+    "diameter": 14,
+    "length": 16,
+    "side_count": 8,
+    "diameter_mode": "inscribed_circle",
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Polygonal cut source shaft",
+      "parameter_prefix": "SHAFT01",
+      "steps": [
+        {
+          "length": 32,
+          "diameter": 30
+        }
+      ]
+    }
+  }
+}

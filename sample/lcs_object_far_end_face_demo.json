@@ -1,0 +1,20 @@
+{
+  "scenario": "lcs",
+  "params": {
+    "mode": "object",
+    "name": "Tail face local coordinate system",
+    "lcs_name": "LCS_TAIL_FACE",
+    "reference": {
+      "selector": "far_end_face",
+      "source_scenario": "stepped_shaft",
+      "source_params": {
+        "name": "LCS source shaft",
+        "steps": [
+          { "length": 18, "diameter": 30 },
+          { "length": 24, "diameter": 22 },
+          { "length": 18, "diameter": 26 }
+        ]
+      }
+    }
+  }
+}

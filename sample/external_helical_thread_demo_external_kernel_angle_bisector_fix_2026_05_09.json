@@ -1,0 +1,29 @@
+{
+  "scenario": "external_helical_thread",
+  "output_name": "external_helical_thread_demo_external_kernel_angle_bisector_fix_2026_05_09.m3d",
+  "params": {
+    "name": "ExternalHelicalThreadDemoExternalKernelAngleBisectorFix20260509",
+    "diameter": 12,
+    "pitch": 1.0,
+    "length": 12,
+    "clearance": 0.0,
+    "profile_entry_offset": 1.1,
+    "profile_angle_degrees": 60.0,
+    "root_radius_level": 5.365,
+    "direction": "left",
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "ThreadCarrierShaftExternalKernelAngleBisectorFix20260509",
+      "steps": [
+        {
+          "length": 20,
+          "diameter": 12
+        },
+        {
+          "length": 12,
+          "diameter": 20
+        }
+      ]
+    }
+  }
+}

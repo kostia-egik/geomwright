@@ -1,0 +1,53 @@
+{
+  "document": {
+    "id": "mock-assembly",
+    "name": "Редуктор ",
+    "path": "C:/mock/reductor.a3d",
+    "type": 5,
+    "active": true,
+    "changed": false
+  },
+  "tree": {
+    "id": "root",
+    "parent_id": null,
+    "name": "Редуктор ",
+    "designation": "",
+    "title": "",
+    "material": "",
+    "comment": "",
+    "mass": null,
+    "quantity": null,
+    "kind": "assembly",
+    "source_path": "C:/mock/reductor.a3d",
+    "children": [
+      {
+        "id": "root/0",
+        "parent_id": "root",
+        "name": " Корпус  ",
+        "designation": "A-001",
+        "title": "",
+        "material": "Сталь",
+        "comment": "",
+        "mass": null,
+        "quantity": 1,
+        "kind": "part",
+        "source_path": "C:/mock/case.m3d",
+        "children": []
+      },
+      {
+        "id": "root/1",
+        "parent_id": "root",
+        "name": "Подшипник  205",
+        "designation": "",
+        "title": "",
+        "material": "",
+        "comment": "",
+        "mass": null,
+        "quantity": 2,
+        "kind": "component",
+        "source_path": "C:/mock/bearing.m3d",
+        "children": []
+      }
+    ]
+  }
+}

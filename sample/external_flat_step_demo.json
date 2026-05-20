@@ -1,0 +1,12 @@
+{
+  "scenario": "external_flat_step",
+  "output_name": "external_flat_step_demo.m3d",
+  "params": {
+    "name": "External flat step demo",
+    "parameter_prefix": "FLAT01",
+    "diameter": 28,
+    "length": 16,
+    "flat_depth": 4,
+    "flats_count": 1
+  }
+}

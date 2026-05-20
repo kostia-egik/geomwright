@@ -1,0 +1,15 @@
+{
+  "scenario": "lcs",
+  "params": {
+    "name": "LCS point demo",
+    "mode": "point",
+    "lcs_name": "LCS_POINT_DEMO",
+    "reference": {
+      "name": "PT_BASE",
+      "origin": [12, 8, 0]
+    },
+    "rotation": {
+      "rz": 30
+    }
+  }
+}

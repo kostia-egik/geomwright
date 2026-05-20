@@ -1,0 +1,25 @@
+{
+  "naming": {
+    "trim_spaces": true,
+    "replace_double_spaces": true,
+    "forbidden_chars": ["\"", "'"],
+    "case": "keep"
+  },
+  "defaults": {
+    "material": "",
+    "comment": ""
+  },
+  "required_fields": [
+    "designation",
+    "title"
+  ],
+  "warn_if_missing_material": true,
+  "purchase_rules": [
+    {
+      "match_name_contains": ["bolt", "bearing", "nut", "washer", "винт", "гайка", "подшипник"],
+      "set": {
+        "is_purchase": true
+      }
+    }
+  ]
+}

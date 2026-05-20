@@ -1,0 +1,28 @@
+{
+  "scenario": "external_helical_thread",
+  "output_name": "external_helical_thread_demo_displace_base_fix_2026_05_08.m3d",
+  "params": {
+    "name": "ExternalHelicalThreadDemoDisplaceBaseFix20260508",
+    "diameter": 20,
+    "pitch": 2.0,
+    "length": 12,
+    "depth": 1.1,
+    "clearance": 0.15,
+    "profile_entry_offset": 2.2,
+    "direction": "left",
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "ThreadCarrierShaftDisplaceBaseFix20260508",
+      "steps": [
+        {
+          "length": 20,
+          "diameter": 20
+        },
+        {
+          "length": 12,
+          "diameter": 28
+        }
+      ]
+    }
+  }
+}

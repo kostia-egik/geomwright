@@ -1,0 +1,27 @@
+{
+  "scenario": "stepped_shaft",
+  "output_name": "stepped_shaft_offset_csys.m3d",
+  "params": {
+    "name": "Stepped shaft offset csys",
+    "designation": "SHAFT-CSYS-001",
+    "material": "Steel 45",
+    "parameter_prefix": "REVCSYS01",
+    "placement": {
+      "mode": "csys",
+      "name": "REV-CSYS-01",
+      "origin": [80, 30]
+    },
+    "sketch": {
+      "axis_line_style": "axial",
+      "profile_line_style": "normal",
+      "dimensions": true,
+      "constraints": true,
+      "dimension_display": "radius"
+    },
+    "steps": [
+      {"length": 16, "diameter": 18},
+      {"length": 22, "diameter": 30},
+      {"length": 12, "diameter": 24}
+    ]
+  }
+}

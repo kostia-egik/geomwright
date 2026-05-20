@@ -1,0 +1,22 @@
+{
+  "scenario": "internal_conical_step",
+  "output_name": "internal_conical_step_demo.m3d",
+  "params": {
+    "name": "Internal conical step demo",
+    "parameter_prefix": "ICUT01",
+    "length": 24,
+    "start_diameter": 14,
+    "end_diameter": 6,
+    "source_scenario": "stepped_shaft",
+    "source_params": {
+      "name": "Base shaft",
+      "parameter_prefix": "BASE01",
+      "steps": [
+        { "length": 48, "diameter": 30 }
+      ]
+    },
+    "sketch": {
+      "dimension_display": "radius"
+    }
+  }
+}

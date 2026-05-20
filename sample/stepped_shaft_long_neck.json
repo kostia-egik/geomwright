@@ -1,0 +1,22 @@
+{
+  "scenario": "stepped_shaft",
+  "output_name": "stepped_shaft_long_neck.m3d",
+  "params": {
+    "name": "Stepped shaft long neck",
+    "designation": "SHAFT-LN-001",
+    "material": "Steel 45",
+    "sketch": {
+      "axis_line_style": "axial",
+      "profile_line_style": "normal",
+      "dimensions": true,
+      "constraints": true,
+      "dimension_display": "radius"
+    },
+    "steps": [
+      {"length": 8, "diameter": 30},
+      {"length": 42, "diameter": 12},
+      {"length": 10, "diameter": 24},
+      {"length": 6, "diameter": 12}
+    ]
+  }
+}
