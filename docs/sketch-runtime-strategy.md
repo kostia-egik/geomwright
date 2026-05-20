@@ -9,9 +9,10 @@ Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
 - `frames.py`: 2D local-frame checks for zero axes, orthogonality and handedness;
 - `constraints.py`: staged constraint plan checks for unknown stages, missing targets, required constraints and minimum target counts;
 - `relations.py`: point-to-point relative position checks (`left_of`, `right_of`, `above`, `below`, `same_x`, `same_y`) for semantic geometry sanity checks;
+- `tangency.py`: segment/arc/circle tangency checks at shared or explicit contact points, with missing-contact and non-parallel tangent diagnostics;
 - `orientation.py`: segment-loop signed-area orientation checks for expected clockwise/counter-clockwise contour direction;
 - `dimensions.py`: variable/dimension binding checks for missing variables, missing targets and unknown expression references;
-- `verify.py`: one-call preflight aggregation across topology, frame, constraints, point relations, loop orientation and dimension bindings;
+- `verify.py`: one-call preflight aggregation across topology, frame, constraints, point relations, tangencies, loop orientation and dimension bindings;
 - `readback.py`: dependency-free actual-vs-expected sketch snapshot checks for ids, coordinates, primitive shape, loop membership, construction flags and actual topology;
 - `diagnostics.py`: compact model-readable diagnostics shared by the preflight reports.
 
@@ -332,6 +333,7 @@ Verifier обязан ловить:
 - `open_loop`
 - `unexpected_intersection`
 - `wrong_loop_orientation`
+- `tangency_mismatch`
 - `construction_profile_mixup`
 - `missing_constraint`
 - `constraint_apply_failed`

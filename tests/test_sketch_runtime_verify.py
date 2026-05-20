@@ -11,6 +11,7 @@ from kompas_mcp.sketch_runtime import (
     Segment,
     SketchModel,
     SketchPreflightPlan,
+    TangencyExpectation,
     VariableSpec,
     Vector2,
     verify_sketch_preflight,
@@ -30,6 +31,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
                 )
             ),
             relations=(PointRelationExpectation("p1_left_p2", "left_of", "p1", "p2"),),
+            tangencies=(TangencyExpectation("line_self_tangent", "l1", "l1", at_point_id="p2"),),
             orientations=(LoopOrientationExpectation("main", "ccw"),),
             variables=(VariableSpec("Pitch", 2.0),),
             dimensions=(DimensionBinding("pitch_dim", "linear", ("p1", "p2"), "Pitch"),),
@@ -42,6 +44,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertIsNotNone(report.frame)
         self.assertIsNotNone(report.constraints)
         self.assertIsNotNone(report.relations)
+        self.assertIsNotNone(report.tangencies)
         self.assertIsNotNone(report.orientations)
         self.assertIsNotNone(report.dimensions)
         self.assertEqual(report.diagnostics, ())
@@ -49,6 +52,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertEqual(payload["topology"]["stage"], "preflight_topology")
         self.assertIn("constraints", payload)
         self.assertIn("relations", payload)
+        self.assertIn("tangencies", payload)
         self.assertIn("orientations", payload)
 
     def test_preflight_flattens_diagnostics(self) -> None:
@@ -61,6 +65,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
             frame=Frame2D("bad_lcs", x_axis=Vector2(1.0, 0.0), y_axis=Vector2(1.0, 0.0)),
             constraints=ConstraintPlan(constraints=(ConstraintSpec("bad_parallel", "parallel", ("l1", "missing"), stage="orientation"),)),
             relations=(PointRelationExpectation("bad_relation", "right_of", "p1", "p3"),),
+            tangencies=(TangencyExpectation("bad_tangent", "l1", "missing"),),
             orientations=(LoopOrientationExpectation("main", "ccw"),),
             variables=(VariableSpec("Pitch", 2.0),),
             dimensions=(DimensionBinding("bad_dim", "linear", ("missing",), "MissingVar"),),
@@ -74,6 +79,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertIn("collinear_axes", codes)
         self.assertIn("missing_constraint_target", codes)
         self.assertIn("point_relation_mismatch", codes)
+        self.assertIn("missing_tangency_primitive", codes)
         self.assertIn("orientation_open_loop", codes)
         self.assertIn("missing_dimension_variable", codes)
         self.assertIn("missing_dimension_target", codes)

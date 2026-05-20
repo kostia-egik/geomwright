@@ -10,6 +10,7 @@ from .entities import SketchModel
 from .frames import Frame2D, FrameReport, verify_frame
 from .orientation import LoopOrientationExpectation, LoopOrientationReport, verify_loop_orientations
 from .relations import PointRelationExpectation, PointRelationReport, verify_point_relations
+from .tangency import TangencyExpectation, TangencyReport, verify_tangencies
 from .topology import TopologyReport, verify_topology
 
 
@@ -19,6 +20,7 @@ class SketchPreflightPlan:
     frame: Frame2D | None = None
     constraints: ConstraintPlan | None = None
     relations: tuple[PointRelationExpectation, ...] = ()
+    tangencies: tuple[TangencyExpectation, ...] = ()
     orientations: tuple[LoopOrientationExpectation, ...] = ()
     variables: tuple[VariableSpec, ...] = ()
     dimensions: tuple[DimensionBinding, ...] = ()
@@ -32,6 +34,7 @@ class SketchPreflightReport:
     frame: FrameReport | None = None
     constraints: ConstraintReport | None = None
     relations: PointRelationReport | None = None
+    tangencies: TangencyReport | None = None
     orientations: LoopOrientationReport | None = None
     dimensions: DimensionReport | None = None
     diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
@@ -49,6 +52,8 @@ class SketchPreflightReport:
             payload["constraints"] = self.constraints.to_dict()
         if self.relations is not None:
             payload["relations"] = self.relations.to_dict()
+        if self.tangencies is not None:
+            payload["tangencies"] = self.tangencies.to_dict()
         if self.orientations is not None:
             payload["orientations"] = self.orientations.to_dict()
         if self.dimensions is not None:
@@ -83,6 +88,15 @@ def verify_sketch_preflight(
         if plan.relations
         else None
     )
+    tangencies = (
+        verify_tangencies(
+            plan.model,
+            plan.tangencies,
+            stage="preflight_tangencies",
+        )
+        if plan.tangencies
+        else None
+    )
     orientations = (
         verify_loop_orientations(
             plan.model,
@@ -103,7 +117,7 @@ def verify_sketch_preflight(
         else None
     )
 
-    diagnostics = _collect_diagnostics(topology, frame, constraints, relations, orientations, dimensions)
+    diagnostics = _collect_diagnostics(topology, frame, constraints, relations, tangencies, orientations, dimensions)
     ok = topology.ok
     if frame is not None:
         ok = ok and frame.ok
@@ -111,6 +125,8 @@ def verify_sketch_preflight(
         ok = ok and constraints.ok
     if relations is not None:
         ok = ok and relations.ok
+    if tangencies is not None:
+        ok = ok and tangencies.ok
     if orientations is not None:
         ok = ok and orientations.ok
     if dimensions is not None:
@@ -123,6 +139,7 @@ def verify_sketch_preflight(
         frame=frame,
         constraints=constraints,
         relations=relations,
+        tangencies=tangencies,
         orientations=orientations,
         dimensions=dimensions,
         diagnostics=diagnostics,
@@ -134,6 +151,7 @@ def _collect_diagnostics(
     frame: FrameReport | None,
     constraints: ConstraintReport | None,
     relations: PointRelationReport | None,
+    tangencies: TangencyReport | None,
     orientations: LoopOrientationReport | None,
     dimensions: DimensionReport | None,
 ) -> tuple[Diagnostic, ...]:
@@ -144,6 +162,8 @@ def _collect_diagnostics(
         diagnostics.extend(constraints.diagnostics)
     if relations is not None:
         diagnostics.extend(relations.diagnostics)
+    if tangencies is not None:
+        diagnostics.extend(tangencies.diagnostics)
     if orientations is not None:
         diagnostics.extend(orientations.diagnostics)
     if dimensions is not None:
