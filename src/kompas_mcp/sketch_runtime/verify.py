@@ -8,6 +8,7 @@ from .diagnostics import Diagnostic
 from .dimensions import DimensionBinding, DimensionReport, VariableSpec, verify_dimension_bindings
 from .entities import SketchModel
 from .frames import Frame2D, FrameReport, verify_frame
+from .orientation import LoopOrientationExpectation, LoopOrientationReport, verify_loop_orientations
 from .topology import TopologyReport, verify_topology
 
 
@@ -16,6 +17,7 @@ class SketchPreflightPlan:
     model: SketchModel
     frame: Frame2D | None = None
     constraints: ConstraintPlan | None = None
+    orientations: tuple[LoopOrientationExpectation, ...] = ()
     variables: tuple[VariableSpec, ...] = ()
     dimensions: tuple[DimensionBinding, ...] = ()
 
@@ -27,6 +29,7 @@ class SketchPreflightReport:
     topology: TopologyReport
     frame: FrameReport | None = None
     constraints: ConstraintReport | None = None
+    orientations: LoopOrientationReport | None = None
     dimensions: DimensionReport | None = None
     diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
 
@@ -41,6 +44,8 @@ class SketchPreflightReport:
             payload["frame"] = self.frame.to_dict()
         if self.constraints is not None:
             payload["constraints"] = self.constraints.to_dict()
+        if self.orientations is not None:
+            payload["orientations"] = self.orientations.to_dict()
         if self.dimensions is not None:
             payload["dimensions"] = self.dimensions.to_dict()
         return payload
@@ -64,6 +69,15 @@ def verify_sketch_preflight(
         if plan.constraints is not None
         else None
     )
+    orientations = (
+        verify_loop_orientations(
+            plan.model,
+            plan.orientations,
+            stage="preflight_orientations",
+        )
+        if plan.orientations
+        else None
+    )
     dimensions = (
         verify_dimension_bindings(
             variables=plan.variables,
@@ -75,12 +89,14 @@ def verify_sketch_preflight(
         else None
     )
 
-    diagnostics = _collect_diagnostics(topology, frame, constraints, dimensions)
+    diagnostics = _collect_diagnostics(topology, frame, constraints, orientations, dimensions)
     ok = topology.ok
     if frame is not None:
         ok = ok and frame.ok
     if constraints is not None:
         ok = ok and constraints.ok
+    if orientations is not None:
+        ok = ok and orientations.ok
     if dimensions is not None:
         ok = ok and dimensions.ok
 
@@ -90,6 +106,7 @@ def verify_sketch_preflight(
         topology=topology,
         frame=frame,
         constraints=constraints,
+        orientations=orientations,
         dimensions=dimensions,
         diagnostics=diagnostics,
     )
@@ -99,6 +116,7 @@ def _collect_diagnostics(
     topology: TopologyReport,
     frame: FrameReport | None,
     constraints: ConstraintReport | None,
+    orientations: LoopOrientationReport | None,
     dimensions: DimensionReport | None,
 ) -> tuple[Diagnostic, ...]:
     diagnostics: list[Diagnostic] = list(topology.diagnostics)
@@ -106,6 +124,8 @@ def _collect_diagnostics(
         diagnostics.extend(frame.diagnostics)
     if constraints is not None:
         diagnostics.extend(constraints.diagnostics)
+    if orientations is not None:
+        diagnostics.extend(orientations.diagnostics)
     if dimensions is not None:
         diagnostics.extend(dimensions.diagnostics)
     return tuple(diagnostics)

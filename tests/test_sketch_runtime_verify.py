@@ -5,6 +5,7 @@ from kompas_mcp.sketch_runtime import (
     ConstraintSpec,
     DimensionBinding,
     Frame2D,
+    LoopOrientationExpectation,
     Point,
     Segment,
     SketchModel,
@@ -27,6 +28,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
                     ConstraintSpec("base_horizontal", "horizontal", ("l1",), stage="orientation"),
                 )
             ),
+            orientations=(LoopOrientationExpectation("main", "ccw"),),
             variables=(VariableSpec("Pitch", 2.0),),
             dimensions=(DimensionBinding("pitch_dim", "linear", ("p1", "p2"), "Pitch"),),
         )
@@ -37,11 +39,13 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertEqual(report.stage, "profile_preflight")
         self.assertIsNotNone(report.frame)
         self.assertIsNotNone(report.constraints)
+        self.assertIsNotNone(report.orientations)
         self.assertIsNotNone(report.dimensions)
         self.assertEqual(report.diagnostics, ())
         payload = report.to_dict()
         self.assertEqual(payload["topology"]["stage"], "preflight_topology")
         self.assertIn("constraints", payload)
+        self.assertIn("orientations", payload)
 
     def test_preflight_flattens_diagnostics(self) -> None:
         model = SketchModel(
@@ -52,6 +56,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
             model=model,
             frame=Frame2D("bad_lcs", x_axis=Vector2(1.0, 0.0), y_axis=Vector2(1.0, 0.0)),
             constraints=ConstraintPlan(constraints=(ConstraintSpec("bad_parallel", "parallel", ("l1", "missing"), stage="orientation"),)),
+            orientations=(LoopOrientationExpectation("main", "ccw"),),
             variables=(VariableSpec("Pitch", 2.0),),
             dimensions=(DimensionBinding("bad_dim", "linear", ("missing",), "MissingVar"),),
         )
@@ -63,6 +68,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertIn("dangling_loop_points", codes)
         self.assertIn("collinear_axes", codes)
         self.assertIn("missing_constraint_target", codes)
+        self.assertIn("orientation_open_loop", codes)
         self.assertIn("missing_dimension_variable", codes)
         self.assertIn("missing_dimension_target", codes)
 

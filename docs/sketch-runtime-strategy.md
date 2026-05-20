@@ -8,8 +8,9 @@ Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
 - `topology.py`: closed-loop, standalone circle-loop, missing endpoint/center, dangling point, connectivity, construction-in-profile and segment-intersection preflight checks;
 - `frames.py`: 2D local-frame checks for zero axes, orthogonality and handedness;
 - `constraints.py`: staged constraint plan checks for unknown stages, missing targets, required constraints and minimum target counts;
+- `orientation.py`: segment-loop signed-area orientation checks for expected clockwise/counter-clockwise contour direction;
 - `dimensions.py`: variable/dimension binding checks for missing variables, missing targets and unknown expression references;
-- `verify.py`: one-call preflight aggregation across topology, frame, constraints and dimension bindings;
+- `verify.py`: one-call preflight aggregation across topology, frame, constraints, loop orientation and dimension bindings;
 - `readback.py`: dependency-free actual-vs-expected sketch snapshot checks for ids, coordinates, primitive shape, loop membership, construction flags and actual topology;
 - `diagnostics.py`: compact model-readable diagnostics shared by the preflight reports.
 
