@@ -20,6 +20,7 @@ from .dimensions import (
 )
 from .directions import DirectionAlias, DirectionAliasReport, DirectionAliasResult, verify_direction_aliases
 from .entities import Arc, Circle, Point, Segment, SketchModel, SketchPrimitive
+from .examples import FlatV60ThreadProfileSpec, build_flat_v60_thread_profile_preflight
 from .frames import Frame2D, FrameReport, Vector2, verify_frame
 from .measurements import MeasurementExpectation, MeasurementReport, MeasurementResult, verify_measurements
 from .orientation import (
@@ -51,6 +52,7 @@ __all__ = [
     "DirectionAliasReport",
     "DirectionAliasResult",
     "Frame2D",
+    "FlatV60ThreadProfileSpec",
     "FrameReport",
     "LoopOrientationExpectation",
     "LoopOrientationReport",
@@ -85,4 +87,5 @@ __all__ = [
     "verify_sketch_readback",
     "verify_tangencies",
     "verify_topology",
+    "build_flat_v60_thread_profile_preflight",
 ]
