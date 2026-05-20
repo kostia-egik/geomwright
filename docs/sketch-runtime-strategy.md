@@ -7,13 +7,14 @@ Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
 - `entities.py`: semantic points, segments, arcs, circles, sketch model ids, roles and construction flags;
 - `topology.py`: closed-loop, standalone circle-loop, missing endpoint/center, dangling point, connectivity, construction-in-profile and segment-intersection preflight checks;
 - `frames.py`: 2D local-frame checks for zero axes, orthogonality and handedness;
+- `directions.py`: semantic direction-alias checks against frame axes (`+x`, `-x`, `+y`, `-y`) for axis/radial/cut direction sanity checks;
 - `constraints.py`: staged constraint plan checks for unknown stages, missing targets, required constraints and minimum target counts;
 - `relations.py`: point-to-point relative position checks (`left_of`, `right_of`, `above`, `below`, `same_x`, `same_y`) for semantic geometry sanity checks;
 - `tangency.py`: segment/arc/circle tangency checks at shared or explicit contact points, with missing-contact and non-parallel tangent diagnostics;
 - `measurements.py`: numeric geometry checks for point distances, horizontal/vertical spans, segment length, arc radius and circle radius;
 - `orientation.py`: segment-loop signed-area orientation checks for expected clockwise/counter-clockwise contour direction;
 - `dimensions.py`: variable/dimension binding checks for missing variables, missing targets and unknown expression references;
-- `verify.py`: one-call preflight aggregation across topology, frame, constraints, point relations, tangencies, measurements, loop orientation and dimension bindings;
+- `verify.py`: one-call preflight aggregation across topology, frame, direction aliases, constraints, point relations, tangencies, measurements, loop orientation and dimension bindings;
 - `readback.py`: dependency-free actual-vs-expected sketch snapshot checks for ids, coordinates, primitive shape, loop membership, construction flags and actual topology;
 - `diagnostics.py`: compact model-readable diagnostics shared by the preflight reports.
 
@@ -345,6 +346,7 @@ Verifier обязан ловить:
 - `readback_mismatch`
 - `lcs_axis_inverted`
 - `direction_alias_conflict`
+- `direction_alias_mismatch`
 - `solver_underconstrained`
 - `solver_overconstrained`
 

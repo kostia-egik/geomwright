@@ -10,6 +10,7 @@ from .constraints import (
 )
 from .diagnostics import Diagnostic
 from .dimensions import DimensionBinding, DimensionReport, VariableSpec, verify_dimension_bindings
+from .directions import DirectionAlias, DirectionAliasReport, DirectionAliasResult, verify_direction_aliases
 from .entities import Arc, Circle, Point, Segment, SketchModel, SketchPrimitive
 from .frames import Frame2D, FrameReport, Vector2, verify_frame
 from .measurements import MeasurementExpectation, MeasurementReport, MeasurementResult, verify_measurements
@@ -36,6 +37,9 @@ __all__ = [
     "Diagnostic",
     "DimensionBinding",
     "DimensionReport",
+    "DirectionAlias",
+    "DirectionAliasReport",
+    "DirectionAliasResult",
     "Frame2D",
     "FrameReport",
     "LoopOrientationExpectation",
@@ -61,6 +65,7 @@ __all__ = [
     "Vector2",
     "verify_constraint_plan",
     "verify_dimension_bindings",
+    "verify_direction_aliases",
     "verify_frame",
     "verify_measurements",
     "verify_loop_orientations",

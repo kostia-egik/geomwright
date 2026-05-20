@@ -4,6 +4,7 @@ from kompas_mcp.sketch_runtime import (
     ConstraintPlan,
     ConstraintSpec,
     DimensionBinding,
+    DirectionAlias,
     Frame2D,
     LoopOrientationExpectation,
     MeasurementExpectation,
@@ -25,6 +26,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         plan = SketchPreflightPlan(
             model=model,
             frame=Frame2D("profile_lcs", x_axis=Vector2(1.0, 0.0), y_axis=Vector2(0.0, 1.0)),
+            direction_aliases=(DirectionAlias("axis_forward", Vector2(1.0, 0.0), "+x"),),
             constraints=ConstraintPlan(
                 constraints=(
                     ConstraintSpec("fix_origin", "fixed", ("p1",), stage="anchor"),
@@ -44,6 +46,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertEqual(report.stage, "profile_preflight")
         self.assertIsNotNone(report.frame)
+        self.assertIsNotNone(report.direction_aliases)
         self.assertIsNotNone(report.constraints)
         self.assertIsNotNone(report.relations)
         self.assertIsNotNone(report.tangencies)
@@ -53,6 +56,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertEqual(report.diagnostics, ())
         payload = report.to_dict()
         self.assertEqual(payload["topology"]["stage"], "preflight_topology")
+        self.assertIn("direction_aliases", payload)
         self.assertIn("constraints", payload)
         self.assertIn("relations", payload)
         self.assertIn("tangencies", payload)
@@ -67,6 +71,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         plan = SketchPreflightPlan(
             model=model,
             frame=Frame2D("bad_lcs", x_axis=Vector2(1.0, 0.0), y_axis=Vector2(1.0, 0.0)),
+            direction_aliases=(DirectionAlias("bad_direction", Vector2(-1.0, 0.0), "+x"),),
             constraints=ConstraintPlan(constraints=(ConstraintSpec("bad_parallel", "parallel", ("l1", "missing"), stage="orientation"),)),
             relations=(PointRelationExpectation("bad_relation", "right_of", "p1", "p3"),),
             tangencies=(TangencyExpectation("bad_tangent", "l1", "missing"),),
@@ -82,6 +87,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("dangling_loop_points", codes)
         self.assertIn("collinear_axes", codes)
+        self.assertIn("direction_alias_mismatch", codes)
         self.assertIn("missing_constraint_target", codes)
         self.assertIn("point_relation_mismatch", codes)
         self.assertIn("missing_tangency_primitive", codes)

@@ -6,6 +6,7 @@ from typing import Any
 from .constraints import ConstraintPlan, ConstraintReport, verify_constraint_plan
 from .diagnostics import Diagnostic
 from .dimensions import DimensionBinding, DimensionReport, VariableSpec, verify_dimension_bindings
+from .directions import DirectionAlias, DirectionAliasReport, verify_direction_aliases
 from .entities import SketchModel
 from .frames import Frame2D, FrameReport, verify_frame
 from .measurements import MeasurementExpectation, MeasurementReport, verify_measurements
@@ -19,6 +20,7 @@ from .topology import TopologyReport, verify_topology
 class SketchPreflightPlan:
     model: SketchModel
     frame: Frame2D | None = None
+    direction_aliases: tuple[DirectionAlias, ...] = ()
     constraints: ConstraintPlan | None = None
     relations: tuple[PointRelationExpectation, ...] = ()
     tangencies: tuple[TangencyExpectation, ...] = ()
@@ -34,6 +36,7 @@ class SketchPreflightReport:
     ok: bool
     topology: TopologyReport
     frame: FrameReport | None = None
+    direction_aliases: DirectionAliasReport | None = None
     constraints: ConstraintReport | None = None
     relations: PointRelationReport | None = None
     tangencies: TangencyReport | None = None
@@ -51,6 +54,8 @@ class SketchPreflightReport:
         }
         if self.frame is not None:
             payload["frame"] = self.frame.to_dict()
+        if self.direction_aliases is not None:
+            payload["direction_aliases"] = self.direction_aliases.to_dict()
         if self.constraints is not None:
             payload["constraints"] = self.constraints.to_dict()
         if self.relations is not None:
@@ -73,6 +78,15 @@ def verify_sketch_preflight(
 ) -> SketchPreflightReport:
     topology = verify_topology(plan.model, stage="preflight_topology")
     frame = verify_frame(plan.frame, stage="preflight_frame") if plan.frame is not None else None
+    direction_aliases = (
+        verify_direction_aliases(
+            plan.frame,
+            plan.direction_aliases,
+            stage="preflight_direction_aliases",
+        )
+        if plan.frame is not None and plan.direction_aliases
+        else None
+    )
 
     entity_ids = set(plan.model.point_map()) | set(plan.model.primitive_map())
     constraints = (
@@ -134,6 +148,7 @@ def verify_sketch_preflight(
     diagnostics = _collect_diagnostics(
         topology,
         frame,
+        direction_aliases,
         constraints,
         relations,
         tangencies,
@@ -144,6 +159,8 @@ def verify_sketch_preflight(
     ok = topology.ok
     if frame is not None:
         ok = ok and frame.ok
+    if direction_aliases is not None:
+        ok = ok and direction_aliases.ok
     if constraints is not None:
         ok = ok and constraints.ok
     if relations is not None:
@@ -162,6 +179,7 @@ def verify_sketch_preflight(
         ok=ok,
         topology=topology,
         frame=frame,
+        direction_aliases=direction_aliases,
         constraints=constraints,
         relations=relations,
         tangencies=tangencies,
@@ -175,6 +193,7 @@ def verify_sketch_preflight(
 def _collect_diagnostics(
     topology: TopologyReport,
     frame: FrameReport | None,
+    direction_aliases: DirectionAliasReport | None,
     constraints: ConstraintReport | None,
     relations: PointRelationReport | None,
     tangencies: TangencyReport | None,
@@ -185,6 +204,8 @@ def _collect_diagnostics(
     diagnostics: list[Diagnostic] = list(topology.diagnostics)
     if frame is not None:
         diagnostics.extend(frame.diagnostics)
+    if direction_aliases is not None:
+        diagnostics.extend(direction_aliases.diagnostics)
     if constraints is not None:
         diagnostics.extend(constraints.diagnostics)
     if relations is not None:
