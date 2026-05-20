@@ -9,7 +9,15 @@ from .constraints import (
     verify_constraint_plan,
 )
 from .diagnostics import Diagnostic
-from .dimensions import DimensionBinding, DimensionReport, VariableSpec, verify_dimension_bindings
+from .dimensions import (
+    DimensionBinding,
+    DimensionReadback,
+    DimensionReadbackReport,
+    DimensionReport,
+    VariableSpec,
+    verify_dimension_bindings,
+    verify_dimension_readback,
+)
 from .directions import DirectionAlias, DirectionAliasReport, DirectionAliasResult, verify_direction_aliases
 from .entities import Arc, Circle, Point, Segment, SketchModel, SketchPrimitive
 from .frames import Frame2D, FrameReport, Vector2, verify_frame
@@ -36,6 +44,8 @@ __all__ = [
     "ConstraintStageSpec",
     "Diagnostic",
     "DimensionBinding",
+    "DimensionReadback",
+    "DimensionReadbackReport",
     "DimensionReport",
     "DirectionAlias",
     "DirectionAliasReport",
@@ -65,6 +75,7 @@ __all__ = [
     "Vector2",
     "verify_constraint_plan",
     "verify_dimension_bindings",
+    "verify_dimension_readback",
     "verify_direction_aliases",
     "verify_frame",
     "verify_measurements",
