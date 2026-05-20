@@ -7,7 +7,9 @@ Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
 - `entities.py`: semantic points, segments, arcs, sketch model ids and roles;
 - `topology.py`: closed-loop, missing endpoint, dangling point and connectivity preflight checks;
 - `frames.py`: 2D local-frame checks for zero axes, orthogonality and handedness;
+- `constraints.py`: staged constraint plan checks for unknown stages, missing targets, required constraints and minimum target counts;
 - `dimensions.py`: variable/dimension binding checks for missing variables, missing targets and unknown expression references;
+- `verify.py`: one-call preflight aggregation across topology, frame, constraints and dimension bindings;
 - `diagnostics.py`: compact model-readable diagnostics shared by the preflight reports.
 
 These modules are intentionally dependency-free and do not call KOMPAS/COM yet. They are the first pure-python preflight layer that future sketch builders can use before executing live commands.
