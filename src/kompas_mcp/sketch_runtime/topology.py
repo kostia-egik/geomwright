@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .diagnostics import Diagnostic
-from .entities import Point, PointId, Segment, SketchModel, SketchPrimitive
+from .entities import Circle, Point, PointId, Segment, SketchModel, SketchPrimitive
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,25 @@ def verify_topology(model: SketchModel, *, stage: str = "topology") -> TopologyR
                     details={"center_point_id": primitive.center},
                 )
             )
+        if primitive.kind == "circle":
+            if primitive.center not in point_by_id:
+                diagnostics.append(
+                    Diagnostic(
+                        "missing_circle_center",
+                        "Circle references a center point that does not exist",
+                        entity_ids=(primitive.id,),
+                        details={"center_point_id": primitive.center},
+                    )
+                )
+            if primitive.radius <= 0.0:
+                diagnostics.append(
+                    Diagnostic(
+                        "invalid_circle_radius",
+                        "Circle radius must be greater than zero",
+                        entity_ids=(primitive.id,),
+                        details={"radius": primitive.radius},
+                    )
+                )
 
     actual_loops = set(primitives_by_loop)
     for loop_id in sorted(expected_loops - actual_loops):
@@ -126,10 +145,23 @@ def _verify_loop(
 ) -> tuple[LoopReport, list[Diagnostic]]:
     diagnostics: list[Diagnostic] = []
     primitive_ids = tuple(primitive.id for primitive in primitives)
+    circles = [primitive for primitive in primitives if isinstance(primitive, Circle)]
+    edge_primitives = [primitive for primitive in primitives if not isinstance(primitive, Circle)]
     adjacency: dict[PointId, set[PointId]] = defaultdict(set)
     degree: dict[PointId, int] = defaultdict(int)
 
-    for primitive in primitives:
+    for circle in circles:
+        if len(primitives) != 1:
+            diagnostics.append(
+                Diagnostic(
+                    "circle_mixed_loop",
+                    "Circle loops must not share a loop id with other primitives",
+                    entity_ids=(circle.id,),
+                    details={"loop_id": loop_id},
+                )
+            )
+
+    for primitive in edge_primitives:
         start, end = primitive.endpoint_ids()
         if start not in point_by_id or end not in point_by_id:
             continue
@@ -148,10 +180,15 @@ def _verify_loop(
         degree[start] += 1
         degree[end] += 1
 
-    point_ids = tuple(sorted(degree))
+    circle_point_ids = [circle.center for circle in circles if circle.center in point_by_id]
+    point_ids = tuple(sorted(set(degree) | set(circle_point_ids)))
     dangling = tuple(sorted(point_id for point_id, value in degree.items() if value != 2))
-    connected = _is_connected(point_ids, adjacency)
-    closed = not dangling and connected and bool(primitives)
+    if len(primitives) == 1 and circles:
+        connected = bool(circle_point_ids)
+        closed = connected and circles[0].radius > 0.0
+    else:
+        connected = _is_connected(tuple(sorted(degree)), adjacency)
+        closed = not dangling and connected and bool(edge_primitives) and not circles
 
     if dangling:
         diagnostics.append(

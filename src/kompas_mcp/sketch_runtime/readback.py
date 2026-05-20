@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .diagnostics import Diagnostic
-from .entities import Arc, Point, Segment, SketchModel, SketchPrimitive
+from .entities import Arc, Circle, Point, Segment, SketchModel, SketchPrimitive
 from .topology import TopologyReport, verify_topology
 
 
@@ -109,7 +109,9 @@ def verify_sketch_readback(
                 )
             )
             continue
-        diagnostics.extend(_verify_primitive_readback(expected_primitive, actual_primitive))
+        diagnostics.extend(
+            _verify_primitive_readback(expected_primitive, actual_primitive, expectation.point_tolerance)
+        )
 
     topology = verify_topology(actual, stage=f"{stage}_topology") if expectation.verify_actual_topology else None
     if topology is not None:
@@ -176,7 +178,11 @@ def _verify_point_readback(expected: Point, actual: Point, tolerance: float) -> 
     ]
 
 
-def _verify_primitive_readback(expected: SketchPrimitive, actual: SketchPrimitive) -> list[Diagnostic]:
+def _verify_primitive_readback(
+    expected: SketchPrimitive,
+    actual: SketchPrimitive,
+    tolerance: float,
+) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     if expected.kind != actual.kind:
         diagnostics.append(
@@ -238,6 +244,32 @@ def _verify_primitive_readback(expected: SketchPrimitive, actual: SketchPrimitiv
                     "Actual arc direction differs from the expected direction",
                     entity_ids=(expected.id,),
                     details={"expected": expected.direction, "actual": actual.direction, "role": expected.role},
+                )
+            )
+    elif isinstance(expected, Circle) and isinstance(actual, Circle):
+        if expected.center != actual.center:
+            diagnostics.append(
+                Diagnostic(
+                    "readback_circle_center_mismatch",
+                    "Actual circle center differs from the expected center",
+                    entity_ids=(expected.id,),
+                    details={"expected": expected.center, "actual": actual.center, "role": expected.role},
+                )
+            )
+        radius_delta = float(actual.radius) - float(expected.radius)
+        if abs(radius_delta) > tolerance:
+            diagnostics.append(
+                Diagnostic(
+                    "readback_circle_radius_mismatch",
+                    "Actual circle radius differs from the expected radius",
+                    entity_ids=(expected.id,),
+                    details={
+                        "expected": float(expected.radius),
+                        "actual": float(actual.radius),
+                        "delta": radius_delta,
+                        "tolerance": tolerance,
+                        "role": expected.role,
+                    },
                 )
             )
     elif isinstance(expected, Segment) and isinstance(actual, Segment):

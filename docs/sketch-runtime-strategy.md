@@ -4,8 +4,8 @@
 
 Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
 
-- `entities.py`: semantic points, segments, arcs, sketch model ids, roles and construction flags;
-- `topology.py`: closed-loop, missing endpoint, dangling point, connectivity, construction-in-profile and segment-intersection preflight checks;
+- `entities.py`: semantic points, segments, arcs, circles, sketch model ids, roles and construction flags;
+- `topology.py`: closed-loop, standalone circle-loop, missing endpoint/center, dangling point, connectivity, construction-in-profile and segment-intersection preflight checks;
 - `frames.py`: 2D local-frame checks for zero axes, orthogonality and handedness;
 - `constraints.py`: staged constraint plan checks for unknown stages, missing targets, required constraints and minimum target counts;
 - `dimensions.py`: variable/dimension binding checks for missing variables, missing targets and unknown expression references;

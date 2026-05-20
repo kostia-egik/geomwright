@@ -6,7 +6,7 @@ from typing import Literal
 
 PointId = str
 PrimitiveId = str
-PrimitiveKind = Literal["segment", "arc"]
+PrimitiveKind = Literal["segment", "arc", "circle"]
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,24 @@ class Arc:
         return (self.start, self.end)
 
 
-SketchPrimitive = Segment | Arc
+@dataclass(frozen=True)
+class Circle:
+    id: PrimitiveId
+    center: PointId
+    radius: float
+    role: str = ""
+    loop_id: str = "main"
+    construction: bool = False
+
+    @property
+    def kind(self) -> PrimitiveKind:
+        return "circle"
+
+    def endpoint_ids(self) -> tuple[PointId, ...]:
+        return ()
+
+
+SketchPrimitive = Segment | Arc | Circle
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 import unittest
 
-from kompas_mcp.sketch_runtime import Point, Segment, SketchModel, verify_topology
+from kompas_mcp.sketch_runtime import Circle, Point, Segment, SketchModel, verify_topology
 
 
 class SketchRuntimeTopologyTests(unittest.TestCase):
@@ -103,6 +103,40 @@ class SketchRuntimeTopologyTests(unittest.TestCase):
 
         self.assertFalse(report.ok)
         self.assertEqual(report.diagnostics[0].code, "construction_in_expected_loop")
+
+    def test_circle_can_be_standalone_closed_loop(self) -> None:
+        model = SketchModel(
+            points=(Point("pc", 0.0, 0.0),),
+            primitives=(Circle("c1", "pc", 5.0),),
+        )
+
+        report = verify_topology(model)
+
+        self.assertTrue(report.ok)
+        self.assertTrue(report.loops[0].closed)
+        self.assertTrue(report.loops[0].connected)
+        self.assertEqual(report.loops[0].point_ids, ("pc",))
+
+    def test_circle_reports_missing_center_and_invalid_radius(self) -> None:
+        model = SketchModel(points=(), primitives=(Circle("c1", "missing", 0.0),))
+
+        report = verify_topology(model)
+        codes = [diagnostic.code for diagnostic in report.diagnostics]
+
+        self.assertFalse(report.ok)
+        self.assertIn("missing_circle_center", codes)
+        self.assertIn("invalid_circle_radius", codes)
+
+    def test_circle_cannot_share_loop_with_edges(self) -> None:
+        model = SketchModel(
+            points=(Point("p1", 0.0, 0.0), Point("p2", 1.0, 0.0), Point("pc", 0.5, 0.0)),
+            primitives=(Circle("c1", "pc", 0.25), Segment("l1", "p1", "p2")),
+        )
+
+        report = verify_topology(model)
+
+        self.assertFalse(report.ok)
+        self.assertIn("circle_mixed_loop", [diagnostic.code for diagnostic in report.diagnostics])
 
 
 if __name__ == "__main__":

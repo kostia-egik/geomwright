@@ -2,6 +2,7 @@ import unittest
 
 from kompas_mcp.sketch_runtime import (
     Arc,
+    Circle,
     Point,
     Segment,
     SketchModel,
@@ -76,6 +77,25 @@ class SketchRuntimeReadbackTests(unittest.TestCase):
         self.assertIn("readback_construction_mismatch", codes)
         self.assertIn("readback_arc_center_mismatch", codes)
         self.assertIn("readback_arc_direction_mismatch", codes)
+
+    def test_readback_reports_circle_mismatches(self) -> None:
+        expected = SketchModel(
+            points=(Point("pc", 0.0, 0.0), Point("actual_center", 1.0, 0.0)),
+            primitives=(Circle("c1", "pc", 5.0),),
+            expected_loops=(),
+        )
+        actual = SketchModel(
+            points=expected.points,
+            primitives=(Circle("c1", "actual_center", 6.0),),
+            expected_loops=(),
+        )
+
+        report = verify_sketch_readback(SketchReadbackExpectation(expected, verify_actual_topology=False), actual)
+        codes = [diagnostic.code for diagnostic in report.diagnostics]
+
+        self.assertFalse(report.ok)
+        self.assertIn("readback_circle_center_mismatch", codes)
+        self.assertIn("readback_circle_radius_mismatch", codes)
 
     def test_readback_can_check_required_subset(self) -> None:
         expected = _rectangle_model()
