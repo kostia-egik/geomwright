@@ -12,6 +12,7 @@ from .diagnostics import Diagnostic
 from .dimensions import DimensionBinding, DimensionReport, VariableSpec, verify_dimension_bindings
 from .entities import Arc, Circle, Point, Segment, SketchModel, SketchPrimitive
 from .frames import Frame2D, FrameReport, Vector2, verify_frame
+from .measurements import MeasurementExpectation, MeasurementReport, MeasurementResult, verify_measurements
 from .orientation import (
     LoopOrientationExpectation,
     LoopOrientationReport,
@@ -40,6 +41,9 @@ __all__ = [
     "LoopOrientationExpectation",
     "LoopOrientationReport",
     "LoopOrientationResult",
+    "MeasurementExpectation",
+    "MeasurementReport",
+    "MeasurementResult",
     "Point",
     "PointRelationExpectation",
     "PointRelationReport",
@@ -58,6 +62,7 @@ __all__ = [
     "verify_constraint_plan",
     "verify_dimension_bindings",
     "verify_frame",
+    "verify_measurements",
     "verify_loop_orientations",
     "verify_point_relations",
     "verify_sketch_preflight",

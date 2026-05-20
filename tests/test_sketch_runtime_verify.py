@@ -6,6 +6,7 @@ from kompas_mcp.sketch_runtime import (
     DimensionBinding,
     Frame2D,
     LoopOrientationExpectation,
+    MeasurementExpectation,
     Point,
     PointRelationExpectation,
     Segment,
@@ -32,6 +33,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
             ),
             relations=(PointRelationExpectation("p1_left_p2", "left_of", "p1", "p2"),),
             tangencies=(TangencyExpectation("line_self_tangent", "l1", "l1", at_point_id="p2"),),
+            measurements=(MeasurementExpectation("width", "horizontal_distance", ("p1", "p2"), 10.0),),
             orientations=(LoopOrientationExpectation("main", "ccw"),),
             variables=(VariableSpec("Pitch", 2.0),),
             dimensions=(DimensionBinding("pitch_dim", "linear", ("p1", "p2"), "Pitch"),),
@@ -45,6 +47,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertIsNotNone(report.constraints)
         self.assertIsNotNone(report.relations)
         self.assertIsNotNone(report.tangencies)
+        self.assertIsNotNone(report.measurements)
         self.assertIsNotNone(report.orientations)
         self.assertIsNotNone(report.dimensions)
         self.assertEqual(report.diagnostics, ())
@@ -53,6 +56,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertIn("constraints", payload)
         self.assertIn("relations", payload)
         self.assertIn("tangencies", payload)
+        self.assertIn("measurements", payload)
         self.assertIn("orientations", payload)
 
     def test_preflight_flattens_diagnostics(self) -> None:
@@ -66,6 +70,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
             constraints=ConstraintPlan(constraints=(ConstraintSpec("bad_parallel", "parallel", ("l1", "missing"), stage="orientation"),)),
             relations=(PointRelationExpectation("bad_relation", "right_of", "p1", "p3"),),
             tangencies=(TangencyExpectation("bad_tangent", "l1", "missing"),),
+            measurements=(MeasurementExpectation("bad_measure", "point_distance", ("p1", "missing"), 1.0),),
             orientations=(LoopOrientationExpectation("main", "ccw"),),
             variables=(VariableSpec("Pitch", 2.0),),
             dimensions=(DimensionBinding("bad_dim", "linear", ("missing",), "MissingVar"),),
@@ -80,6 +85,7 @@ class SketchRuntimePreflightTests(unittest.TestCase):
         self.assertIn("missing_constraint_target", codes)
         self.assertIn("point_relation_mismatch", codes)
         self.assertIn("missing_tangency_primitive", codes)
+        self.assertIn("missing_measurement_target", codes)
         self.assertIn("orientation_open_loop", codes)
         self.assertIn("missing_dimension_variable", codes)
         self.assertIn("missing_dimension_target", codes)

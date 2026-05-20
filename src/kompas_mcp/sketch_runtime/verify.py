@@ -8,6 +8,7 @@ from .diagnostics import Diagnostic
 from .dimensions import DimensionBinding, DimensionReport, VariableSpec, verify_dimension_bindings
 from .entities import SketchModel
 from .frames import Frame2D, FrameReport, verify_frame
+from .measurements import MeasurementExpectation, MeasurementReport, verify_measurements
 from .orientation import LoopOrientationExpectation, LoopOrientationReport, verify_loop_orientations
 from .relations import PointRelationExpectation, PointRelationReport, verify_point_relations
 from .tangency import TangencyExpectation, TangencyReport, verify_tangencies
@@ -21,6 +22,7 @@ class SketchPreflightPlan:
     constraints: ConstraintPlan | None = None
     relations: tuple[PointRelationExpectation, ...] = ()
     tangencies: tuple[TangencyExpectation, ...] = ()
+    measurements: tuple[MeasurementExpectation, ...] = ()
     orientations: tuple[LoopOrientationExpectation, ...] = ()
     variables: tuple[VariableSpec, ...] = ()
     dimensions: tuple[DimensionBinding, ...] = ()
@@ -35,6 +37,7 @@ class SketchPreflightReport:
     constraints: ConstraintReport | None = None
     relations: PointRelationReport | None = None
     tangencies: TangencyReport | None = None
+    measurements: MeasurementReport | None = None
     orientations: LoopOrientationReport | None = None
     dimensions: DimensionReport | None = None
     diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
@@ -54,6 +57,8 @@ class SketchPreflightReport:
             payload["relations"] = self.relations.to_dict()
         if self.tangencies is not None:
             payload["tangencies"] = self.tangencies.to_dict()
+        if self.measurements is not None:
+            payload["measurements"] = self.measurements.to_dict()
         if self.orientations is not None:
             payload["orientations"] = self.orientations.to_dict()
         if self.dimensions is not None:
@@ -97,6 +102,15 @@ def verify_sketch_preflight(
         if plan.tangencies
         else None
     )
+    measurements = (
+        verify_measurements(
+            plan.model,
+            plan.measurements,
+            stage="preflight_measurements",
+        )
+        if plan.measurements
+        else None
+    )
     orientations = (
         verify_loop_orientations(
             plan.model,
@@ -117,7 +131,16 @@ def verify_sketch_preflight(
         else None
     )
 
-    diagnostics = _collect_diagnostics(topology, frame, constraints, relations, tangencies, orientations, dimensions)
+    diagnostics = _collect_diagnostics(
+        topology,
+        frame,
+        constraints,
+        relations,
+        tangencies,
+        measurements,
+        orientations,
+        dimensions,
+    )
     ok = topology.ok
     if frame is not None:
         ok = ok and frame.ok
@@ -127,6 +150,8 @@ def verify_sketch_preflight(
         ok = ok and relations.ok
     if tangencies is not None:
         ok = ok and tangencies.ok
+    if measurements is not None:
+        ok = ok and measurements.ok
     if orientations is not None:
         ok = ok and orientations.ok
     if dimensions is not None:
@@ -140,6 +165,7 @@ def verify_sketch_preflight(
         constraints=constraints,
         relations=relations,
         tangencies=tangencies,
+        measurements=measurements,
         orientations=orientations,
         dimensions=dimensions,
         diagnostics=diagnostics,
@@ -152,6 +178,7 @@ def _collect_diagnostics(
     constraints: ConstraintReport | None,
     relations: PointRelationReport | None,
     tangencies: TangencyReport | None,
+    measurements: MeasurementReport | None,
     orientations: LoopOrientationReport | None,
     dimensions: DimensionReport | None,
 ) -> tuple[Diagnostic, ...]:
@@ -164,6 +191,8 @@ def _collect_diagnostics(
         diagnostics.extend(relations.diagnostics)
     if tangencies is not None:
         diagnostics.extend(tangencies.diagnostics)
+    if measurements is not None:
+        diagnostics.extend(measurements.diagnostics)
     if orientations is not None:
         diagnostics.extend(orientations.diagnostics)
     if dimensions is not None:
