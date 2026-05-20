@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .diagnostics import Diagnostic
-from .entities import PointId, SketchModel, SketchPrimitive
+from .entities import Point, PointId, Segment, SketchModel, SketchPrimitive
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,7 @@ def verify_topology(model: SketchModel, *, stage: str = "topology") -> TopologyR
 def _verify_loop(
     loop_id: str,
     primitives: list[SketchPrimitive],
-    point_by_id: dict[PointId, object],
+    point_by_id: dict[PointId, Point],
 ) -> tuple[LoopReport, list[Diagnostic]]:
     diagnostics: list[Diagnostic] = []
     primitive_ids = tuple(primitive.id for primitive in primitives)
@@ -160,6 +160,7 @@ def _verify_loop(
                 details={"loop_id": loop_id},
             )
         )
+    diagnostics.extend(_verify_unexpected_segment_intersections(loop_id, primitives, point_by_id))
 
     return (
         LoopReport(
@@ -171,6 +172,66 @@ def _verify_loop(
             dangling_point_ids=dangling,
         ),
         diagnostics,
+    )
+
+
+def _verify_unexpected_segment_intersections(
+    loop_id: str,
+    primitives: list[SketchPrimitive],
+    point_by_id: dict[PointId, Point],
+) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    segments = [primitive for primitive in primitives if isinstance(primitive, Segment)]
+    for index, first in enumerate(segments):
+        first_points = set(first.endpoint_ids())
+        first_start = point_by_id.get(first.start)
+        first_end = point_by_id.get(first.end)
+        if first_start is None or first_end is None:
+            continue
+        for second in segments[index + 1 :]:
+            if first_points.intersection(second.endpoint_ids()):
+                continue
+            second_start = point_by_id.get(second.start)
+            second_end = point_by_id.get(second.end)
+            if second_start is None or second_end is None:
+                continue
+            if _segments_intersect(first_start, first_end, second_start, second_end):
+                diagnostics.append(
+                    Diagnostic(
+                        "unexpected_segment_intersection",
+                        "Loop segments intersect away from declared shared endpoints",
+                        entity_ids=(first.id, second.id),
+                        details={"loop_id": loop_id},
+                    )
+                )
+    return diagnostics
+
+
+def _segments_intersect(a: Point, b: Point, c: Point, d: Point, *, tolerance: float = 1e-9) -> bool:
+    ab_c = _orientation(a, b, c)
+    ab_d = _orientation(a, b, d)
+    cd_a = _orientation(c, d, a)
+    cd_b = _orientation(c, d, b)
+
+    if abs(ab_c) <= tolerance and _on_segment(a, c, b, tolerance=tolerance):
+        return True
+    if abs(ab_d) <= tolerance and _on_segment(a, d, b, tolerance=tolerance):
+        return True
+    if abs(cd_a) <= tolerance and _on_segment(c, a, d, tolerance=tolerance):
+        return True
+    if abs(cd_b) <= tolerance and _on_segment(c, b, d, tolerance=tolerance):
+        return True
+    return (ab_c > tolerance) != (ab_d > tolerance) and (cd_a > tolerance) != (cd_b > tolerance)
+
+
+def _orientation(a: Point, b: Point, c: Point) -> float:
+    return (float(b.x) - float(a.x)) * (float(c.y) - float(a.y)) - (float(b.y) - float(a.y)) * (float(c.x) - float(a.x))
+
+
+def _on_segment(a: Point, b: Point, c: Point, *, tolerance: float) -> bool:
+    return (
+        min(float(a.x), float(c.x)) - tolerance <= float(b.x) <= max(float(a.x), float(c.x)) + tolerance
+        and min(float(a.y), float(c.y)) - tolerance <= float(b.y) <= max(float(a.y), float(c.y)) + tolerance
     )
 
 

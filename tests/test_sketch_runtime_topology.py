@@ -62,6 +62,27 @@ class SketchRuntimeTopologyTests(unittest.TestCase):
         self.assertEqual(report.diagnostics[0].code, "missing_endpoint")
         self.assertEqual(report.diagnostics[0].entity_ids, ("l1",))
 
+    def test_self_intersecting_loop_is_diagnostic(self) -> None:
+        model = SketchModel(
+            points=(
+                Point("p1", 0.0, 0.0),
+                Point("p2", 10.0, 10.0),
+                Point("p3", 0.0, 10.0),
+                Point("p4", 10.0, 0.0),
+            ),
+            primitives=(
+                Segment("l1", "p1", "p2"),
+                Segment("l2", "p2", "p3"),
+                Segment("l3", "p3", "p4"),
+                Segment("l4", "p4", "p1"),
+            ),
+        )
+
+        report = verify_topology(model)
+
+        self.assertFalse(report.ok)
+        self.assertIn("unexpected_segment_intersection", [diagnostic.code for diagnostic in report.diagnostics])
+
 
 if __name__ == "__main__":
     unittest.main()
