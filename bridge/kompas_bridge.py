@@ -565,6 +565,7 @@ def _serialize_part_model_object_children(part, node_id):
                 continue
             reference = safe_get(obj, "Reference")
             child_id = "%s/%s/%s" % (node_id, collection_name, reference if reference not in (None, "") else index)
+            child_children = _serialize_sketch_entity_children(obj, child_id) if collection_name == "sketches" else []
             children.append(
                 {
                     "id": child_id,
@@ -587,10 +588,100 @@ def _serialize_part_model_object_children(part, node_id):
                     "unique_meta_object_key": safe_get(obj, "UniqueMetaObjectKey"),
                     "is_local": None,
                     "origin": [safe_get(obj, "X"), safe_get(obj, "Y"), safe_get(obj, "Z")],
-                    "children": [],
+                    "sketch_entity_count": len(child_children),
+                    "children": child_children,
                 }
             )
     return children
+
+
+def _serialize_sketch_entity_children(sketch, sketch_id):
+    begin_edit = safe_get(sketch, "BeginEdit")
+    end_edit = safe_get(sketch, "EndEdit")
+    if not callable(begin_edit):
+        return []
+    sketch_doc = None
+    try:
+        sketch_doc = begin_edit()
+        if sketch_doc is None:
+            return []
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        children = []
+        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "segments", ("LineSegments", "GetLineSegments")))
+        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "circles", ("Circles", "GetCircles")))
+        return children
+    except Exception:
+        return []
+    finally:
+        if callable(end_edit) and sketch_doc is not None:
+            try:
+                end_edit()
+            except Exception:
+                pass
+
+
+def _serialize_sketch_entity_collection(drawing_container, sketch_id, collection_name, accessors):
+    collection, _, _ = _resolve_model_object_collection(drawing_container, accessors)
+    count = collection_count(collection)
+    children = []
+    for index in range(count):
+        entity = get_collection_item(collection, index)
+        if entity is None:
+            continue
+        reference = safe_get(entity, "Reference")
+        entity_kind = "segment" if collection_name == "segments" else "circle"
+        geometry = _sketch_entity_geometry(entity_kind, entity)
+        fingerprint = _sketch_entity_fingerprint(entity_kind, geometry, reference)
+        children.append(
+            {
+                "id": "%s/%s/%s" % (sketch_id, collection_name, reference if reference not in (None, "") else index),
+                "parent_id": sketch_id,
+                "name": safe_get(entity, "Name", ""),
+                "designation": "",
+                "title": None,
+                "material": "",
+                "comment": "",
+                "mass": None,
+                "volume": None,
+                "density": None,
+                "quantity": None,
+                "kind": "sketch_entity",
+                "sketch_entity_kind": entity_kind,
+                "model_object_collection": collection_name,
+                "source_path": "",
+                "reference": reference,
+                "fingerprint": fingerprint,
+                "geometry": geometry,
+                "line_style": safe_get(entity, "Style"),
+                "children": [],
+            }
+        )
+    return children
+
+
+def _sketch_entity_geometry(entity_kind, entity):
+    if entity_kind == "segment":
+        return {
+            "start": [_json_safe_scalar(safe_get(entity, "X1")), _json_safe_scalar(safe_get(entity, "Y1"))],
+            "end": [_json_safe_scalar(safe_get(entity, "X2")), _json_safe_scalar(safe_get(entity, "Y2"))],
+        }
+    if entity_kind == "circle":
+        return {
+            "center": [_json_safe_scalar(safe_get(entity, "Xc")), _json_safe_scalar(safe_get(entity, "Yc"))],
+            "radius": _json_safe_scalar(safe_get(entity, "Radius")),
+        }
+    return {}
+
+
+def _sketch_entity_fingerprint(entity_kind, geometry, reference):
+    parts = [str(entity_kind), str(reference if reference not in (None, "") else "")]
+    if entity_kind == "segment":
+        parts.extend(str(value) for value in geometry.get("start", []))
+        parts.extend(str(value) for value in geometry.get("end", []))
+    elif entity_kind == "circle":
+        parts.extend(str(value) for value in geometry.get("center", []))
+        parts.append(str(geometry.get("radius")))
+    return "|".join(parts)
 
 
 def _flatten_tree_entries(root):

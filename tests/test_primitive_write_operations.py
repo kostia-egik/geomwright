@@ -581,6 +581,32 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(child["model_object_collection"], "points3d")
         self.assertEqual(child["origin"], [1.0, 2.0, 3.0])
 
+    def test_bridge_serialize_part_includes_sketch_entity_children(self) -> None:
+        bridge = _load_bridge_module()
+        line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=5.0, Style=1, Reference=201)
+        circle = types.SimpleNamespace(Name="", Xc=4.0, Yc=3.0, Radius=2.0, Style=1, Reference=202)
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]), Circles=_FakeCollection([circle]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(
+            Name="Part",
+            Marking="",
+            Material="",
+            Comment="",
+            Reference=1,
+            Sketchs=_FakeCollection([sketch]),
+        )
+
+        tree = bridge.serialize_part(part, "root", None)
+
+        sketch_node = tree["children"][0]
+        self.assertEqual(sketch_node["model_object_collection"], "sketches")
+        self.assertEqual(sketch_node["sketch_entity_count"], 2)
+        self.assertEqual([child["sketch_entity_kind"] for child in sketch_node["children"]], ["segment", "circle"])
+        self.assertEqual(sketch_node["children"][0]["geometry"]["end"], [10.0, 5.0])
+        self.assertIn("segment|201", sketch_node["children"][0]["fingerprint"])
+        self.assertTrue(sketch.ended)
+
 
 class _FakeRunner:
     def __init__(self) -> None:
@@ -657,6 +683,33 @@ class _FakeCollection:
 
     def Item(self, index: int) -> Any:
         return self._items[index]
+
+
+class _FakeViews:
+    def __init__(self, view: Any) -> None:
+        self._view = view
+
+    def View(self, index: int) -> Any:
+        return self._view
+
+
+class _FakeViewsManager:
+    def __init__(self, view: Any) -> None:
+        self.Views = _FakeViews(view)
+
+
+class _FakeSketch:
+    def __init__(self, name: str, reference: int, sketch_doc: Any) -> None:
+        self.Name = name
+        self.Reference = reference
+        self._sketch_doc = sketch_doc
+        self.ended = False
+
+    def BeginEdit(self) -> Any:
+        return self._sketch_doc
+
+    def EndEdit(self) -> None:
+        self.ended = True
 
 
 def _snapshot(entries: list[dict[str, Any]], *, items: int) -> dict[str, Any]:
