@@ -50,3 +50,17 @@ Use `create_sketch_entities` to create multiple entities in one new sketch. Supp
 ```
 
 The tool returns per-entity results plus a shared after snapshot and delta. Batch execution is fail-fast and does not attempt rollback yet.
+
+## Live Audit
+
+The manual live audit script is `sample/audit_live_kompas_write_v2_2026_05_24.py`.
+It copies the requested model into `sample/generated/...`, opens the copy, runs
+`create_sketch_entities`, captures an after snapshot, writes
+`write_v2_audit_manifest.json`, and closes the copied document unless
+`--keep-open` is passed.
+
+Example:
+
+```powershell
+.\.venv\Scripts\python.exe sample\audit_live_kompas_write_v2_2026_05_24.py --model-path C:\path\to\part.m3d --visible
+```

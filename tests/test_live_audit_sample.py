@@ -58,11 +58,48 @@ class LiveAuditSampleTests(unittest.TestCase):
         self.assertNotIn("probe_summary", preview)
         self.assertEqual(preview["probe"]["mode"], "active_document")
 
+    def test_write_v2_audit_manifest_keeps_raw_result_bounded(self) -> None:
+        sample = _load_write_sample()
+        tool_inputs = {"name": "SK", "entities": [{"kind": "segment", "start": [0, 0], "end": [1, 0]}]}
+        result = {
+            "ok": True,
+            "result_preview": {"ok": True, "items": 1},
+            "snapshots": {
+                "before": {"summary": {"items": 1}},
+                "after": {"summary": {"items": 3}},
+            },
+            "delta": {
+                "summary": {"added_items": 2, "removed_items": 0, "changed_items": 0},
+                "counts_delta": {"items": {"delta": 2}},
+            },
+            "failures": [],
+        }
+
+        manifest = sample._build_write_manifest(tool_inputs, result)
+
+        self.assertTrue(manifest["ok"])
+        self.assertEqual(manifest["tool_inputs"], tool_inputs)
+        self.assertEqual(manifest["before_summary"]["items"], 1)
+        self.assertEqual(manifest["after_summary"]["items"], 3)
+        self.assertEqual(manifest["delta_summary"]["added_items"], 2)
+        self.assertNotIn("snapshots", manifest)
+
 
 def _load_sample():
     root = Path(__file__).resolve().parents[1]
     path = root / "sample" / "audit_live_kompas_low_level_2026_05_20.py"
     spec = importlib.util.spec_from_file_location("audit_live_kompas_low_level_sample", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load sample from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_write_sample():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "sample" / "audit_live_kompas_write_v2_2026_05_24.py"
+    spec = importlib.util.spec_from_file_location("audit_live_kompas_write_v2_sample", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load sample from {path}")
     module = importlib.util.module_from_spec(spec)
