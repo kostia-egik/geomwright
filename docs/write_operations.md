@@ -13,7 +13,7 @@ Success means the operation returned `ok=true`, the before/after readback exists
 
 ## Targeting
 
-Sketch writes support an explicit target object. The stable mode today is:
+Sketch writes support an explicit target object. To create a new sketch:
 
 ```json
 {
@@ -23,7 +23,19 @@ Sketch writes support an explicit target object. The stable mode today is:
 }
 ```
 
-Existing-sketch editing by `sketch_ref` is reserved but intentionally rejected until readback can identify and verify sketch contents reliably enough for update/delete operations.
+To append entities to an existing sketch, pass the readback `sketch_ref` from a previous write or snapshot and set `create_new_sketch=false`:
+
+```json
+{
+  "sketch_ref": "12345",
+  "create_new_sketch": false,
+  "entities": [
+    {"kind": "segment", "start": [0, 0], "end": [10, 0]}
+  ]
+}
+```
+
+Only explicit `sketch_ref` targeting is supported for existing sketches. Name-based matching is intentionally not used because it can be ambiguous.
 
 ## Error Classes
 
@@ -35,7 +47,7 @@ Existing-sketch editing by `sketch_ref` is reserved but intentionally rejected u
 
 ## Batch Sketch Entities
 
-Use `create_sketch_entities` to create multiple entities in one new sketch. Supported entity kinds are currently `point`, `segment`, `polyline`, `arc`, `circle`, `ellipse`, and `rectangle`.
+Use `create_sketch_entities` to create multiple entities in one target sketch. Supported entity kinds are currently `point`, `segment`, `polyline`, `arc`, `circle`, `ellipse`, and `rectangle`.
 
 ```json
 {
@@ -54,6 +66,8 @@ Use `create_sketch_entities` to create multiple entities in one new sketch. Supp
 ```
 
 The tool returns per-entity results plus a shared after snapshot and delta. Batch execution is fail-fast and does not attempt rollback yet.
+
+`require_no_removed` defaults to `false` for batch sketch writes. Live KOMPAS readback can renumber or reshape existing sketch entity references after edit, so the stable default contract is `min_added >= 1` plus after-snapshot readback. Set `require_no_removed=true` only for tightly controlled models where removed-item deltas are known to be stable.
 
 ## Live Audit
 

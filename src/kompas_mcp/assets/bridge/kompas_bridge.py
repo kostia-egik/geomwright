@@ -596,6 +596,8 @@ def _serialize_part_model_object_children(part, node_id):
 
 
 def _serialize_sketch_entity_children(sketch, sketch_id):
+    if not callable(safe_get(sketch, "BeginEdit")):
+        sketch = _cast_to_com_interface(sketch, "ISketch")
     begin_edit = safe_get(sketch, "BeginEdit")
     end_edit = safe_get(sketch, "EndEdit")
     if not callable(begin_edit):
@@ -1914,11 +1916,7 @@ def _normalize_sketch_plane(value):
 def _create_sketch_on_plane(model_container, part, name, plane):
     plane_key = _normalize_sketch_plane(plane)
     plane_object = _resolve_default_part_object(part, plane_key)
-    sketchs = safe_get(model_container, "Sketchs")
-    if sketchs is None:
-        get_sketchs = safe_get(model_container, "GetSketchs")
-        if callable(get_sketchs):
-            sketchs = get_sketchs()
+    sketchs = _get_sketch_collection(model_container)
     if sketchs is None or not callable(safe_get(sketchs, "Add")):
         raise RuntimeError("Part does not expose Sketchs.Add")
     sketch = sketchs.Add()
@@ -1933,6 +1931,33 @@ def _create_sketch_on_plane(model_container, part, name, plane):
     if not sketch.Update():
         raise RuntimeError("Sketch Update returned False")
     return sketch, plane_key
+
+
+def _get_sketch_collection(model_container):
+    sketchs = safe_get(model_container, "Sketchs")
+    if sketchs is None:
+        get_sketchs = safe_get(model_container, "GetSketchs")
+        if callable(get_sketchs):
+            sketchs = get_sketchs()
+    return sketchs
+
+
+def _resolve_existing_sketch(model_container, sketch_ref):
+    sketchs = _get_sketch_collection(model_container)
+    if sketchs is None:
+        raise RuntimeError("unsupported COM shape: part does not expose Sketchs/GetSketchs")
+    wanted = str(sketch_ref)
+    for index in range(collection_count(sketchs)):
+        sketch = get_collection_item(sketchs, index)
+        if sketch is None:
+            continue
+        reference = safe_get(sketch, "Reference")
+        if str(reference) == wanted:
+            editable_sketch = sketch if callable(safe_get(sketch, "BeginEdit")) else _cast_to_com_interface(sketch, "ISketch")
+            if not callable(safe_get(editable_sketch, "BeginEdit")):
+                raise RuntimeError("unsupported COM shape: sketch_ref target does not expose ISketch.BeginEdit")
+            return editable_sketch
+    raise RuntimeError("ambiguous target: sketch_ref not found: %s" % wanted)
 
 
 def _get_sketch_system_view(sketch_doc):
@@ -1965,7 +1990,14 @@ def _resolve_sketch_write_target(model_container, part, payload, default_name):
     if sketch_ref not in (None, "") and (create_new or mode == "create_new_sketch"):
         raise RuntimeError("ambiguous target: provide sketch_ref or create_new_sketch, not both")
     if sketch_ref not in (None, "") or mode == "existing_sketch":
-        raise RuntimeError("unsupported COM shape: existing sketch_ref target is not implemented")
+        if sketch_ref in (None, ""):
+            raise RuntimeError("ambiguous target: existing_sketch requires sketch_ref")
+        sketch = _resolve_existing_sketch(model_container, sketch_ref)
+        return sketch, {
+            "mode": "existing_sketch",
+            "name": safe_get(sketch, "Name", ""),
+            "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+        }
     if not create_new and mode != "create_new_sketch":
         raise RuntimeError("ambiguous target: create_new_sketch=false requires sketch_ref")
     name = target.get("name") or payload.get("name") or default_name

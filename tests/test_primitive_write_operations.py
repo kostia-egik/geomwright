@@ -230,6 +230,31 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_create_sketch_entities_uses_existing_sketch_target(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        adapter.create_sketch_entities(
+            document_id="doc-1",
+            sketch_ref=100,
+            create_new_sketch=False,
+            entities=[{"kind": "segment", "start": [0, 0], "end": [10, 0]}],
+        )
+
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    "create_sketch_entities",
+                    {
+                        "document_id": "doc-1",
+                        "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                        "entities": [{"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1}],
+                    },
+                )
+            ],
+        )
+
     def test_bridge_create_point3d_targets_active_part(self) -> None:
         bridge = _load_bridge_module()
         app = object()
@@ -619,6 +644,42 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertTrue(all(entity.updated for bucket in created_entities.values() for entity in bucket))
         self.assertTrue(sketch.ended)
         self.assertTrue(sketch.updated)
+
+    def test_bridge_create_sketch_entities_targets_existing_sketch_ref(self) -> None:
+        bridge = _load_bridge_module()
+        line = _FakeSketchEntity(401)
+        view = types.SimpleNamespace(LineSegments=_FakeAddCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        existing = _FakeSketch("SK_EXISTING", 100, sketch_doc)
+        other = _FakeSketch("SK_OTHER", 99, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([other, existing]))
+
+        sketch, target, results = bridge._create_sketch_entities(
+            part,
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "entities": [{"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1}],
+            },
+        )
+
+        self.assertIs(sketch, existing)
+        self.assertEqual(target, {"mode": "existing_sketch", "name": "SK_EXISTING", "sketch_ref": 100})
+        self.assertEqual(results[0]["reference"], 401)
+        self.assertTrue(existing.ended)
+        self.assertTrue(existing.updated)
+
+    def test_bridge_existing_sketch_ref_not_found_is_target_error(self) -> None:
+        bridge = _load_bridge_module()
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([]))
+
+        with self.assertRaisesRegex(RuntimeError, "sketch_ref not found"):
+            bridge._resolve_sketch_write_target(
+                part,
+                part,
+                {"target": {"mode": "existing_sketch", "sketch_ref": "404"}},
+                "SK_BATCH",
+            )
 
     def test_bridge_serialize_part_includes_point3d_children(self) -> None:
         bridge = _load_bridge_module()

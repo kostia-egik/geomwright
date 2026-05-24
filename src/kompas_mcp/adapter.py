@@ -751,7 +751,7 @@ class KompasAdapter:
         sketch_ref: str | int | None = None,
         create_new_sketch: bool = True,
         min_added: int = 1,
-        require_no_removed: bool = True,
+        require_no_removed: bool = False,
         require_no_changed: bool = False,
         max_items: int = 25,
     ) -> dict[str, Any]:
@@ -770,7 +770,7 @@ class KompasAdapter:
                 "entities": normalized_entities,
             },
         )
-        return _snapshot_verified_envelope(
+        envelope = _snapshot_verified_envelope(
             "create_sketch_entities",
             result=result,
             min_added=min_added,
@@ -778,6 +778,13 @@ class KompasAdapter:
             require_no_changed=require_no_changed,
             max_items=max_items,
         )
+        if isinstance(result.get("target"), dict):
+            envelope["target"] = result["target"]
+        if isinstance(result.get("items"), list):
+            envelope["items"] = result["items"]
+        if isinstance(result.get("summary"), dict):
+            envelope["summary"] = result["summary"]
+        return envelope
 
     def check_file_access(self, path: str) -> dict[str, Any]:
         return self._check_file_access(path)

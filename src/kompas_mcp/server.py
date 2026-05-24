@@ -442,7 +442,7 @@ def create_sketch_entities(
     sketch_ref: str | None = None,
     create_new_sketch: bool = True,
     min_added: int = 1,
-    require_no_removed: bool = True,
+    require_no_removed: bool = False,
     require_no_changed: bool = False,
     max_items: int = 25,
 ) -> dict:

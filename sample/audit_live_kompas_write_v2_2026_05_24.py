@@ -50,7 +50,7 @@ def main() -> None:
             {"kind": "rectangle", "corner1": [0, 0], "corner2": [50, 24]},
         ],
         "min_added": 1,
-        "require_no_removed": True,
+        "require_no_removed": False,
     }
     audit: dict[str, Any] = {
         "schema": "kompas_mcp.write_operations_v2.live_audit.v1",
@@ -90,6 +90,25 @@ def main() -> None:
         )
         audit["steps"].append(write_step)
         audit["write_manifest"] = _build_write_manifest(tool_inputs, write_step.get("payload"))
+        sketch_ref = _extract_sketch_ref(write_step.get("payload"))
+        if sketch_ref not in (None, ""):
+            append_inputs = {
+                "sketch_ref": sketch_ref,
+                "create_new_sketch": False,
+                "entities": [
+                    {"kind": "segment", "start": [60, 0], "end": [80, 20]},
+                    {"kind": "point", "point": [80, 20]},
+                ],
+                "min_added": 1,
+                "require_no_removed": False,
+                "require_no_changed": False,
+            }
+            append_step = _run_step(
+                "append_existing_sketch_entities",
+                lambda: adapter.create_sketch_entities(document_id=opened_document_id, **append_inputs),
+            )
+            audit["steps"].append(append_step)
+            audit["append_write_manifest"] = _build_write_manifest(append_inputs, append_step.get("payload"))
 
         audit["steps"].append(
             _run_step(
@@ -180,12 +199,25 @@ def _extract_document_id(payload: Any) -> str | None:
     return None
 
 
+def _extract_sketch_ref(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    target = payload.get("target")
+    if isinstance(target, dict):
+        return target.get("sketch_ref")
+    item = payload.get("item")
+    if isinstance(item, dict):
+        return item.get("sketch_ref") or item.get("reference")
+    return None
+
+
 def _finish(audit: dict[str, Any], output_dir: Path) -> None:
     audit["ok"] = all(step.get("ok") for step in audit.get("steps", []))
     audit["summary"] = {
         "step_count": len(audit.get("steps", [])),
         "failed_steps": [step.get("name") for step in audit.get("steps", []) if not step.get("ok")],
         "write_ok": bool(audit.get("write_manifest", {}).get("ok")),
+        "append_write_ok": bool(audit.get("append_write_manifest", {}).get("ok")) if "append_write_manifest" in audit else None,
     }
     manifest_path = output_dir / "write_v2_audit_manifest.json"
     manifest_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
