@@ -35,15 +35,19 @@ Existing-sketch editing by `sketch_ref` is reserved but intentionally rejected u
 
 ## Batch Sketch Entities
 
-Use `create_sketch_entities` to create multiple entities in one new sketch. Supported entity kinds are currently `segment`, `circle`, and `rectangle`.
+Use `create_sketch_entities` to create multiple entities in one new sketch. Supported entity kinds are currently `point`, `segment`, `polyline`, `arc`, `circle`, `ellipse`, and `rectangle`.
 
 ```json
 {
   "name": "SKETCH_BATCH_1",
   "plane": "XOY",
   "entities": [
+    {"kind": "point", "point": [0, 0]},
     {"kind": "segment", "start": [0, 0], "end": [50, 0]},
+    {"kind": "polyline", "points": [[0, 0], [20, 10], [40, 0]]},
+    {"kind": "arc", "center": [25, 10], "radius": 8, "start": [33, 10], "end": [25, 18]},
     {"kind": "circle", "center": [25, 10], "radius": 5},
+    {"kind": "ellipse", "center": [25, 10], "radius_x": 12, "radius_y": 5},
     {"kind": "rectangle", "corner1": [0, 0], "corner2": [50, 20]}
   ]
 }

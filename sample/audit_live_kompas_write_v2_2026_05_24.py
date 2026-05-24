@@ -41,8 +41,12 @@ def main() -> None:
         "name": "WRITE_V2_AUDIT_SKETCH",
         "plane": "XOY",
         "entities": [
+            {"kind": "point", "point": [0, 0]},
             {"kind": "segment", "start": [0, 0], "end": [50, 0]},
+            {"kind": "polyline", "points": [[0, 24], [12, 34], [24, 24], [36, 34], [48, 24]]},
+            {"kind": "arc", "center": [25, 12], "radius": 10, "start": [35, 12], "end": [25, 22]},
             {"kind": "circle", "center": [25, 12], "radius": 6},
+            {"kind": "ellipse", "center": [25, -12], "radius_x": 14, "radius_y": 5},
             {"kind": "rectangle", "corner1": [0, 0], "corner2": [50, 24]},
         ],
         "min_added": 1,

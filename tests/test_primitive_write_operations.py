@@ -178,6 +178,10 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             entities=[
                 {"kind": "segment", "start": [0, 0], "end": [10, 0]},
                 {"kind": "circle", "center": [5, 5], "radius": 2},
+                {"kind": "point", "point": [1, 1]},
+                {"kind": "polyline", "points": [[0, 0], [1, 0], [1, 1]], "closed": True},
+                {"kind": "arc", "center": [5, 5], "radius": 3, "start": [8, 5], "end": [5, 8], "direction": True},
+                {"kind": "ellipse", "center": [5, 5], "radius_x": 4, "radius_y": 2, "angle": 0},
             ],
         )
 
@@ -192,6 +196,18 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
                         "entities": [
                             {"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1},
                             {"kind": "circle", "center": [5.0, 5.0], "radius": 2.0, "line_style": 1},
+                            {"kind": "point", "point": [1.0, 1.0], "line_style": 1},
+                            {"kind": "polyline", "points": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], "closed": True, "line_style": 1},
+                            {
+                                "kind": "arc",
+                                "center": [5.0, 5.0],
+                                "radius": 3.0,
+                                "start": [8.0, 5.0],
+                                "end": [5.0, 8.0],
+                                "direction": True,
+                                "line_style": 1,
+                            },
+                            {"kind": "ellipse", "center": [5.0, 5.0], "radius_x": 4.0, "radius_y": 2.0, "angle": 0.0, "line_style": 1},
                         ],
                     },
                 )
@@ -560,6 +576,50 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(result["summary"]["entity_count"], 1)
         self.assertEqual(result["readback"]["after"]["snapshot"]["counts"]["items"], 2)
 
+    def test_bridge_create_sketch_entities_supports_v2_entity_batch(self) -> None:
+        bridge = _load_bridge_module()
+        created_entities = {
+            "Points": [_FakeSketchEntity(301)],
+            "LineSegments": [_FakeSketchEntity(302), _FakeSketchEntity(303)],
+            "Arcs": [_FakeSketchEntity(305)],
+            "Ellipses": [_FakeSketchEntity(306)],
+        }
+        view = types.SimpleNamespace(
+            Points=_FakeAddCollection(created_entities["Points"]),
+            LineSegments=_FakeAddCollection(created_entities["LineSegments"]),
+            Arcs=_FakeAddCollection(created_entities["Arcs"]),
+            Ellipses=_FakeAddCollection(created_entities["Ellipses"]),
+        )
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_BATCH", 100, sketch_doc)
+
+        original_resolve_target = bridge._resolve_sketch_write_target
+        self.addCleanup(setattr, bridge, "_resolve_sketch_write_target", original_resolve_target)
+        bridge._resolve_sketch_write_target = lambda model_container, part, payload, default_name: (
+            sketch,
+            {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "xoy_plane", "sketch_ref": 100},
+        )
+
+        _, target, results = bridge._create_sketch_entities(
+            object(),
+            object(),
+            {
+                "entities": [
+                    {"kind": "point", "point": [1.0, 2.0], "line_style": 1},
+                    {"kind": "polyline", "points": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], "closed": False, "line_style": 1},
+                    {"kind": "arc", "center": [5.0, 5.0], "radius": 2.0, "start": [7.0, 5.0], "end": [5.0, 7.0], "direction": True, "line_style": 1},
+                    {"kind": "ellipse", "center": [5.0, 5.0], "radius_x": 4.0, "radius_y": 2.0, "angle": 0.0, "line_style": 1},
+                ]
+            },
+        )
+
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual([item["kind"] for item in results], ["point", "polyline", "arc", "ellipse"])
+        self.assertEqual(results[1]["line_count"], 2)
+        self.assertTrue(all(entity.updated for bucket in created_entities.values() for entity in bucket))
+        self.assertTrue(sketch.ended)
+        self.assertTrue(sketch.updated)
+
     def test_bridge_serialize_part_includes_point3d_children(self) -> None:
         bridge = _load_bridge_module()
         point = types.SimpleNamespace(Name="PT_A", X=1.0, Y=2.0, Z=3.0, Reference=42, ModelObjectType=17)
@@ -585,7 +645,16 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         bridge = _load_bridge_module()
         line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=5.0, Style=1, Reference=201)
         circle = types.SimpleNamespace(Name="", Xc=4.0, Yc=3.0, Radius=2.0, Style=1, Reference=202)
-        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]), Circles=_FakeCollection([circle]))
+        point = types.SimpleNamespace(Name="", X=1.0, Y=2.0, Style=1, Reference=203)
+        arc = types.SimpleNamespace(Name="", Xc=4.0, Yc=3.0, Radius=2.0, X1=6.0, Y1=3.0, X2=4.0, Y2=5.0, Direction=True, Style=1, Reference=204)
+        ellipse = types.SimpleNamespace(Name="", Xc=7.0, Yc=8.0, Rx=4.0, Ry=2.0, Angle=0.0, Style=1, Reference=205)
+        view = types.SimpleNamespace(
+            LineSegments=_FakeCollection([line]),
+            Circles=_FakeCollection([circle]),
+            Points=_FakeCollection([point]),
+            Arcs=_FakeCollection([arc]),
+            Ellipses=_FakeCollection([ellipse]),
+        )
         sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
         sketch = _FakeSketch("SK_A", 100, sketch_doc)
         part = types.SimpleNamespace(
@@ -601,10 +670,13 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         sketch_node = tree["children"][0]
         self.assertEqual(sketch_node["model_object_collection"], "sketches")
-        self.assertEqual(sketch_node["sketch_entity_count"], 2)
-        self.assertEqual([child["sketch_entity_kind"] for child in sketch_node["children"]], ["segment", "circle"])
+        self.assertEqual(sketch_node["sketch_entity_count"], 5)
+        self.assertEqual([child["sketch_entity_kind"] for child in sketch_node["children"]], ["segment", "circle", "point", "arc", "ellipse"])
         self.assertEqual(sketch_node["children"][0]["geometry"]["end"], [10.0, 5.0])
         self.assertIn("segment|201", sketch_node["children"][0]["fingerprint"])
+        self.assertEqual(sketch_node["children"][2]["geometry"]["point"], [1.0, 2.0])
+        self.assertIn("arc|204", sketch_node["children"][3]["fingerprint"])
+        self.assertEqual(sketch_node["children"][4]["geometry"]["radius_y"], 2.0)
         self.assertTrue(sketch.ended)
 
 
@@ -704,12 +776,39 @@ class _FakeSketch:
         self.Reference = reference
         self._sketch_doc = sketch_doc
         self.ended = False
+        self.updated = False
 
     def BeginEdit(self) -> Any:
         return self._sketch_doc
 
     def EndEdit(self) -> None:
         self.ended = True
+
+    def Update(self) -> bool:
+        self.updated = True
+        return True
+
+
+class _FakeSketchEntity:
+    def __init__(self, reference: int) -> None:
+        self.Reference = reference
+        self.updated = False
+
+    def Update(self) -> bool:
+        self.updated = True
+        return True
+
+
+class _FakeAddCollection:
+    def __init__(self, items: list[_FakeSketchEntity]) -> None:
+        self._items = items
+        self._next = 0
+        self.Count = len(items)
+
+    def Add(self) -> _FakeSketchEntity:
+        item = self._items[self._next]
+        self._next += 1
+        return item
 
 
 def _snapshot(entries: list[dict[str, Any]], *, items: int) -> dict[str, Any]:

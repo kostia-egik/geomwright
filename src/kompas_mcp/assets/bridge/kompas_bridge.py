@@ -607,8 +607,11 @@ def _serialize_sketch_entity_children(sketch, sketch_id):
             return []
         drawing_container = _get_sketch_drawing_container(sketch_doc)
         children = []
-        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "segments", ("LineSegments", "GetLineSegments")))
-        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "circles", ("Circles", "GetCircles")))
+        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "segments", ("LineSegments", "GetLineSegments"), "segment"))
+        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "circles", ("Circles", "GetCircles"), "circle"))
+        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "points", ("Points", "GetPoints"), "point"))
+        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "arcs", ("Arcs", "GetArcs"), "arc"))
+        children.extend(_serialize_sketch_entity_collection(drawing_container, sketch_id, "ellipses", ("Ellipses", "GetEllipses"), "ellipse"))
         return children
     except Exception:
         return []
@@ -620,7 +623,7 @@ def _serialize_sketch_entity_children(sketch, sketch_id):
                 pass
 
 
-def _serialize_sketch_entity_collection(drawing_container, sketch_id, collection_name, accessors):
+def _serialize_sketch_entity_collection(drawing_container, sketch_id, collection_name, accessors, entity_kind):
     collection, _, _ = _resolve_model_object_collection(drawing_container, accessors)
     count = collection_count(collection)
     children = []
@@ -629,7 +632,6 @@ def _serialize_sketch_entity_collection(drawing_container, sketch_id, collection
         if entity is None:
             continue
         reference = safe_get(entity, "Reference")
-        entity_kind = "segment" if collection_name == "segments" else "circle"
         geometry = _sketch_entity_geometry(entity_kind, entity)
         fingerprint = _sketch_entity_fingerprint(entity_kind, geometry, reference)
         children.append(
@@ -670,6 +672,23 @@ def _sketch_entity_geometry(entity_kind, entity):
             "center": [_json_safe_scalar(safe_get(entity, "Xc")), _json_safe_scalar(safe_get(entity, "Yc"))],
             "radius": _json_safe_scalar(safe_get(entity, "Radius")),
         }
+    if entity_kind == "point":
+        return {"point": [_json_safe_scalar(safe_get(entity, "X")), _json_safe_scalar(safe_get(entity, "Y"))]}
+    if entity_kind == "arc":
+        return {
+            "center": [_json_safe_scalar(safe_get(entity, "Xc")), _json_safe_scalar(safe_get(entity, "Yc"))],
+            "radius": _json_safe_scalar(safe_get(entity, "Radius")),
+            "start": [_json_safe_scalar(safe_get(entity, "X1")), _json_safe_scalar(safe_get(entity, "Y1"))],
+            "end": [_json_safe_scalar(safe_get(entity, "X2")), _json_safe_scalar(safe_get(entity, "Y2"))],
+            "direction": _json_safe_scalar(safe_get(entity, "Direction")),
+        }
+    if entity_kind == "ellipse":
+        return {
+            "center": [_json_safe_scalar(safe_get(entity, "Xc")), _json_safe_scalar(safe_get(entity, "Yc"))],
+            "radius_x": _json_safe_scalar(safe_get(entity, "SemiAxisA", safe_get(entity, "Rx", safe_get(entity, "RadiusX")))),
+            "radius_y": _json_safe_scalar(safe_get(entity, "SemiAxisB", safe_get(entity, "Ry", safe_get(entity, "RadiusY")))),
+            "angle": _json_safe_scalar(safe_get(entity, "Angle")),
+        }
     return {}
 
 
@@ -681,6 +700,19 @@ def _sketch_entity_fingerprint(entity_kind, geometry, reference):
     elif entity_kind == "circle":
         parts.extend(str(value) for value in geometry.get("center", []))
         parts.append(str(geometry.get("radius")))
+    elif entity_kind == "point":
+        parts.extend(str(value) for value in geometry.get("point", []))
+    elif entity_kind == "arc":
+        parts.extend(str(value) for value in geometry.get("center", []))
+        parts.append(str(geometry.get("radius")))
+        parts.extend(str(value) for value in geometry.get("start", []))
+        parts.extend(str(value) for value in geometry.get("end", []))
+        parts.append(str(geometry.get("direction")))
+    elif entity_kind == "ellipse":
+        parts.extend(str(value) for value in geometry.get("center", []))
+        parts.append(str(geometry.get("radius_x")))
+        parts.append(str(geometry.get("radius_y")))
+        parts.append(str(geometry.get("angle")))
     return "|".join(parts)
 
 
@@ -2003,6 +2035,93 @@ def _add_sketch_circle(drawing_container, center, radius, line_style):
     return circle
 
 
+def _set_first_available_attr(entity, names, value):
+    last_error = None
+    for name in names:
+        try:
+            setattr(entity, name, value)
+            return
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+
+
+def _add_sketch_point(drawing_container, point, line_style):
+    points = _get_add_collection(drawing_container, "Points", "GetPoints", "Points")
+    created = points.Add()
+    if created is None:
+        raise RuntimeError("Points.Add returned None")
+    created.X = float(point[0])
+    created.Y = float(point[1])
+    try:
+        _apply_line_style(created, line_style)
+    except Exception:
+        pass
+    if not created.Update():
+        raise RuntimeError("Point Update returned False")
+    return created
+
+
+def _add_sketch_arc(drawing_container, center, radius, start, end, direction, line_style):
+    arcs = _get_add_collection(drawing_container, "Arcs", "GetArcs", "Arcs")
+    arc = arcs.Add()
+    if arc is None:
+        raise RuntimeError("Arcs.Add returned None")
+    arc.Xc = float(center[0])
+    arc.Yc = float(center[1])
+    arc.Radius = float(radius)
+    arc.X1 = float(start[0])
+    arc.Y1 = float(start[1])
+    arc.X2 = float(end[0])
+    arc.Y2 = float(end[1])
+    try:
+        arc.Direction = bool(direction)
+    except Exception:
+        set_direction = safe_get(arc, "SetDirection")
+        if callable(set_direction):
+            set_direction(bool(direction))
+    _apply_line_style(arc, line_style)
+    if not arc.Update():
+        raise RuntimeError("Arc Update returned False")
+    return arc
+
+
+def _add_sketch_ellipse(drawing_container, center, radius_x, radius_y, angle, line_style):
+    ellipses = _get_add_collection(drawing_container, "Ellipses", "GetEllipses", "Ellipses")
+    ellipse = ellipses.Add()
+    if ellipse is None:
+        raise RuntimeError("Ellipses.Add returned None")
+    cx, cy = float(center[0]), float(center[1])
+    rx, ry = float(radius_x), float(radius_y)
+    ellipse.Xc = cx
+    ellipse.Yc = cy
+    _set_first_available_attr(ellipse, ("SemiAxisA", "Rx", "RadiusX"), rx)
+    _set_first_available_attr(ellipse, ("SemiAxisB", "Ry", "RadiusY"), ry)
+    _set_first_available_attr(ellipse, ("X1",), cx - rx)
+    _set_first_available_attr(ellipse, ("Y1",), cy)
+    _set_first_available_attr(ellipse, ("X2",), cx + rx)
+    _set_first_available_attr(ellipse, ("Y2",), cy)
+    try:
+        ellipse.Angle = float(angle)
+    except Exception:
+        pass
+    _apply_line_style(ellipse, line_style)
+    if not ellipse.Update():
+        raise RuntimeError("Ellipse Update returned False")
+    return ellipse
+
+
+def _add_sketch_polyline(drawing_container, points, closed, line_style):
+    created = []
+    pairs = list(zip(points, points[1:]))
+    if closed and len(points) > 2:
+        pairs.append((points[-1], points[0]))
+    for start, end in pairs:
+        created.append(_add_sketch_line_segment(drawing_container, start, end, line_style))
+    return created
+
+
 def _add_sketch_rectangle(drawing_container, corner1, corner2, line_style):
     lines = []
     x1, y1 = float(corner1[0]), float(corner1[1])
@@ -2032,6 +2151,18 @@ def _create_sketch_entities(model_container, part, payload):
                 results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
             elif kind == "circle":
                 created = _add_sketch_circle(drawing_container, entity.get("center"), float(entity.get("radius")), int(entity.get("line_style", 1)))
+                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+            elif kind == "point":
+                created = _add_sketch_point(drawing_container, entity.get("point"), int(entity.get("line_style", 1)))
+                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+            elif kind == "polyline":
+                lines = _add_sketch_polyline(drawing_container, entity.get("points"), bool(entity.get("closed", False)), int(entity.get("line_style", 1)))
+                results.append({"index": index, "kind": kind, "ok": True, "line_count": len(lines), "reference": safe_get(lines[0], "Reference") if lines else None})
+            elif kind == "arc":
+                created = _add_sketch_arc(drawing_container, entity.get("center"), float(entity.get("radius")), entity.get("start"), entity.get("end"), bool(entity.get("direction", True)), int(entity.get("line_style", 1)))
+                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+            elif kind == "ellipse":
+                created = _add_sketch_ellipse(drawing_container, entity.get("center"), float(entity.get("radius_x")), float(entity.get("radius_y")), float(entity.get("angle", 0.0)), int(entity.get("line_style", 1)))
                 results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
             elif kind == "rectangle":
                 lines = _add_sketch_rectangle(drawing_container, entity.get("corner1"), entity.get("corner2"), int(entity.get("line_style", 1)))

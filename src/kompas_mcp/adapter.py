@@ -68,6 +68,12 @@ def _normalize_positive_float(value: float | int | None, *, name: str, default: 
     return result
 
 
+def _normalize_point2d_list(value: Any, *, name: str, min_count: int) -> list[list[float]]:
+    if not isinstance(value, (list, tuple)) or len(value) < min_count:
+        raise ValueError(f"{name} must contain at least {min_count} points")
+    return [_normalize_point2d(item, name=f"{name}[{index}]") for index, item in enumerate(value)]
+
+
 def _snapshot_preview(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
@@ -131,6 +137,54 @@ def _normalize_sketch_entities(entities: list[dict[str, Any]] | tuple[dict[str, 
                     "kind": "circle",
                     "center": _normalize_point2d(entity.get("center"), name=f"entities[{index}].center"),
                     "radius": _normalize_positive_float(entity.get("radius"), name=f"entities[{index}].radius", default=10.0),
+                    "line_style": line_style,
+                }
+            )
+        elif kind == "point":
+            normalized.append(
+                {
+                    "kind": "point",
+                    "point": _normalize_point2d(entity.get("point", entity.get("position")), name=f"entities[{index}].point"),
+                    "line_style": line_style,
+                }
+            )
+        elif kind == "polyline":
+            normalized.append(
+                {
+                    "kind": "polyline",
+                    "points": _normalize_point2d_list(entity.get("points"), name=f"entities[{index}].points", min_count=2),
+                    "closed": bool(entity.get("closed", False)),
+                    "line_style": line_style,
+                }
+            )
+        elif kind == "arc":
+            normalized.append(
+                {
+                    "kind": "arc",
+                    "center": _normalize_point2d(entity.get("center"), name=f"entities[{index}].center"),
+                    "radius": _normalize_positive_float(entity.get("radius"), name=f"entities[{index}].radius", default=10.0),
+                    "start": _normalize_point2d(entity.get("start"), name=f"entities[{index}].start"),
+                    "end": _normalize_point2d(entity.get("end"), name=f"entities[{index}].end"),
+                    "direction": bool(entity.get("direction", True)),
+                    "line_style": line_style,
+                }
+            )
+        elif kind == "ellipse":
+            normalized.append(
+                {
+                    "kind": "ellipse",
+                    "center": _normalize_point2d(entity.get("center"), name=f"entities[{index}].center"),
+                    "radius_x": _normalize_positive_float(
+                        entity.get("radius_x", entity.get("major_radius")),
+                        name=f"entities[{index}].radius_x",
+                        default=10.0,
+                    ),
+                    "radius_y": _normalize_positive_float(
+                        entity.get("radius_y", entity.get("minor_radius")),
+                        name=f"entities[{index}].radius_y",
+                        default=5.0,
+                    ),
+                    "angle": float(entity.get("angle", 0.0)),
                     "line_style": line_style,
                 }
             )
