@@ -9,7 +9,17 @@ from typing import Any
 
 
 DEFAULT_KOMPAS_PYTHON = Path(r"C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe")
-DEFAULT_BRIDGE_SCRIPT = Path(__file__).resolve().parents[2] / "bridge" / "kompas_bridge.py"
+CHECKOUT_BRIDGE_SCRIPT = Path(__file__).resolve().parents[2] / "bridge" / "kompas_bridge.py"
+PACKAGED_BRIDGE_SCRIPT = Path(__file__).resolve().parent / "assets" / "bridge" / "kompas_bridge.py"
+
+
+def default_bridge_script_path() -> Path:
+    if CHECKOUT_BRIDGE_SCRIPT.exists():
+        return CHECKOUT_BRIDGE_SCRIPT
+    return PACKAGED_BRIDGE_SCRIPT
+
+
+DEFAULT_BRIDGE_SCRIPT = default_bridge_script_path()
 
 
 class BridgeError(RuntimeError):
@@ -23,7 +33,7 @@ class BridgeRunner:
         bridge_script: str | None = None,
     ) -> None:
         self.kompas_python = Path(kompas_python or os.environ.get("KOMPAS_PYTHON") or DEFAULT_KOMPAS_PYTHON)
-        self.bridge_script = Path(bridge_script or os.environ.get("KOMPAS_BRIDGE_SCRIPT") or DEFAULT_BRIDGE_SCRIPT)
+        self.bridge_script = Path(bridge_script or os.environ.get("KOMPAS_BRIDGE_SCRIPT") or default_bridge_script_path())
 
     def call(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
@@ -59,10 +69,24 @@ class BridgeRunner:
             if not response_path.exists():
                 raise BridgeError(completed.stderr.strip() or "Bridge did not produce a response file")
 
-            envelope = json.loads(response_path.read_text(encoding="utf-8"))
+            try:
+                envelope = json.loads(response_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise BridgeError(f"Invalid bridge response JSON: {exc}") from exc
+            if not isinstance(envelope, dict):
+                raise BridgeError(f"Bridge response must be an object, got {type(envelope).__name__}")
             if envelope.get("ok"):
-                return envelope["data"]
+                if "data" not in envelope:
+                    raise BridgeError("Bridge response missing data")
+                data = envelope["data"]
+                if not isinstance(data, dict):
+                    raise BridgeError(f"Bridge response data must be an object, got {type(data).__name__}")
+                return data
 
             error = envelope.get("error") or {}
-            message = error.get("message") or completed.stderr.strip() or "Unknown bridge error"
+            message = (
+                error.get("message")
+                if isinstance(error, dict)
+                else str(error)
+            ) or completed.stderr.strip() or "Unknown bridge error"
             raise BridgeError(message)

@@ -20,3 +20,9 @@ kompas-mcp = "kompas_mcp.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+kompas_mcp = [
+  "assets/rules/*.json",
+  "assets/bridge/*.py",
+]

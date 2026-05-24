@@ -5,8 +5,14 @@ from pathlib import Path
 from typing import Any
 
 
+CHECKOUT_RULES_PATH = Path(__file__).resolve().parents[2] / "rules" / "default.json"
+PACKAGED_RULES_PATH = Path(__file__).resolve().parent / "assets" / "rules" / "default.json"
+
+
 def default_rules_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "rules" / "default.json"
+    if CHECKOUT_RULES_PATH.exists():
+        return CHECKOUT_RULES_PATH
+    return PACKAGED_RULES_PATH
 
 
 def load_rules(rules_path: str | None = None) -> dict[str, Any]:
