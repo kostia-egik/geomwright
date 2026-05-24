@@ -2788,6 +2788,10 @@ def normalize_workflow_params(params: dict[str, Any]) -> dict[str, Any]:
     normalized_exports = _normalize_workflow_exports(params.get("exports"), context)
 
     material_payload = resolve_material_payload(params.get("material"), params.get("density"))
+    try:
+        runtime_object_probe_max_items = int(params.get("runtime_object_probe_max_items", 20) or 20)
+    except (TypeError, ValueError):
+        runtime_object_probe_max_items = 20
     return {
         "name": str(params.get("name") or "Workflow chain"),
         "designation": str(params.get("designation") or ""),
@@ -2799,6 +2803,8 @@ def normalize_workflow_params(params: dict[str, Any]) -> dict[str, Any]:
         "exports": normalized_exports,
         "output_path": output_path,
         "close_after_save": bool(params.get("close_after_save", True)),
+        "include_runtime_object_probe": bool(params.get("include_runtime_object_probe", False)),
+        "runtime_object_probe_max_items": runtime_object_probe_max_items,
     }
 
 

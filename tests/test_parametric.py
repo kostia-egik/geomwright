@@ -2051,6 +2051,25 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(operations[4]["preview"]["scenario"], "stepped_shaft")
         self.assertEqual(preview["operations"][4]["depends_on"], ["lcs_ecc"])
 
+    def test_preview_workflow_preserves_runtime_object_probe_options(self) -> None:
+        preview = preview_part_scenario(
+            "workflow",
+            {
+                "include_runtime_object_probe": True,
+                "runtime_object_probe_max_items": 7,
+                "operations": [
+                    {
+                        "id": "pt1",
+                        "scenario": "point",
+                        "params": {"mode": "global", "origin": [0, 0, 0]},
+                    },
+                ],
+            },
+        )
+
+        self.assertTrue(preview["params"]["include_runtime_object_probe"])
+        self.assertEqual(preview["params"]["runtime_object_probe_max_items"], 7)
+
     def test_preview_workflow_supports_explicit_output_tokens(self) -> None:
         preview = preview_part_scenario(
             "workflow",

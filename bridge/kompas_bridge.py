@@ -548,6 +548,355 @@ def serialize_part(part, node_id, parent_id):
     return item
 
 
+MODEL_OBJECT_COLLECTION_SPECS = [
+    ("sketches", ("Sketchs", "GetSketchs")),
+    ("rotateds", ("Rotateds", "GetRotateds")),
+    ("extrusions", ("Extrusions", "GetExtrusions")),
+    ("evolutions", ("Evolutions", "GetEvolutions")),
+    ("feature_patterns", ("FeaturePatterns", "GetFeaturePatterns")),
+]
+
+
+MODEL_OBJECT_SURFACE_COLLECTION_SPECS = [
+    (
+        "part",
+        "top_part",
+        (
+            ("parts", ("Parts", "GetParts")),
+            ("model_objects", ("ModelObjects", "GetModelObjects")),
+            ("result_bodies", ("ResultBodies", "GetResultBodies")),
+            ("bodies", ("Bodies", "GetBodies")),
+        ),
+    ),
+    (
+        "model_container",
+        "model_container",
+        (
+            ("sketches", ("Sketchs", "GetSketchs")),
+            ("rotateds", ("Rotateds", "GetRotateds")),
+            ("extrusions", ("Extrusions", "GetExtrusions")),
+            ("evolutions", ("Evolutions", "GetEvolutions")),
+            ("feature_patterns", ("FeaturePatterns", "GetFeaturePatterns")),
+            ("points3d", ("Points3D", "GetPoints3D")),
+            ("curves3d", ("Curves3D", "GetCurves3D")),
+            ("surfaces3d", ("Surfaces3D", "GetSurfaces3D")),
+        ),
+    ),
+    (
+        "auxiliary_geometry",
+        "auxiliary_geometry_container",
+        (
+            ("axes3d", ("Axes3D", "GetAxes3D")),
+            ("planes3d", ("Planes3D", "GetPlanes3D")),
+            ("local_coordinate_systems", ("LocalCoordinateSystems", "GetLocalCoordinateSystems")),
+            ("points3d", ("Points3D", "GetPoints3D")),
+        ),
+    ),
+]
+
+
+def _json_safe_scalar(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
+def _describe_model_probe_object(obj, index):
+    preview = {
+        "index": index,
+        "com_type": obj.__class__.__name__ if obj is not None else None,
+    }
+    for attr in (
+        "Name",
+        "Reference",
+        "UniqueNumber",
+        "UniqueMetaObjectKey",
+        "Hidden",
+        "Visible",
+        "Changed",
+        "Type",
+    ):
+        value = safe_get(obj, attr)
+        if value is not None:
+            preview[attr[:1].lower() + attr[1:]] = _json_safe_scalar(value)
+    return preview
+
+
+def _resolve_model_object_collection(container, accessor_names):
+    errors = []
+    for accessor_name in accessor_names:
+        value = safe_get(container, accessor_name)
+        if value is None:
+            continue
+        if callable(value):
+            try:
+                value = value()
+            except Exception as exc:
+                errors.append({"accessor": accessor_name, "error": str(exc), "type": exc.__class__.__name__})
+                continue
+        return value, accessor_name, errors
+    return None, None, errors
+
+
+def _probe_collection_entry(name, accessors, container, max_items):
+    collection, accessor, errors = _resolve_model_object_collection(container, accessors)
+    available = collection is not None
+    count = collection_count(collection) if available else 0
+    truncated = count > max_items
+    preview = []
+    if available and max_items:
+        for index in range(min(count, max_items)):
+            item = get_collection_item(collection, index)
+            if item is not None:
+                preview.append(_describe_model_probe_object(item, index))
+    return {
+        "name": name,
+        "accessors": list(accessors),
+        "accessor": accessor,
+        "available": available,
+        "count": count,
+        "preview_count": len(preview),
+        "preview": preview,
+        "truncated": truncated,
+        "errors": errors,
+    }
+
+
+def _probe_model_object_surface(surface_name, container_role, container, collection_specs, max_items, include_empty):
+    container_available = container is not None
+    collections = []
+    total_items = 0
+    available_count = 0
+    nonempty_count = 0
+    truncated_count = 0
+
+    for collection_name, accessors in collection_specs:
+        entry = _probe_collection_entry(collection_name, accessors, container, max_items)
+        total_items += entry["count"]
+        if entry["available"]:
+            available_count += 1
+        if entry["count"]:
+            nonempty_count += 1
+        if entry["truncated"]:
+            truncated_count += 1
+        if not include_empty and not entry["count"]:
+            continue
+        collections.append(entry)
+
+    return {
+        "name": surface_name,
+        "container_role": container_role,
+        "container_available": container_available,
+        "container_type": container.__class__.__name__ if container is not None else None,
+        "summary": {
+            "collection_count": len(collections),
+            "available_count": available_count,
+            "nonempty_count": nonempty_count,
+            "total_items": total_items,
+            "truncated_count": truncated_count,
+        },
+        "collections": collections,
+    }
+
+
+def probe_model_object_surfaces(part, model_container, max_items=5, include_empty=True):
+    auxiliary_container = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    containers = {
+        "top_part": part,
+        "model_container": model_container,
+        "auxiliary_geometry_container": auxiliary_container,
+    }
+    surfaces = []
+    total_items = 0
+    available_surfaces = 0
+    nonempty_surfaces = 0
+    for surface_name, container_role, collection_specs in MODEL_OBJECT_SURFACE_COLLECTION_SPECS:
+        surface = _probe_model_object_surface(
+            surface_name,
+            container_role,
+            containers.get(container_role),
+            collection_specs,
+            max_items,
+            include_empty,
+        )
+        total_items += surface["summary"]["total_items"]
+        if surface["container_available"]:
+            available_surfaces += 1
+        if surface["summary"]["total_items"]:
+            nonempty_surfaces += 1
+        surfaces.append(surface)
+    return {
+        "summary": {
+            "surface_count": len(surfaces),
+            "available_surface_count": available_surfaces,
+            "nonempty_surface_count": nonempty_surfaces,
+            "total_items": total_items,
+            "max_items": max_items,
+        },
+        "surfaces": surfaces,
+    }
+
+
+def probe_model_object_collections(part, max_items=5, include_empty=True):
+    try:
+        max_items = int(max_items)
+    except Exception:
+        max_items = 5
+    max_items = max(0, min(max_items, 50))
+    include_empty = bool(include_empty)
+
+    model_container = cast_model_container(part)
+    collections = []
+    total_items = 0
+    available_count = 0
+    nonempty_count = 0
+    truncated_count = 0
+
+    for name, accessors in MODEL_OBJECT_COLLECTION_SPECS:
+        entry = _probe_collection_entry(name, accessors, model_container, max_items)
+        count = entry["count"]
+        total_items += count
+        if entry["available"]:
+            available_count += 1
+        if count:
+            nonempty_count += 1
+        if entry["truncated"]:
+            truncated_count += 1
+        if not include_empty and not count:
+            continue
+        collections.append(entry)
+
+    surface_probe = probe_model_object_surfaces(
+        part,
+        model_container,
+        max_items=max_items,
+        include_empty=include_empty,
+    )
+
+    return {
+        "summary": {
+            "collection_count": len(collections),
+            "available_count": available_count,
+            "nonempty_count": nonempty_count,
+            "total_items": total_items,
+            "truncated_count": truncated_count,
+            "surface_count": surface_probe["summary"]["surface_count"],
+            "surface_total_items": surface_probe["summary"]["total_items"],
+            "max_items": max_items,
+        },
+        "collections": collections,
+        "surfaces": surface_probe["surfaces"],
+        "limitations": [
+            "Probe reports known model-container, part, and auxiliary collection accessors only.",
+            "Preview is bounded and does not serialize geometry bodies or sketch entities.",
+        ],
+    }
+
+
+def probe_runtime_objects(runtime_objects, max_items=5):
+    try:
+        max_items = int(max_items)
+    except Exception:
+        max_items = 5
+    max_items = max(0, min(max_items, 50))
+
+    operations = []
+    output_type_counts = {}
+    object_type_counts = {}
+    total_outputs = 0
+    preview_count = 0
+    for operation_id in sorted((runtime_objects or {}).keys()):
+        runtime_payload = runtime_objects.get(operation_id) or {}
+        if not isinstance(runtime_payload, dict):
+            operations.append(
+                {
+                    "id": str(operation_id),
+                    "ok": False,
+                    "error": "runtime payload is not an object",
+                    "payload_type": runtime_payload.__class__.__name__,
+                }
+            )
+            continue
+        outputs = []
+        declared_outputs = sorted(
+            str(name).strip()
+            for name in (((runtime_payload.get("preview") or {}).get("interface") or {}).get("outputs") or {}).keys()
+            if str(name).strip()
+        )
+        if not declared_outputs:
+            declared_outputs = sorted(
+                str(name)
+                for name in runtime_payload.keys()
+                if name not in ("scenario", "preview", "params")
+            )
+        output_errors = []
+        resolved_output_count = 0
+        for output_key in declared_outputs:
+            try:
+                output_payload = _resolve_runtime_workflow_output(runtime_objects, operation_id, output_key)
+            except Exception as exc:
+                output_errors.append(
+                    {
+                        "key": str(output_key),
+                        "error": str(exc),
+                        "type": exc.__class__.__name__,
+                    }
+                )
+                continue
+            total_outputs += 1
+            resolved_output_count += 1
+            output_type = str(output_payload.get("type") or "unknown")
+            output_type_counts[output_type] = output_type_counts.get(output_type, 0) + 1
+            obj = output_payload.get("object")
+            if obj is not None:
+                object_type = obj.__class__.__name__
+                object_type_counts[object_type] = object_type_counts.get(object_type, 0) + 1
+            if preview_count >= max_items:
+                continue
+            entry = {
+                "key": str(output_key),
+                "type": output_type,
+                "has_object": obj is not None,
+            }
+            for key in ("name", "role", "origin", "direction", "selector"):
+                if key in output_payload:
+                    entry[key] = output_payload.get(key)
+            if obj is not None:
+                entry["object"] = _describe_model_probe_object(obj, preview_count)
+            outputs.append(entry)
+            preview_count += 1
+        operations.append(
+            {
+                "id": str(operation_id),
+                "scenario": str(runtime_payload.get("scenario") or ""),
+                "declared_output_count": len(declared_outputs),
+                "resolved_output_count": resolved_output_count,
+                "output_preview_count": len(outputs),
+                "outputs": outputs,
+                "errors": output_errors,
+            }
+        )
+    return {
+        "summary": {
+            "operation_count": len(runtime_objects or {}),
+            "total_outputs": total_outputs,
+            "preview_count": preview_count,
+            "truncated": total_outputs > preview_count,
+            "max_items": max_items,
+            "output_type_counts": output_type_counts,
+            "object_type_counts": object_type_counts,
+        },
+        "operations": operations,
+        "limitations": [
+            "Runtime object probe inspects transient workflow handles before save/close.",
+            "Preview is bounded and does not serialize geometry bodies or sketch entities.",
+        ],
+    }
+
+
 def build_part_index(part, node_id, index):
     index[node_id] = part
     parts = safe_get(part, "Parts")
@@ -1286,6 +1635,27 @@ def handle_get_document_tree(payload):
     return {
         "document": describe_document(document, app),
         "tree": serialize_part(top_part, "root", None),
+    }
+
+
+def handle_probe_model_object_collections(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+
+    probe = probe_model_object_collections(
+        top_part,
+        max_items=payload.get("max_items", 5),
+        include_empty=payload.get("include_empty", True),
+    )
+    return {
+        "document": describe_document(document, app),
+        "probe": probe,
     }
 
 
@@ -9422,6 +9792,20 @@ def _handle_create_workflow_scenario(payload, scenario):
                 }
             )
 
+        runtime_object_probe = None
+        if params.get("include_runtime_object_probe"):
+            runtime_object_probe = probe_runtime_objects(
+                runtime_objects,
+                max_items=params.get("runtime_object_probe_max_items", 20),
+            )
+            steps_report.append(
+                {
+                    "step": "runtime_object_probe",
+                    "ok": True,
+                    "summary": runtime_object_probe["summary"],
+                }
+            )
+
         current_stage = "save"
         saved, created_document = _save_generated_part_document(
             doc3,
@@ -9440,11 +9824,13 @@ def _handle_create_workflow_scenario(payload, scenario):
             "closed": close_after_save,
             "steps": steps_report,
             "exports": exports,
+            "runtime_object_probe": runtime_object_probe,
             "summary": {
                 "operation_count": len(operations),
                 "operation_ids": [str(operation.get("id") or "") for operation in operations],
                 "export_count": len(exports),
                 "export_names": sorted(exports.keys()),
+                "runtime_object_probe": runtime_object_probe["summary"] if runtime_object_probe else None,
             },
             "remaining_documents": list_documents(app),
             "file_access": file_access_diagnostics(output_path),
@@ -9723,6 +10109,8 @@ def dispatch(request):
         return handle_list_documents()
     if action == "get_document_tree":
         return handle_get_document_tree(payload)
+    if action == "probe_model_object_collections":
+        return handle_probe_model_object_collections(payload)
     if action == "get_specification_descriptions":
         return handle_get_specification_descriptions(payload)
     if action == "get_specification":
