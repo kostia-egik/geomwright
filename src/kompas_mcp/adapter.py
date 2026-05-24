@@ -91,6 +91,113 @@ def _prefixed_failures(prefix: str, payload: dict[str, Any]) -> list[dict[str, A
     return rows
 
 
+def _normalize_sketch_target(
+    *,
+    name: str,
+    plane: str,
+    sketch_ref: str | int | None = None,
+    create_new_sketch: bool = True,
+) -> dict[str, Any]:
+    if sketch_ref not in (None, "") and create_new_sketch:
+        raise ValueError("ambiguous target: provide sketch_ref or create_new_sketch, not both")
+    if sketch_ref in (None, "") and not create_new_sketch:
+        raise ValueError("ambiguous target: create_new_sketch=false requires sketch_ref")
+    if sketch_ref not in (None, ""):
+        return {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)}
+    return {"mode": "create_new_sketch", "name": str(name), "plane": str(plane or "XOY")}
+
+
+def _normalize_sketch_entities(entities: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None) -> list[dict[str, Any]]:
+    if not isinstance(entities, (list, tuple)) or not entities:
+        raise ValueError("entities must be a non-empty list")
+    normalized: list[dict[str, Any]] = []
+    for index, entity in enumerate(entities):
+        if not isinstance(entity, dict):
+            raise ValueError(f"entities[{index}] must be an object")
+        kind = str(entity.get("kind") or entity.get("type") or "").strip().lower()
+        line_style = int(entity.get("line_style", 1))
+        if kind in ("segment", "line", "line_segment"):
+            normalized.append(
+                {
+                    "kind": "segment",
+                    "start": _normalize_point2d(entity.get("start"), name=f"entities[{index}].start"),
+                    "end": _normalize_point2d(entity.get("end"), name=f"entities[{index}].end"),
+                    "line_style": line_style,
+                }
+            )
+        elif kind == "circle":
+            normalized.append(
+                {
+                    "kind": "circle",
+                    "center": _normalize_point2d(entity.get("center"), name=f"entities[{index}].center"),
+                    "radius": _normalize_positive_float(entity.get("radius"), name=f"entities[{index}].radius", default=10.0),
+                    "line_style": line_style,
+                }
+            )
+        elif kind == "rectangle":
+            normalized.append(
+                {
+                    "kind": "rectangle",
+                    "corner1": _normalize_point2d(entity.get("corner1"), name=f"entities[{index}].corner1"),
+                    "corner2": _normalize_point2d(entity.get("corner2"), name=f"entities[{index}].corner2"),
+                    "line_style": line_style,
+                }
+            )
+        else:
+            raise ValueError(f"unsupported sketch entity kind: {kind or '<missing>'}")
+    return normalized
+
+
+def _snapshot_verified_envelope(
+    operation: str,
+    *,
+    result: dict[str, Any],
+    min_added: int,
+    require_no_removed: bool,
+    require_no_changed: bool,
+    max_items: int,
+) -> dict[str, Any]:
+    readback = result.get("readback") if isinstance(result.get("readback"), dict) else {}
+    before = readback.get("before") if isinstance(readback.get("before"), dict) else None
+    after = readback.get("after") if isinstance(readback.get("after"), dict) else None
+    delta_verification = build_document_snapshot_delta_verification(
+        operation,
+        before=before,
+        after=after,
+        min_added=min_added,
+        require_no_removed=require_no_removed,
+        require_no_changed=require_no_changed,
+        use_default_volatile_ignores=True,
+        max_items=max_items,
+    )
+    checks = [
+        {
+            "name": "snapshot_delta_verification_ok",
+            "ok": bool(delta_verification.get("ok")),
+            "expected": True,
+            "actual": bool(delta_verification.get("ok")),
+        }
+    ]
+    checks.extend(_prefixed_failures("snapshot_delta", delta_verification))
+    envelope = build_operation_result_envelope(
+        operation,
+        result=result,
+        checks=checks,
+        stage="snapshot_verified_operation",
+        require_result=True,
+    )
+    envelope["execution"] = {
+        "preflight_ran": True,
+        "before_snapshot_ran": before is not None,
+        "operation_ran": True,
+        "after_snapshot_ran": after is not None,
+        "delta_verification_ran": True,
+    }
+    envelope["snapshots"] = {"before": _snapshot_preview(before), "after": _snapshot_preview(after)}
+    envelope["delta"] = delta_verification.get("delta") if isinstance(delta_verification.get("delta"), dict) else {}
+    return envelope
+
+
 class KompasAdapter:
     def __init__(self, runner: BridgeRunner | None = None) -> None:
         self.runner = runner or BridgeRunner()
@@ -579,6 +686,44 @@ class KompasAdapter:
             else {}
         )
         return envelope
+
+    def create_sketch_entities(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_BATCH_1",
+        plane: str = "XOY",
+        entities: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
+        min_added: int = 1,
+        require_no_removed: bool = True,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        target = _normalize_sketch_target(
+            name=name,
+            plane=plane,
+            sketch_ref=sketch_ref,
+            create_new_sketch=create_new_sketch,
+        )
+        normalized_entities = _normalize_sketch_entities(entities)
+        result = self.runner.call(
+            "create_sketch_entities",
+            {
+                "document_id": document_id,
+                "target": target,
+                "entities": normalized_entities,
+            },
+        )
+        return _snapshot_verified_envelope(
+            "create_sketch_entities",
+            result=result,
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            max_items=max_items,
+        )
 
     def check_file_access(self, path: str) -> dict[str, Any]:
         return self._check_file_access(path)

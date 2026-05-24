@@ -70,6 +70,36 @@ def classify_runtime_error(
             hint="Check the active document type with preflight_document_context.",
         ).to_dict()
 
+    if _contains_any(lowered, ("invalid input", "must contain exactly", "must be greater than zero", "malformed payload")):
+        return RuntimeErrorClassification(
+            code="INVALID_INPUT",
+            category="input",
+            message=text,
+            exception_type=type_name,
+            stage=stage,
+            hint="Fix the tool arguments before retrying.",
+        ).to_dict()
+
+    if _contains_any(lowered, ("ambiguous target", "multiple target", "provide sketch_ref or create_new_sketch")):
+        return RuntimeErrorClassification(
+            code="AMBIGUOUS_TARGET",
+            category="target_resolution",
+            message=text,
+            exception_type=type_name,
+            stage=stage,
+            hint="Select exactly one target sketch/plane strategy.",
+        ).to_dict()
+
+    if _contains_any(lowered, ("unsupported com shape", "does not expose", "not implemented for this com")):
+        return RuntimeErrorClassification(
+            code="UNSUPPORTED_COM_SHAPE",
+            category="com_shape",
+            message=text,
+            exception_type=type_name,
+            stage=stage,
+            hint="Run probe_model_object_collections or probe_document_readback to inspect available COM surfaces.",
+        ).to_dict()
+
     if _contains_any(lowered, ("kompas python not found", "python not found")):
         return RuntimeErrorClassification(
             code="KOMPAS_PYTHON_NOT_FOUND",

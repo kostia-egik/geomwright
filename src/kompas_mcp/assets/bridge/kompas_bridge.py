@@ -1834,6 +1834,126 @@ def _get_sketch_system_view(sketch_doc):
     raise RuntimeError("Failed to get sketch system view")
 
 
+def _resolve_sketch_write_target(model_container, part, payload, default_name):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    mode = str(target.get("mode") or "").strip().lower()
+    create_new = bool(payload.get("create_new_sketch", mode in ("", "create_new_sketch")))
+    if sketch_ref not in (None, "") and (create_new or mode == "create_new_sketch"):
+        raise RuntimeError("ambiguous target: provide sketch_ref or create_new_sketch, not both")
+    if sketch_ref not in (None, "") or mode == "existing_sketch":
+        raise RuntimeError("unsupported COM shape: existing sketch_ref target is not implemented")
+    if not create_new and mode != "create_new_sketch":
+        raise RuntimeError("ambiguous target: create_new_sketch=false requires sketch_ref")
+    name = target.get("name") or payload.get("name") or default_name
+    plane = target.get("plane") or payload.get("plane") or "XOY"
+    sketch, plane_key = _create_sketch_on_plane(model_container, part, name, plane)
+    return sketch, {
+        "mode": "create_new_sketch",
+        "name": safe_get(sketch, "Name", name),
+        "plane": plane_key,
+        "sketch_ref": safe_get(sketch, "Reference"),
+    }
+
+
+def _get_sketch_drawing_container(sketch_doc):
+    view = _get_sketch_system_view(sketch_doc)
+    return cast_drawing_container(view)
+
+
+def _get_add_collection(container, property_name, getter_name, label):
+    collection = safe_get(container, property_name)
+    if collection is None:
+        getter = safe_get(container, getter_name)
+        if callable(getter):
+            collection = getter()
+    if collection is None or not callable(safe_get(collection, "Add")):
+        raise RuntimeError("Sketch view does not expose %s.Add" % label)
+    return collection
+
+
+def _apply_line_style(entity, line_style):
+    try:
+        entity.Style = int(line_style)
+    except Exception:
+        set_style = safe_get(entity, "SetStyle")
+        if callable(set_style):
+            set_style(int(line_style))
+        else:
+            raise
+
+
+def _add_sketch_line_segment(drawing_container, start, end, line_style):
+    line_segments = _get_add_collection(drawing_container, "LineSegments", "GetLineSegments", "LineSegments")
+    line = line_segments.Add()
+    if line is None:
+        raise RuntimeError("LineSegments.Add returned None")
+    line.X1 = float(start[0])
+    line.Y1 = float(start[1])
+    line.X2 = float(end[0])
+    line.Y2 = float(end[1])
+    _apply_line_style(line, line_style)
+    if not line.Update():
+        raise RuntimeError("LineSegment Update returned False")
+    return line
+
+
+def _add_sketch_circle(drawing_container, center, radius, line_style):
+    circles = _get_add_collection(drawing_container, "Circles", "GetCircles", "Circles")
+    circle = circles.Add()
+    if circle is None:
+        raise RuntimeError("Circles.Add returned None")
+    circle.Xc = float(center[0])
+    circle.Yc = float(center[1])
+    circle.Radius = float(radius)
+    _apply_line_style(circle, line_style)
+    if not circle.Update():
+        raise RuntimeError("Circle Update returned False")
+    return circle
+
+
+def _add_sketch_rectangle(drawing_container, corner1, corner2, line_style):
+    lines = []
+    x1, y1 = float(corner1[0]), float(corner1[1])
+    x2, y2 = float(corner2[0]), float(corner2[1])
+    for start, end in (([x1, y1], [x2, y1]), ([x2, y1], [x2, y2]), ([x2, y2], [x1, y2]), ([x1, y2], [x1, y1])):
+        lines.append(_add_sketch_line_segment(drawing_container, start, end, line_style))
+    return lines
+
+
+def _create_sketch_entities(model_container, part, payload):
+    sketch, target = _resolve_sketch_write_target(model_container, part, payload, "SKETCH_BATCH_1")
+    entities = payload.get("entities")
+    if not isinstance(entities, list) or not entities:
+        raise RuntimeError("invalid input: entities must be a non-empty list")
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    results = []
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        for index, entity in enumerate(entities):
+            if not isinstance(entity, dict):
+                raise RuntimeError("invalid input: entities[%s] must be an object" % index)
+            kind = str(entity.get("kind") or "").strip().lower()
+            if kind == "segment":
+                created = _add_sketch_line_segment(drawing_container, entity.get("start"), entity.get("end"), int(entity.get("line_style", 1)))
+                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+            elif kind == "circle":
+                created = _add_sketch_circle(drawing_container, entity.get("center"), float(entity.get("radius")), int(entity.get("line_style", 1)))
+                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+            elif kind == "rectangle":
+                lines = _add_sketch_rectangle(drawing_container, entity.get("corner1"), entity.get("corner2"), int(entity.get("line_style", 1)))
+                results.append({"index": index, "kind": kind, "ok": True, "line_count": len(lines), "reference": safe_get(lines[0], "Reference") if lines else None})
+            else:
+                raise RuntimeError("invalid input: unsupported sketch entity kind: %s" % (kind or "<missing>"))
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, target, results
+
+
 def _create_sketch_line_segment(model_container, part, name, plane, start, end, line_style):
     sketch, plane_key = _create_sketch_on_plane(model_container, part, name, plane)
     sketch_doc = sketch.BeginEdit()
@@ -2121,6 +2241,53 @@ def handle_create_sketch_rectangle(payload):
             "name": safe_get(sketch, "Name", payload.get("name")),
             "plane": plane,
             "line_count": len(lines),
+            "update_ok": update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_create_sketch_entities(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, entity_results = _create_sketch_entities(model_container, top_part, payload)
+    updater = safe_get(top_part, "Update")
+    update_ok = True
+    if callable(updater):
+        update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "items": entity_results,
+        "item": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "type": "SketchEntitiesBatch",
+            "plane": target.get("plane"),
+            "entity_count": len(entity_results),
+            "reference": safe_get(sketch, "Reference"),
+        },
+        "summary": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "plane": target.get("plane"),
+            "entity_count": len(entity_results),
+            "failed_count": sum(1 for item in entity_results if not item.get("ok")),
             "update_ok": update_ok,
         },
         "readback": {
@@ -10613,6 +10780,8 @@ def dispatch(request):
         return handle_create_sketch_circle(payload)
     if action == "create_sketch_rectangle":
         return handle_create_sketch_rectangle(payload)
+    if action == "create_sketch_entities":
+        return handle_create_sketch_entities(payload)
     if action == "probe_model_object_collections":
         return handle_probe_model_object_collections(payload)
     if action == "get_specification_descriptions":

@@ -33,6 +33,19 @@ class RuntimeErrorClassificationTests(unittest.TestCase):
         self.assertEqual(result["code"], "EMPTY_READBACK")
         self.assertEqual(result["category"], "readback")
 
+    def test_classifies_v2_write_contract_errors(self) -> None:
+        cases = [
+            ("invalid input: entities must be a non-empty list", "INVALID_INPUT", "input"),
+            ("ambiguous target: provide sketch_ref or create_new_sketch, not both", "AMBIGUOUS_TARGET", "target_resolution"),
+            ("unsupported COM shape: existing sketch_ref target is not implemented", "UNSUPPORTED_COM_SHAPE", "com_shape"),
+        ]
+
+        for message, code, category in cases:
+            with self.subTest(code=code):
+                result = classify_runtime_error(message)
+                self.assertEqual(result["code"], code)
+                self.assertEqual(result["category"], category)
+
     def test_unknown_error_keeps_message_and_hint(self) -> None:
         result = classify_runtime_error("unexpected bridge payload")
 

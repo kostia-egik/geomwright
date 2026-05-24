@@ -64,6 +64,8 @@ you need orientation. It returns categories such as `low_level_runtime`,
 
 Low-level runtime/readback tools are documented in
 [`docs/low-level-runtime.md`](docs/low-level-runtime.md).
+Snapshot-verified write contracts are documented in
+[`docs/write_operations.md`](docs/write_operations.md).
 For the first live read-only audit, run
 `sample\audit_live_kompas_low_level_2026_05_20.py`.
 

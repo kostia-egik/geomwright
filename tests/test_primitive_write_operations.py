@@ -167,6 +167,53 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_create_sketch_entities_uses_explicit_create_new_target(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.create_sketch_entities(
+            document_id="doc-1",
+            name="SK_BATCH",
+            plane="XOY",
+            entities=[
+                {"kind": "segment", "start": [0, 0], "end": [10, 0]},
+                {"kind": "circle", "center": [5, 5], "radius": 2},
+            ],
+        )
+
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    "create_sketch_entities",
+                    {
+                        "document_id": "doc-1",
+                        "target": {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "XOY"},
+                        "entities": [
+                            {"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1},
+                            {"kind": "circle", "center": [5.0, 5.0], "radius": 2.0, "line_style": 1},
+                        ],
+                    },
+                )
+            ],
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["execution"]["preflight_ran"])
+        self.assertEqual(result["delta"]["summary"]["added_items"], 1)
+
+    def test_create_sketch_entities_rejects_ambiguous_target_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.create_sketch_entities(
+                sketch_ref="100",
+                create_new_sketch=True,
+                entities=[{"kind": "segment", "start": [0, 0], "end": [10, 0]}],
+            )
+
+        self.assertEqual(runner.calls, [])
+
     def test_bridge_create_point3d_targets_active_part(self) -> None:
         bridge = _load_bridge_module()
         app = object()
@@ -465,6 +512,53 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             result["readback"]["after"]["snapshot"]["manifest"]["item_index"]["entries"][-1]["model_object_collection"],
             "sketches",
         )
+
+    def test_bridge_create_sketch_entities_reports_target_and_per_entity_results(self) -> None:
+        bridge = _load_bridge_module()
+        app = object()
+        part = _FakePart()
+        document = types.SimpleNamespace(TopPart=part)
+        sketch = types.SimpleNamespace(Name="SK_BATCH", Reference=100)
+        entity_results = [{"index": 0, "kind": "segment", "ok": True, "reference": 201}]
+        created: dict[str, Any] = {}
+
+        original_make_app = bridge.make_app
+        original_resolve_document = bridge.resolve_document
+        original_cast_model_container = bridge.cast_model_container
+        original_create_entities = bridge._create_sketch_entities
+        original_describe_document = bridge.describe_document
+        self.addCleanup(setattr, bridge, "make_app", original_make_app)
+        self.addCleanup(setattr, bridge, "resolve_document", original_resolve_document)
+        self.addCleanup(setattr, bridge, "cast_model_container", original_cast_model_container)
+        self.addCleanup(setattr, bridge, "_create_sketch_entities", original_create_entities)
+        self.addCleanup(setattr, bridge, "describe_document", original_describe_document)
+
+        bridge.make_app = lambda: app
+        bridge.resolve_document = lambda live_app, document_id: document
+        bridge.cast_model_container = lambda live_part: live_part
+        bridge.describe_document = lambda live_document, live_app: {"id": "doc-1"}
+
+        def create_entities(model_container: Any, part_arg: Any, payload: dict[str, Any]) -> Any:
+            created.update({"model_container": model_container, "part": part_arg, "payload": payload})
+            part.Sketchs = _FakeCollection([sketch])
+            return sketch, {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "xoy_plane", "sketch_ref": 100}, entity_results
+
+        bridge._create_sketch_entities = create_entities
+
+        result = bridge.handle_create_sketch_entities(
+            {
+                "document_id": "doc-1",
+                "target": {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "XOY"},
+                "entities": [{"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1}],
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(created["model_container"], part)
+        self.assertEqual(result["target"]["sketch_ref"], 100)
+        self.assertEqual(result["items"], entity_results)
+        self.assertEqual(result["summary"]["entity_count"], 1)
+        self.assertEqual(result["readback"]["after"]["snapshot"]["counts"]["items"], 2)
 
     def test_bridge_serialize_part_includes_point3d_children(self) -> None:
         bridge = _load_bridge_module()

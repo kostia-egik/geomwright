@@ -52,6 +52,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "create_sketch_line_segment",
             "create_sketch_circle",
             "create_sketch_rectangle",
+            "create_sketch_entities",
             "probe_document_readback",
             "probe_model_object_collections",
         ],

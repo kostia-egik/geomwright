@@ -434,6 +434,34 @@ def create_sketch_rectangle(
 
 
 @mcp.tool()
+def create_sketch_entities(
+    document_id: str | None = None,
+    name: str = "SKETCH_BATCH_1",
+    plane: str = "XOY",
+    entities: list[dict] | None = None,
+    sketch_ref: str | None = None,
+    create_new_sketch: bool = True,
+    min_added: int = 1,
+    require_no_removed: bool = True,
+    require_no_changed: bool = False,
+    max_items: int = 25,
+) -> dict:
+    """Create several 2D sketch entities in one target sketch and verify the snapshot delta."""
+    return adapter.create_sketch_entities(
+        document_id=document_id,
+        name=name,
+        plane=plane,
+        entities=entities,
+        sketch_ref=sketch_ref,
+        create_new_sketch=create_new_sketch,
+        min_added=min_added,
+        require_no_removed=require_no_removed,
+        require_no_changed=require_no_changed,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
 def check_file_access(path: str) -> dict:
     """Check whether a file is visible and can be opened exclusively by this process."""
     return adapter.check_file_access(path)
