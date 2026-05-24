@@ -47,6 +47,50 @@ def flatten_tree(root: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+def _normalize_point3d_origin(origin: list[float] | tuple[float, float, float] | None) -> list[float]:
+    values = [0.0, 0.0, 0.0] if origin is None else list(origin)
+    if len(values) != 3:
+        raise ValueError("origin must contain exactly 3 coordinates")
+    return [float(value) for value in values]
+
+
+def _normalize_point2d(value: list[float] | tuple[float, float] | None, *, name: str) -> list[float]:
+    values = [0.0, 0.0] if value is None else list(value)
+    if len(values) != 2:
+        raise ValueError(f"{name} must contain exactly 2 coordinates")
+    return [float(item) for item in values]
+
+
+def _normalize_positive_float(value: float | int | None, *, name: str, default: float) -> float:
+    result = float(default if value is None else value)
+    if result <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return result
+
+
+def _snapshot_preview(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    payload = snapshot.get("snapshot") if isinstance(snapshot.get("snapshot"), dict) else snapshot
+    return {
+        "ok": bool(snapshot.get("ok")),
+        "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+        "counts": payload.get("counts") if isinstance(payload.get("counts"), dict) else {},
+    }
+
+
+def _prefixed_failures(prefix: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    failures = payload.get("failures") if isinstance(payload.get("failures"), list) else []
+    rows: list[dict[str, Any]] = []
+    for item in failures:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row["name"] = f"{prefix}:{row.get('name') or 'failure'}"
+        rows.append(row)
+    return rows
+
+
 class KompasAdapter:
     def __init__(self, runner: BridgeRunner | None = None) -> None:
         self.runner = runner or BridgeRunner()
@@ -250,6 +294,291 @@ class KompasAdapter:
             stage=stage,
             require_result=require_result,
         )
+
+    def create_point3d(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "PT1",
+        origin: list[float] | tuple[float, float, float] | None = None,
+        min_added: int = 1,
+        require_no_removed: bool = True,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        point_origin = _normalize_point3d_origin(origin)
+        result = self.runner.call(
+            "create_point3d",
+            {
+                "document_id": document_id,
+                "name": name,
+                "origin": point_origin,
+            },
+        )
+        readback = result.get("readback") if isinstance(result.get("readback"), dict) else {}
+        before = readback.get("before") if isinstance(readback.get("before"), dict) else None
+        after = readback.get("after") if isinstance(readback.get("after"), dict) else None
+        delta_verification = build_document_snapshot_delta_verification(
+            "create_point3d",
+            before=before,
+            after=after,
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            use_default_volatile_ignores=True,
+            max_items=max_items,
+        )
+        checks = [
+            {
+                "name": "snapshot_delta_verification_ok",
+                "ok": bool(delta_verification.get("ok")),
+                "expected": True,
+                "actual": bool(delta_verification.get("ok")),
+            }
+        ]
+        checks.extend(_prefixed_failures("snapshot_delta", delta_verification))
+        envelope = build_operation_result_envelope(
+            "create_point3d",
+            result=result,
+            checks=checks,
+            stage="snapshot_verified_operation",
+            require_result=True,
+        )
+        envelope["execution"] = {
+            "before_snapshot_ran": before is not None,
+            "operation_ran": True,
+            "after_snapshot_ran": after is not None,
+            "delta_verification_ran": True,
+        }
+        envelope["snapshots"] = {
+            "before": _snapshot_preview(before),
+            "after": _snapshot_preview(after),
+        }
+        envelope["delta"] = (
+            delta_verification.get("delta")
+            if isinstance(delta_verification.get("delta"), dict)
+            else {}
+        )
+        return envelope
+
+    def create_sketch_line_segment(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_LINE_1",
+        plane: str = "XOY",
+        start: list[float] | tuple[float, float] | None = None,
+        end: list[float] | tuple[float, float] | None = None,
+        line_style: int = 1,
+        min_added: int = 1,
+        require_no_removed: bool = True,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        start_point = _normalize_point2d(start, name="start")
+        end_point = _normalize_point2d([100.0, 0.0] if end is None else end, name="end")
+        result = self.runner.call(
+            "create_sketch_line_segment",
+            {
+                "document_id": document_id,
+                "name": name,
+                "plane": plane,
+                "start": start_point,
+                "end": end_point,
+                "line_style": int(line_style),
+            },
+        )
+        readback = result.get("readback") if isinstance(result.get("readback"), dict) else {}
+        before = readback.get("before") if isinstance(readback.get("before"), dict) else None
+        after = readback.get("after") if isinstance(readback.get("after"), dict) else None
+        delta_verification = build_document_snapshot_delta_verification(
+            "create_sketch_line_segment",
+            before=before,
+            after=after,
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            use_default_volatile_ignores=True,
+            max_items=max_items,
+        )
+        checks = [
+            {
+                "name": "snapshot_delta_verification_ok",
+                "ok": bool(delta_verification.get("ok")),
+                "expected": True,
+                "actual": bool(delta_verification.get("ok")),
+            }
+        ]
+        checks.extend(_prefixed_failures("snapshot_delta", delta_verification))
+        envelope = build_operation_result_envelope(
+            "create_sketch_line_segment",
+            result=result,
+            checks=checks,
+            stage="snapshot_verified_operation",
+            require_result=True,
+        )
+        envelope["execution"] = {
+            "before_snapshot_ran": before is not None,
+            "operation_ran": True,
+            "after_snapshot_ran": after is not None,
+            "delta_verification_ran": True,
+        }
+        envelope["snapshots"] = {
+            "before": _snapshot_preview(before),
+            "after": _snapshot_preview(after),
+        }
+        envelope["delta"] = (
+            delta_verification.get("delta")
+            if isinstance(delta_verification.get("delta"), dict)
+            else {}
+        )
+        return envelope
+
+    def create_sketch_circle(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_CIRCLE_1",
+        plane: str = "XOY",
+        center: list[float] | tuple[float, float] | None = None,
+        radius: float = 10.0,
+        line_style: int = 1,
+        min_added: int = 1,
+        require_no_removed: bool = True,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        center_point = _normalize_point2d(center, name="center")
+        circle_radius = _normalize_positive_float(radius, name="radius", default=10.0)
+        result = self.runner.call(
+            "create_sketch_circle",
+            {
+                "document_id": document_id,
+                "name": name,
+                "plane": plane,
+                "center": center_point,
+                "radius": circle_radius,
+                "line_style": int(line_style),
+            },
+        )
+        readback = result.get("readback") if isinstance(result.get("readback"), dict) else {}
+        before = readback.get("before") if isinstance(readback.get("before"), dict) else None
+        after = readback.get("after") if isinstance(readback.get("after"), dict) else None
+        delta_verification = build_document_snapshot_delta_verification(
+            "create_sketch_circle",
+            before=before,
+            after=after,
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            use_default_volatile_ignores=True,
+            max_items=max_items,
+        )
+        checks = [
+            {
+                "name": "snapshot_delta_verification_ok",
+                "ok": bool(delta_verification.get("ok")),
+                "expected": True,
+                "actual": bool(delta_verification.get("ok")),
+            }
+        ]
+        checks.extend(_prefixed_failures("snapshot_delta", delta_verification))
+        envelope = build_operation_result_envelope(
+            "create_sketch_circle",
+            result=result,
+            checks=checks,
+            stage="snapshot_verified_operation",
+            require_result=True,
+        )
+        envelope["execution"] = {
+            "before_snapshot_ran": before is not None,
+            "operation_ran": True,
+            "after_snapshot_ran": after is not None,
+            "delta_verification_ran": True,
+        }
+        envelope["snapshots"] = {
+            "before": _snapshot_preview(before),
+            "after": _snapshot_preview(after),
+        }
+        envelope["delta"] = (
+            delta_verification.get("delta")
+            if isinstance(delta_verification.get("delta"), dict)
+            else {}
+        )
+        return envelope
+
+    def create_sketch_rectangle(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_RECTANGLE_1",
+        plane: str = "XOY",
+        corner1: list[float] | tuple[float, float] | None = None,
+        corner2: list[float] | tuple[float, float] | None = None,
+        line_style: int = 1,
+        min_added: int = 1,
+        require_no_removed: bool = True,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        first_corner = _normalize_point2d(corner1, name="corner1")
+        second_corner = _normalize_point2d([100.0, 50.0] if corner2 is None else corner2, name="corner2")
+        result = self.runner.call(
+            "create_sketch_rectangle",
+            {
+                "document_id": document_id,
+                "name": name,
+                "plane": plane,
+                "corner1": first_corner,
+                "corner2": second_corner,
+                "line_style": int(line_style),
+            },
+        )
+        readback = result.get("readback") if isinstance(result.get("readback"), dict) else {}
+        before = readback.get("before") if isinstance(readback.get("before"), dict) else None
+        after = readback.get("after") if isinstance(readback.get("after"), dict) else None
+        delta_verification = build_document_snapshot_delta_verification(
+            "create_sketch_rectangle",
+            before=before,
+            after=after,
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            use_default_volatile_ignores=True,
+            max_items=max_items,
+        )
+        checks = [
+            {
+                "name": "snapshot_delta_verification_ok",
+                "ok": bool(delta_verification.get("ok")),
+                "expected": True,
+                "actual": bool(delta_verification.get("ok")),
+            }
+        ]
+        checks.extend(_prefixed_failures("snapshot_delta", delta_verification))
+        envelope = build_operation_result_envelope(
+            "create_sketch_rectangle",
+            result=result,
+            checks=checks,
+            stage="snapshot_verified_operation",
+            require_result=True,
+        )
+        envelope["execution"] = {
+            "before_snapshot_ran": before is not None,
+            "operation_ran": True,
+            "after_snapshot_ran": after is not None,
+            "delta_verification_ran": True,
+        }
+        envelope["snapshots"] = {
+            "before": _snapshot_preview(before),
+            "after": _snapshot_preview(after),
+        }
+        envelope["delta"] = (
+            delta_verification.get("delta")
+            if isinstance(delta_verification.get("delta"), dict)
+            else {}
+        )
+        return envelope
 
     def check_file_access(self, path: str) -> dict[str, Any]:
         return self._check_file_access(path)

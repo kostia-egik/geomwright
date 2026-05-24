@@ -456,13 +456,16 @@ def ensure_backup_copy(target_path, backup_root):
 
 def collection_count(collection):
     try:
-        return int(safe_get(collection, "Count", 0) or 0)
+        count = safe_get(collection, "Count", 0)
+        if callable(count):
+            count = count()
+        return int(count or 0)
     except Exception:
         return 0
 
 
 def get_collection_item(collection, index):
-    for accessor_name in ("Part", "Item"):
+    for accessor_name in ("Part", "Item", "Point3D", "Sketch"):
         accessor = safe_get(collection, accessor_name)
         if accessor is None:
             continue
@@ -535,17 +538,92 @@ def serialize_part(part, node_id, parent_id):
         "children": [],
     }
 
-    parts = safe_get(part, "Parts")
-    if parts is None:
-        return item
-
     children = []
-    for index, child in enumerate(iter_collection(parts)):
-        child_id = "%s/%s" % (node_id, index)
-        children.append(serialize_part(child, child_id, node_id))
+    parts = safe_get(part, "Parts")
+    if parts is not None:
+        for index, child in enumerate(iter_collection(parts)):
+            child_id = "%s/%s" % (node_id, index)
+            children.append(serialize_part(child, child_id, node_id))
+    children.extend(_serialize_part_model_object_children(part, node_id))
 
     item["children"] = children
     return item
+
+
+def _serialize_part_model_object_children(part, node_id):
+    model_container = cast_model_container(part)
+    children = []
+    for collection_name, accessors in (
+        ("points3d", ("Points3D", "GetPoints3D")),
+        ("sketches", ("Sketchs", "GetSketchs")),
+    ):
+        collection, _, _ = _resolve_model_object_collection(model_container, accessors)
+        count = collection_count(collection)
+        for index in range(count):
+            obj = get_collection_item(collection, index)
+            if obj is None:
+                continue
+            reference = safe_get(obj, "Reference")
+            child_id = "%s/%s/%s" % (node_id, collection_name, reference if reference not in (None, "") else index)
+            children.append(
+                {
+                    "id": child_id,
+                    "parent_id": node_id,
+                    "name": safe_get(obj, "Name", ""),
+                    "designation": "",
+                    "title": None,
+                    "material": "",
+                    "comment": "",
+                    "mass": None,
+                    "volume": None,
+                    "density": None,
+                    "quantity": None,
+                    "kind": "model_object",
+                    "model_object_collection": collection_name,
+                    "model_object_type": safe_get(obj, "ModelObjectType"),
+                    "source_path": "",
+                    "reference": reference,
+                    "unique_number": safe_get(obj, "UniqueNumber"),
+                    "unique_meta_object_key": safe_get(obj, "UniqueMetaObjectKey"),
+                    "is_local": None,
+                    "origin": [safe_get(obj, "X"), safe_get(obj, "Y"), safe_get(obj, "Z")],
+                    "children": [],
+                }
+            )
+    return children
+
+
+def _flatten_tree_entries(root):
+    entries = []
+
+    def walk(node):
+        entries.append(node)
+        for child in node.get("children") or []:
+            walk(child)
+
+    walk(root)
+    return entries
+
+
+def _snapshot_from_tree(document, app, tree):
+    entries = _flatten_tree_entries(tree)
+    counts = {
+        "items": len(entries),
+        "tree_nodes": len(entries),
+        "indexed_items": len(entries),
+    }
+    return {
+        "ok": True,
+        "snapshot": {
+            "document": describe_document(document, app),
+            "summary": dict(counts),
+            "counts": dict(counts),
+            "manifest": {
+                "counts": dict(counts),
+                "item_index": {"entries": entries},
+            },
+        },
+    }
 
 
 MODEL_OBJECT_COLLECTION_SPECS = [
@@ -631,7 +709,8 @@ def _resolve_model_object_collection(container, accessor_names):
         value = safe_get(container, accessor_name)
         if value is None:
             continue
-        if callable(value):
+        is_collection_like = any(safe_get(value, attr) is not None for attr in ("Count", "Item", "Add"))
+        if callable(value) and (accessor_name.startswith("Get") or not is_collection_like):
             try:
                 value = value()
             except Exception as exc:
@@ -1635,6 +1714,419 @@ def handle_get_document_tree(payload):
     return {
         "document": describe_document(document, app),
         "tree": serialize_part(top_part, "root", None),
+    }
+
+
+def handle_create_point3d(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    origin = payload.get("origin")
+    if not isinstance(origin, list) or len(origin) != 3:
+        raise RuntimeError("origin must contain exactly 3 coordinates")
+
+    before_tree = serialize_part(top_part, "root", None)
+    point = _create_point3d(model_container, payload.get("name") or "PT1", origin)
+    updater = safe_get(top_part, "Update")
+    update_ok = True
+    if callable(updater):
+        update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "item": {
+            "name": safe_get(point, "Name", payload.get("name")),
+            "type": "Point3D",
+            "origin": [safe_get(point, "X", 0.0), safe_get(point, "Y", 0.0), safe_get(point, "Z", 0.0)],
+            "reference": safe_get(point, "Reference"),
+        },
+        "summary": {
+            "name": safe_get(point, "Name", payload.get("name")),
+            "update_ok": update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def _normalize_point2d_payload(value, name, default):
+    values = list(default if value is None else value)
+    if len(values) != 2:
+        raise RuntimeError("%s must contain exactly 2 coordinates" % name)
+    return [float(values[0]), float(values[1])]
+
+
+def _normalize_sketch_plane(value):
+    normalized = str(value or "XOY").strip().lower().replace("-", "_")
+    aliases = {
+        "xoy": "xoy_plane",
+        "xy": "xoy_plane",
+        "xoy_plane": "xoy_plane",
+        "xoz": "xoz_plane",
+        "xz": "xoz_plane",
+        "xoz_plane": "xoz_plane",
+        "yoz": "yoz_plane",
+        "yz": "yoz_plane",
+        "yoz_plane": "yoz_plane",
+    }
+    resolved = aliases.get(normalized)
+    if resolved is None:
+        raise RuntimeError("Unsupported sketch plane: %s" % value)
+    return resolved
+
+
+def _create_sketch_on_plane(model_container, part, name, plane):
+    plane_key = _normalize_sketch_plane(plane)
+    plane_object = _resolve_default_part_object(part, plane_key)
+    sketchs = safe_get(model_container, "Sketchs")
+    if sketchs is None:
+        get_sketchs = safe_get(model_container, "GetSketchs")
+        if callable(get_sketchs):
+            sketchs = get_sketchs()
+    if sketchs is None or not callable(safe_get(sketchs, "Add")):
+        raise RuntimeError("Part does not expose Sketchs.Add")
+    sketch = sketchs.Add()
+    if sketch is None:
+        raise RuntimeError("Sketchs.Add returned None")
+    sketch.Plane = plane_object
+    if name:
+        try:
+            sketch.Name = str(name)
+        except Exception:
+            pass
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update returned False")
+    return sketch, plane_key
+
+
+def _get_sketch_system_view(sketch_doc):
+    views_manager = safe_get(sketch_doc, "ViewsAndLayersManager")
+    if views_manager is None:
+        get_views_manager = safe_get(sketch_doc, "GetViewsAndLayersManager")
+        if callable(get_views_manager):
+            views_manager = get_views_manager()
+    views = safe_get(views_manager, "Views") if views_manager is not None else None
+    if views is None:
+        raise RuntimeError("Sketch document does not expose ViewsAndLayersManager.Views")
+    for accessor_name, accessor_arg in (("View", 0), ("Item", 0), ("View", 1), ("Item", 1)):
+        accessor = safe_get(views, accessor_name)
+        if not callable(accessor):
+            continue
+        try:
+            view = accessor(accessor_arg)
+            if view is not None:
+                return view
+        except Exception:
+            continue
+    raise RuntimeError("Failed to get sketch system view")
+
+
+def _create_sketch_line_segment(model_container, part, name, plane, start, end, line_style):
+    sketch, plane_key = _create_sketch_on_plane(model_container, part, name, plane)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
+        line_segments = safe_get(drawing_container, "LineSegments")
+        if line_segments is None:
+            get_line_segments = safe_get(drawing_container, "GetLineSegments")
+            if callable(get_line_segments):
+                line_segments = get_line_segments()
+        if line_segments is None or not callable(safe_get(line_segments, "Add")):
+            raise RuntimeError("Sketch view does not expose LineSegments.Add")
+        line = line_segments.Add()
+        if line is None:
+            raise RuntimeError("LineSegments.Add returned None")
+        line.X1 = float(start[0])
+        line.Y1 = float(start[1])
+        line.X2 = float(end[0])
+        line.Y2 = float(end[1])
+        try:
+            line.Style = int(line_style)
+        except Exception:
+            set_style = safe_get(line, "SetStyle")
+            if callable(set_style):
+                set_style(int(line_style))
+            else:
+                raise
+        if not line.Update():
+            raise RuntimeError("LineSegment Update returned False")
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, line, plane_key
+
+
+def _create_sketch_circle(model_container, part, name, plane, center, radius, line_style):
+    sketch, plane_key = _create_sketch_on_plane(model_container, part, name, plane)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
+        circles = safe_get(drawing_container, "Circles")
+        if circles is None:
+            get_circles = safe_get(drawing_container, "GetCircles")
+            if callable(get_circles):
+                circles = get_circles()
+        if circles is None or not callable(safe_get(circles, "Add")):
+            raise RuntimeError("Sketch view does not expose Circles.Add")
+        circle = circles.Add()
+        if circle is None:
+            raise RuntimeError("Circles.Add returned None")
+        circle.Xc = float(center[0])
+        circle.Yc = float(center[1])
+        circle.Radius = float(radius)
+        try:
+            circle.Style = int(line_style)
+        except Exception:
+            set_style = safe_get(circle, "SetStyle")
+            if callable(set_style):
+                set_style(int(line_style))
+            else:
+                raise
+        if not circle.Update():
+            raise RuntimeError("Circle Update returned False")
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, circle, plane_key
+
+
+def _create_sketch_rectangle(model_container, part, name, plane, corner1, corner2, line_style):
+    sketch, plane_key = _create_sketch_on_plane(model_container, part, name, plane)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    lines = []
+    x1, y1 = float(corner1[0]), float(corner1[1])
+    x2, y2 = float(corner2[0]), float(corner2[1])
+    segments = (
+        ([x1, y1], [x2, y1]),
+        ([x2, y1], [x2, y2]),
+        ([x2, y2], [x1, y2]),
+        ([x1, y2], [x1, y1]),
+    )
+    try:
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
+        line_segments = safe_get(drawing_container, "LineSegments")
+        if line_segments is None:
+            get_line_segments = safe_get(drawing_container, "GetLineSegments")
+            if callable(get_line_segments):
+                line_segments = get_line_segments()
+        if line_segments is None or not callable(safe_get(line_segments, "Add")):
+            raise RuntimeError("Sketch view does not expose LineSegments.Add")
+        for start, end in segments:
+            line = line_segments.Add()
+            if line is None:
+                raise RuntimeError("LineSegments.Add returned None")
+            line.X1 = float(start[0])
+            line.Y1 = float(start[1])
+            line.X2 = float(end[0])
+            line.Y2 = float(end[1])
+            try:
+                line.Style = int(line_style)
+            except Exception:
+                set_style = safe_get(line, "SetStyle")
+                if callable(set_style):
+                    set_style(int(line_style))
+                else:
+                    raise
+            if not line.Update():
+                raise RuntimeError("LineSegment Update returned False")
+            lines.append(line)
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, lines, plane_key
+
+
+def handle_create_sketch_line_segment(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    start = _normalize_point2d_payload(payload.get("start"), "start", [0.0, 0.0])
+    end = _normalize_point2d_payload(payload.get("end"), "end", [100.0, 0.0])
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, line, plane = _create_sketch_line_segment(
+        model_container,
+        top_part,
+        payload.get("name") or "SKETCH_LINE_1",
+        payload.get("plane") or "XOY",
+        start,
+        end,
+        int(payload.get("line_style", 1)),
+    )
+    updater = safe_get(top_part, "Update")
+    update_ok = True
+    if callable(updater):
+        update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "item": {
+            "name": safe_get(sketch, "Name", payload.get("name")),
+            "type": "SketchLineSegment",
+            "plane": plane,
+            "start": start,
+            "end": end,
+            "reference": safe_get(line, "Reference"),
+        },
+        "summary": {
+            "name": safe_get(sketch, "Name", payload.get("name")),
+            "plane": plane,
+            "update_ok": update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_create_sketch_circle(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    center = _normalize_point2d_payload(payload.get("center"), "center", [0.0, 0.0])
+    radius = float(payload.get("radius", 10.0))
+    if radius <= 0:
+        raise RuntimeError("radius must be greater than zero")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, circle, plane = _create_sketch_circle(
+        model_container,
+        top_part,
+        payload.get("name") or "SKETCH_CIRCLE_1",
+        payload.get("plane") or "XOY",
+        center,
+        radius,
+        int(payload.get("line_style", 1)),
+    )
+    updater = safe_get(top_part, "Update")
+    update_ok = True
+    if callable(updater):
+        update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "item": {
+            "name": safe_get(sketch, "Name", payload.get("name")),
+            "type": "SketchCircle",
+            "plane": plane,
+            "center": center,
+            "radius": radius,
+            "reference": safe_get(circle, "Reference"),
+        },
+        "summary": {
+            "name": safe_get(sketch, "Name", payload.get("name")),
+            "plane": plane,
+            "update_ok": update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_create_sketch_rectangle(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    corner1 = _normalize_point2d_payload(payload.get("corner1"), "corner1", [0.0, 0.0])
+    corner2 = _normalize_point2d_payload(payload.get("corner2"), "corner2", [100.0, 50.0])
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, lines, plane = _create_sketch_rectangle(
+        model_container,
+        top_part,
+        payload.get("name") or "SKETCH_RECTANGLE_1",
+        payload.get("plane") or "XOY",
+        corner1,
+        corner2,
+        int(payload.get("line_style", 1)),
+    )
+    updater = safe_get(top_part, "Update")
+    update_ok = True
+    if callable(updater):
+        update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "item": {
+            "name": safe_get(sketch, "Name", payload.get("name")),
+            "type": "SketchRectangle",
+            "plane": plane,
+            "corner1": corner1,
+            "corner2": corner2,
+            "line_count": len(lines),
+            "reference": safe_get(lines[0], "Reference") if lines else None,
+        },
+        "summary": {
+            "name": safe_get(sketch, "Name", payload.get("name")),
+            "plane": plane,
+            "line_count": len(lines),
+            "update_ok": update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
     }
 
 
@@ -3509,17 +4001,21 @@ def _create_point3d(model_container, name, origin):
             points = get_points()
     if points is None:
         raise RuntimeError("Part does not expose Points3D")
-    before_count = collection_count(points)
-    raw = points._oleobj_.InvokeTypes(2, 0, 1, (9, 0), ())
+    add_point = safe_get(points, "Add")
     point = None
-    if raw not in (None, ""):
-        point = _cast_to_com_interface(raw, "IPoint3D")
-    if point is None:
-        index = collection_count(points) - 1
-        if index < 0:
-            index = before_count
-        getter = safe_get(points, "Point3D")
-        point = getter(index) if callable(getter) else None
+    if callable(add_point):
+        point = add_point()
+    if point is None and safe_get(points, "_oleobj_") is not None:
+        before_count = collection_count(points)
+        raw = points._oleobj_.InvokeTypes(2, 0, 1, (9, 0), ())
+        if raw not in (None, ""):
+            point = _cast_to_com_interface(raw, "IPoint3D")
+        if point is None:
+            index = collection_count(points) - 1
+            if index < 0:
+                index = before_count
+            getter = safe_get(points, "Point3D")
+            point = getter(index) if callable(getter) else None
     if point is None:
         raise RuntimeError("Failed to create Point3D")
     point.Name = str(name or "")
@@ -10109,6 +10605,14 @@ def dispatch(request):
         return handle_list_documents()
     if action == "get_document_tree":
         return handle_get_document_tree(payload)
+    if action == "create_point3d":
+        return handle_create_point3d(payload)
+    if action == "create_sketch_line_segment":
+        return handle_create_sketch_line_segment(payload)
+    if action == "create_sketch_circle":
+        return handle_create_sketch_circle(payload)
+    if action == "create_sketch_rectangle":
+        return handle_create_sketch_rectangle(payload)
     if action == "probe_model_object_collections":
         return handle_probe_model_object_collections(payload)
     if action == "get_specification_descriptions":

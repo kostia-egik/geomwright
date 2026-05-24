@@ -328,6 +328,112 @@ def normalize_operation_result(
 
 
 @mcp.tool()
+def create_point3d(
+    document_id: str | None = None,
+    name: str = "PT1",
+    origin: list[float] | None = None,
+    min_added: int = 1,
+    require_no_removed: bool = True,
+    require_no_changed: bool = False,
+    max_items: int = 25,
+) -> dict:
+    """Create a 3D point in the active part and verify the before/after snapshot delta."""
+    return adapter.create_point3d(
+        document_id=document_id,
+        name=name,
+        origin=origin,
+        min_added=min_added,
+        require_no_removed=require_no_removed,
+        require_no_changed=require_no_changed,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
+def create_sketch_line_segment(
+    document_id: str | None = None,
+    name: str = "SKETCH_LINE_1",
+    plane: str = "XOY",
+    start: list[float] | None = None,
+    end: list[float] | None = None,
+    line_style: int = 1,
+    min_added: int = 1,
+    require_no_removed: bool = True,
+    require_no_changed: bool = False,
+    max_items: int = 25,
+) -> dict:
+    """Create a sketch with one 2D line segment and verify the before/after snapshot delta."""
+    return adapter.create_sketch_line_segment(
+        document_id=document_id,
+        name=name,
+        plane=plane,
+        start=start,
+        end=end,
+        line_style=line_style,
+        min_added=min_added,
+        require_no_removed=require_no_removed,
+        require_no_changed=require_no_changed,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
+def create_sketch_circle(
+    document_id: str | None = None,
+    name: str = "SKETCH_CIRCLE_1",
+    plane: str = "XOY",
+    center: list[float] | None = None,
+    radius: float = 10.0,
+    line_style: int = 1,
+    min_added: int = 1,
+    require_no_removed: bool = True,
+    require_no_changed: bool = False,
+    max_items: int = 25,
+) -> dict:
+    """Create a sketch with one 2D circle and verify the before/after snapshot delta."""
+    return adapter.create_sketch_circle(
+        document_id=document_id,
+        name=name,
+        plane=plane,
+        center=center,
+        radius=radius,
+        line_style=line_style,
+        min_added=min_added,
+        require_no_removed=require_no_removed,
+        require_no_changed=require_no_changed,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
+def create_sketch_rectangle(
+    document_id: str | None = None,
+    name: str = "SKETCH_RECTANGLE_1",
+    plane: str = "XOY",
+    corner1: list[float] | None = None,
+    corner2: list[float] | None = None,
+    line_style: int = 1,
+    min_added: int = 1,
+    require_no_removed: bool = True,
+    require_no_changed: bool = False,
+    max_items: int = 25,
+) -> dict:
+    """Create a sketch rectangle from two corners and verify the before/after snapshot delta."""
+    return adapter.create_sketch_rectangle(
+        document_id=document_id,
+        name=name,
+        plane=plane,
+        corner1=corner1,
+        corner2=corner2,
+        line_style=line_style,
+        min_added=min_added,
+        require_no_removed=require_no_removed,
+        require_no_changed=require_no_changed,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
 def check_file_access(path: str) -> dict:
     """Check whether a file is visible and can be opened exclusively by this process."""
     return adapter.check_file_access(path)
