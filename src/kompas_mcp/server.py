@@ -21,6 +21,7 @@ from .relink import relink_to_export as run_relink_to_export
 from .rules import load_rules
 from .native_modules import inspect_native_module as build_native_module_inspection
 from .native_modules import inspect_native_module_interfaces as build_native_module_interface_inspection
+from .native_modules import inspect_native_spring_workflow as build_native_spring_workflow_inspection
 from .native_modules import list_native_modules as build_native_modules
 from .thread_catalog import list_thread_catalog_standards as build_thread_catalog_standards
 from .thread_catalog import list_helical_thread_v1_candidates as build_helical_thread_v1_candidates
@@ -93,6 +94,22 @@ def inspect_native_module_interfaces(
         max_files=max_files,
         max_string_hits=max_string_hits,
         max_bytes_per_file=max_bytes_per_file,
+    )
+
+
+@mcp.tool()
+def inspect_native_spring_workflow(
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_tables: int | None = 80,
+    max_sample_rows: int | None = 3,
+) -> dict:
+    """Inspect native Spring commands, workflow modes, and bounded reference calculation tables."""
+    return build_native_spring_workflow_inspection(
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        max_tables=max_tables,
+        max_sample_rows=max_sample_rows,
     )
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kompas_mcp.native_modules import inspect_native_module
 from kompas_mcp.native_modules import inspect_native_module_interfaces
+from kompas_mcp.native_modules import inspect_native_spring_workflow
 from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import preview_native_module_launch
 from kompas_mcp.native_module_result import capture_native_module_result
@@ -42,8 +43,11 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(payload["spring"]["module_kind"], "calculation_workflow")
         self.assertEqual(payload["spring"]["commands"][0]["workflow"][0], "design_calculation")
         self.assertEqual(payload["spring"]["commands"][0]["help_key"], "IDD_HELP_CCS")
-        self.assertEqual(payload["database_inventory"][0]["tables"][0]["name"], "MATERIALS")
-        self.assertEqual(payload["database_inventory"][0]["tables"][0]["row_count"], 2)
+        tables_by_name = {
+            table["name"]: table
+            for table in payload["database_inventory"][0]["tables"]
+        }
+        self.assertEqual(tables_by_name["MATERIALS"]["row_count"], 2)
 
     def test_inspects_native_module_interface_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,6 +73,28 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         )
         self.assertIn("static artifact scan", payload["assessment"]["limits"][0])
         self.assertEqual(payload["spring"]["module_kind"], "calculation_workflow")
+
+    def test_inspects_native_spring_workflow_reference_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+
+            payload = inspect_native_spring_workflow(
+                libs_dir=str(libs_dir),
+                max_tables=20,
+                max_sample_rows=2,
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["workflow_kind"], "native_calculation_workflow")
+        self.assertEqual(payload["commands"][0]["id"], 101)
+        self.assertIn("coil_spring_design_tables", payload["commands"][0]["likely_reference_groups"])
+        self.assertEqual(payload["workflow_capabilities"]["design_calculation_commands"], 2)
+        self.assertIn("material_strength_reference", payload["reference_data"]["groups"])
+        self.assertIn("coil_spring_design_tables", payload["reference_data"]["groups"])
+        material_tables = payload["reference_data"]["groups"]["material_strength_reference"]["tables"]
+        self.assertEqual(material_tables[0]["sample_rows"][0]["NAME"], "Steel A")
+        self.assertFalse(payload["automation_assessment"]["public_parameter_contract_detected"])
+        self.assertFalse(payload["automation_assessment"]["safe_to_use_for_automation"])
 
     def test_missing_module_returns_available_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -344,10 +370,19 @@ def _create_sqlite_database(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:
         connection.execute("create table MATERIALS (ID integer primary key, NAME text)")
+        connection.execute("create table SPRPARAMSCOILS (ID integer primary key, F3 real, D real, D1 real)")
+        connection.execute("create table DOPUSKD1 (ID integer primary key, DMIN real, DMAX real, DOPUSK real)")
+        connection.execute("create table SPRCPS (NOMER integer primary key, F3 real, D1 real, D2 real)")
         connection.executemany(
             "insert into MATERIALS (ID, NAME) values (?, ?)",
             [(1, "Steel A"), (2, "Steel B")],
         )
+        connection.executemany(
+            "insert into SPRPARAMSCOILS (ID, F3, D, D1) values (?, ?, ?, ?)",
+            [(1, 20.0, 12.0, 16.0), (2, 30.0, 14.0, 18.0)],
+        )
+        connection.execute("insert into DOPUSKD1 (ID, DMIN, DMAX, DOPUSK) values (1, 1.0, 10.0, 0.2)")
+        connection.execute("insert into SPRCPS (NOMER, F3, D1, D2) values (1, 100.0, 20.0, 40.0)")
         connection.commit()
     finally:
         connection.close()

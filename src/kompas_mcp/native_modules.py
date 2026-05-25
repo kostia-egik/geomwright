@@ -261,6 +261,77 @@ def inspect_native_module_interfaces(
     }
 
 
+def inspect_native_spring_workflow(
+    *,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_tables: int | None = 80,
+    max_sample_rows: int | None = 3,
+) -> dict[str, Any]:
+    """Build a bounded read-only dossier for the native Spring calculation workflow."""
+    table_limit = _normalize_limit(max_tables, default=80, maximum=200)
+    row_limit = _normalize_limit(max_sample_rows, default=3, maximum=10)
+    inspection = inspect_native_module(
+        "Spring",
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_database_inventory=True,
+        max_tables_per_database=table_limit,
+    )
+    if not inspection.get("ok"):
+        return {
+            "ok": False,
+            "module": "Spring",
+            "stage": "inspect_native_module",
+            "inspection": inspection,
+            "error": inspection.get("error", "Spring native module was not found"),
+        }
+
+    module_dir = Path(inspection["path"])
+    workflow = _spring_calculation_workflow(inspection)
+    reference_map = _spring_reference_database_map(
+        inspection.get("database_inventory", []),
+        max_sample_rows=row_limit,
+    )
+    return {
+        "ok": True,
+        "module": inspection["module"],
+        "title": inspection.get("title"),
+        "app_id": inspection.get("app_id"),
+        "path": inspection.get("path"),
+        "workflow_kind": "native_calculation_workflow",
+        "commands": workflow["commands"],
+        "workflow_capabilities": workflow["capabilities"],
+        "reference_data": reference_map,
+        "artifacts": {
+            "manifest": inspection.get("manifest_path"),
+            "runtime_files": [
+                {
+                    "name": item.get("name"),
+                    "relative_path": item.get("relative_path"),
+                    "size_bytes": item.get("size_bytes"),
+                }
+                for item in inspection.get("runtime_files", [])[:20]
+            ],
+            "databases": [
+                {
+                    "name": item.get("name"),
+                    "relative_path": item.get("relative_path"),
+                    "size_bytes": item.get("size_bytes"),
+                }
+                for item in inspection.get("databases", [])[:20]
+            ],
+            "help_database_detected": (module_dir / "SPRING_ru-RU.db").is_file(),
+        },
+        "automation_assessment": _spring_workflow_automation_assessment(reference_map),
+        "next_experiments": [
+            "Run start_native_module_result_probe(module='Spring', command_id=101, allow_interactive=true), complete one compression spring manually, then diff before/after captures.",
+            "During the manual workflow, watch whether Spring creates or modifies a job/session file outside the reference databases.",
+            "If a stable job/session artifact appears, inspect that artifact before attempting any parameter automation.",
+        ],
+    }
+
+
 def preview_native_module_launch(
     module: str = "Spring",
     *,
@@ -783,6 +854,234 @@ def _native_interface_next_experiments(module: str, status: str) -> list[str]:
     else:
         generic.append("Treat the module as interactive until a documented external/session contract is found.")
     return generic
+
+
+def _spring_calculation_workflow(inspection: dict[str, Any]) -> dict[str, Any]:
+    spring = inspection.get("spring") or {}
+    commands: list[dict[str, Any]] = []
+    capability_counts = {
+        "design_calculation": 0,
+        "verification_calculation": 0,
+        "result_report": 0,
+        "build_model_or_drawing": 0,
+        "build_without_calculation": 0,
+    }
+    for command in spring.get("commands", []):
+        help_text = " ".join(
+            str(command.get(key) or "")
+            for key in ("summary", "method", "build_without_calculation")
+        ).lower()
+        workflow = list(command.get("workflow") or [])
+        if command.get("build_without_calculation"):
+            capability_counts["build_without_calculation"] += 1
+        for capability in capability_counts:
+            if capability in workflow:
+                capability_counts[capability] += 1
+        commands.append(
+            {
+                "id": command.get("id"),
+                "title": command.get("title"),
+                "help_key": command.get("help_key"),
+                "workflow": workflow,
+                "descriptions": {
+                    "summary": command.get("summary"),
+                    "method": command.get("method"),
+                    "build_without_calculation": command.get("build_without_calculation"),
+                },
+                "evidence": {
+                    "mentions_design": "design" in help_text or "проект" in help_text,
+                    "mentions_verification": "verification" in help_text or "провер" in help_text,
+                    "mentions_model_or_drawing": (
+                        "model" in help_text
+                        or "drawing" in help_text
+                        or "модел" in help_text
+                        or "черт" in help_text
+                    ),
+                },
+                "likely_reference_groups": _spring_command_reference_groups(command.get("id")),
+            }
+        )
+    return {
+        "commands": commands,
+        "capabilities": {
+            "design_calculation_commands": capability_counts["design_calculation"],
+            "verification_calculation_commands": capability_counts["verification_calculation"],
+            "result_report_commands": capability_counts["result_report"],
+            "build_model_or_drawing_commands": capability_counts["build_model_or_drawing"],
+            "build_without_calculation_mentions": capability_counts["build_without_calculation"],
+            "notes": [
+                "Capabilities are derived from Spring help DB and command metadata; they describe user workflow, not a parameter API.",
+            ],
+        },
+    }
+
+
+def _spring_reference_database_map(
+    inventory: list[dict[str, Any]],
+    *,
+    max_sample_rows: int,
+) -> dict[str, Any]:
+    groups: dict[str, dict[str, Any]] = {}
+    databases: list[dict[str, Any]] = []
+    for database in inventory:
+        database_groups: dict[str, int] = {}
+        table_payloads = []
+        db_path = Path(str(database.get("path") or ""))
+        for table in database.get("tables", []):
+            group = _classify_spring_table(str(table.get("name") or ""))
+            group_payload = groups.setdefault(
+                group,
+                {
+                    "table_count": 0,
+                    "total_rows": 0,
+                    "tables": [],
+                    "truncated": False,
+                },
+            )
+            row_count = table.get("row_count")
+            group_payload["table_count"] += 1
+            if isinstance(row_count, int):
+                group_payload["total_rows"] += row_count
+            table_summary = {
+                "name": table.get("name"),
+                "database": database.get("name"),
+                "row_count": row_count,
+                "columns": table.get("columns", [])[:16],
+            }
+            if len(group_payload["tables"]) < 12:
+                table_summary["sample_rows"] = _sqlite_table_sample(
+                    db_path,
+                    str(table.get("name") or ""),
+                    max_rows=max_sample_rows,
+                    columns=table.get("columns", [])[:8],
+                )
+                group_payload["tables"].append(table_summary)
+            else:
+                group_payload["truncated"] = True
+            database_groups[group] = database_groups.get(group, 0) + 1
+            table_payloads.append(
+                {
+                    "name": table.get("name"),
+                    "group": group,
+                    "row_count": row_count,
+                    "columns": table.get("columns", [])[:16],
+                }
+            )
+        databases.append(
+            {
+                "name": database.get("name"),
+                "ok": database.get("ok"),
+                "table_count": database.get("table_count"),
+                "groups": database_groups,
+                "tables": table_payloads[:80],
+                "truncated": bool(database.get("truncated")) or len(table_payloads) > 80,
+            }
+        )
+    return {
+        "database_count": len(databases),
+        "databases": databases,
+        "groups": groups,
+        "notes": [
+            "These SQLite/SDB databases are mapped as reference/calculation data.",
+            "No table in this map is treated as a supported session or job-file contract by itself.",
+        ],
+    }
+
+
+def _classify_spring_table(name: str) -> str:
+    upper = name.upper()
+    if upper in {"VERSION", "SPRVID", "SQLITE_SEQUENCE"}:
+        return "metadata"
+    if upper.startswith("DISKSPRING") or upper.startswith("SPRCPS"):
+        return "disc_spring_reference"
+    if upper.startswith("SPRCON"):
+        return "conical_spring_reference"
+    if upper.endswith("_CRS") or "_CRS" in upper:
+        return "torsion_spring_reference"
+    if upper.endswith("_CES") or "_CES" in upper:
+        return "extension_spring_reference"
+    if upper.startswith("SPRPARAMSCOILS"):
+        return "coil_spring_design_tables"
+    if "MATERIAL" in upper or upper.startswith("RM_") or upper.startswith("SORT") or upper == "SPCES":
+        return "material_strength_reference"
+    if upper.startswith("DOPUSK") or upper.startswith("IT_") or upper.startswith("BORDER_"):
+        return "tolerance_reference"
+    return "other_reference"
+
+
+def _spring_command_reference_groups(command_id: Any) -> list[str]:
+    mapping = {
+        "101": ["coil_spring_design_tables", "material_strength_reference", "tolerance_reference"],
+        "102": ["extension_spring_reference", "material_strength_reference", "tolerance_reference"],
+        "103": ["disc_spring_reference", "material_strength_reference", "tolerance_reference"],
+        "104": ["conical_spring_reference", "material_strength_reference", "tolerance_reference"],
+        "105": ["torsion_spring_reference", "material_strength_reference", "tolerance_reference"],
+    }
+    return mapping.get(str(command_id), ["other_reference"])
+
+
+def _sqlite_table_sample(
+    database_path: Path,
+    table_name: str,
+    *,
+    max_rows: int,
+    columns: list[str],
+) -> list[dict[str, Any]]:
+    if not database_path.is_file() or not table_name or max_rows <= 0:
+        return []
+    safe_columns = [column for column in columns if column]
+    if not safe_columns:
+        return []
+    selected_columns = safe_columns[: min(len(safe_columns), 6)]
+    quoted_table = _quote_sqlite_identifier(table_name)
+    quoted_columns = ", ".join(_quote_sqlite_identifier(column) for column in selected_columns)
+    connection = None
+    try:
+        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        rows = connection.execute(
+            f"select {quoted_columns} from {quoted_table} limit ?",
+            (max_rows,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        if connection is not None:
+            connection.close()
+    return [
+        {column: row[index] for index, column in enumerate(selected_columns)}
+        for row in rows
+    ]
+
+
+def _spring_workflow_automation_assessment(reference_map: dict[str, Any]) -> dict[str, Any]:
+    groups = reference_map.get("groups", {})
+    has_reference_data = bool(groups)
+    has_design_tables = any(
+        group in groups
+        for group in (
+            "coil_spring_design_tables",
+            "disc_spring_reference",
+            "conical_spring_reference",
+            "extension_spring_reference",
+            "torsion_spring_reference",
+        )
+    )
+    return {
+        "status": "reference_workflow_mapped_no_public_parameter_contract",
+        "reference_data_detected": has_reference_data,
+        "calculation_tables_detected": has_design_tables,
+        "public_parameter_contract_detected": False,
+        "safe_to_use_for_automation": False,
+        "recommended_boundary": (
+            "Use Spring through interactive native commands until a supported "
+            "job/session/interface contract is proven."
+        ),
+        "limits": [
+            "Reference tables can explain Spring choices but are not the Spring solver contract.",
+            "Writing to Spring databases is intentionally out of scope.",
+            "Manual before/after probing is still required to prove model or drawing results.",
+        ],
+    }
 
 
 def _spring_interface_summary(inspection: dict[str, Any]) -> dict[str, Any]:
