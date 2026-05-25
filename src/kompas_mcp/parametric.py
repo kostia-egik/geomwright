@@ -53,6 +53,7 @@ SUPPORTED_PART_SCENARIOS = (
     "internal_threaded_step",
     "face_ring_groove",
     "bolt_circle_holes",
+    "compression_spring",
     "point",
     "lcs",
     "workflow",
@@ -200,6 +201,14 @@ BOLT_CIRCLE_HOLES_SCENARIO_ALIASES = {
     "bolt_hole_circle": "bolt_circle_holes",
     "pcd_holes": "bolt_circle_holes",
     "hole_circle": "bolt_circle_holes",
+}
+
+
+COMPRESSION_SPRING_SCENARIO_ALIASES = {
+    "compression_spring": "compression_spring",
+    "spring": "compression_spring",
+    "coil_spring": "compression_spring",
+    "cylindrical_spring": "compression_spring",
 }
 
 
@@ -1407,6 +1416,119 @@ def preview_bolt_circle_holes(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_compression_spring_params(params)
+    parameter_prefix = normalized["parameter_prefix"]
+    operation_label = build_operation_label(
+        normalized["name"],
+        parameter_prefix=parameter_prefix,
+    )
+    placement_origin = normalized["placement"]["effective_origin"]
+    start_center = [float(placement_origin[0]), float(placement_origin[1]), 0.0]
+    end_center = [
+        float(placement_origin[0]) + float(normalized["height"]),
+        float(placement_origin[1]),
+        0.0,
+    ]
+    wire_center = [
+        float(placement_origin[0]),
+        float(placement_origin[1]) + float(normalized["mean_diameter"]) / 2.0,
+        0.0,
+    ]
+    operations = [
+        {
+            "operation": "create_part_document",
+            "description": "Create a new 3D part document",
+        },
+        {
+            "operation": "add_variables",
+            "enabled": True,
+            "variable_count": len(normalized["variable_plan"]),
+            "variables": normalized["variable_plan"],
+            "description": "Create external variables for spring geometry",
+            "live_status": "planned",
+        },
+        {
+            "operation": "create_spring_axis",
+            "start": start_center,
+            "end": end_center,
+            "description": "Create the spring axis reference",
+            "live_status": "planned",
+        },
+        {
+            "operation": "create_spiral_path",
+            "mean_diameter": normalized["mean_diameter"],
+            "pitch": normalized["pitch"],
+            "height": normalized["height"],
+            "turns": normalized["turns"],
+            "left_hand": normalized["left_hand"],
+            "operation_variable_bindings": list(
+                normalized["operation_variable_bindings"]
+            ),
+            "description": "Create the cylindrical spiral used as the sweep path",
+            "live_status": "planned",
+        },
+        {
+            "operation": "create_wire_profile",
+            "profile": "circle",
+            "center": wire_center,
+            "radius": normalized["wire_diameter"] / 2.0,
+            "description": "Create the circular wire profile at the spring start",
+            "live_status": "planned",
+        },
+        {
+            "operation": "boss_evolution",
+            "profile": "wire_profile",
+            "path": "spiral_path",
+            "description": "Sweep the wire profile along the spiral path",
+            "live_status": "preview_only",
+        },
+    ]
+    if normalized["auxiliary_geometry_hidden"]:
+        operations.append(
+            {
+                "operation": "hide_auxiliary_geometry",
+                "objects": ["spring_axis", "spiral_path", "wire_profile_lcs"],
+                "description": "Hide service geometry created for the spring",
+                "live_status": "preview_only",
+            }
+        )
+
+    return {
+        "scenario": "compression_spring",
+        "ok": True,
+        "params": normalized,
+        "summary": {
+            "mean_diameter": normalized["mean_diameter"],
+            "outer_diameter": normalized["outer_diameter"],
+            "inner_diameter": normalized["inner_diameter"],
+            "wire_diameter": normalized["wire_diameter"],
+            "pitch": normalized["pitch"],
+            "height": normalized["height"],
+            "turns": normalized["turns"],
+            "left_hand": normalized["left_hand"],
+            "auxiliary_geometry_hidden": normalized["auxiliary_geometry_hidden"],
+            "parameter_prefix": parameter_prefix,
+            "operation_label": operation_label,
+            "planned_variable_count": len(normalized["variable_plan"]),
+            "placement_mode": normalized["placement"]["mode"],
+            "placement_origin": normalized["placement"]["origin"],
+            "placement_base_mode": normalized["placement"]["base"]["mode"],
+            "placement_base_origin": normalized["placement"]["base_origin"],
+            "placement_local_offset": normalized["placement"]["local_offset"],
+            "placement_reference": normalized["placement"]["reference"],
+            "live_supported": normalized["live_supported"],
+        },
+        "interface": _build_compression_spring_interface(
+            normalized,
+            start_center,
+            end_center,
+            wire_center,
+        ),
+        "operations": operations,
+    }
+
+
 def preview_point(params: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_point_params(params)
     point = normalized["origin"]
@@ -1636,12 +1758,14 @@ def preview_workflow(params: dict[str, Any]) -> dict[str, Any]:
             "operation_ids": [operation["id"] for operation in normalized["operations"]],
             "export_count": len(normalized["exports"]),
             "export_names": [export["name"] for export in normalized["exports"]],
-            "creation_status": "available" if all(operation["preview"]["ok"] for operation in normalized["operations"]) else "preview_only",
+            "creation_status": "available" if normalized["live_supported"] else "preview_only",
+            "live_supported": normalized["live_supported"],
             "output_path": normalized["output_path"],
         },
         "interface": {
             "feature_type": "workflow.chain",
             "operation_ids": [operation["id"] for operation in normalized["operations"]],
+            "live_supported": normalized["live_supported"],
             "outputs": exports,
             "exports": exports,
             "results": {
@@ -2610,6 +2734,209 @@ def normalize_bolt_circle_holes_params(params: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        raise ValueError("params must be an object")
+
+    mean_diameter = _optional_positive_float(
+        params,
+        "mean_diameter",
+        "mean_diameter",
+        "coil_diameter",
+        "diameter",
+        "d",
+    )
+    wire_diameter = _optional_positive_float(
+        params,
+        "wire_diameter",
+        "wire_diameter",
+        "wire",
+        "bar_diameter",
+        "wire_d",
+    )
+    pitch = _optional_positive_float(params, "pitch", "pitch", "step", "p")
+    height = _optional_positive_float(
+        params,
+        "height",
+        "height",
+        "length",
+        "free_length",
+        "h",
+        "l",
+    )
+    turns = _optional_positive_float(
+        params,
+        "turns",
+        "turns",
+        "turn_count",
+        "coil_count",
+        "active_turns",
+        "n",
+    )
+
+    if mean_diameter is None:
+        raise ValueError("compression_spring requires mean_diameter")
+    if wire_diameter is None:
+        raise ValueError("compression_spring requires wire_diameter")
+    if mean_diameter <= wire_diameter:
+        raise ValueError("compression_spring requires mean_diameter greater than wire_diameter")
+    if turns is None:
+        turns = 6.0
+    if turns <= 0.0:
+        raise ValueError("compression_spring turns must be a positive number")
+    if pitch is None and height is None:
+        raise ValueError("compression_spring requires pitch or height")
+    if pitch is None:
+        pitch = float(height) / float(turns)
+    if height is None:
+        height = float(pitch) * float(turns)
+    expected_height = float(pitch) * float(turns)
+    if abs(float(height) - expected_height) > 1e-6:
+        raise ValueError("compression_spring height must equal pitch * turns")
+    if float(pitch) < float(wire_diameter):
+        raise ValueError("compression_spring requires pitch greater than or equal to wire_diameter")
+
+    direction_value = str(
+        params.get("turn_direction") or params.get("direction") or params.get("hand") or ""
+    ).strip().lower().replace("-", "_").replace(" ", "_")
+    left_hand_raw = params.get("left_hand")
+    if left_hand_raw is None:
+        left_hand = direction_value in {
+            "left",
+            "left_hand",
+            "left_handed",
+            "ccw",
+            "counterclockwise",
+        }
+    else:
+        left_hand = bool(left_hand_raw)
+    direction = "left" if left_hand else "right"
+
+    output_path = params.get("output_path")
+    if output_path:
+        output_path = str(Path(str(output_path)))
+
+    sketch = normalize_sketch_options(params.get("sketch"))
+    placement = normalize_placement_options(params.get("placement"))
+    if placement["base"]["mode"] in ("csys", "csys_ref") and not placement["rotation_supported"]:
+        raise ValueError(
+            "placement.axis_direction rotation is not supported yet; "
+            "use a translated csys with the default axis direction"
+        )
+
+    parameter_prefix = normalize_parameter_prefix(
+        params.get("parameter_prefix") or params.get("parameter_namespace")
+    )
+    material_payload = resolve_material_payload(params.get("material"), params.get("density"))
+    operation_label = build_operation_label(
+        params.get("name") or "Compression spring",
+        parameter_prefix=parameter_prefix,
+    )
+    mean_diameter_variable = build_parameter_name("D", 1, prefix=parameter_prefix)
+    wire_diameter_variable = build_parameter_name("WD", 1, prefix=parameter_prefix)
+    pitch_variable = build_parameter_name("P", 1, prefix=parameter_prefix)
+    height_variable = build_parameter_name("H", 1, prefix=parameter_prefix)
+    turns_variable = build_parameter_name("N", 1, prefix=parameter_prefix)
+    variable_plan = [
+        {
+            "name": mean_diameter_variable,
+            "value": float(mean_diameter),
+            "note": build_parameter_note(operation_label, "spring", mean_diameter_variable, "Mean coil diameter"),
+            "kind": "driving_mean_diameter",
+            "step_name": "spring",
+            "operation_label": operation_label,
+            "external": True,
+        },
+        {
+            "name": wire_diameter_variable,
+            "value": float(wire_diameter),
+            "note": build_parameter_note(operation_label, "spring", wire_diameter_variable, "Wire diameter"),
+            "kind": "driving_wire_diameter",
+            "step_name": "spring",
+            "operation_label": operation_label,
+            "external": True,
+        },
+        {
+            "name": pitch_variable,
+            "value": float(pitch),
+            "note": build_parameter_note(operation_label, "spring", pitch_variable, "Pitch"),
+            "kind": "driving_pitch",
+            "step_name": "spring",
+            "operation_label": operation_label,
+            "external": True,
+        },
+        {
+            "name": height_variable,
+            "value": float(height),
+            "note": build_parameter_note(operation_label, "spring", height_variable, "Free height"),
+            "kind": "driving_height",
+            "step_name": "spring",
+            "operation_label": operation_label,
+            "external": True,
+        },
+        {
+            "name": turns_variable,
+            "value": float(turns),
+            "note": build_parameter_note(operation_label, "spring", turns_variable, "Turn count"),
+            "kind": "driving_turn_count",
+            "step_name": "spring",
+            "operation_label": operation_label,
+            "external": True,
+        },
+    ]
+
+    mean_diameter = float(mean_diameter)
+    wire_diameter = float(wire_diameter)
+    pitch = float(pitch)
+    height = float(height)
+    turns = float(turns)
+    return {
+        "name": str(params.get("name") or "Compression spring"),
+        "designation": str(params.get("designation") or ""),
+        "material": material_payload["material"],
+        "density": material_payload["density"],
+        "material_catalog_matched": material_payload["catalog_matched"],
+        "comment": str(params.get("comment") or ""),
+        "plane": str(params.get("plane") or "YOZ"),
+        "axis": str(params.get("axis") or "OX"),
+        "sketch": sketch,
+        "placement": placement,
+        "parameter_prefix": parameter_prefix,
+        "mean_diameter": mean_diameter,
+        "outer_diameter": mean_diameter + wire_diameter,
+        "inner_diameter": mean_diameter - wire_diameter,
+        "wire_diameter": wire_diameter,
+        "pitch": pitch,
+        "height": height,
+        "turns": turns,
+        "turn_direction": direction,
+        "left_hand": left_hand,
+        "variable_plan": variable_plan,
+        "mean_diameter_expression": mean_diameter_variable,
+        "wire_diameter_expression": wire_diameter_variable,
+        "pitch_expression": pitch_variable,
+        "height_expression": height_variable,
+        "turns_expression": turns_variable,
+        "operation_variable_bindings": _build_spring_spiral_variable_bindings(
+            mean_diameter_variable,
+            pitch_variable,
+            height_variable,
+        ),
+        "profile_circles": [
+            {
+                "target": "wire_profile",
+                "center": [0.0, mean_diameter / 2.0],
+                "radius": wire_diameter / 2.0,
+                "radius_expression": f"{wire_diameter_variable} / 2",
+            }
+        ],
+        "auxiliary_geometry_hidden": bool(params.get("auxiliary_geometry_hidden", True)),
+        "live_supported": False,
+        "output_path": output_path,
+        "close_after_save": bool(params.get("close_after_save", True)),
+    }
+
+
 def normalize_point_params(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(params, dict):
         raise ValueError("params must be an object")
@@ -2853,6 +3180,10 @@ def normalize_workflow_params(params: dict[str, Any]) -> dict[str, Any]:
         context[normalized_operation["id"]] = normalized_operation
         normalized_operations.append(normalized_operation)
     normalized_exports = _normalize_workflow_exports(params.get("exports"), context)
+    live_supported = all(
+        operation["preview"].get("params", {}).get("live_supported") is not False
+        for operation in normalized_operations
+    )
 
     material_payload = resolve_material_payload(params.get("material"), params.get("density"))
     try:
@@ -2868,6 +3199,7 @@ def normalize_workflow_params(params: dict[str, Any]) -> dict[str, Any]:
         "comment": str(params.get("comment") or ""),
         "operations": normalized_operations,
         "exports": normalized_exports,
+        "live_supported": live_supported,
         "output_path": output_path,
         "close_after_save": bool(params.get("close_after_save", True)),
         "include_runtime_object_probe": bool(params.get("include_runtime_object_probe", False)),
@@ -2905,6 +3237,8 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
         return preview_face_ring_groove(params)
     if normalized_scenario == "bolt_circle_holes":
         return preview_bolt_circle_holes(params)
+    if normalized_scenario == "compression_spring":
+        return preview_compression_spring(params)
     if normalized_scenario == "point":
         return preview_point(params)
     if normalized_scenario == "lcs":
@@ -2934,6 +3268,7 @@ def _normalize_scenario(scenario: str) -> str:
     aliases.update(INTERNAL_THREADED_STEP_SCENARIO_ALIASES)
     aliases.update(FACE_RING_GROOVE_SCENARIO_ALIASES)
     aliases.update(BOLT_CIRCLE_HOLES_SCENARIO_ALIASES)
+    aliases.update(COMPRESSION_SPRING_SCENARIO_ALIASES)
     aliases.update(POINT_SCENARIO_ALIASES)
     aliases.update(LCS_SCENARIO_ALIASES)
     aliases.update(WORKFLOW_SCENARIO_ALIASES)
@@ -3105,10 +3440,11 @@ def _normalize_workflow_operation(
         "external_polygonal_step",
         "internal_polygonal_step",
         "external_flat_step",
-        "internal_flat_step",
-        "face_ring_groove",
-        "bolt_circle_holes",
-    ):
+            "internal_flat_step",
+            "face_ring_groove",
+            "bolt_circle_holes",
+            "compression_spring",
+        ):
         placement = params.get("placement")
         if isinstance(placement, dict):
             base_payload = placement.get("base") or placement
@@ -3162,8 +3498,10 @@ def _normalize_workflow_operation(
             preview = preview_internal_flat_step(params)
         elif scenario == "face_ring_groove":
             preview = preview_face_ring_groove(params)
-        else:
+        elif scenario == "bolt_circle_holes":
             preview = preview_bolt_circle_holes(params)
+        else:
+            preview = preview_compression_spring(params)
     else:
         raise ValueError(f"Unsupported workflow operation scenario: {scenario}")
 
@@ -3618,6 +3956,51 @@ def _build_circular_pattern_variable_bindings(
             ],
             "expression": angle_step_expression,
             "role": "pattern_angle_step",
+        },
+    ]
+
+
+def _build_spring_spiral_variable_bindings(
+    mean_diameter_expression: str,
+    pitch_expression: str,
+    height_expression: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": "spiral_path",
+            "parameter_note": "Diameter",
+            "parameter_note_aliases": [
+                "Diameter",
+                "Mean diameter",
+                "Coil diameter",
+                "Диаметр",
+                "Средний диаметр",
+            ],
+            "expression": mean_diameter_expression,
+            "role": "spring_mean_diameter",
+        },
+        {
+            "target": "spiral_path",
+            "parameter_note": "Step",
+            "parameter_note_aliases": [
+                "Step",
+                "Pitch",
+                "Шаг",
+            ],
+            "expression": pitch_expression,
+            "role": "spring_pitch",
+        },
+        {
+            "target": "spiral_path",
+            "parameter_note": "Height",
+            "parameter_note_aliases": [
+                "Height",
+                "Length",
+                "Высота",
+                "Длина",
+            ],
+            "expression": height_expression,
+            "role": "spring_height",
         },
     ]
 
@@ -9289,6 +9672,85 @@ def _build_bolt_circle_holes_interface(
                 "name": "first_hole_lcs",
                 "origin": list(first_hole_center),
                 "live_supported": True,
+            },
+        },
+        "placement_contract": {
+            "base_mode": normalized["placement"]["base"]["mode"],
+            "base_origin": normalized["placement"]["base_origin"],
+            "local_offset": normalized["placement"]["local_offset"],
+            "effective_origin": normalized["placement"]["effective_origin"],
+            "reference": normalized["placement"]["reference"],
+        },
+    }
+
+
+def _build_compression_spring_interface(
+    normalized: dict[str, Any],
+    start_center: list[float],
+    end_center: list[float],
+    wire_center: list[float],
+) -> dict[str, Any]:
+    driving_variables = {
+        str(item.get("kind") or ""): item["name"]
+        for item in (normalized.get("variable_plan") or [])
+        if str(item.get("kind") or "").startswith("driving_")
+    }
+    return {
+        "feature_type": "spring.compression",
+        "parameter_namespace": normalized["parameter_prefix"],
+        "operation_label": build_operation_label(normalized["name"], parameter_prefix=normalized["parameter_prefix"]),
+        "definition": {
+            "mode": "cylindrical_spiral_sweep",
+            "axis": normalized["axis"],
+            "turn_direction": normalized["turn_direction"],
+            "left_hand": normalized["left_hand"],
+            "auxiliary_geometry_hidden": normalized["auxiliary_geometry_hidden"],
+            "live_supported": normalized["live_supported"],
+        },
+        "placement": normalized["placement"],
+        "parameters": {
+            "mean_diameter": normalized["mean_diameter"],
+            "outer_diameter": normalized["outer_diameter"],
+            "inner_diameter": normalized["inner_diameter"],
+            "wire_diameter": normalized["wire_diameter"],
+            "pitch": normalized["pitch"],
+            "height": normalized["height"],
+            "turns": normalized["turns"],
+            "driving_mean_diameter": driving_variables.get("driving_mean_diameter", ""),
+            "driving_wire_diameter": driving_variables.get("driving_wire_diameter", ""),
+            "driving_pitch": driving_variables.get("driving_pitch", ""),
+            "driving_height": driving_variables.get("driving_height", ""),
+            "driving_turn_count": driving_variables.get("driving_turn_count", ""),
+            "mean_diameter_expression": normalized["mean_diameter_expression"],
+            "wire_diameter_expression": normalized["wire_diameter_expression"],
+            "pitch_expression": normalized["pitch_expression"],
+            "height_expression": normalized["height_expression"],
+            "turns_expression": normalized["turns_expression"],
+        },
+        "anchors": {
+            "start_center": list(start_center),
+            "end_center": list(end_center),
+            "wire_profile_center": list(wire_center),
+        },
+        "outputs": {
+            "body": {"type": "body", "live_supported": normalized["live_supported"]},
+            "axis": {
+                "type": "axis",
+                "name": "spring_axis",
+                "origin": list(start_center),
+                "end": list(end_center),
+                "live_supported": normalized["live_supported"],
+            },
+            "spiral_path": {
+                "type": "curve3d",
+                "name": "spiral_path",
+                "live_supported": normalized["live_supported"],
+            },
+            "wire_profile": {
+                "type": "sketch",
+                "name": "wire_profile",
+                "origin": list(wire_center),
+                "live_supported": normalized["live_supported"],
             },
         },
         "placement_contract": {

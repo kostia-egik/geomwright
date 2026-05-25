@@ -2480,6 +2480,11 @@ class KompasAdapter:
         close_after_save: bool | None = None,
     ) -> dict[str, Any]:
         preview = self.preview_part_scenario(scenario, params)
+        if preview.get("params", {}).get("live_supported") is False:
+            scenario_name = preview["scenario"]
+            raise ValueError(
+                f"{scenario_name} live creation is not implemented yet; use preview_part_scenario"
+            )
         normalized_params = dict(preview["params"])
         if output_path:
             normalized_params["output_path"] = self._normalize_target_path_for_kompas(output_path)

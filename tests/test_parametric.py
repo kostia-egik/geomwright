@@ -3008,6 +3008,82 @@ class ParametricPartTests(unittest.TestCase):
         self.assertIn("BCH01_PCD1", payload["params"]["first_hole_offset_expressions"][1])
         self.assertEqual(payload["params"]["pattern_operation_variable_bindings"][0]["expression"], "BCH01_N1")
 
+    def test_preview_compression_spring_builds_spiral_contract(self) -> None:
+        preview = preview_part_scenario(
+            "spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "pitch": 8,
+                "turns": 6,
+                "parameter_prefix": "spg01",
+            },
+        )
+
+        self.assertEqual(preview["scenario"], "compression_spring")
+        self.assertEqual(preview["summary"]["mean_diameter"], 30.0)
+        self.assertEqual(preview["summary"]["outer_diameter"], 34.0)
+        self.assertEqual(preview["summary"]["inner_diameter"], 26.0)
+        self.assertEqual(preview["summary"]["height"], 48.0)
+        self.assertEqual(preview["summary"]["turns"], 6.0)
+        self.assertFalse(preview["summary"]["live_supported"])
+        self.assertEqual(preview["operations"][1]["operation"], "add_variables")
+        self.assertEqual(preview["operations"][3]["operation"], "create_spiral_path")
+        self.assertEqual(preview["operations"][3]["operation_variable_bindings"][0]["expression"], "SPG01_D1")
+        self.assertEqual(preview["operations"][3]["operation_variable_bindings"][1]["expression"], "SPG01_P1")
+        self.assertEqual(preview["operations"][3]["operation_variable_bindings"][2]["expression"], "SPG01_H1")
+        self.assertEqual(preview["operations"][5]["operation"], "boss_evolution")
+        self.assertEqual(preview["operations"][5]["live_status"], "preview_only")
+        self.assertEqual(preview["interface"]["feature_type"], "spring.compression")
+        self.assertFalse(preview["interface"]["outputs"]["body"]["live_supported"])
+        self.assertEqual(preview["interface"]["parameters"]["driving_mean_diameter"], "SPG01_D1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_wire_diameter"], "SPG01_WD1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_pitch"], "SPG01_P1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_height"], "SPG01_H1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_turn_count"], "SPG01_N1")
+
+    def test_create_compression_spring_from_scenario_rejects_preview_only_contract(self) -> None:
+        adapter = KompasAdapter(runner=FakeRunner())
+
+        with self.assertRaisesRegex(ValueError, r"compression_spring live creation is not implemented yet"):
+            adapter.create_part_from_scenario(
+                "compression_spring",
+                {
+                    "mean_diameter": 30,
+                    "wire_diameter": 4,
+                    "height": 48,
+                    "turns": 6,
+                },
+                output_path=r"C:\\Temp\\kompas-mcp\\unit-spring.m3d",
+            )
+
+    def test_workflow_with_compression_spring_is_preview_only(self) -> None:
+        params = {
+            "operations": [
+                {
+                    "id": "spring01",
+                    "scenario": "compression_spring",
+                    "params": {
+                        "mean_diameter": 30,
+                        "wire_diameter": 4,
+                        "pitch": 8,
+                        "turns": 6,
+                    },
+                }
+            ]
+        }
+        preview = preview_part_scenario("workflow", params)
+        self.assertFalse(preview["params"]["live_supported"])
+        self.assertEqual(preview["summary"]["creation_status"], "preview_only")
+
+        adapter = KompasAdapter(runner=FakeRunner())
+        with self.assertRaisesRegex(ValueError, r"workflow live creation is not implemented yet"):
+            adapter.create_part_from_scenario(
+                "workflow",
+                params,
+                output_path=r"C:\\Temp\\kompas-mcp\\unit-spring-workflow.m3d",
+            )
+
     def test_preview_workflow_supports_external_conical_step_operation(self) -> None:
         preview = preview_part_scenario(
             "workflow",

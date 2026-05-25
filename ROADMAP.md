@@ -277,6 +277,7 @@
 
 Ближайший порядок:
 
-- распространить helper `bind_operation_variables` на остальные extrude/cut-extrude/pattern параметры, где сейчас ещё есть числовые fallback'и;
-- продолжить крупные модули: следующий кандидат - пружины по параметрам, затем шкивы/звёзды/шестерни;
+- `bind_operation_variables` по текущим extrude/cut-extrude/pattern сценариям закрыт на уровне preview-контракта; оставшиеся числовые значения считаем transient fallback до `Update`, а не отдельным roadmap-блокером;
+- пружины по параметрам: preview-контракт `compression_spring` добавлен; следующий шаг - live bridge-построение через цилиндрическую спираль, круглый профиль проволоки и boss evolution;
+- после пружин продолжить крупные модули: шкивы/звёзды/шестерни;
 - low-level расширять только по блокерам этих модулей: например, если понадобится редактирование/удаление sketch entity, readback constraints/dimensions или feature-level primitive, добавлять ровно этот tool с тестами и live-audit.
