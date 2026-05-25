@@ -245,6 +245,16 @@ def _bind_extrusion_operation_variables(extrusion, params, scenario, target="ext
     return report
 
 
+def _bind_circular_pattern_operation_variables(pattern, params, scenario, target="circular_pattern"):
+    planned_bindings = list(params.get("pattern_operation_variable_bindings") or [])
+    if not planned_bindings:
+        return None
+    report = _bind_operation_variables(pattern, planned_bindings)
+    report["scenario"] = scenario
+    report["target"] = target
+    return report
+
+
 MATERIAL_CATALOG = (
     {
         "name": "Сталь 10 ГОСТ 1050-2013",
@@ -1956,6 +1966,18 @@ def _build_save_staging_path(target_path):
             return candidate
 
 
+def _cleanup_staging_file(staging_path):
+    cleanup_report = {"path": staging_path, "removed": False, "error": None}
+    if not staging_path or not os.path.exists(staging_path):
+        return cleanup_report
+    try:
+        os.remove(staging_path)
+        cleanup_report["removed"] = True
+    except Exception as exc:
+        cleanup_report["error"] = str(exc)
+    return cleanup_report
+
+
 def _collect_open_documents_by_path(app, target_path, exclude_document=None):
     target_aliases = build_path_aliases(target_path)
     matches = []
@@ -1983,6 +2005,7 @@ def _replace_staging_file(app, staging_path, target_path, reopen_target=False, v
         "replaced_existing": bool(os.path.exists(target_path)),
         "open_target_documents": [match["description"] for match in matches],
         "closed_target_documents": [],
+        "remaining_open_target_documents": [],
         "reopened_document": None,
         "reopen_attempts": [],
     }
@@ -2016,6 +2039,13 @@ def _replace_staging_file(app, staging_path, target_path, reopen_target=False, v
                     "Failed to close remaining target alias before replace: %s | document=%s"
                     % (exc, json.dumps(match["description"], ensure_ascii=False))
                 )
+    remaining_matches = _collect_open_documents_by_path(app, target_path)
+    if remaining_matches:
+        report["remaining_open_target_documents"] = [match["description"] for match in remaining_matches]
+        raise RuntimeError(
+            "Target file is still open in KOMPAS after close attempts: %s"
+            % json.dumps(report["remaining_open_target_documents"], ensure_ascii=False)
+        )
 
     try:
         replace_file_path(staging_path, target_path)
@@ -2071,13 +2101,20 @@ def _save_document_via_staging(document, app, target_path, keep_open=False, visi
     except Exception as exc:
         raise RuntimeError("Failed to close staging document before replace: %s" % exc)
 
-    reopened_document, replace_report = _replace_staging_file(
-        app,
-        staging_path,
-        target_path,
-        reopen_target=bool(keep_open),
-        visible=visible,
-    )
+    try:
+        reopened_document, replace_report = _replace_staging_file(
+            app,
+            staging_path,
+            target_path,
+            reopen_target=bool(keep_open),
+            visible=visible,
+        )
+    except Exception as exc:
+        cleanup_report = _cleanup_staging_file(staging_path)
+        raise RuntimeError(
+            "Failed to complete staged save into target: %s | staging_cleanup=%s"
+            % (exc, json.dumps(cleanup_report, ensure_ascii=False))
+        )
     replace_report["source_document"] = document_description
     replace_report["kept_open"] = bool(keep_open)
     return reopened_document, replace_report
@@ -7784,6 +7821,14 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
         count_expression=params.get("pattern_count_expression"),
         angle_step_expression=params.get("pattern_step_expression"),
     )
+    pattern_binding_report = _bind_circular_pattern_operation_variables(pattern, params, "bolt_circle_holes")
+    if pattern_binding_report is not None:
+        steps_report.append(pattern_binding_report)
+        if not pattern_binding_report.get("ok"):
+            raise RuntimeError(
+                "Failed to bind bolt_circle_holes circular pattern variables: %s"
+                % (pattern_binding_report.get("failed"),)
+            )
     steps_report.append(
         {
             "step": "circular_pattern",
@@ -7791,6 +7836,8 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
             "api": "api7_feature_patterns_add",
             "count": int(params.get("count") or 0),
             "angle_step_degrees": 360.0 / float(params.get("count") or 1),
+            "pattern_count_expression": params.get("pattern_count_expression"),
+            "pattern_step_expression": params.get("pattern_step_expression"),
             "clockwise": bool(params.get("clockwise")),
             "center_origin": center_origin,
             "first_hole_center": first_hole_center,

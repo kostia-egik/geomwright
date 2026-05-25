@@ -2952,10 +2952,14 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["summary"]["count"], 4)
         self.assertEqual(preview["summary"]["axial_direction"], "backward")
         self.assertTrue(preview["summary"]["auxiliary_geometry_hidden"])
-        self.assertEqual(preview["summary"]["planned_variable_count"], 2)
+        self.assertEqual(preview["summary"]["planned_variable_count"], 5)
         self.assertEqual(preview["operations"][1]["operation"], "add_variables")
         self.assertEqual(preview["operations"][2]["operation"], "create_source_body")
         self.assertEqual(preview["operations"][-2]["operation"], "create_circular_pattern")
+        self.assertEqual(preview["operations"][-2]["pattern_count_expression"], "BCH01_N1")
+        self.assertEqual(preview["operations"][-2]["pattern_step_expression"], "BCH01_A1")
+        self.assertEqual(preview["operations"][-2]["operation_variable_bindings"][0]["expression"], "BCH01_N1")
+        self.assertEqual(preview["operations"][-2]["operation_variable_bindings"][1]["expression"], "BCH01_A1")
         self.assertEqual(preview["operations"][-1]["operation"], "hide_auxiliary_geometry")
         self.assertIn("pattern_axis", preview["operations"][-1]["objects"])
         self.assertEqual(preview["interface"]["feature_type"], "pattern.bolt_circle_holes")
@@ -2965,6 +2969,9 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["interface"]["outputs"]["first_hole_lcs"]["type"], "lcs")
         self.assertEqual(preview["interface"]["parameters"]["driving_diameters"], ["BCH01_D1"])
         self.assertEqual(preview["interface"]["parameters"]["driving_lengths"], ["BCH01_L1"])
+        self.assertEqual(preview["interface"]["parameters"]["driving_pcd"], "BCH01_PCD1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_pattern_count"], "BCH01_N1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_pattern_angle_step"], "BCH01_A1")
 
     def test_create_bolt_circle_holes_from_scenario_passes_normalized_params(self) -> None:
         runner = FakeRunner()
@@ -2996,6 +3003,10 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(payload["params"]["start_angle_degrees"], 15.0)
         self.assertEqual(payload["params"]["parameter_prefix"], "BCH01")
         self.assertTrue(payload["params"]["auxiliary_geometry_hidden"])
+        self.assertEqual(payload["params"]["pattern_count_expression"], "BCH01_N1")
+        self.assertEqual(payload["params"]["pattern_step_expression"], "BCH01_A1")
+        self.assertIn("BCH01_PCD1", payload["params"]["first_hole_offset_expressions"][1])
+        self.assertEqual(payload["params"]["pattern_operation_variable_bindings"][0]["expression"], "BCH01_N1")
 
     def test_preview_workflow_supports_external_conical_step_operation(self) -> None:
         preview = preview_part_scenario(

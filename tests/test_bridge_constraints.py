@@ -124,6 +124,60 @@ class BridgeConstraintTests(unittest.TestCase):
         self.assertEqual(report["failed_count"], 1)
         self.assertEqual(report["failed"][0]["error"], "operation_variable_not_found")
 
+    def test_bind_circular_pattern_operation_variables_matches_count_and_angle_aliases(self) -> None:
+        class FakeVariable:
+            def __init__(self, name, note, expression):
+                self.Name = name
+                self.ParameterNote = note
+                self.Expression = expression
+
+            def Update(self):
+                return True
+
+        class FakeOwner:
+            def __init__(self):
+                self.count = FakeVariable("var_count", "Count", "4")
+                self.angle = FakeVariable("var_angle", "Angle", "90")
+
+            def Variables(self, *args):
+                return [self.count, self.angle]
+
+        class FakePattern:
+            def __init__(self):
+                self.Owner = FakeOwner()
+                self.updated = 0
+
+            def Update(self):
+                self.updated += 1
+                return True
+
+        pattern = FakePattern()
+        report = BRIDGE._bind_circular_pattern_operation_variables(
+            pattern,
+            {
+                "pattern_operation_variable_bindings": [
+                    {
+                        "parameter_note_aliases": ["Count"],
+                        "expression": "BCH01_N1",
+                    },
+                    {
+                        "parameter_note_aliases": ["Angle"],
+                        "expression": "BCH01_A1",
+                    },
+                ]
+            },
+            "bolt_circle_holes",
+        )
+
+        self.assertIsNotNone(report)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["scenario"], "bolt_circle_holes")
+        self.assertEqual(report["target"], "circular_pattern")
+        self.assertEqual(report["applied_count"], 2)
+        self.assertEqual(pattern.Owner.count.Expression, "BCH01_N1")
+        self.assertEqual(pattern.Owner.angle.Expression, "BCH01_A1")
+        self.assertEqual(pattern.updated, 2)
+
     def test_apply_sketch_constraints_skips_redundant_arc_merge_points(self) -> None:
         original = BRIDGE._apply_constraint_to_line
 

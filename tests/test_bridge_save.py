@@ -99,6 +99,11 @@ class FakeDocument:
         self._app.Documents.remove(self)
 
 
+class StickyFakeDocument(FakeDocument):
+    def Close(self, mode):
+        self.close_calls.append(int(mode))
+
+
 class FakeApp:
     def __init__(self) -> None:
         self.ActiveDocument = None
@@ -171,6 +176,31 @@ class BridgeSaveTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "old")
             self.assertEqual(dirty_target.close_calls, [])
             self.assertEqual(source.close_calls, [])
+
+    def test_save_document_via_staging_rejects_target_that_remains_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = FakeApp()
+            target = Path(temp_dir) / "part.m3d"
+            target.write_text("old", encoding="utf-8")
+
+            open_target = StickyFakeDocument(app, path=str(target), changed=False, content="old")
+            app.Documents.add(open_target)
+            source = FakeDocument(app, content="new-content")
+            app.Documents.add(source)
+
+            with self.assertRaisesRegex(RuntimeError, "still open"):
+                BRIDGE._save_document_via_staging(
+                    source,
+                    app,
+                    str(target),
+                    keep_open=False,
+                    visible=False,
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "old")
+            self.assertEqual(open_target.close_calls, [0, 0, 0, 0])
+            self.assertEqual(source.close_calls, [0])
+            self.assertEqual(list(Path(temp_dir).glob("*.__kompas_mcp_stage__*.m3d")), [])
 
 
 if __name__ == "__main__":

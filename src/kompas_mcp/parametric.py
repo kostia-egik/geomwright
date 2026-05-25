@@ -20,6 +20,7 @@ from .sketch import build_flat_step_constraint_plan
 from .sketch import build_flat_step_dimension_plan
 from .sketch import build_flat_step_variable_plan
 from .sketch import build_parameter_name
+from .sketch import build_parameter_note
 from .sketch import build_polygonal_step_constraint_plan
 from .sketch import build_polygonal_step_dimension_plan
 from .sketch import build_polygonal_step_variable_plan
@@ -1290,20 +1291,21 @@ def preview_bolt_circle_holes(params: dict[str, Any]) -> dict[str, Any]:
             operation["variables"] = []
             operation["live_status"] = "moved_to_parent"
             break
+    variable_plan = base_hole_variable_plan + list(normalized.get("pattern_variable_plan") or [])
     operations = [
         {
             "operation": "create_part_document",
             "description": "Create a new 3D part document",
         }
     ]
-    if base_hole_variable_plan:
+    if variable_plan:
         operations.append(
             {
                 "operation": "add_variables",
                 "enabled": True,
-                "variable_count": len(base_hole_variable_plan),
-                "variables": base_hole_variable_plan,
-                "description": "Create external variables for the base hole geometry",
+                "variable_count": len(variable_plan),
+                "variables": variable_plan,
+                "description": "Create external variables for the base hole and bolt-circle pattern geometry",
                 "live_status": "planned",
             }
         )
@@ -1343,6 +1345,9 @@ def preview_bolt_circle_holes(params: dict[str, Any]) -> dict[str, Any]:
                 "count": normalized["count"],
                 "angle_step_degrees": angle_step,
                 "start_angle_degrees": normalized["start_angle_degrees"],
+                "pattern_count_expression": normalized["pattern_count_expression"],
+                "pattern_step_expression": normalized["pattern_step_expression"],
+                "operation_variable_bindings": list(normalized.get("pattern_operation_variable_bindings") or []),
                 "save_initial_orientation": True,
                 "description": "Copy the base hole operation using the native KOMPAS circular pattern",
                 "live_status": "planned",
@@ -1383,7 +1388,7 @@ def preview_bolt_circle_holes(params: dict[str, Any]) -> dict[str, Any]:
             "requires_existing_body": normalized["source_preview"] is None,
             "parameter_prefix": parameter_prefix,
             "operation_label": operation_label,
-            "planned_variable_count": len(base_hole_variable_plan),
+            "planned_variable_count": len(variable_plan),
             "placement_mode": normalized["placement"]["mode"],
             "placement_origin": normalized["placement"]["origin"],
             "placement_base_mode": normalized["placement"]["base"]["mode"],
@@ -1396,7 +1401,7 @@ def preview_bolt_circle_holes(params: dict[str, Any]) -> dict[str, Any]:
             normalized,
             hole_centers,
             first_hole_center,
-            base_hole_variable_plan,
+            variable_plan,
         ),
         "operations": operations,
     }
@@ -2528,6 +2533,42 @@ def normalize_bolt_circle_holes_params(params: dict[str, Any]) -> dict[str, Any]
         params.get("parameter_prefix") or params.get("parameter_namespace")
     )
     material_payload = resolve_material_payload(params.get("material"), params.get("density"))
+    operation_label = build_operation_label(params.get("name") or "Bolt circle holes", parameter_prefix=parameter_prefix)
+    pcd_variable = build_parameter_name("PCD", 1, prefix=parameter_prefix)
+    count_variable = build_parameter_name("N", 1, prefix=parameter_prefix)
+    angle_variable = build_parameter_name("A", 1, prefix=parameter_prefix)
+    pattern_angle_step = 360.0 / float(count)
+    pattern_variable_plan = [
+        {
+            "name": pcd_variable,
+            "value": bolt_circle_diameter,
+            "note": build_parameter_note(operation_label, "pattern", pcd_variable, "Bolt circle diameter"),
+            "kind": "driving_pcd",
+            "step_name": "pattern",
+            "operation_label": operation_label,
+            "external": True,
+        },
+        {
+            "name": count_variable,
+            "value": float(count),
+            "note": build_parameter_note(operation_label, "pattern", count_variable, "Instance count"),
+            "kind": "driving_pattern_count",
+            "step_name": "pattern",
+            "operation_label": operation_label,
+            "external": True,
+        },
+        {
+            "name": angle_variable,
+            "value": pattern_angle_step,
+            "note": build_parameter_note(operation_label, "pattern", angle_variable, "Angular step"),
+            "kind": "driving_pattern_angle_step",
+            "step_name": "pattern",
+            "operation_label": operation_label,
+            "external": True,
+        },
+    ]
+    pattern_radius_y_factor = math.cos(math.radians(start_angle_degrees))
+    pattern_radius_z_factor = math.sin(math.radians(start_angle_degrees))
 
     return {
         "name": str(params.get("name") or "Bolt circle holes"),
@@ -2546,6 +2587,18 @@ def normalize_bolt_circle_holes_params(params: dict[str, Any]) -> dict[str, Any]
         "bolt_circle_diameter": bolt_circle_diameter,
         "count": count,
         "start_angle_degrees": start_angle_degrees,
+        "pattern_variable_plan": pattern_variable_plan,
+        "pattern_count_expression": count_variable,
+        "pattern_step_expression": angle_variable,
+        "first_hole_offset_expressions": [
+            None,
+            f"({pcd_variable} / 2) * {pattern_radius_y_factor:.12g}",
+            f"({pcd_variable} / 2) * {pattern_radius_z_factor:.12g}",
+        ],
+        "pattern_operation_variable_bindings": _build_circular_pattern_variable_bindings(
+            count_variable,
+            angle_variable,
+        ),
         "clockwise": clockwise,
         "axial_direction": axial_direction,
         "auxiliary_geometry_hidden": bool(params.get("auxiliary_geometry_hidden", True)),
@@ -3530,6 +3583,42 @@ def _build_extrusion_length_variable_bindings(
             "expression": length_variable,
             "role": "extrusion_length",
         }
+    ]
+
+
+def _build_circular_pattern_variable_bindings(
+    count_expression: str,
+    angle_step_expression: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": "circular_pattern",
+            "parameter_note": "Count",
+            "parameter_note_aliases": [
+                "Count",
+                "Instance count",
+                "Instances",
+                "Количество",
+                "Число",
+            ],
+            "expression": count_expression,
+            "role": "pattern_count",
+        },
+        {
+            "target": "circular_pattern",
+            "parameter_note": "Angle",
+            "parameter_note_aliases": [
+                "Angle",
+                "Step",
+                "Angular step",
+                "Angle step",
+                "Угол",
+                "Шаг",
+                "Угловой шаг",
+            ],
+            "expression": angle_step_expression,
+            "role": "pattern_angle_step",
+        },
     ]
 
 
@@ -9145,6 +9234,11 @@ def _build_bolt_circle_holes_interface(
     placement_origin = normalized["placement"]["effective_origin"]
     driving_diameters = [item["name"] for item in variable_plan if str(item.get("kind") or "").startswith("driving_") and "diameter" in str(item.get("kind") or "")]
     driving_lengths = [item["name"] for item in variable_plan if str(item.get("kind") or "").startswith("driving_") and "length" in str(item.get("kind") or "")]
+    pattern_variables = {
+        str(item.get("kind") or ""): item["name"]
+        for item in variable_plan
+        if str(item.get("kind") or "").startswith("driving_pattern") or str(item.get("kind") or "") == "driving_pcd"
+    }
     return {
         "feature_type": "pattern.bolt_circle_holes",
         "parameter_namespace": normalized["parameter_prefix"],
@@ -9165,6 +9259,11 @@ def _build_bolt_circle_holes_interface(
             "count": normalized["count"],
             "driving_diameters": driving_diameters,
             "driving_lengths": driving_lengths,
+            "driving_pcd": pattern_variables.get("driving_pcd", ""),
+            "driving_pattern_count": pattern_variables.get("driving_pattern_count", ""),
+            "driving_pattern_angle_step": pattern_variables.get("driving_pattern_angle_step", ""),
+            "pattern_count_expression": normalized["pattern_count_expression"],
+            "pattern_step_expression": normalized["pattern_step_expression"],
         },
         "anchors": {
             "placement_center": [float(placement_origin[0]), float(placement_origin[1]), 0.0],
