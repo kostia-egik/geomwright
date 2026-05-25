@@ -101,8 +101,12 @@ Use `parameterize_sketch` when the geometry already exists. It requires
 `collection_index` to support a follow-up parameterization call when raw COM
 `reference` values are renumbered after `Sketch.Update()`.
 
-Use `list_sketch_entities` first when the sketch was not created in the same
-agent step. It returns bounded selector rows with `reference`,
+Use `list_sketches` first when the target sketch reference is unknown. It
+returns bounded sketch rows with `name`, `reference`, `sketch_ref`, and
+`collection_index`.
+
+Use `list_sketch_entities` when the sketch was not created in the same agent
+step. It returns bounded selector rows with `reference`,
 `collection_index`, `fingerprint`, and `geometry` for `segment`, `circle`,
 `point`, `arc`, and `ellipse` entities.
 

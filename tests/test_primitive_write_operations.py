@@ -375,6 +375,35 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_list_sketches_forwards_filter_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.list_sketches(document_id="doc-1", name_contains="base", max_items=12, include_entity_counts=True)
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "list_sketches",
+                {
+                    "document_id": "doc-1",
+                    "max_items": 12,
+                    "name_contains": "base",
+                    "include_entity_counts": True,
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_list_sketches_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.list_sketches(max_items=0)
+
+        self.assertEqual(runner.calls, [])
+
     def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -1133,6 +1162,30 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(items[0]["geometry"]["end"], [10.0, 0.0])
         self.assertIn("segment|201", items[0]["fingerprint"])
         self.assertEqual(summary["counts"], {"segments": 1, "circles": 1})
+        self.assertFalse(summary["truncated"])
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_list_sketches_returns_references_and_counts(self) -> None:
+        bridge = _load_bridge_module()
+        line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=0.0, Style=1, Reference=201)
+        circle = types.SimpleNamespace(Name="", Xc=5.0, Yc=5.0, Radius=2.0, Style=1, Reference=202)
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]), Circles=_FakeCollection([circle]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("BASE_SKETCH", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        items, summary = bridge._list_existing_sketches(
+            part,
+            {"name_contains": "base", "max_items": 10, "include_entity_counts": True},
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "BASE_SKETCH")
+        self.assertEqual(items[0]["sketch_ref"], 100)
+        self.assertEqual(items[0]["collection_index"], 0)
+        self.assertEqual(items[0]["entity_counts"]["segments"], 1)
+        self.assertEqual(items[0]["entity_counts"]["circles"], 1)
+        self.assertEqual(summary["sketch_count"], 1)
         self.assertFalse(summary["truncated"])
         self.assertTrue(sketch.ended)
 

@@ -1960,6 +1960,71 @@ def _resolve_existing_sketch(model_container, sketch_ref):
     raise RuntimeError("ambiguous target: sketch_ref not found: %s" % wanted)
 
 
+def _sketch_list_item(sketch, index):
+    reference = safe_get(sketch, "Reference")
+    return {
+        "index": index,
+        "collection_index": index,
+        "type": "Sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "reference": reference,
+        "sketch_ref": reference,
+    }
+
+
+def _sketch_entity_counts(sketch):
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        counts = {}
+        for kind in ("segment", "circle", "point", "arc", "ellipse"):
+            collection, collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
+            counts[collection_name] = collection_count(collection)
+        return counts
+    finally:
+        sketch.EndEdit()
+
+
+def _list_existing_sketches(model_container, payload):
+    sketchs = _get_sketch_collection(model_container)
+    if sketchs is None:
+        raise RuntimeError("unsupported COM shape: part does not expose Sketchs/GetSketchs")
+    max_items = int(payload.get("max_items", 100))
+    if max_items < 1:
+        raise RuntimeError("invalid input: max_items must be greater than zero")
+    name_contains = str(payload.get("name_contains") or "").strip().lower()
+    include_entity_counts = bool(payload.get("include_entity_counts", False))
+
+    items = []
+    total = collection_count(sketchs)
+    truncated = False
+    for index in range(total):
+        sketch = get_collection_item(sketchs, index)
+        if sketch is None:
+            continue
+        item = _sketch_list_item(sketch, index)
+        if name_contains and name_contains not in str(item.get("name") or "").lower():
+            continue
+        if len(items) >= max_items:
+            truncated = True
+            break
+        if include_entity_counts:
+            try:
+                item["entity_counts"] = _sketch_entity_counts(sketch)
+            except Exception as exc:
+                item["entity_counts_error"] = str(exc)
+        items.append(item)
+    return items, {
+        "sketch_count": len(items),
+        "total_sketches": total,
+        "truncated": truncated,
+        "max_items": max_items,
+        "include_entity_counts": include_entity_counts,
+    }
+
+
 def _get_sketch_system_view(sketch_doc):
     views_manager = safe_get(sketch_doc, "ViewsAndLayersManager")
     if views_manager is None:
@@ -3009,6 +3074,28 @@ def handle_parameterize_sketch(payload):
             "before": _snapshot_from_tree(document, app, before_tree),
             "after": _snapshot_from_tree(document, app, after_tree),
         },
+    }
+
+
+def handle_list_sketches(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    items, summary = _list_existing_sketches(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "items": items,
+        "summary": summary,
     }
 
 
@@ -11555,6 +11642,8 @@ def dispatch(request):
         return handle_create_sketch_entities(payload)
     if action == "parameterize_sketch":
         return handle_parameterize_sketch(payload)
+    if action == "list_sketches":
+        return handle_list_sketches(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

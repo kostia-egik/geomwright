@@ -1188,6 +1188,26 @@ class KompasAdapter:
             payload["kinds"] = normalized_kinds
         return self.runner.call("list_sketch_entities", payload)
 
+    def list_sketches(
+        self,
+        document_id: str | None = None,
+        *,
+        name_contains: str | None = None,
+        max_items: int = 100,
+        include_entity_counts: bool = False,
+    ) -> dict[str, Any]:
+        if int(max_items) < 1:
+            raise ValueError("max_items must be greater than zero")
+        payload: dict[str, Any] = {
+            "document_id": document_id,
+            "max_items": int(max_items),
+        }
+        if name_contains not in (None, ""):
+            payload["name_contains"] = str(name_contains)
+        if include_entity_counts:
+            payload["include_entity_counts"] = True
+        return self.runner.call("list_sketches", payload)
+
     def inspect_sketch_entity(
         self,
         document_id: str | None = None,

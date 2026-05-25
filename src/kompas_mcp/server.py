@@ -642,6 +642,22 @@ def parameterize_sketch(
 
 
 @mcp.tool()
+def list_sketches(
+    document_id: str | None = None,
+    name_contains: str | None = None,
+    max_items: int = 100,
+    include_entity_counts: bool = False,
+) -> dict:
+    """List sketches with their stable sketch_ref values for follow-up entity tools."""
+    return adapter.list_sketches(
+        document_id=document_id,
+        name_contains=name_contains,
+        max_items=max_items,
+        include_entity_counts=include_entity_counts,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,
