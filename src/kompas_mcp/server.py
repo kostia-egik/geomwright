@@ -714,6 +714,36 @@ def update_sketch_entity_geometry(
 
 
 @mcp.tool()
+def list_sketch_dimensions(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    kinds: list[str] | str | None = None,
+    max_items: int = 100,
+) -> dict:
+    """List existing sketch dimensions with reference, index, fingerprint, and placement fields."""
+    return adapter.list_sketch_dimensions(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        kinds=kinds,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
+def inspect_sketch_dimension(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    dimension: dict | None = None,
+) -> dict:
+    """Inspect one existing sketch dimension selected by reference, index, or fingerprint."""
+    return adapter.inspect_sketch_dimension(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        dimension=dimension,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

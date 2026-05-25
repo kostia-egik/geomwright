@@ -544,6 +544,69 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_list_sketch_dimensions_forwards_filter_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.list_sketch_dimensions(
+            document_id="doc-1",
+            sketch_ref=100,
+            kinds=["line_length", "circle_diameter"],
+            max_items=10,
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "list_sketch_dimensions",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "max_items": 10,
+                    "kinds": ["line", "diametral"],
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_inspect_sketch_dimension_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.inspect_sketch_dimension(
+            document_id="doc-1",
+            sketch_ref=100,
+            dimension={"kind": "circle_diameter", "reference": 301},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "inspect_sketch_dimension",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "dimension": {"kind": "diametral", "reference": "301"},
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_sketch_dimension_readback_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.list_sketch_dimensions(sketch_ref=100, kinds=["unsupported"])
+        with self.assertRaises(ValueError):
+            adapter.list_sketch_dimensions(kinds=["line"])
+        with self.assertRaises(ValueError):
+            adapter.inspect_sketch_dimension(sketch_ref=100, dimension={"kind": "line"})
+        with self.assertRaises(ValueError):
+            adapter.inspect_sketch_dimension(sketch_ref=100, dimension={"kind": "unsupported", "index": 0})
+
+        self.assertEqual(runner.calls, [])
+
     def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -1303,6 +1366,80 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertIn("segment|201", items[0]["fingerprint"])
         self.assertEqual(summary["counts"], {"segments": 1, "circles": 1})
         self.assertFalse(summary["truncated"])
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_list_sketch_dimensions_returns_selectors(self) -> None:
+        bridge = _load_bridge_module()
+        line_dim = types.SimpleNamespace(
+            Name="D1",
+            X1=0.0,
+            Y1=0.0,
+            X2=10.0,
+            Y2=0.0,
+            X3=5.0,
+            Y3=-8.0,
+            Orientation=0,
+            Reference=301,
+        )
+        diam_dim = types.SimpleNamespace(Name="D2", Angle=0.0, DimensionType=False, Reference=302)
+        view = types.SimpleNamespace(
+            LineDimensions=_FakeCollection([line_dim]),
+            DiametralDimensions=_FakeCollection([diam_dim]),
+        )
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, items, summary = bridge._list_existing_sketch_dimensions(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "kinds": ["line_length", "circle_diameter"],
+                "max_items": 10,
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual([item["kind"] for item in items], ["line", "diametral"])
+        self.assertEqual(items[0]["collection_index"], 0)
+        self.assertEqual(items[0]["geometry"]["x2"], 10.0)
+        self.assertIn("line|301", items[0]["fingerprint"])
+        self.assertEqual(summary["counts"], {"line_dimensions": 1, "diametral_dimensions": 1})
+        self.assertFalse(summary["truncated"])
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_inspect_sketch_dimension_returns_one_selector(self) -> None:
+        bridge = _load_bridge_module()
+        line_dim = types.SimpleNamespace(
+            Name="D1",
+            X1=0.0,
+            Y1=0.0,
+            X2=10.0,
+            Y2=0.0,
+            X3=5.0,
+            Y3=-8.0,
+            Orientation=0,
+            Reference=301,
+        )
+        view = types.SimpleNamespace(LineDimensions=_FakeCollection([line_dim]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, item = bridge._inspect_existing_sketch_dimension(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "dimension": {"kind": "line_length", "reference": 301},
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(item["kind"], "line")
+        self.assertEqual(item["collection_index"], 0)
+        self.assertEqual(item["geometry"]["x3"], 5.0)
         self.assertTrue(sketch.ended)
 
     def test_bridge_list_sketches_returns_references_and_counts(self) -> None:

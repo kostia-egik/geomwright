@@ -2488,6 +2488,261 @@ def _list_existing_sketch_entities(model_container, payload):
     }
 
 
+def _normalize_sketch_dimension_kind(kind):
+    value = str(kind or "").strip().lower()
+    if value in ("line", "linear", "line_length"):
+        return "line"
+    if value in ("break", "break_line", "axis_distance"):
+        return "break_line"
+    if value in ("diameter", "diametral", "circle_diameter"):
+        return "diametral"
+    if value in ("angle", "angle_between_lines"):
+        return "angle"
+    return value
+
+
+def _get_sketch_symbols_container(view):
+    try:
+        return _cast_to_com_interface(view, "ISymbols2DContainer")
+    except Exception:
+        return view
+
+
+def _get_dimension_collection(symbols_container, property_name, getter_name):
+    collection = safe_get(symbols_container, property_name)
+    if collection is None:
+        getter = safe_get(symbols_container, getter_name)
+        if callable(getter):
+            collection = getter()
+    return collection
+
+
+def _collection_for_sketch_dimension_kind(symbols_container, kind):
+    normalized = _normalize_sketch_dimension_kind(kind)
+    if normalized == "line":
+        return _get_dimension_collection(symbols_container, "LineDimensions", "GetLineDimensions"), "line_dimensions"
+    if normalized == "break_line":
+        return _get_dimension_collection(symbols_container, "BreakLineDimensions", "GetBreakLineDimensions"), "break_line_dimensions"
+    if normalized == "diametral":
+        return _get_dimension_collection(symbols_container, "DiametralDimensions", "GetDiametralDimensions"), "diametral_dimensions"
+    if normalized == "angle":
+        return _get_dimension_collection(symbols_container, "AngleDimensions", "GetAngleDimensions"), "angle_dimensions"
+    raise RuntimeError("unsupported_sketch_dimension_kind")
+
+
+def _sketch_dimension_geometry(dimension):
+    geometry = {}
+    for key in ("X1", "Y1", "X2", "Y2", "X3", "Y3"):
+        value = safe_get(dimension, key)
+        if value is not None:
+            geometry[key.lower()] = _json_safe_scalar(value)
+    angle = safe_get(dimension, "Angle")
+    if angle is not None:
+        geometry["angle"] = _json_safe_scalar(angle)
+    orientation = safe_get(dimension, "Orientation")
+    if orientation is not None:
+        geometry["orientation"] = _json_safe_scalar(orientation)
+    dimension_type = safe_get(dimension, "DimensionType")
+    if dimension_type is not None:
+        geometry["dimension_type"] = _json_safe_scalar(dimension_type)
+    return geometry
+
+
+def _sketch_dimension_fingerprint(kind, geometry, reference):
+    parts = [str(kind), str(reference if reference not in (None, "") else "")]
+    for key in ("x1", "y1", "x2", "y2", "x3", "y3", "angle", "orientation", "dimension_type"):
+        if key in geometry:
+            parts.append(str(geometry.get(key)))
+    return "|".join(parts)
+
+
+def _dimension_text_payload(dimension):
+    payload = {}
+    text = safe_get(dimension, "Text")
+    if text is None:
+        try:
+            text = _cast_to_com_interface(dimension, "IDimensionText")
+        except Exception:
+            text = None
+    if text is not None:
+        for key in ("Prefix", "NominalText", "Suffix"):
+            value = safe_get(text, key)
+            if value is not None:
+                payload[key.lower()] = safe_get(value, "Str", value)
+        auto_nominal = safe_get(text, "AutoNominalValue")
+        if auto_nominal is not None:
+            payload["auto_nominal_value"] = _json_safe_scalar(auto_nominal)
+    return payload
+
+
+def _sketch_dimension_list_item(dimension, kind, collection_name, index, sketch_ref):
+    reference = safe_get(dimension, "Reference")
+    geometry = _sketch_dimension_geometry(dimension)
+    fingerprint = _sketch_dimension_fingerprint(kind, geometry, reference)
+    item = {
+        "index": index,
+        "collection_index": index,
+        "kind": kind,
+        "collection": collection_name,
+        "sketch_ref": sketch_ref,
+        "reference": reference,
+        "fingerprint": fingerprint,
+        "geometry": geometry,
+        "name": safe_get(dimension, "Name", ""),
+        "value": _json_safe_scalar(safe_get(dimension, "Value")),
+        "variable": safe_get(dimension, "Variable"),
+        "expression": safe_get(dimension, "Expression"),
+        "valid": _json_safe_scalar(safe_get(dimension, "Valid")),
+    }
+    text = _dimension_text_payload(dimension)
+    if text:
+        item["text"] = text
+    return item
+
+
+def _list_existing_sketch_dimensions(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    raw_kinds = payload.get("kinds") or payload.get("dimension_kinds")
+    if raw_kinds in (None, ""):
+        kinds = ["line", "break_line", "diametral", "angle"]
+    elif isinstance(raw_kinds, (list, tuple)):
+        kinds = [_normalize_sketch_dimension_kind(item) for item in raw_kinds]
+    else:
+        kinds = [_normalize_sketch_dimension_kind(raw_kinds)]
+    allowed = {"line", "break_line", "diametral", "angle"}
+    for kind in kinds:
+        if kind not in allowed:
+            raise RuntimeError("invalid input: unsupported sketch dimension kind: %s" % (kind or "<missing>"))
+    max_items = int(payload.get("max_items", 100))
+    if max_items < 1:
+        raise RuntimeError("invalid input: max_items must be greater than zero")
+
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    items = []
+    counts = {}
+    truncated = False
+    try:
+        view = _get_sketch_drawing_container(sketch_doc)
+        symbols_container = _get_sketch_symbols_container(view)
+        for kind in kinds:
+            collection, collection_name = _collection_for_sketch_dimension_kind(symbols_container, kind)
+            count = collection_count(collection)
+            counts[collection_name] = count
+            for index in range(count):
+                if len(items) >= max_items:
+                    truncated = True
+                    break
+                dimension = get_collection_item(collection, index)
+                if dimension is not None:
+                    items.append(_sketch_dimension_list_item(dimension, kind, collection_name, index, safe_get(sketch, "Reference", sketch_ref)))
+            if truncated:
+                break
+    finally:
+        sketch.EndEdit()
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, items, {
+        "dimension_count": len(items),
+        "counts": counts,
+        "truncated": truncated,
+        "max_items": max_items,
+    }
+
+
+def _select_existing_sketch_dimension(symbols_container, spec):
+    kind = _normalize_sketch_dimension_kind(spec.get("kind") or spec.get("type"))
+    collection, collection_name = _collection_for_sketch_dimension_kind(symbols_container, kind)
+    expected_reference = spec.get("reference")
+    expected_reference = str(expected_reference) if expected_reference not in (None, "") else None
+    expected_fingerprint = str(spec.get("fingerprint") or "") or None
+    if spec.get("index") not in (None, ""):
+        dimension = get_collection_item(collection, int(spec.get("index")))
+        if dimension is None:
+            raise RuntimeError("sketch_dimension_index_not_found")
+        return dimension, kind, collection_name
+    count = collection_count(collection)
+    for index in range(count):
+        dimension = get_collection_item(collection, index)
+        if dimension is None:
+            continue
+        reference = safe_get(dimension, "Reference")
+        geometry = _sketch_dimension_geometry(dimension)
+        fingerprint = _sketch_dimension_fingerprint(kind, geometry, reference)
+        if expected_reference is not None and str(reference) == expected_reference:
+            return dimension, kind, collection_name
+        if expected_fingerprint is not None and fingerprint == expected_fingerprint:
+            return dimension, kind, collection_name
+    raise RuntimeError("sketch_dimension_not_found")
+
+
+def _inspect_existing_sketch_dimension(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    spec = payload.get("dimension") or payload.get("selector")
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: dimension selector must be an object")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        view = _get_sketch_drawing_container(sketch_doc)
+        symbols_container = _get_sketch_symbols_container(view)
+        dimension, kind, collection_name = _select_existing_sketch_dimension(symbols_container, spec)
+        item = _sketch_dimension_list_item(
+            dimension,
+            kind,
+            collection_name,
+            int(spec.get("index")) if spec.get("index") not in (None, "") else -1,
+            safe_get(sketch, "Reference", sketch_ref),
+        )
+        if item["collection_index"] < 0:
+            collection, _collection_name = _collection_for_sketch_dimension_kind(symbols_container, kind)
+            count = collection_count(collection)
+            for index in range(count):
+                candidate = get_collection_item(collection, index)
+                if candidate is None:
+                    continue
+                candidate_item = _sketch_dimension_list_item(
+                    candidate,
+                    kind,
+                    collection_name,
+                    index,
+                    safe_get(sketch, "Reference", sketch_ref),
+                )
+                if (
+                    candidate is dimension
+                    or (
+                        item.get("reference") not in (None, "")
+                        and str(candidate_item.get("reference")) == str(item.get("reference"))
+                    )
+                    or (
+                        item.get("fingerprint") not in (None, "")
+                        and candidate_item.get("fingerprint") == item.get("fingerprint")
+                    )
+                ):
+                    item["index"] = index
+                    item["collection_index"] = index
+                    break
+    finally:
+        sketch.EndEdit()
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, item
+
+
 def _inspect_existing_sketch_entity(model_container, payload):
     target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
     sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
@@ -3497,6 +3752,62 @@ def handle_update_sketch_entity_geometry(payload):
         "readback": {
             "before": _snapshot_from_tree(document, app, before_tree),
             "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_list_sketch_dimensions(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    sketch, target, items, summary = _list_existing_sketch_dimensions(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "items": items,
+        "item": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "type": "SketchDimensionList",
+            "reference": safe_get(sketch, "Reference"),
+        },
+        "summary": summary,
+    }
+
+
+def handle_inspect_sketch_dimension(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    sketch, target, item = _inspect_existing_sketch_dimension(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": item,
+        "summary": {
+            "found": True,
+            "kind": item.get("kind"),
+            "collection": item.get("collection"),
+            "collection_index": item.get("collection_index"),
         },
     }
 
@@ -12054,6 +12365,10 @@ def dispatch(request):
         return handle_delete_sketch_entity(payload)
     if action == "update_sketch_entity_geometry":
         return handle_update_sketch_entity_geometry(payload)
+    if action == "list_sketch_dimensions":
+        return handle_list_sketch_dimensions(payload)
+    if action == "inspect_sketch_dimension":
+        return handle_inspect_sketch_dimension(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

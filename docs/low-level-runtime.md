@@ -39,6 +39,9 @@ Use these tools for read-only diagnostics:
 - `verify_document_readback_stability`: captures two snapshots and requires
   zero added/removed/changed items. Use `ignore_paths`, `ignore_keys`, or
   `use_default_volatile_ignores` for timestamp/session noise.
+- `list_sketch_dimensions` / `inspect_sketch_dimension`: read live sketch
+  dimensions from an existing `sketch_ref` and return bounded selectors
+  (`reference`, `collection_index`, `fingerprint`) for repair workflows.
 
 Use these tools for offline verification:
 

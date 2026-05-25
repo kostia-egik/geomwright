@@ -63,6 +63,8 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "set_sketch_entity_style",
             "delete_sketch_entity",
             "update_sketch_entity_geometry",
+            "list_sketch_dimensions",
+            "inspect_sketch_dimension",
             "list_sketch_entities",
             "inspect_sketch_entity",
             "probe_document_readback",

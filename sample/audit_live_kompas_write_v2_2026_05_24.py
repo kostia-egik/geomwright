@@ -242,6 +242,32 @@ def main() -> None:
                 )
                 audit["steps"].append(parameterize_step)
                 audit["parameterize_manifest"] = _build_write_manifest(parameterize_inputs, parameterize_step.get("payload"))
+                dimension_list_step = _run_step(
+                    "list_existing_sketch_dimensions",
+                    lambda: adapter.list_sketch_dimensions(
+                        document_id=opened_document_id,
+                        sketch_ref=sketch_ref,
+                        kinds=["line_length"],
+                        max_items=25,
+                    ),
+                )
+                audit["steps"].append(dimension_list_step)
+                line_dimension = _extract_first_list_item(dimension_list_step.get("payload"), "line")
+                if line_dimension is not None:
+                    audit["steps"].append(
+                        _run_step(
+                            "inspect_existing_sketch_dimension",
+                            lambda: adapter.inspect_sketch_dimension(
+                                document_id=opened_document_id,
+                                sketch_ref=sketch_ref,
+                                dimension={
+                                    "kind": "line_length",
+                                    "index": int(line_dimension.get("collection_index")),
+                                    "fingerprint": line_dimension.get("fingerprint"),
+                                },
+                            ),
+                        )
+                    )
 
         audit["steps"].append(
             _run_step(
@@ -401,6 +427,18 @@ def _extract_list_item_by_collection_index(payload: Any, kind: str, collection_i
     return None
 
 
+def _extract_first_list_item(payload: Any, kind: str) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if isinstance(item, dict) and item.get("kind") == kind:
+            return item
+    return None
+
+
 def _step_ok(audit: dict[str, Any], name: str) -> bool | None:
     for step in audit.get("steps", []):
         if isinstance(step, dict) and step.get("name") == name:
@@ -420,6 +458,8 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "set_sketch_entity_style_ok": _step_ok(audit, "set_existing_sketch_entity_style"),
         "delete_sketch_entity_ok": _step_ok(audit, "delete_existing_sketch_entity"),
         "update_sketch_entity_geometry_ok": _step_ok(audit, "update_existing_sketch_entity_geometry"),
+        "list_sketch_dimensions_ok": _step_ok(audit, "list_existing_sketch_dimensions"),
+        "inspect_sketch_dimension_ok": _step_ok(audit, "inspect_existing_sketch_dimension"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,
