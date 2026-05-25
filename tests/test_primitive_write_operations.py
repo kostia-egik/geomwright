@@ -404,6 +404,36 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_rename_sketch_forwards_target_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.rename_sketch(document_id="doc-1", sketch_ref=100, name="RENAMED")
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "rename_sketch",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "name": "RENAMED",
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_rename_sketch_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.rename_sketch(sketch_ref=100, name="")
+        with self.assertRaises(ValueError):
+            adapter.rename_sketch(name="RENAMED")
+
+        self.assertEqual(runner.calls, [])
+
     def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -1188,6 +1218,24 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(summary["sketch_count"], 1)
         self.assertFalse(summary["truncated"])
         self.assertTrue(sketch.ended)
+
+    def test_bridge_rename_sketch_updates_name(self) -> None:
+        bridge = _load_bridge_module()
+        sketch = _FakeSketch("OLD_NAME", 100, types.SimpleNamespace())
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, update_ok = bridge._rename_existing_sketch(
+            part,
+            {"target": {"mode": "existing_sketch", "sketch_ref": "100"}, "name": "NEW_NAME"},
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(sketch.Name, "NEW_NAME")
+        self.assertEqual(target["old_name"], "OLD_NAME")
+        self.assertEqual(target["name"], "NEW_NAME")
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertTrue(update_ok)
+        self.assertTrue(sketch.updated)
 
     def test_bridge_inspect_sketch_entity_returns_one_selector(self) -> None:
         bridge = _load_bridge_module()

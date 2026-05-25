@@ -2025,6 +2025,29 @@ def _list_existing_sketches(model_container, payload):
     }
 
 
+def _rename_existing_sketch(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise RuntimeError("invalid input: name is required")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    old_name = safe_get(sketch, "Name", "")
+    sketch.Name = name
+    update_ok = True
+    updater = safe_get(sketch, "Update")
+    if callable(updater):
+        update_ok = bool(updater())
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", name),
+        "old_name": old_name,
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, update_ok
+
+
 def _get_sketch_system_view(sketch_doc):
     views_manager = safe_get(sketch_doc, "ViewsAndLayersManager")
     if views_manager is None:
@@ -3096,6 +3119,50 @@ def handle_list_sketches(payload):
         "document": describe_document(document, app),
         "items": items,
         "summary": summary,
+    }
+
+
+def handle_rename_sketch(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, sketch_update_ok = _rename_existing_sketch(model_container, payload)
+    updater = safe_get(top_part, "Update")
+    part_update_ok = True
+    if callable(updater):
+        part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "old_name": target.get("old_name"),
+            "type": "Sketch",
+            "reference": safe_get(sketch, "Reference"),
+        },
+        "summary": {
+            "old_name": target.get("old_name"),
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "sketch_update_ok": sketch_update_ok,
+            "part_update_ok": part_update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
     }
 
 
@@ -11644,6 +11711,8 @@ def dispatch(request):
         return handle_parameterize_sketch(payload)
     if action == "list_sketches":
         return handle_list_sketches(payload)
+    if action == "rename_sketch":
+        return handle_rename_sketch(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

@@ -658,6 +658,16 @@ def list_sketches(
 
 
 @mcp.tool()
+def rename_sketch(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    name: str = "",
+) -> dict:
+    """Rename an existing sketch selected by sketch_ref."""
+    return adapter.rename_sketch(document_id=document_id, sketch_ref=sketch_ref, name=name)
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

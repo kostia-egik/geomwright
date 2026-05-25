@@ -117,6 +117,16 @@ def main() -> None:
                     ),
                 )
             )
+            audit["steps"].append(
+                _run_step(
+                    "rename_sketch",
+                    lambda: adapter.rename_sketch(
+                        document_id=opened_document_id,
+                        sketch_ref=sketch_ref,
+                        name="WRITE_V2_AUDIT_RENAMED",
+                    ),
+                )
+            )
             append_inputs = {
                 "sketch_ref": sketch_ref,
                 "create_new_sketch": False,
@@ -369,6 +379,7 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "write_ok": bool(audit.get("write_manifest", {}).get("ok")),
         "append_write_ok": bool(audit.get("append_write_manifest", {}).get("ok")) if "append_write_manifest" in audit else None,
         "list_sketches_ok": _step_ok(audit, "list_sketches"),
+        "rename_sketch_ok": _step_ok(audit, "rename_sketch"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,

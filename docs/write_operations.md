@@ -103,7 +103,8 @@ Use `parameterize_sketch` when the geometry already exists. It requires
 
 Use `list_sketches` first when the target sketch reference is unknown. It
 returns bounded sketch rows with `name`, `reference`, `sketch_ref`, and
-`collection_index`.
+`collection_index`. Use `rename_sketch` when the selected sketch needs a
+stable, agent-readable name before follow-up operations.
 
 Use `list_sketch_entities` when the sketch was not created in the same agent
 step. It returns bounded selector rows with `reference`,

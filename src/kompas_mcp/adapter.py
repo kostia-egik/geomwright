@@ -1208,6 +1208,27 @@ class KompasAdapter:
             payload["include_entity_counts"] = True
         return self.runner.call("list_sketches", payload)
 
+    def rename_sketch(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        name: str,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        new_name = str(name or "").strip()
+        if not new_name:
+            raise ValueError("name is required")
+        return self.runner.call(
+            "rename_sketch",
+            {
+                "document_id": document_id,
+                "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+                "name": new_name,
+            },
+        )
+
     def inspect_sketch_entity(
         self,
         document_id: str | None = None,
