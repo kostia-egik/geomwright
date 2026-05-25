@@ -9,6 +9,7 @@ from unittest.mock import patch
 from kompas_mcp.native_modules import inspect_native_module
 from kompas_mcp.native_modules import inspect_native_module_entrypoints
 from kompas_mcp.native_modules import inspect_native_module_interfaces
+from kompas_mcp.native_modules import inspect_native_entrypoint_static_abi
 from kompas_mcp.native_modules import inspect_native_spring_workflow
 from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import plan_native_entrypoint_validation
@@ -213,6 +214,55 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(payload["harness"]["mode"], "specification_only_no_execution")
         self.assertIn("LoadLibrary", payload["harness"]["phases"][0]["blocked_actions"])
 
+    def test_inspects_entrypoint_static_abi_without_loading_dll(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            fake_exports = _fake_spring_ccs_export_inventory()
+            fake_abi = {
+                "ok": True,
+                "is_pe": True,
+                "machine": "0x8664",
+                "architecture": "x64",
+                "pe_kind": "PE32+",
+                "selected_export": "SpringCCS",
+                "selected_export_found": True,
+                "selected_export_entry": {
+                    "name": "SpringCCS",
+                    "ordinal": 1,
+                    "ordinal_index": 0,
+                    "rva": "0x00001234",
+                    "forwarded": False,
+                },
+                "exports": [],
+                "imports": [
+                    {
+                        "dll": "KOMPAS6API5.dll",
+                        "symbol_count_returned": 1,
+                        "symbols_truncated": False,
+                        "symbols": [{"name": "ksGetApplication7", "hint": 10}],
+                    }
+                ],
+                "dependencies": ["KOMPAS6API5.dll"],
+            }
+
+            with patch("kompas_mcp.native_modules._runtime_export_inventory", return_value=fake_exports):
+                with patch("kompas_mcp.native_modules._pe_static_abi_inventory", return_value=fake_abi):
+                    payload = inspect_native_entrypoint_static_abi(
+                        "Spring",
+                        libs_dir=str(libs_dir),
+                        export_name="SpringCCS",
+                    )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["probe_kind"], "native_entrypoint_static_abi")
+        self.assertEqual(payload["entry_count"], 1)
+        entry = payload["entries"][0]
+        self.assertEqual(entry["static_abi"]["selected_export_entry"]["ordinal"], 1)
+        self.assertIn("KOMPAS6API5.dll", entry["static_abi"]["dependencies"])
+        self.assertEqual(entry["readiness"]["status"], "static_abi_inventory_complete")
+        self.assertFalse(payload["execution_policy"]["loads_library"])
+        self.assertFalse(payload["assessment"]["may_call_export_now"])
+
     def test_missing_module_returns_available_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             libs_dir = _create_spring_fixture(Path(temp_dir))
@@ -397,6 +447,33 @@ def _create_spring_fixture(root: Path) -> Path:
     _create_sqlite_database(base_dir / "Spring.sdb")
     _create_help_database(spring_dir / "SPRING_ru-RU.db")
     return libs_dir
+
+
+def _fake_spring_ccs_export_inventory() -> dict:
+    return {
+        "enabled": True,
+        "summary": {
+            "file_count": 1,
+            "pe_file_count": 1,
+            "exporting_file_count": 1,
+            "automation_export_count": 1,
+        },
+        "files": [
+            {
+                "relative_path": "SPR_CCS.dll",
+                "name": "SPR_CCS.dll",
+                "suffix": ".dll",
+                "ok": True,
+                "is_pe": True,
+                "machine": "0x8664",
+                "architecture": "x64",
+                "export_count": 1,
+                "exports_returned": 1,
+                "exports_truncated": False,
+                "automation_exports": ["SpringCCS"],
+            }
+        ],
+    }
 
 
 class _FakeNativeLaunchRunner:

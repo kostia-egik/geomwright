@@ -21,6 +21,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "probe_native_module_programmatic_access",
             "inspect_native_module_entrypoints",
             "plan_native_entrypoint_validation",
+            "inspect_native_entrypoint_static_abi",
             "launch_native_module_command",
             "start_native_module_result_probe",
             "capture_native_module_result",

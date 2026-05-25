@@ -23,6 +23,7 @@ from .native_modules import inspect_native_module as build_native_module_inspect
 from .native_modules import inspect_native_module_entrypoints as build_native_module_entrypoint_inspection
 from .native_modules import inspect_native_module_interfaces as build_native_module_interface_inspection
 from .native_modules import inspect_native_spring_workflow as build_native_spring_workflow_inspection
+from .native_modules import inspect_native_entrypoint_static_abi as build_native_entrypoint_static_abi_inspection
 from .native_modules import list_native_modules as build_native_modules
 from .native_modules import plan_native_entrypoint_validation as build_native_entrypoint_validation_plan
 from .native_modules import probe_native_module_programmatic_access as build_native_module_programmatic_access_probe
@@ -175,6 +176,30 @@ def plan_native_entrypoint_validation(
         kompas_root=kompas_root,
         libs_dir=libs_dir,
         max_exports_per_file=max_exports_per_file,
+    )
+
+
+@mcp.tool()
+def inspect_native_entrypoint_static_abi(
+    module: str = "Spring",
+    export_name: str | None = None,
+    command_id: int | str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_exports_per_file: int | None = 120,
+    max_import_dlls: int | None = 80,
+    max_imports_per_dll: int | None = 80,
+) -> dict:
+    """Parse static PE ABI evidence for selected private native exports without loading DLLs."""
+    return build_native_entrypoint_static_abi_inspection(
+        module=module,
+        export_name=export_name,
+        command_id=command_id,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        max_exports_per_file=max_exports_per_file,
+        max_import_dlls=max_import_dlls,
+        max_imports_per_dll=max_imports_per_dll,
     )
 
 

@@ -548,6 +548,81 @@ def plan_native_entrypoint_validation(
     }
 
 
+def inspect_native_entrypoint_static_abi(
+    module: str = "Spring",
+    *,
+    export_name: str | None = None,
+    command_id: int | str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_exports_per_file: int | None = 120,
+    max_import_dlls: int | None = 80,
+    max_imports_per_dll: int | None = 80,
+) -> dict[str, Any]:
+    """Inspect static PE ABI evidence for selected private native exports."""
+    plan = plan_native_entrypoint_validation(
+        module,
+        export_name=export_name,
+        command_id=command_id,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        max_exports_per_file=max_exports_per_file,
+    )
+    if not plan.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "probe_kind": "native_entrypoint_static_abi",
+            "stage": "plan_native_entrypoint_validation",
+            "validation_plan": plan,
+            "error": plan.get("error", "Native entrypoint static ABI inventory could not be built"),
+        }
+
+    module_dir = Path(plan["path"])
+    export_limit = _normalize_limit(max_exports_per_file, default=120, maximum=500)
+    import_dll_limit = _normalize_limit(max_import_dlls, default=80, maximum=300)
+    import_symbol_limit = _normalize_limit(max_imports_per_dll, default=80, maximum=500)
+    entries = []
+    for candidate in plan.get("selected_candidates", []):
+        relative = str(candidate.get("relative_path") or candidate.get("file") or "")
+        dll_path = module_dir / relative
+        inventory = _pe_static_abi_inventory(
+            dll_path,
+            selected_export=str(candidate.get("export") or ""),
+            max_exports=export_limit,
+            max_import_dlls=import_dll_limit,
+            max_imports_per_dll=import_symbol_limit,
+        )
+        entries.append(
+            {
+                "candidate": candidate,
+                "dll_path": str(dll_path),
+                "static_abi": inventory,
+                "readiness": _static_abi_entry_readiness(candidate, inventory),
+            }
+        )
+
+    return {
+        "ok": True,
+        "module": plan["module"],
+        "query": module,
+        "title": plan.get("title"),
+        "app_id": plan.get("app_id"),
+        "path": plan.get("path"),
+        "probe_kind": "native_entrypoint_static_abi",
+        "filters": plan.get("filters", {}),
+        "entry_count": len(entries),
+        "entries": entries,
+        "assessment": _static_abi_inventory_assessment(entries, plan),
+        "execution_policy": {
+            "loads_library": False,
+            "calls_exports": False,
+            "safe_for_production_bridge": True,
+            "promotion_to_loader_probe_allowed": False,
+        },
+    }
+
+
 def preview_native_module_launch(
     module: str = "Spring",
     *,
@@ -1791,6 +1866,343 @@ def _entrypoint_validation_harness(selected: list[dict[str, Any]]) -> dict[str, 
         "default_timeout_seconds": 10,
         "recommended_workdir_policy": "new_empty_temp_dir_per_run",
         "result_policy": "write bounded JSON result plus process exit code; never rely on UI state",
+    }
+
+
+def _pe_static_abi_inventory(
+    path: Path,
+    *,
+    selected_export: str,
+    max_exports: int,
+    max_import_dlls: int,
+    max_imports_per_dll: int,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "is_pe": False,
+        "architecture": None,
+        "machine": None,
+        "selected_export": selected_export,
+        "selected_export_found": False,
+        "exports": [],
+        "imports": [],
+        "dependencies": [],
+    }
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        payload["error"] = str(exc)
+        return payload
+    layout = _pe_layout(data)
+    if not layout.get("ok"):
+        payload.update(layout)
+        return payload
+
+    exports = _pe_export_inventory(
+        data,
+        layout,
+        max_exports=max_exports,
+        selected_export=selected_export,
+    )
+    imports = _pe_import_inventory(
+        data,
+        layout,
+        max_import_dlls=max_import_dlls,
+        max_imports_per_dll=max_imports_per_dll,
+    )
+    selected = exports.get("selected_export")
+    payload.update(
+        {
+            "ok": True,
+            "is_pe": True,
+            "machine": layout.get("machine"),
+            "architecture": layout.get("architecture"),
+            "pe_kind": layout.get("pe_kind"),
+            "export_count": exports.get("export_count", 0),
+            "exports_returned": len(exports.get("exports", [])),
+            "exports_truncated": exports.get("truncated", False),
+            "selected_export_found": selected is not None,
+            "selected_export_entry": selected,
+            "imports": imports.get("imports", []),
+            "dependencies": imports.get("dependencies", []),
+            "import_dll_count": imports.get("import_dll_count", 0),
+            "imports_truncated": imports.get("truncated", False),
+            "evidence": [
+                "parsed_dos_header",
+                "parsed_pe_header",
+                "parsed_export_table" if exports.get("available") else "no_export_table",
+                "parsed_import_table" if imports.get("available") else "no_import_table",
+            ],
+        }
+    )
+    return payload
+
+
+def _pe_layout(data: bytes) -> dict[str, Any]:
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return {"ok": False, "is_pe": False, "error": "not a PE/MZ file"}
+    try:
+        pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe_offset : pe_offset + 4] != b"PE\0\0":
+            return {"ok": False, "is_pe": False, "error": "PE signature not found"}
+        coff = pe_offset + 4
+        machine = struct.unpack_from("<H", data, coff)[0]
+        section_count = struct.unpack_from("<H", data, coff + 2)[0]
+        optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+        optional = coff + 20
+        magic = struct.unpack_from("<H", data, optional)[0]
+        if magic == 0x10B:
+            data_directory = optional + 96
+            pointer_size = 4
+            ordinal_flag = 0x80000000
+            pe_kind = "PE32"
+        elif magic == 0x20B:
+            data_directory = optional + 112
+            pointer_size = 8
+            ordinal_flag = 0x8000000000000000
+            pe_kind = "PE32+"
+        else:
+            return {"ok": False, "is_pe": True, "error": "unknown PE optional header magic"}
+        directories = []
+        for index in range(16):
+            offset = data_directory + index * 8
+            rva, size = struct.unpack_from("<II", data, offset)
+            directories.append({"rva": rva, "size": size})
+        sections = []
+        section_offset = optional + optional_size
+        for index in range(section_count):
+            offset = section_offset + index * 40
+            name = data[offset : offset + 8].rstrip(b"\0").decode("ascii", errors="replace")
+            virtual_size, virtual_address, raw_size, raw_pointer = struct.unpack_from("<IIII", data, offset + 8)
+            sections.append(
+                {
+                    "name": name,
+                    "virtual_address": virtual_address,
+                    "virtual_size": max(virtual_size, raw_size),
+                    "raw_pointer": raw_pointer,
+                    "raw_size": raw_size,
+                }
+            )
+        return {
+            "ok": True,
+            "is_pe": True,
+            "machine": f"0x{machine:04X}",
+            "architecture": _pe_machine_architecture(machine),
+            "pe_kind": pe_kind,
+            "pointer_size": pointer_size,
+            "ordinal_flag": ordinal_flag,
+            "directories": directories,
+            "sections": sections,
+        }
+    except (IndexError, struct.error, ValueError) as exc:
+        return {"ok": False, "is_pe": False, "error": f"PE header parse failed: {exc}"}
+
+
+def _pe_export_inventory(
+    data: bytes,
+    layout: dict[str, Any],
+    *,
+    max_exports: int,
+    selected_export: str,
+) -> dict[str, Any]:
+    export_dir = layout["directories"][0]
+    export_rva = int(export_dir.get("rva") or 0)
+    export_size = int(export_dir.get("size") or 0)
+    if export_rva == 0:
+        return {"available": False, "export_count": 0, "exports": [], "selected_export": None, "truncated": False}
+    sections = _pe_sections_as_tuples(layout)
+    export_offset = _pe_rva_to_offset(export_rva, sections)
+    if export_offset is None:
+        return {"available": False, "export_count": 0, "exports": [], "selected_export": None, "truncated": False}
+    try:
+        ordinal_base = struct.unpack_from("<I", data, export_offset + 16)[0]
+        function_count = struct.unpack_from("<I", data, export_offset + 20)[0]
+        name_count = struct.unpack_from("<I", data, export_offset + 24)[0]
+        functions_rva = struct.unpack_from("<I", data, export_offset + 28)[0]
+        names_rva = struct.unpack_from("<I", data, export_offset + 32)[0]
+        ordinals_rva = struct.unpack_from("<I", data, export_offset + 36)[0]
+        functions_offset = _pe_rva_to_offset(functions_rva, sections)
+        names_offset = _pe_rva_to_offset(names_rva, sections)
+        ordinals_offset = _pe_rva_to_offset(ordinals_rva, sections)
+        if functions_offset is None or names_offset is None or ordinals_offset is None:
+            return {"available": False, "export_count": name_count, "exports": [], "selected_export": None, "truncated": False}
+        exports = []
+        selected_entry = None
+        selected_key = selected_export.casefold()
+        for index in range(min(name_count, max_exports)):
+            name_rva = struct.unpack_from("<I", data, names_offset + index * 4)[0]
+            name_offset = _pe_rva_to_offset(name_rva, sections)
+            ordinal_index = struct.unpack_from("<H", data, ordinals_offset + index * 2)[0]
+            function_rva = (
+                struct.unpack_from("<I", data, functions_offset + ordinal_index * 4)[0]
+                if ordinal_index < function_count
+                else None
+            )
+            name = _read_c_string(data, name_offset) if name_offset is not None else ""
+            forwarded = (
+                function_rva is not None
+                and export_rva <= function_rva < export_rva + export_size
+            )
+            entry = {
+                "name": name,
+                "ordinal": ordinal_base + ordinal_index,
+                "ordinal_index": ordinal_index,
+                "rva": f"0x{function_rva:08X}" if function_rva is not None else None,
+                "forwarded": forwarded,
+            }
+            exports.append(entry)
+            if selected_key and name.casefold() == selected_key:
+                selected_entry = entry
+        return {
+            "available": True,
+            "export_count": name_count,
+            "exports": exports,
+            "selected_export": selected_entry,
+            "truncated": name_count > max_exports,
+        }
+    except (IndexError, struct.error, ValueError) as exc:
+        return {"available": False, "export_count": 0, "exports": [], "selected_export": None, "error": str(exc)}
+
+
+def _pe_import_inventory(
+    data: bytes,
+    layout: dict[str, Any],
+    *,
+    max_import_dlls: int,
+    max_imports_per_dll: int,
+) -> dict[str, Any]:
+    import_dir = layout["directories"][1]
+    import_rva = int(import_dir.get("rva") or 0)
+    if import_rva == 0:
+        return {"available": False, "import_dll_count": 0, "dependencies": [], "imports": [], "truncated": False}
+    sections = _pe_sections_as_tuples(layout)
+    descriptor_offset = _pe_rva_to_offset(import_rva, sections)
+    if descriptor_offset is None:
+        return {"available": False, "import_dll_count": 0, "dependencies": [], "imports": [], "truncated": False}
+    imports = []
+    truncated = False
+    pointer_size = int(layout["pointer_size"])
+    ordinal_flag = int(layout["ordinal_flag"])
+    try:
+        descriptor_index = 0
+        while descriptor_index < max_import_dlls:
+            offset = descriptor_offset + descriptor_index * 20
+            original_first_thunk, _time, _forwarder, name_rva, first_thunk = struct.unpack_from("<IIIII", data, offset)
+            if original_first_thunk == 0 and name_rva == 0 and first_thunk == 0:
+                break
+            name_offset = _pe_rva_to_offset(name_rva, sections)
+            dll_name = _read_c_string(data, name_offset) if name_offset is not None else ""
+            thunk_rva = original_first_thunk or first_thunk
+            symbols = _pe_import_symbols(
+                data,
+                sections,
+                thunk_rva=thunk_rva,
+                pointer_size=pointer_size,
+                ordinal_flag=ordinal_flag,
+                max_symbols=max_imports_per_dll,
+            )
+            imports.append(
+                {
+                    "dll": dll_name,
+                    "symbol_count_returned": len(symbols["symbols"]),
+                    "symbols_truncated": symbols["truncated"],
+                    "symbols": symbols["symbols"],
+                }
+            )
+            if symbols["truncated"]:
+                truncated = True
+            descriptor_index += 1
+        if descriptor_index >= max_import_dlls:
+            truncated = True
+        return {
+            "available": True,
+            "import_dll_count": len(imports),
+            "dependencies": [item["dll"] for item in imports],
+            "imports": imports,
+            "truncated": truncated,
+        }
+    except (IndexError, struct.error, ValueError) as exc:
+        return {"available": False, "import_dll_count": 0, "dependencies": [], "imports": [], "truncated": False, "error": str(exc)}
+
+
+def _pe_import_symbols(
+    data: bytes,
+    sections: list[tuple[int, int, int, int]],
+    *,
+    thunk_rva: int,
+    pointer_size: int,
+    ordinal_flag: int,
+    max_symbols: int,
+) -> dict[str, Any]:
+    thunk_offset = _pe_rva_to_offset(thunk_rva, sections)
+    if thunk_offset is None:
+        return {"symbols": [], "truncated": False}
+    symbols = []
+    step_format = "<Q" if pointer_size == 8 else "<I"
+    ordinal_mask = ordinal_flag - 1
+    for index in range(max_symbols):
+        thunk_value = struct.unpack_from(step_format, data, thunk_offset + index * pointer_size)[0]
+        if thunk_value == 0:
+            return {"symbols": symbols, "truncated": False}
+        if thunk_value & ordinal_flag:
+            symbols.append({"ordinal": int(thunk_value & ordinal_mask)})
+            continue
+        hint_name_offset = _pe_rva_to_offset(int(thunk_value), sections)
+        if hint_name_offset is None:
+            symbols.append({"name": None, "hint": None})
+            continue
+        hint = struct.unpack_from("<H", data, hint_name_offset)[0]
+        symbols.append({"name": _read_c_string(data, hint_name_offset + 2), "hint": hint})
+    return {"symbols": symbols, "truncated": True}
+
+
+def _pe_sections_as_tuples(layout: dict[str, Any]) -> list[tuple[int, int, int, int]]:
+    return [
+        (
+            int(section["virtual_address"]),
+            int(section["virtual_size"]),
+            int(section["raw_pointer"]),
+            int(section["raw_size"]),
+        )
+        for section in layout.get("sections", [])
+    ]
+
+
+def _static_abi_entry_readiness(candidate: dict[str, Any], inventory: dict[str, Any]) -> dict[str, Any]:
+    selected_found = bool(inventory.get("selected_export_found"))
+    imports_available = bool(inventory.get("imports"))
+    return {
+        "status": "static_abi_inventory_complete" if inventory.get("ok") and selected_found else "static_abi_inventory_incomplete",
+        "export_found": selected_found,
+        "imports_available": imports_available,
+        "architecture_matches_candidate": (
+            inventory.get("architecture") == candidate.get("architecture")
+            if inventory.get("architecture") and candidate.get("architecture")
+            else None
+        ),
+        "may_advance_to_loader_probe": False,
+        "reason": (
+            "Static ABI evidence is ready for human review; loader probing still requires explicit approval."
+            if inventory.get("ok") and selected_found
+            else "Selected export was not proven in the static PE table."
+        ),
+    }
+
+
+def _static_abi_inventory_assessment(entries: list[dict[str, Any]], plan: dict[str, Any]) -> dict[str, Any]:
+    complete = [entry for entry in entries if entry.get("readiness", {}).get("status") == "static_abi_inventory_complete"]
+    return {
+        "status": "static_abi_inventory_complete" if complete and len(complete) == len(entries) else "static_abi_inventory_needs_review",
+        "complete_entry_count": len(complete),
+        "entry_count": len(entries),
+        "may_call_export_now": False,
+        "production_bridge_allowed": False,
+        "full_autonomous_access_supported": False,
+        "next_gate": "isolated_loader_probe" if complete else "fix_static_inventory_or_selection",
+        "verdict": (
+            "Static PE data can narrow the reverse-engineering target, but it still does not define a callable Spring API."
+        ),
+        "hard_blocks": plan.get("assessment", {}).get("hard_blocks", []),
     }
 
 
