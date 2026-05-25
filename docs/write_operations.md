@@ -118,6 +118,11 @@ parameterization. It accepts the same `reference`, collection `index`, or
 Use `set_sketch_entity_style` to update the line style for one selected
 existing entity without changing its geometry.
 
+Use `delete_sketch_entity` to remove one mistaken existing entity by the same
+`reference`, collection `index`, or `fingerprint` selector. The result includes
+the deleted entity descriptor, before/after collection counts, and readback
+snapshots around the edit.
+
 ```json
 {
   "sketch_ref": "12345",

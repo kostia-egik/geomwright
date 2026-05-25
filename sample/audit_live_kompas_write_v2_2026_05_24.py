@@ -132,7 +132,7 @@ def main() -> None:
                 "create_new_sketch": False,
                 "entities": [
                     {"kind": "segment", "id": "tail", "start": [60, 0], "end": [80, 0]},
-                    {"kind": "point", "point": [80, 20]},
+                    {"kind": "point", "id": "audit_point", "point": [80, 20]},
                 ],
                 "min_added": 1,
                 "require_no_removed": False,
@@ -145,6 +145,18 @@ def main() -> None:
             audit["steps"].append(append_step)
             audit["append_write_manifest"] = _build_write_manifest(append_inputs, append_step.get("payload"))
             tail_index = _extract_item_field(append_step.get("payload"), "tail", "collection_index")
+            audit_point_index = _extract_item_field(append_step.get("payload"), "audit_point", "collection_index")
+            if audit_point_index not in (None, ""):
+                audit["steps"].append(
+                    _run_step(
+                        "delete_existing_sketch_entity",
+                        lambda: adapter.delete_sketch_entity(
+                            document_id=opened_document_id,
+                            sketch_ref=sketch_ref,
+                            entity={"kind": "point", "index": int(audit_point_index)},
+                        ),
+                    )
+                )
             list_step = _run_step(
                 "list_existing_sketch_entities",
                 lambda: adapter.list_sketch_entities(
@@ -395,6 +407,7 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "list_sketches_ok": _step_ok(audit, "list_sketches"),
         "rename_sketch_ok": _step_ok(audit, "rename_sketch"),
         "set_sketch_entity_style_ok": _step_ok(audit, "set_existing_sketch_entity_style"),
+        "delete_sketch_entity_ok": _step_ok(audit, "delete_existing_sketch_entity"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,

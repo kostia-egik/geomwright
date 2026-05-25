@@ -69,7 +69,7 @@
 
 Обязательный low-level минимум перед следующим крупным модулем:
 
-1. `delete_sketch_entity`: удаление ошибочно созданного объекта эскиза по `reference` / `index` / `fingerprint`.
+1. `delete_sketch_entity`: удаление ошибочно созданного объекта эскиза по `reference` / `index` / `fingerprint` — реализовано, требуется поддерживать в live-audit.
 2. `update_sketch_entity_geometry`: правка геометрии существующего `point`, `segment`, `circle`, затем `arc`.
 3. `list_sketch_dimensions` и `inspect_sketch_dimension`: readback управляющих размеров, имен переменных, привязок и текущих значений.
 4. `list_sketch_constraints` и `inspect_sketch_constraint`: readback геометрических ограничений и их целевых объектов.

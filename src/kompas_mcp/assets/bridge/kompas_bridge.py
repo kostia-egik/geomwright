@@ -2647,6 +2647,73 @@ def _set_existing_sketch_entity_style(model_container, payload):
     }, before, after
 
 
+def _delete_entity_from_collection(collection, entity, index):
+    deleter = safe_get(entity, "Delete")
+    if callable(deleter):
+        result = deleter()
+        return True if result is None else bool(result)
+    collection_deleter = safe_get(collection, "Delete")
+    if callable(collection_deleter):
+        result = collection_deleter(index)
+        return True if result is None else bool(result)
+    items = safe_get(collection, "_items")
+    if isinstance(items, list) and 0 <= int(index) < len(items) and items[int(index)] is entity:
+        items.pop(int(index))
+        try:
+            collection.Count = len(items)
+        except Exception:
+            pass
+        return True
+    raise RuntimeError("sketch_entity_delete_not_supported")
+
+
+def _delete_existing_sketch_entity(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    spec = payload.get("entity") or payload.get("selector")
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: entity selector must be an object")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
+        collection, _collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
+        resolved_sketch_ref = safe_get(sketch, "Reference", sketch_ref)
+        before_count = collection_count(collection)
+        index = _existing_sketch_entity_index(drawing_container, entity, kind, collection_name, resolved_sketch_ref)
+        before = _sketch_entity_list_item(entity, kind, collection_name, index, resolved_sketch_ref)
+        if index < 0:
+            raise RuntimeError("sketch_entity_index_not_found")
+        deleted = _delete_entity_from_collection(collection, entity, index)
+        after_count = collection_count(collection)
+        if after_count >= before_count:
+            raise RuntimeError("sketch_entity_delete_not_confirmed")
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, before, {
+        "kind": before.get("kind"),
+        "collection": before.get("collection"),
+        "collection_index": before.get("collection_index"),
+        "reference": before.get("reference"),
+        "fingerprint": before.get("fingerprint"),
+        "deleted": deleted,
+        "before_count": before_count,
+        "after_count": after_count,
+        "deleted_count": before_count - after_count,
+    }
+
+
 def _existing_sketch_entity_entry(entity, kind, role, target, spec):
     if kind == "segment":
         start = spec.get("start") if isinstance(spec.get("start"), list) else None
@@ -3273,6 +3340,50 @@ def handle_set_sketch_entity_style(payload):
             "collection_index": after_item.get("collection_index"),
             "old_line_style": before_item.get("line_style"),
             "line_style": after_item.get("line_style"),
+            "part_update_ok": part_update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_delete_sketch_entity(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, before_item, deletion = _delete_existing_sketch_entity(model_container, payload)
+    updater = safe_get(top_part, "Update")
+    part_update_ok = True
+    if callable(updater):
+        part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": deletion,
+        "before_item": before_item,
+        "summary": {
+            "kind": deletion.get("kind"),
+            "collection": deletion.get("collection"),
+            "collection_index": deletion.get("collection_index"),
+            "deleted": deletion.get("deleted"),
+            "deleted_count": deletion.get("deleted_count"),
+            "before_count": deletion.get("before_count"),
+            "after_count": deletion.get("after_count"),
             "part_update_ok": part_update_ok,
         },
         "readback": {
@@ -11831,6 +11942,8 @@ def dispatch(request):
         return handle_rename_sketch(payload)
     if action == "set_sketch_entity_style":
         return handle_set_sketch_entity_style(payload)
+    if action == "delete_sketch_entity":
+        return handle_delete_sketch_entity(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

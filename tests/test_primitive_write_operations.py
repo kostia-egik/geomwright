@@ -472,6 +472,40 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_delete_sketch_entity_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.delete_sketch_entity(
+            document_id="doc-1",
+            sketch_ref=100,
+            entity={"kind": "line", "index": "2"},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "delete_sketch_entity",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "entity": {"kind": "segment", "index": 2},
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_delete_sketch_entity_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.delete_sketch_entity(entity={"kind": "segment", "index": 0})
+        with self.assertRaises(ValueError):
+            adapter.delete_sketch_entity(sketch_ref=100, entity={"kind": "spline", "index": 0})
+
+        self.assertEqual(runner.calls, [])
+
     def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -1308,6 +1342,44 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertTrue(sketch.ended)
         self.assertTrue(sketch.updated)
 
+    def test_bridge_delete_sketch_entity_removes_selected_entity(self) -> None:
+        bridge = _load_bridge_module()
+        line = _FakeSketchEntity(201)
+        line.Name = ""
+        line.X1 = 0.0
+        line.Y1 = 0.0
+        line.X2 = 10.0
+        line.Y2 = 0.0
+        other = _FakeSketchEntity(202)
+        other.Name = ""
+        other.X1 = 20.0
+        other.Y1 = 0.0
+        other.X2 = 30.0
+        other.Y2 = 0.0
+        collection = _FakeCollection([line, other])
+        view = types.SimpleNamespace(LineSegments=collection)
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, before, deletion = bridge._delete_existing_sketch_entity(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "entity": {"kind": "line", "reference": 201},
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(before["reference"], 201)
+        self.assertTrue(deletion["deleted"])
+        self.assertEqual(deletion["deleted_count"], 1)
+        self.assertEqual(collection.Count, 1)
+        self.assertIs(collection.Item(0), other)
+        self.assertTrue(sketch.ended)
+        self.assertTrue(sketch.updated)
+
     def test_bridge_inspect_sketch_entity_returns_one_selector(self) -> None:
         bridge = _load_bridge_module()
         line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=0.0, Style=1, Reference=201)
@@ -1408,6 +1480,11 @@ class _FakeCollection:
 
     def Item(self, index: int) -> Any:
         return self._items[index]
+
+    def Delete(self, index: int) -> bool:
+        self._items.pop(index)
+        self.Count = len(self._items)
+        return True
 
 
 class _FakeViews:

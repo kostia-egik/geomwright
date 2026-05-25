@@ -684,6 +684,20 @@ def set_sketch_entity_style(
 
 
 @mcp.tool()
+def delete_sketch_entity(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    entity: dict | None = None,
+) -> dict:
+    """Delete one existing sketch entity selected by reference, index, or fingerprint."""
+    return adapter.delete_sketch_entity(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        entity=entity,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

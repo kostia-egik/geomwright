@@ -1250,6 +1250,22 @@ class KompasAdapter:
         }
         return self.runner.call("set_sketch_entity_style", payload)
 
+    def delete_sketch_entity(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        entity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        payload = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "entity": _normalize_sketch_entity_selector(entity, name="entity"),
+        }
+        return self.runner.call("delete_sketch_entity", payload)
+
     def inspect_sketch_entity(
         self,
         document_id: str | None = None,
