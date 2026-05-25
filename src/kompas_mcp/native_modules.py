@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import struct
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,21 @@ INTERFACE_HINT_PATTERNS: dict[str, tuple[str, ...]] = {
         "window",
     ),
 }
+PROGRAMMATIC_ACCESS_TERMS = (
+    "calculate",
+    "calculation",
+    "buildmodel",
+    "build_model",
+    "createpart",
+    "createdocument",
+    "setparameter",
+    "getparameter",
+    "externalinterface",
+    "externalruncommand",
+    "iexchange",
+    "spring",
+    "пруж",
+)
 
 
 def list_native_modules(
@@ -329,6 +345,82 @@ def inspect_native_spring_workflow(
             "During the manual workflow, watch whether Spring creates or modifies a job/session file outside the reference databases.",
             "If a stable job/session artifact appears, inspect that artifact before attempting any parameter automation.",
         ],
+    }
+
+
+def probe_native_module_programmatic_access(
+    module: str = "Spring",
+    *,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    include_registry: bool = True,
+    include_exports: bool = True,
+    max_registry_keys: int | None = 25_000,
+    max_registry_matches: int | None = 40,
+    max_exports_per_file: int | None = 120,
+) -> dict[str, Any]:
+    """Probe stronger evidence for autonomous native-module automation access."""
+    inspection = inspect_native_module(
+        module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_database_inventory=True,
+    )
+    if not inspection.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "stage": "inspect_native_module",
+            "inspection": inspection,
+            "error": inspection.get("error", "Native module was not found"),
+        }
+
+    module_dir = Path(inspection["path"])
+    registry_key_limit = _normalize_limit(max_registry_keys, default=25_000, maximum=100_000)
+    registry_match_limit = _normalize_limit(max_registry_matches, default=40, maximum=200)
+    exports_limit = _normalize_limit(max_exports_per_file, default=120, maximum=500)
+    search_terms = _programmatic_access_search_terms(inspection)
+    runtime_files = inspection.get("runtime_files", [])
+    export_inventory = (
+        _runtime_export_inventory(module_dir, runtime_files, max_exports_per_file=exports_limit)
+        if include_exports
+        else {"enabled": False, "files": [], "summary": {}}
+    )
+    registry_hints = (
+        _registry_programmatic_access_hints(
+            inspection,
+            search_terms=search_terms,
+            max_keys=registry_key_limit,
+            max_matches=registry_match_limit,
+        )
+        if include_registry
+        else {"enabled": False, "roots": [], "summary": {}}
+    )
+    job_artifacts = _job_session_artifact_hints(inspection)
+    string_evidence = _programmatic_string_evidence(inspection, search_terms=search_terms)
+    assessment = _programmatic_access_assessment(
+        inspection,
+        exports=export_inventory,
+        registry=registry_hints,
+        job_artifacts=job_artifacts,
+        string_evidence=string_evidence,
+    )
+    return {
+        "ok": True,
+        "module": inspection["module"],
+        "query": module,
+        "title": inspection.get("title"),
+        "app_id": inspection.get("app_id"),
+        "path": inspection.get("path"),
+        "probe_kind": "programmatic_access",
+        "evidence": {
+            "registry": registry_hints,
+            "exports": export_inventory,
+            "job_session_artifacts": job_artifacts,
+            "string_evidence": string_evidence,
+            "manifest": _manifest_interface_hints(inspection),
+        },
+        "assessment": assessment,
     }
 
 
@@ -854,6 +946,478 @@ def _native_interface_next_experiments(module: str, status: str) -> list[str]:
     else:
         generic.append("Treat the module as interactive until a documented external/session contract is found.")
     return generic
+
+
+def _programmatic_access_search_terms(inspection: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    for value in (
+        inspection.get("module"),
+        inspection.get("title"),
+        inspection.get("app_id"),
+    ):
+        if value:
+            terms.extend(re.findall(r"[\wА-Яа-я]+", str(value).lower()))
+    for item in inspection.get("runtime_files", []):
+        name = str(item.get("name") or "").lower()
+        stem = Path(name).stem
+        if stem:
+            terms.append(stem)
+        terms.append(name)
+    terms.extend(PROGRAMMATIC_ACCESS_TERMS)
+    compact: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        term = term.strip().lower()
+        if len(term) < 3 or term in seen or not re.search(r"[a-zа-я]", term):
+            continue
+        compact.append(term)
+        seen.add(term)
+    return compact[:80]
+
+
+def _runtime_export_inventory(
+    module_dir: Path,
+    runtime_files: list[dict[str, Any]],
+    *,
+    max_exports_per_file: int,
+) -> dict[str, Any]:
+    files = []
+    summary = {
+        "file_count": 0,
+        "pe_file_count": 0,
+        "exporting_file_count": 0,
+        "automation_export_count": 0,
+    }
+    for item in runtime_files[:50]:
+        path = Path(str(item.get("path", "")))
+        if not _is_relative_to(path, module_dir):
+            continue
+        export_info = _pe_export_names(path, max_exports=max_exports_per_file)
+        automation_exports = [
+            name
+            for name in export_info.get("exports", [])
+            if _looks_like_programmatic_symbol(name)
+        ]
+        files.append(
+            {
+                "relative_path": item.get("relative_path"),
+                "name": item.get("name"),
+                "suffix": item.get("suffix"),
+                "ok": export_info.get("ok"),
+                "is_pe": export_info.get("is_pe", False),
+                "export_count": export_info.get("export_count", 0),
+                "exports_returned": len(export_info.get("exports", [])),
+                "exports_truncated": export_info.get("truncated", False),
+                "automation_exports": automation_exports[:20],
+                "error": export_info.get("error"),
+            }
+        )
+        summary["file_count"] += 1
+        if export_info.get("is_pe"):
+            summary["pe_file_count"] += 1
+        if int(export_info.get("export_count") or 0) > 0:
+            summary["exporting_file_count"] += 1
+        summary["automation_export_count"] += len(automation_exports)
+    return {
+        "enabled": True,
+        "summary": summary,
+        "files": files,
+        "notes": [
+            "PE exports are strong evidence only when they expose domain-level automation functions, not generic DLL registration entrypoints.",
+        ],
+    }
+
+
+def _pe_export_names(path: Path, *, max_exports: int) -> dict[str, Any]:
+    payload: dict[str, Any] = {"ok": False, "is_pe": False, "exports": [], "export_count": 0}
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        payload["error"] = str(exc)
+        return payload
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        payload["error"] = "not a PE/MZ file"
+        return payload
+    try:
+        pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe_offset : pe_offset + 4] != b"PE\0\0":
+            payload["error"] = "PE signature not found"
+            return payload
+        coff = pe_offset + 4
+        section_count = struct.unpack_from("<H", data, coff + 2)[0]
+        optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+        optional = coff + 20
+        magic = struct.unpack_from("<H", data, optional)[0]
+        data_directory = optional + (96 if magic == 0x10B else 112 if magic == 0x20B else -1)
+        if data_directory < optional:
+            payload["error"] = "unknown PE optional header magic"
+            return payload
+        export_rva, _export_size = struct.unpack_from("<II", data, data_directory)
+        payload["is_pe"] = True
+        if export_rva == 0:
+            payload.update({"ok": True, "exports": [], "export_count": 0, "truncated": False})
+            return payload
+        sections = []
+        section_offset = optional + optional_size
+        for index in range(section_count):
+            offset = section_offset + index * 40
+            virtual_size, virtual_address, raw_size, raw_pointer = struct.unpack_from("<IIII", data, offset + 8)
+            sections.append((virtual_address, max(virtual_size, raw_size), raw_pointer, raw_size))
+        export_offset = _pe_rva_to_offset(export_rva, sections)
+        if export_offset is None:
+            payload["error"] = "export directory RVA could not be mapped"
+            return payload
+        name_count = struct.unpack_from("<I", data, export_offset + 24)[0]
+        names_rva = struct.unpack_from("<I", data, export_offset + 32)[0]
+        names_offset = _pe_rva_to_offset(names_rva, sections)
+        if names_offset is None:
+            payload["error"] = "export names RVA could not be mapped"
+            return payload
+        names = []
+        for index in range(min(name_count, max_exports)):
+            name_rva = struct.unpack_from("<I", data, names_offset + index * 4)[0]
+            name_offset = _pe_rva_to_offset(name_rva, sections)
+            if name_offset is None:
+                continue
+            names.append(_read_c_string(data, name_offset))
+        payload.update(
+            {
+                "ok": True,
+                "exports": names,
+                "export_count": name_count,
+                "truncated": name_count > max_exports,
+            }
+        )
+    except (IndexError, struct.error, ValueError) as exc:
+        payload["error"] = f"PE export parse failed: {exc}"
+    return payload
+
+
+def _pe_rva_to_offset(rva: int, sections: list[tuple[int, int, int, int]]) -> int | None:
+    for virtual_address, virtual_size, raw_pointer, raw_size in sections:
+        if virtual_address <= rva < virtual_address + virtual_size:
+            offset = raw_pointer + (rva - virtual_address)
+            if offset < raw_pointer + raw_size:
+                return offset
+    return None
+
+
+def _read_c_string(data: bytes, offset: int) -> str:
+    end = data.find(b"\0", offset)
+    if end < 0:
+        end = min(len(data), offset + 256)
+    return data[offset:end].decode("ascii", errors="replace")
+
+
+def _looks_like_programmatic_symbol(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in {"dllcanunloadnow", "dllgetclassobject", "dllregisterserver", "dllunregisterserver"}:
+        return False
+    return any(term in lowered for term in PROGRAMMATIC_ACCESS_TERMS)
+
+
+def _registry_programmatic_access_hints(
+    inspection: dict[str, Any],
+    *,
+    search_terms: list[str],
+    max_keys: int,
+    max_matches: int,
+) -> dict[str, Any]:
+    if os.name != "nt":
+        return {
+            "enabled": True,
+            "available": False,
+            "roots": [],
+            "summary": {"match_count": 0},
+            "error": "Windows registry is unavailable on this platform",
+        }
+    try:
+        import winreg
+    except ImportError as exc:
+        return {
+            "enabled": True,
+            "available": False,
+            "roots": [],
+            "summary": {"match_count": 0},
+            "error": str(exc),
+        }
+
+    module_dir = str(Path(inspection["path"]).resolve()).lower()
+    runtime_names = {
+        str(item.get("name") or "").lower()
+        for item in inspection.get("runtime_files", [])
+        if item.get("name")
+    }
+    roots = [
+        _scan_registry_tree(
+            winreg.HKEY_CLASSES_ROOT,
+            "CLSID",
+            search_terms=search_terms,
+            module_dir=module_dir,
+            runtime_names=runtime_names,
+            max_depth=2,
+            max_keys=max_keys,
+            max_matches=max_matches,
+        ),
+        _scan_registry_tree(
+            winreg.HKEY_CLASSES_ROOT,
+            "TypeLib",
+            search_terms=search_terms,
+            module_dir=module_dir,
+            runtime_names=runtime_names,
+            max_depth=3,
+            max_keys=max_keys,
+            max_matches=max_matches,
+        ),
+    ]
+    matches = [match for root in roots for match in root.get("matches", [])]
+    direct_module_servers = [
+        match
+        for match in matches
+        if match.get("module_path_match") and "inprocserver32" in str(match.get("key", "")).lower()
+    ]
+    typelib_matches = [
+        match
+        for match in matches
+        if "typelib" in str(match.get("key", "")).lower()
+    ]
+    return {
+        "enabled": True,
+        "available": True,
+        "summary": {
+            "keys_scanned": sum(int(root.get("keys_scanned") or 0) for root in roots),
+            "truncated": any(root.get("truncated") for root in roots),
+            "match_count": len(matches),
+            "direct_module_com_server_count": len(direct_module_servers),
+            "typelib_match_count": len(typelib_matches),
+        },
+        "roots": roots,
+        "notes": [
+            "Registry matches prove registration only when they point at the module runtime path or expose a module-specific TypeLib/ProgID.",
+        ],
+    }
+
+
+def _scan_registry_tree(
+    root: Any,
+    subkey: str,
+    *,
+    search_terms: list[str],
+    module_dir: str,
+    runtime_names: set[str],
+    max_depth: int,
+    max_keys: int,
+    max_matches: int,
+) -> dict[str, Any]:
+    import winreg
+
+    matches: list[dict[str, Any]] = []
+    scanned = 0
+    truncated = False
+
+    def visit(key_path: str, depth: int) -> None:
+        nonlocal scanned, truncated
+        if scanned >= max_keys or len(matches) >= max_matches:
+            truncated = True
+            return
+        try:
+            with winreg.OpenKey(root, key_path) as key:
+                scanned += 1
+                values = _registry_key_values(winreg, key)
+                match = _registry_values_match(
+                    key_path,
+                    values,
+                    search_terms=search_terms,
+                    module_dir=module_dir,
+                    runtime_names=runtime_names,
+                )
+                if match is not None:
+                    matches.append(match)
+                    if len(matches) >= max_matches:
+                        truncated = True
+                        return
+                if depth >= max_depth:
+                    return
+                index = 0
+                while True:
+                    if scanned >= max_keys or len(matches) >= max_matches:
+                        truncated = True
+                        return
+                    try:
+                        child = winreg.EnumKey(key, index)
+                    except OSError:
+                        break
+                    visit(f"{key_path}\\{child}", depth + 1)
+                    index += 1
+        except OSError:
+            return
+
+    visit(subkey, 0)
+    return {
+        "root": f"HKCR\\{subkey}",
+        "keys_scanned": scanned,
+        "truncated": truncated,
+        "matches": matches,
+    }
+
+
+def _registry_key_values(winreg: Any, key: Any) -> list[dict[str, Any]]:
+    values = []
+    index = 0
+    while index < 12:
+        try:
+            name, value, _value_type = winreg.EnumValue(key, index)
+        except OSError:
+            break
+        if isinstance(value, (str, int, float)):
+            values.append({"name": name or "(default)", "value": str(value)})
+        index += 1
+    try:
+        default, _value_type = winreg.QueryValueEx(key, "")
+        if isinstance(default, (str, int, float)) and not any(item["name"] == "(default)" for item in values):
+            values.insert(0, {"name": "(default)", "value": str(default)})
+    except OSError:
+        pass
+    return values
+
+
+def _registry_values_match(
+    key_path: str,
+    values: list[dict[str, Any]],
+    *,
+    search_terms: list[str],
+    module_dir: str,
+    runtime_names: set[str],
+) -> dict[str, Any] | None:
+    haystack = " ".join([key_path] + [item["value"] for item in values]).lower()
+    matched_terms = [term for term in search_terms if term in haystack][:12]
+    runtime_matches = [name for name in runtime_names if name and name in haystack][:12]
+    module_path_match = module_dir in haystack.replace("/", "\\")
+    if not matched_terms and not runtime_matches and not module_path_match:
+        return None
+    return {
+        "key": f"HKCR\\{key_path}",
+        "matched_terms": matched_terms,
+        "runtime_name_matches": runtime_matches,
+        "module_path_match": module_path_match,
+        "values": values[:6],
+    }
+
+
+def _job_session_artifact_hints(inspection: dict[str, Any]) -> dict[str, Any]:
+    artifacts = []
+    weak_suffixes = {".ini", ".cfg", ".json"}
+    xml_manifest = str(inspection.get("manifest_path") or "")
+    for item in inspection.get("files", {}).get("files", []):
+        suffix = str(item.get("suffix") or "").lower()
+        path = str(item.get("path") or "")
+        if suffix == ".xml" and path == xml_manifest:
+            continue
+        if suffix not in weak_suffixes and suffix != ".xml":
+            continue
+        lowered = " ".join(
+            [
+                str(item.get("name") or ""),
+                str(item.get("relative_path") or ""),
+            ]
+        ).lower()
+        categories = [
+            category
+            for category, terms in {
+                "profile": ("profile", "template", "default"),
+                "import_export": ("import", "export", "report"),
+                "parameter": ("param", "parameter", "spring"),
+                "session": ("session", "state", "job", "task"),
+            }.items()
+            if any(term in lowered for term in terms)
+        ]
+        artifacts.append(
+            {
+                "name": item.get("name"),
+                "relative_path": item.get("relative_path"),
+                "suffix": suffix,
+                "size_bytes": item.get("size_bytes"),
+                "categories": categories,
+            }
+        )
+    return {
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts[:30],
+        "truncated": len(artifacts) > 30,
+        "contract_detected": False,
+        "notes": [
+            "Config/profile artifacts are not treated as an input contract unless a schema or documented loader is found.",
+        ],
+    }
+
+
+def _programmatic_string_evidence(inspection: dict[str, Any], *, search_terms: list[str]) -> dict[str, Any]:
+    module_dir = Path(inspection["path"])
+    files = _interface_scan_files(inspection.get("files", {}).get("files", []), limit=30)
+    hints = _scan_interface_string_hints(module_dir, files, max_hits=80, max_bytes_per_file=1_000_000)
+    strong_hits = []
+    for hit in hints.get("hits", []):
+        text = str(hit.get("text") or "")
+        if any(term in text.lower() for term in PROGRAMMATIC_ACCESS_TERMS):
+            strong_hits.append(hit)
+    return {
+        "hit_count": hints.get("hit_count", 0),
+        "category_counts": hints.get("category_counts", {}),
+        "strong_programmatic_hit_count": len(strong_hits),
+        "strong_programmatic_hits": strong_hits[:20],
+        "notes": [
+            "Strings can suggest private internals, but do not prove a stable callable API.",
+        ],
+    }
+
+
+def _programmatic_access_assessment(
+    inspection: dict[str, Any],
+    *,
+    exports: dict[str, Any],
+    registry: dict[str, Any],
+    job_artifacts: dict[str, Any],
+    string_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    registry_summary = registry.get("summary", {})
+    export_summary = exports.get("summary", {})
+    direct_com_servers = int(registry_summary.get("direct_module_com_server_count") or 0)
+    typelib_matches = int(registry_summary.get("typelib_match_count") or 0)
+    automation_exports = int(export_summary.get("automation_export_count") or 0)
+    strong_strings = int(string_evidence.get("strong_programmatic_hit_count") or 0)
+    entrypoint_candidate_detected = direct_com_servers > 0 or typelib_matches > 0 or automation_exports > 0
+    public_callable_contract_detected = direct_com_servers > 0 and typelib_matches > 0
+    full_access_supported = False
+    if entrypoint_candidate_detected:
+        status = "programmatic_entrypoint_candidate_requires_validation"
+    elif strong_strings > 0 or job_artifacts.get("artifact_count", 0) > 0:
+        status = "weak_internal_hints_no_callable_contract"
+    else:
+        status = "no_public_programmatic_access_detected"
+    return {
+        "status": status,
+        "full_autonomous_access_supported": full_access_supported,
+        "public_callable_contract_detected": public_callable_contract_detected,
+        "programmatic_entrypoint_candidate_detected": entrypoint_candidate_detected,
+        "direct_module_com_server_detected": direct_com_servers > 0,
+        "typelib_detected": typelib_matches > 0,
+        "domain_exports_detected": automation_exports > 0,
+        "job_session_contract_detected": bool(job_artifacts.get("contract_detected")),
+        "confidence": "stronger_static_probe",
+        "verdict": (
+            "No supported autonomous parameter/calculation/build contract is proven. "
+            "Treat this module as unsuitable for autonomous MCP work until a callable COM/TypeLib/export/job contract is validated."
+        ),
+        "limits": [
+            "Registry and PE export probing can miss private in-process interfaces that are created only after loading the module.",
+            "Weak strings and config files are not sufficient for autonomous integration.",
+        ],
+        "next_experiments": [
+            "If a candidate COM/TypeLib/export appears, call only a harmless introspection method first and document the exact contract.",
+            "If no candidate appears for Spring, stop investing in UI-driven integration and design an autonomous spring calculation/modeling path.",
+            "Keep launch/readback tools as diagnostics and fallback, not as the production autonomous workflow.",
+        ],
+    }
 
 
 def _spring_calculation_workflow(inspection: dict[str, Any]) -> dict[str, Any]:

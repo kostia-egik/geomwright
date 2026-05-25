@@ -23,6 +23,7 @@ from .native_modules import inspect_native_module as build_native_module_inspect
 from .native_modules import inspect_native_module_interfaces as build_native_module_interface_inspection
 from .native_modules import inspect_native_spring_workflow as build_native_spring_workflow_inspection
 from .native_modules import list_native_modules as build_native_modules
+from .native_modules import probe_native_module_programmatic_access as build_native_module_programmatic_access_probe
 from .thread_catalog import list_thread_catalog_standards as build_thread_catalog_standards
 from .thread_catalog import list_helical_thread_v1_candidates as build_helical_thread_v1_candidates
 from .thread_catalog import list_thread_standard_entries as build_thread_standard_entries
@@ -110,6 +111,30 @@ def inspect_native_spring_workflow(
         libs_dir=libs_dir,
         max_tables=max_tables,
         max_sample_rows=max_sample_rows,
+    )
+
+
+@mcp.tool()
+def probe_native_module_programmatic_access(
+    module: str = "Spring",
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    include_registry: bool = True,
+    include_exports: bool = True,
+    max_registry_keys: int | None = 25_000,
+    max_registry_matches: int | None = 40,
+    max_exports_per_file: int | None = 120,
+) -> dict:
+    """Probe COM/TypeLib/exports/job evidence for autonomous native-module automation access."""
+    return build_native_module_programmatic_access_probe(
+        module=module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_registry=include_registry,
+        include_exports=include_exports,
+        max_registry_keys=max_registry_keys,
+        max_registry_matches=max_registry_matches,
+        max_exports_per_file=max_exports_per_file,
     )
 
 

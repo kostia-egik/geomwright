@@ -10,6 +10,7 @@ from kompas_mcp.native_modules import inspect_native_module_interfaces
 from kompas_mcp.native_modules import inspect_native_spring_workflow
 from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import preview_native_module_launch
+from kompas_mcp.native_modules import probe_native_module_programmatic_access
 from kompas_mcp.native_module_result import capture_native_module_result
 from kompas_mcp.native_module_result import diff_native_module_results
 from kompas_mcp.native_module_result import start_native_module_result_probe
@@ -95,6 +96,26 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(material_tables[0]["sample_rows"][0]["NAME"], "Steel A")
         self.assertFalse(payload["automation_assessment"]["public_parameter_contract_detected"])
         self.assertFalse(payload["automation_assessment"]["safe_to_use_for_automation"])
+
+    def test_probes_programmatic_access_without_treating_hints_as_full_api(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+
+            payload = probe_native_module_programmatic_access(
+                "Spring",
+                libs_dir=str(libs_dir),
+                include_registry=False,
+                max_exports_per_file=20,
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["probe_kind"], "programmatic_access")
+        self.assertFalse(payload["assessment"]["full_autonomous_access_supported"])
+        self.assertFalse(payload["assessment"]["public_callable_contract_detected"])
+        self.assertFalse(payload["assessment"]["direct_module_com_server_detected"])
+        self.assertFalse(payload["assessment"]["job_session_contract_detected"])
+        self.assertGreaterEqual(payload["evidence"]["job_session_artifacts"]["artifact_count"], 1)
+        self.assertIn("not sufficient", payload["assessment"]["limits"][1])
 
     def test_missing_module_returns_available_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
