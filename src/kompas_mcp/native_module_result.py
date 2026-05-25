@@ -130,6 +130,91 @@ def capture_native_module_result(
     }
 
 
+def diff_native_module_results(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    max_documents: int = 10,
+) -> dict[str, Any]:
+    """Compare two native module readbacks captured around an interactive workflow."""
+    before_documents = _documents_from_capture(before)
+    after_documents = _documents_from_capture(after)
+    before_by_ref = {_document_identity(item, offset): item for offset, item in enumerate(before_documents)}
+    after_by_ref = {_document_identity(item, offset): item for offset, item in enumerate(after_documents)}
+    before_refs = set(before_by_ref)
+    after_refs = set(after_by_ref)
+    added_refs = sorted(after_refs - before_refs)
+    removed_refs = sorted(before_refs - after_refs)
+    selected_before = _document_preview(_selected_from_capture(before))
+    selected_after = _document_preview(_selected_from_capture(after))
+    selected_changed = _document_ref(selected_before, None) != _document_ref(selected_after, None)
+    counts_before = _active_counts_from_capture(before)
+    counts_after = _active_counts_from_capture(after)
+    counts_delta = _counts_delta(counts_before, counts_after)
+    active_state_changed = bool(counts_delta) or selected_changed
+    detected = bool(added_refs or removed_refs or active_state_changed)
+    evidence_level = _native_result_evidence_level(
+        added=bool(added_refs),
+        removed=bool(removed_refs),
+        active_state_changed=active_state_changed,
+        before=before,
+        after=after,
+    )
+    return {
+        "ok": isinstance(before, dict) and isinstance(after, dict),
+        "status": "native_result_delta_detected" if detected else "no_native_result_delta_detected",
+        "module": _module_from_captures(before, after),
+        "command": _command_from_captures(before, after),
+        "readback_diff_only": True,
+        "summary": {
+            "before_documents": len(before_documents),
+            "after_documents": len(after_documents),
+            "added_documents": len(added_refs),
+            "removed_documents": len(removed_refs),
+            "selected_document_changed": selected_changed,
+            "active_counts_changed": bool(counts_delta),
+        },
+        "documents": {
+            "selected_before": selected_before,
+            "selected_after": selected_after,
+            "added": [_document_preview(after_by_ref[key]) for key in added_refs[:max_documents]],
+            "removed": [_document_preview(before_by_ref[key]) for key in removed_refs[:max_documents]],
+            "truncated": {
+                "added": max(0, len(added_refs) - max_documents),
+                "removed": max(0, len(removed_refs) - max_documents),
+            },
+        },
+        "active_document_counts": {
+            "before": counts_before,
+            "after": counts_after,
+            "delta": counts_delta,
+        },
+        "evidence_level": evidence_level,
+        "result_assumption": _native_result_assumption(evidence_level),
+        "steps": [
+            {
+                "step": "before_capture",
+                "ok": bool(before.get("ok")) if isinstance(before, dict) else False,
+                "expected": "capture_native_module_result payload",
+                "actual": type(before).__name__,
+            },
+            {
+                "step": "after_capture",
+                "ok": bool(after.get("ok")) if isinstance(after, dict) else False,
+                "expected": "capture_native_module_result payload",
+                "actual": type(after).__name__,
+            },
+            {
+                "step": "detect_delta",
+                "ok": detected,
+                "expected": "document or active state delta",
+                "actual": {"added": len(added_refs), "removed": len(removed_refs), "counts_delta": counts_delta},
+            },
+        ],
+        "next_step": _native_result_next_step(evidence_level),
+    }
+
+
 def _capture_payload(stage: str, callback: Any) -> dict[str, Any]:
     try:
         payload = callback()
@@ -198,3 +283,87 @@ def _document_preview(document: Any) -> dict[str, Any] | None:
         for key in ("id", "name", "path", "type", "changed", "active")
         if key in document
     }
+
+
+def _documents_from_capture(capture: Any) -> list[dict[str, Any]]:
+    documents = capture.get("documents") if isinstance(capture, dict) else None
+    return _documents_from_payload(documents.get("payload") if isinstance(documents, dict) else None)
+
+
+def _selected_from_capture(capture: Any) -> dict[str, Any] | None:
+    documents = capture.get("documents") if isinstance(capture, dict) else None
+    selected = documents.get("selected") if isinstance(documents, dict) else None
+    return selected if isinstance(selected, dict) else None
+
+
+def _document_identity(document: dict[str, Any], offset: int) -> str:
+    for key in ("id", "path", "name"):
+        value = document.get(key)
+        if value:
+            return f"{key}:{value}"
+    return f"offset:{offset}"
+
+
+def _active_counts_from_capture(capture: Any) -> dict[str, Any]:
+    state = capture.get("active_document_state") if isinstance(capture, dict) else None
+    payload = state.get("state") if isinstance(state, dict) else None
+    counts = payload.get("counts") if isinstance(payload, dict) else None
+    return counts if isinstance(counts, dict) else {}
+
+
+def _counts_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    delta: dict[str, Any] = {}
+    for key in sorted(set(before) | set(after)):
+        before_value = before.get(key)
+        after_value = after.get(key)
+        if isinstance(before_value, (int, float)) and isinstance(after_value, (int, float)):
+            if before_value != after_value:
+                delta[key] = after_value - before_value
+        elif before_value != after_value:
+            delta[key] = {"before": before_value, "after": after_value}
+    return delta
+
+
+def _module_from_captures(before: dict[str, Any], after: dict[str, Any]) -> Any:
+    return after.get("module") or before.get("module")
+
+
+def _command_from_captures(before: dict[str, Any], after: dict[str, Any]) -> Any:
+    return after.get("command") or before.get("command")
+
+
+def _native_result_evidence_level(
+    *,
+    added: bool,
+    removed: bool,
+    active_state_changed: bool,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> str:
+    if added:
+        return "new_document_detected"
+    if active_state_changed:
+        return "active_document_state_changed"
+    if not before.get("active_document_state") or not after.get("active_document_state"):
+        return "insufficient_document_readback"
+    if removed:
+        return "document_removed"
+    return "no_detected_delta"
+
+
+def _native_result_assumption(evidence_level: str) -> str:
+    if evidence_level == "new_document_detected":
+        return "new document appeared between captures; treat it as a candidate native module result until inspected"
+    if evidence_level == "active_document_state_changed":
+        return "active document readback changed between captures; inspect added/changed tree items before attributing it to the native module"
+    if evidence_level == "document_removed":
+        return "document set changed, but this does not prove native module output"
+    if evidence_level == "insufficient_document_readback":
+        return "captures do not include enough document readback to prove a native module result"
+    return "no document or active state delta was detected between captures"
+
+
+def _native_result_next_step(evidence_level: str) -> str:
+    if evidence_level in {"new_document_detected", "active_document_state_changed"}:
+        return "Run capture_native_module_result on the candidate document with include_tree/include_items enabled, then inspect feature names and counts."
+    return "Capture before launching the native command, complete the native workflow, then capture after and diff again."

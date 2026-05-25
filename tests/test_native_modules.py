@@ -9,6 +9,7 @@ from kompas_mcp.native_modules import inspect_native_module
 from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import preview_native_module_launch
 from kompas_mcp.native_module_result import capture_native_module_result
+from kompas_mcp.native_module_result import diff_native_module_results
 from kompas_mcp.adapter import KompasAdapter
 
 
@@ -124,6 +125,50 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertIsNone(payload["active_document_state"])
         self.assertEqual(adapter.calls, ["session", "list"])
 
+    def test_diffs_native_module_result_captures(self) -> None:
+        before = _native_capture_payload(
+            documents=[{"id": "doc-1", "name": "base.m3d", "active": True}],
+            selected={"id": "doc-1", "name": "base.m3d", "active": True},
+            counts={"items": 3, "tree_nodes": 5},
+        )
+        after = _native_capture_payload(
+            documents=[
+                {"id": "doc-1", "name": "base.m3d", "active": False},
+                {"id": "doc-2", "name": "spring.m3d", "active": True},
+            ],
+            selected={"id": "doc-2", "name": "spring.m3d", "active": True},
+            counts={"items": 8, "tree_nodes": 12},
+        )
+
+        payload = diff_native_module_results(before, after)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "native_result_delta_detected")
+        self.assertEqual(payload["evidence_level"], "new_document_detected")
+        self.assertEqual(payload["summary"]["added_documents"], 1)
+        self.assertTrue(payload["summary"]["selected_document_changed"])
+        self.assertEqual(payload["documents"]["added"][0]["id"], "doc-2")
+        self.assertEqual(payload["active_document_counts"]["delta"]["items"], 5)
+
+    def test_diffs_native_module_result_captures_without_delta(self) -> None:
+        before = _native_capture_payload(
+            documents=[{"id": "doc-1", "name": "base.m3d", "active": True}],
+            selected={"id": "doc-1", "name": "base.m3d", "active": True},
+            counts={"items": 3, "tree_nodes": 5},
+        )
+        after = _native_capture_payload(
+            documents=[{"id": "doc-1", "name": "base.m3d", "active": True}],
+            selected={"id": "doc-1", "name": "base.m3d", "active": True},
+            counts={"items": 3, "tree_nodes": 5},
+        )
+
+        payload = diff_native_module_results(before, after)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "no_native_result_delta_detected")
+        self.assertEqual(payload["evidence_level"], "no_detected_delta")
+        self.assertEqual(payload["summary"]["added_documents"], 0)
+
 
 def _create_spring_fixture(root: Path) -> Path:
     libs_dir = root / "Libs"
@@ -234,6 +279,25 @@ def _create_help_database(path: Path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def _native_capture_payload(
+    *,
+    documents: list[dict],
+    selected: dict,
+    counts: dict,
+) -> dict:
+    return {
+        "ok": True,
+        "module": "Spring",
+        "command": {"id": 101, "title": "Compression springs"},
+        "documents": {
+            "count": len(documents),
+            "selected": selected,
+            "payload": {"documents": documents},
+        },
+        "active_document_state": {"ok": True, "state": {"counts": counts}},
+    }
 
 
 if __name__ == "__main__":

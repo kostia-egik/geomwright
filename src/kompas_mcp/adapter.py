@@ -22,6 +22,7 @@ from .document_snapshot_verify import verify_document_snapshot_delta as build_do
 from .document_stability import verify_document_readback_stability as build_document_readback_stability
 from .document_state import get_active_document_state as build_active_document_state
 from .native_module_result import capture_native_module_result as build_native_module_result
+from .native_module_result import diff_native_module_results as build_native_module_result_diff
 from .native_modules import preview_native_module_launch as build_native_module_launch_preview
 from .operation_result import normalize_operation_result as build_operation_result_envelope
 from .properties import get_item_properties as build_item_properties
@@ -708,6 +709,19 @@ class KompasAdapter:
             include_tree=include_tree,
             include_items=include_items,
             max_items=max_items,
+        )
+
+    def diff_native_module_results(
+        self,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        *,
+        max_documents: int = 10,
+    ) -> dict[str, Any]:
+        return build_native_module_result_diff(
+            before,
+            after,
+            max_documents=max_documents,
         )
 
     def preflight_document_context(

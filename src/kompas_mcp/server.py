@@ -128,6 +128,20 @@ def capture_native_module_result(
 
 
 @mcp.tool()
+def diff_native_module_results(
+    before: dict,
+    after: dict,
+    max_documents: int = 10,
+) -> dict:
+    """Compare two native module readbacks captured before and after an interactive workflow."""
+    return adapter.diff_native_module_results(
+        before,
+        after,
+        max_documents=max_documents,
+    )
+
+
+@mcp.tool()
 def list_thread_catalog_standards(database_path: str | None = None) -> dict:
     """List thread standards from KOMPAS thread.db with helical-thread V1 compatibility hints."""
     return build_thread_catalog_standards(database_path=database_path)

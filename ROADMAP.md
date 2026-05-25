@@ -48,6 +48,7 @@
 - добавлены `external_threaded_step` и `internal_threaded_step` через штатный каталог резьб КОМПАС и native thread API;
 - добавлены `external_helical_thread` и `internal_helical_thread` как реальные винтовые резьбы через `ICylindricSpiral3D` + `IEvolution`;
 - добавлен read-only слой `native_modules`: обнаружение установленных прикладных модулей КОМПАС по `Libs`, чтение manifest-команд и bounded SQLite-инвентаря; `Spring` определяется как native calculation workflow, а не как ручной CAD-builder;
+- добавлен безопасный цикл исследования native-модулей: интерактивный запуск команды, readback результата после ручного workflow и diff двух readback-снимков до/после для доказательного поиска новых документов/операций;
 - polygonal-ступени доведены до параметрического эскиза с управляющим диаметром по внутренней окружности (`inscribed_circle`) и `well_constrained`-состоянием;
 - устойчивое сохранение базовых свойств детали (`name`, `designation`, `material`) после повторного открытия пока отдельная задача.
 
