@@ -2714,6 +2714,72 @@ def _delete_existing_sketch_entity(model_container, payload):
     }
 
 
+def _apply_existing_sketch_entity_geometry(entity, kind, geometry):
+    if kind == "segment":
+        start = _normalize_point2d_payload(geometry.get("start"), "geometry.start", None)
+        end = _normalize_point2d_payload(geometry.get("end"), "geometry.end", None)
+        entity.X1 = float(start[0])
+        entity.Y1 = float(start[1])
+        entity.X2 = float(end[0])
+        entity.Y2 = float(end[1])
+        return
+    if kind == "circle":
+        center = _normalize_point2d_payload(geometry.get("center"), "geometry.center", None)
+        radius = float(geometry.get("radius"))
+        if radius <= 0:
+            raise RuntimeError("invalid input: geometry.radius must be greater than zero")
+        entity.Xc = float(center[0])
+        entity.Yc = float(center[1])
+        entity.Radius = radius
+        return
+    if kind == "point":
+        point = _normalize_point2d_payload(geometry.get("point", geometry.get("position")), "geometry.point", None)
+        entity.X = float(point[0])
+        entity.Y = float(point[1])
+        return
+    raise RuntimeError("invalid input: unsupported geometry update kind: %s" % (kind or "<missing>"))
+
+
+def _update_existing_sketch_entity_geometry(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    spec = payload.get("entity") or payload.get("selector")
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: entity selector must be an object")
+    geometry = payload.get("geometry")
+    if not isinstance(geometry, dict):
+        raise RuntimeError("invalid input: geometry must be an object")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
+        if kind not in ("point", "segment", "circle"):
+            raise RuntimeError("invalid input: unsupported geometry update kind: %s" % (kind or "<missing>"))
+        resolved_sketch_ref = safe_get(sketch, "Reference", sketch_ref)
+        index = _existing_sketch_entity_index(drawing_container, entity, kind, collection_name, resolved_sketch_ref)
+        edited_entity = _cast_sketch_entity_for_kind(entity, kind)
+        before = _sketch_entity_list_item(edited_entity, kind, collection_name, index, resolved_sketch_ref)
+        _apply_existing_sketch_entity_geometry(edited_entity, kind, geometry)
+        updater = safe_get(edited_entity, "Update")
+        if callable(updater) and not updater():
+            raise RuntimeError("Sketch entity Update returned False")
+        after = _sketch_entity_list_item(edited_entity, kind, collection_name, index, resolved_sketch_ref)
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, before, after
+
+
 def _existing_sketch_entity_entry(entity, kind, role, target, spec):
     if kind == "segment":
         start = spec.get("start") if isinstance(spec.get("start"), list) else None
@@ -3384,6 +3450,48 @@ def handle_delete_sketch_entity(payload):
             "deleted_count": deletion.get("deleted_count"),
             "before_count": deletion.get("before_count"),
             "after_count": deletion.get("after_count"),
+            "part_update_ok": part_update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_update_sketch_entity_geometry(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, before_item, after_item = _update_existing_sketch_entity_geometry(model_container, payload)
+    updater = safe_get(top_part, "Update")
+    part_update_ok = True
+    if callable(updater):
+        part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": after_item,
+        "before_item": before_item,
+        "summary": {
+            "kind": after_item.get("kind"),
+            "collection": after_item.get("collection"),
+            "collection_index": after_item.get("collection_index"),
+            "old_geometry": before_item.get("geometry"),
+            "geometry": after_item.get("geometry"),
             "part_update_ok": part_update_ok,
         },
         "readback": {
@@ -11944,6 +12052,8 @@ def dispatch(request):
         return handle_set_sketch_entity_style(payload)
     if action == "delete_sketch_entity":
         return handle_delete_sketch_entity(payload)
+    if action == "update_sketch_entity_geometry":
+        return handle_update_sketch_entity_geometry(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

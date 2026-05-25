@@ -698,6 +698,22 @@ def delete_sketch_entity(
 
 
 @mcp.tool()
+def update_sketch_entity_geometry(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    entity: dict | None = None,
+    geometry: dict | None = None,
+) -> dict:
+    """Update geometry for one existing point, segment, or circle selected by reference, index, or fingerprint."""
+    return adapter.update_sketch_entity_geometry(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        entity=entity,
+        geometry=geometry,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

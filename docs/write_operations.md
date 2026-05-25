@@ -123,6 +123,10 @@ Use `delete_sketch_entity` to remove one mistaken existing entity by the same
 the deleted entity descriptor, before/after collection counts, and readback
 snapshots around the edit.
 
+Use `update_sketch_entity_geometry` to overwrite geometry for one existing
+`point`, `segment`, or `circle`. It uses the same selectors and returns
+`before_item`, updated `item`, old/new geometry summary, and readback snapshots.
+
 ```json
 {
   "sketch_ref": "12345",

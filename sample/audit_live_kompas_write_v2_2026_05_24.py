@@ -149,6 +149,17 @@ def main() -> None:
             if audit_point_index not in (None, ""):
                 audit["steps"].append(
                     _run_step(
+                        "update_existing_sketch_entity_geometry",
+                        lambda: adapter.update_sketch_entity_geometry(
+                            document_id=opened_document_id,
+                            sketch_ref=sketch_ref,
+                            entity={"kind": "point", "index": int(audit_point_index)},
+                            geometry={"point": [82, 22]},
+                        ),
+                    )
+                )
+                audit["steps"].append(
+                    _run_step(
                         "delete_existing_sketch_entity",
                         lambda: adapter.delete_sketch_entity(
                             document_id=opened_document_id,
@@ -408,6 +419,7 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "rename_sketch_ok": _step_ok(audit, "rename_sketch"),
         "set_sketch_entity_style_ok": _step_ok(audit, "set_existing_sketch_entity_style"),
         "delete_sketch_entity_ok": _step_ok(audit, "delete_existing_sketch_entity"),
+        "update_sketch_entity_geometry_ok": _step_ok(audit, "update_existing_sketch_entity_geometry"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,

@@ -269,6 +269,26 @@ def _normalize_sketch_entity_selector(value: Any, *, name: str) -> dict[str, Any
     return row
 
 
+def _normalize_sketch_entity_geometry(kind: str, value: Any, *, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    if kind == "segment":
+        return {
+            "start": _normalize_point2d(value.get("start"), name=f"{name}.start"),
+            "end": _normalize_point2d(value.get("end"), name=f"{name}.end"),
+        }
+    if kind == "circle":
+        return {
+            "center": _normalize_point2d(value.get("center"), name=f"{name}.center"),
+            "radius": _normalize_positive_float(value.get("radius"), name=f"{name}.radius", default=10.0),
+        }
+    if kind == "point":
+        return {
+            "point": _normalize_point2d(value.get("point", value.get("position")), name=f"{name}.point"),
+        }
+    raise ValueError(f"{name}.kind is unsupported for geometry update")
+
+
 def _normalize_sketch_entity_kinds(value: Any, *, name: str = "kinds") -> list[str]:
     if value in (None, ""):
         return []
@@ -1265,6 +1285,25 @@ class KompasAdapter:
             "entity": _normalize_sketch_entity_selector(entity, name="entity"),
         }
         return self.runner.call("delete_sketch_entity", payload)
+
+    def update_sketch_entity_geometry(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        entity: dict[str, Any] | None = None,
+        geometry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        selector = _normalize_sketch_entity_selector(entity, name="entity")
+        payload = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "entity": selector,
+            "geometry": _normalize_sketch_entity_geometry(selector["kind"], geometry, name="geometry"),
+        }
+        return self.runner.call("update_sketch_entity_geometry", payload)
 
     def inspect_sketch_entity(
         self,
