@@ -65,6 +65,8 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "update_sketch_entity_geometry",
             "list_sketch_dimensions",
             "inspect_sketch_dimension",
+            "list_sketch_constraints",
+            "inspect_sketch_constraint",
             "list_sketch_entities",
             "inspect_sketch_entity",
             "probe_document_readback",

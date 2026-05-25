@@ -264,6 +264,7 @@ SKETCH_CONSTRAINT_TYPES = {
     "fixed_length": 19,
     "concentricity": 22,
 }
+SKETCH_CONSTRAINT_TYPE_NAMES = {value: key for key, value in SKETCH_CONSTRAINT_TYPES.items()}
 LINE_DIMENSION_ORIENTATIONS = {
     "parallel": 0,
     "horizontal": 1,
@@ -2743,6 +2744,202 @@ def _inspect_existing_sketch_dimension(model_container, payload):
     }, item
 
 
+def _get_constraint_collection(drawing_object):
+    obj = _cast_to_com_interface(drawing_object, "IDrawingObject1")
+    for property_name, getter_name in (("Constraints", "GetConstraints"), ("ConstraintCollection", "GetConstraintCollection")):
+        collection = safe_get(obj, property_name)
+        if callable(collection):
+            try:
+                collection = collection()
+            except TypeError:
+                pass
+        if collection is None:
+            getter = safe_get(obj, getter_name)
+            if callable(getter):
+                collection = getter()
+        if collection is not None:
+            return collection, property_name
+    return None, None
+
+
+def _constraint_kind_from_type(constraint_type):
+    try:
+        return SKETCH_CONSTRAINT_TYPE_NAMES.get(int(constraint_type), "type_%s" % int(constraint_type))
+    except Exception:
+        return None
+
+
+def _sketch_constraint_fingerprint(kind, reference, owner, constraint_index, payload):
+    parts = [
+        str(kind or ""),
+        str(reference if reference not in (None, "") else ""),
+        str(owner.get("reference") if isinstance(owner, dict) else ""),
+        str(constraint_index),
+    ]
+    for key in ("constraint_type", "index", "partner_index", "value", "variable", "expression", "valid"):
+        if key in payload and payload.get(key) not in (None, ""):
+            parts.append(str(payload.get(key)))
+    return "|".join(parts)
+
+
+def _sketch_constraint_list_item(constraint, owner_item, constraint_index, scan_index):
+    constraint_type = safe_get(constraint, "ConstraintType", safe_get(constraint, "Type"))
+    kind = _constraint_kind_from_type(constraint_type)
+    reference = safe_get(constraint, "Reference")
+    payload = {
+        "index": scan_index,
+        "collection_index": scan_index,
+        "constraint_index": constraint_index,
+        "kind": kind,
+        "constraint_type": _json_safe_scalar(constraint_type),
+        "reference": reference,
+        "valid": _json_safe_scalar(safe_get(constraint, "Valid")),
+        "value": _json_safe_scalar(safe_get(constraint, "Value")),
+        "variable": safe_get(constraint, "Variable"),
+        "expression": safe_get(constraint, "Expression"),
+        "point_index": _json_safe_scalar(safe_get(constraint, "Index")),
+        "partner_index": _json_safe_scalar(safe_get(constraint, "PartnerIndex")),
+        "owner": {
+            "kind": owner_item.get("kind"),
+            "reference": owner_item.get("reference"),
+            "collection": owner_item.get("collection"),
+            "collection_index": owner_item.get("collection_index"),
+            "fingerprint": owner_item.get("fingerprint"),
+        },
+    }
+    partner = safe_get(constraint, "Partner")
+    partner_reference = safe_get(partner, "Reference") if partner is not None else None
+    if partner_reference not in (None, ""):
+        payload["partner_reference"] = partner_reference
+    payload["fingerprint"] = _sketch_constraint_fingerprint(kind, reference, payload["owner"], constraint_index, payload)
+    return payload
+
+
+def _scan_existing_sketch_constraints(drawing_container, sketch_ref, kinds, max_items):
+    entity_kinds = ["segment", "circle", "point", "arc", "ellipse"]
+    items = []
+    counts = {}
+    owners_scanned = 0
+    surfaces = []
+    truncated = False
+    seen = set()
+    for entity_kind in entity_kinds:
+        collection, collection_name = _collection_for_sketch_entity_kind(drawing_container, entity_kind)
+        entity_count = collection_count(collection)
+        for entity_index in range(entity_count):
+            entity = get_collection_item(collection, entity_index)
+            if entity is None:
+                continue
+            owners_scanned += 1
+            owner_item = _sketch_entity_list_item(entity, entity_kind, collection_name, entity_index, sketch_ref)
+            constraint_collection, surface = _get_constraint_collection(entity)
+            constraint_count = collection_count(constraint_collection)
+            surfaces.append({
+                "entity_kind": entity_kind,
+                "entity_index": entity_index,
+                "entity_reference": owner_item.get("reference"),
+                "surface": surface,
+                "constraint_count": constraint_count,
+            })
+            counts[entity_kind] = counts.get(entity_kind, 0) + constraint_count
+            for constraint_index in range(constraint_count):
+                if len(items) >= max_items:
+                    truncated = True
+                    break
+                constraint = get_collection_item(constraint_collection, constraint_index)
+                if constraint is None:
+                    continue
+                item = _sketch_constraint_list_item(constraint, owner_item, constraint_index, len(items))
+                if kinds and item.get("kind") not in kinds:
+                    continue
+                dedupe_key = item.get("reference") or item.get("fingerprint")
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                items.append(item)
+            if truncated:
+                break
+        if truncated:
+            break
+    return items, {
+        "constraint_count": len(items),
+        "counts": counts,
+        "owners_scanned": owners_scanned,
+        "surfaces": surfaces[: min(len(surfaces), 25)],
+        "truncated": truncated,
+        "max_items": max_items,
+    }
+
+
+def _list_existing_sketch_constraints(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    raw_kinds = payload.get("kinds") or payload.get("constraint_kinds")
+    if raw_kinds in (None, ""):
+        kinds = []
+    elif isinstance(raw_kinds, (list, tuple)):
+        kinds = [str(item or "").strip().lower() for item in raw_kinds]
+    else:
+        kinds = [str(raw_kinds or "").strip().lower()]
+    allowed = set(SKETCH_CONSTRAINT_TYPES.keys())
+    for kind in kinds:
+        if kind not in allowed:
+            raise RuntimeError("invalid input: unsupported sketch constraint kind: %s" % (kind or "<missing>"))
+    max_items = int(payload.get("max_items", 100))
+    if max_items < 1:
+        raise RuntimeError("invalid input: max_items must be greater than zero")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        items, summary = _scan_existing_sketch_constraints(
+            drawing_container,
+            safe_get(sketch, "Reference", sketch_ref),
+            set(kinds),
+            max_items,
+        )
+    finally:
+        sketch.EndEdit()
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, items, summary
+
+
+def _inspect_existing_sketch_constraint(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    spec = payload.get("constraint") or payload.get("selector")
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: constraint selector must be an object")
+    sketch, target_payload, items, summary = _list_existing_sketch_constraints(
+        model_container,
+        {
+            "target": {"mode": "existing_sketch", "sketch_ref": sketch_ref},
+            "kinds": [spec.get("kind")] if spec.get("kind") not in (None, "") else None,
+            "max_items": max(int(spec.get("index", 0)) + 1 if spec.get("index") not in (None, "") else 100, 100),
+        },
+    )
+    expected_reference = str(spec.get("reference")) if spec.get("reference") not in (None, "") else None
+    expected_fingerprint = str(spec.get("fingerprint") or "") or None
+    expected_index = int(spec.get("index")) if spec.get("index") not in (None, "") else None
+    for item in items:
+        if expected_index is not None and int(item.get("index", -1)) == expected_index:
+            return sketch, target_payload, item
+        if expected_reference is not None and str(item.get("reference")) == expected_reference:
+            return sketch, target_payload, item
+        if expected_fingerprint is not None and item.get("fingerprint") == expected_fingerprint:
+            return sketch, target_payload, item
+    raise RuntimeError("sketch_constraint_not_found; scanned=%s" % summary.get("constraint_count"))
+
+
 def _inspect_existing_sketch_entity(model_container, payload):
     target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
     sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
@@ -3807,6 +4004,62 @@ def handle_inspect_sketch_dimension(payload):
             "found": True,
             "kind": item.get("kind"),
             "collection": item.get("collection"),
+            "collection_index": item.get("collection_index"),
+        },
+    }
+
+
+def handle_list_sketch_constraints(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    sketch, target, items, summary = _list_existing_sketch_constraints(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "items": items,
+        "item": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "type": "SketchConstraintList",
+            "reference": safe_get(sketch, "Reference"),
+        },
+        "summary": summary,
+    }
+
+
+def handle_inspect_sketch_constraint(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    sketch, target, item = _inspect_existing_sketch_constraint(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": item,
+        "summary": {
+            "found": True,
+            "kind": item.get("kind"),
+            "reference": item.get("reference"),
             "collection_index": item.get("collection_index"),
         },
     }
@@ -12369,6 +12622,10 @@ def dispatch(request):
         return handle_list_sketch_dimensions(payload)
     if action == "inspect_sketch_dimension":
         return handle_inspect_sketch_dimension(payload)
+    if action == "list_sketch_constraints":
+        return handle_list_sketch_constraints(payload)
+    if action == "inspect_sketch_constraint":
+        return handle_inspect_sketch_constraint(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

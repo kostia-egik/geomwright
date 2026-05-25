@@ -607,6 +607,69 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_list_sketch_constraints_forwards_filter_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.list_sketch_constraints(
+            document_id="doc-1",
+            sketch_ref=100,
+            kinds=["horizontal", "fixed_length"],
+            max_items=10,
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "list_sketch_constraints",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "max_items": 10,
+                    "kinds": ["horizontal", "fixed_length"],
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_inspect_sketch_constraint_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.inspect_sketch_constraint(
+            document_id="doc-1",
+            sketch_ref=100,
+            constraint={"kind": "horizontal", "reference": 401},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "inspect_sketch_constraint",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "constraint": {"kind": "horizontal", "reference": "401"},
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_sketch_constraint_readback_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.list_sketch_constraints(sketch_ref=100, kinds=["unsupported"])
+        with self.assertRaises(ValueError):
+            adapter.list_sketch_constraints(kinds=["horizontal"])
+        with self.assertRaises(ValueError):
+            adapter.inspect_sketch_constraint(sketch_ref=100, constraint={"kind": "horizontal"})
+        with self.assertRaises(ValueError):
+            adapter.inspect_sketch_constraint(sketch_ref=100, constraint={"kind": "unsupported", "index": 0})
+
+        self.assertEqual(runner.calls, [])
+
     def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -1440,6 +1503,75 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(item["kind"], "line")
         self.assertEqual(item["collection_index"], 0)
         self.assertEqual(item["geometry"]["x3"], 5.0)
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_list_sketch_constraints_returns_selectors(self) -> None:
+        bridge = _load_bridge_module()
+        constraint = types.SimpleNamespace(ConstraintType=3, Reference=401, Valid=True, Index=0)
+        line = types.SimpleNamespace(
+            Name="",
+            X1=0.0,
+            Y1=0.0,
+            X2=10.0,
+            Y2=0.0,
+            Style=1,
+            Reference=201,
+            Constraints=_FakeCollection([constraint]),
+        )
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, items, summary = bridge._list_existing_sketch_constraints(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "kinds": ["horizontal"],
+                "max_items": 10,
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "horizontal")
+        self.assertEqual(items[0]["owner"]["reference"], 201)
+        self.assertIn("horizontal|401", items[0]["fingerprint"])
+        self.assertEqual(summary["constraint_count"], 1)
+        self.assertEqual(summary["owners_scanned"], 1)
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_inspect_sketch_constraint_returns_one_selector(self) -> None:
+        bridge = _load_bridge_module()
+        constraint = types.SimpleNamespace(ConstraintType=3, Reference=401, Valid=True, Index=0)
+        line = types.SimpleNamespace(
+            Name="",
+            X1=0.0,
+            Y1=0.0,
+            X2=10.0,
+            Y2=0.0,
+            Style=1,
+            Reference=201,
+            Constraints=_FakeCollection([constraint]),
+        )
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, item = bridge._inspect_existing_sketch_constraint(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "constraint": {"kind": "horizontal", "reference": 401},
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(item["kind"], "horizontal")
+        self.assertEqual(item["owner"]["collection_index"], 0)
         self.assertTrue(sketch.ended)
 
     def test_bridge_list_sketches_returns_references_and_counts(self) -> None:

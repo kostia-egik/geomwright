@@ -268,6 +268,32 @@ def main() -> None:
                             ),
                         )
                     )
+                constraint_list_step = _run_step(
+                    "list_existing_sketch_constraints",
+                    lambda: adapter.list_sketch_constraints(
+                        document_id=opened_document_id,
+                        sketch_ref=sketch_ref,
+                        kinds=["horizontal"],
+                        max_items=25,
+                    ),
+                )
+                audit["steps"].append(constraint_list_step)
+                horizontal_constraint = _extract_first_list_item(constraint_list_step.get("payload"), "horizontal")
+                if horizontal_constraint is not None:
+                    audit["steps"].append(
+                        _run_step(
+                            "inspect_existing_sketch_constraint",
+                            lambda: adapter.inspect_sketch_constraint(
+                                document_id=opened_document_id,
+                                sketch_ref=sketch_ref,
+                                constraint={
+                                    "kind": "horizontal",
+                                    "index": int(horizontal_constraint.get("collection_index")),
+                                    "fingerprint": horizontal_constraint.get("fingerprint"),
+                                },
+                            ),
+                        )
+                    )
 
         audit["steps"].append(
             _run_step(
@@ -460,6 +486,8 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "update_sketch_entity_geometry_ok": _step_ok(audit, "update_existing_sketch_entity_geometry"),
         "list_sketch_dimensions_ok": _step_ok(audit, "list_existing_sketch_dimensions"),
         "inspect_sketch_dimension_ok": _step_ok(audit, "inspect_existing_sketch_dimension"),
+        "list_sketch_constraints_ok": _step_ok(audit, "list_existing_sketch_constraints"),
+        "inspect_sketch_constraint_ok": _step_ok(audit, "inspect_existing_sketch_constraint"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,

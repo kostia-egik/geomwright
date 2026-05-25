@@ -744,6 +744,36 @@ def inspect_sketch_dimension(
 
 
 @mcp.tool()
+def list_sketch_constraints(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    kinds: list[str] | str | None = None,
+    max_items: int = 100,
+) -> dict:
+    """List existing sketch constraints with reference, index, fingerprint, and owner entity fields."""
+    return adapter.list_sketch_constraints(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        kinds=kinds,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
+def inspect_sketch_constraint(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    constraint: dict | None = None,
+) -> dict:
+    """Inspect one existing sketch constraint selected by reference, index, or fingerprint."""
+    return adapter.inspect_sketch_constraint(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        constraint=constraint,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

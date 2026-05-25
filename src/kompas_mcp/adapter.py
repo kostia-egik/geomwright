@@ -351,6 +351,58 @@ def _normalize_sketch_dimension_selector(value: Any, *, name: str) -> dict[str, 
     return row
 
 
+_SKETCH_CONSTRAINT_KINDS = {
+    "fixed_point",
+    "point_on_curve",
+    "horizontal",
+    "vertical",
+    "parallel",
+    "perpendicular",
+    "equal_length",
+    "merge_points",
+    "tangent",
+    "collinear",
+    "fixed_length",
+    "concentricity",
+}
+
+
+def _normalize_sketch_constraint_kinds(value: Any, *, name: str = "kinds") -> list[str]:
+    if value in (None, ""):
+        return []
+    raw_values = value if isinstance(value, (list, tuple)) else [value]
+    normalized: list[str] = []
+    for index, item in enumerate(raw_values):
+        kind = str(item or "").strip().lower()
+        if kind not in _SKETCH_CONSTRAINT_KINDS:
+            raise ValueError(f"{name}[{index}] is unsupported")
+        if kind not in normalized:
+            normalized.append(kind)
+    return normalized
+
+
+def _normalize_sketch_constraint_selector(value: Any, *, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    row = dict(value)
+    if row.get("kind") not in (None, ""):
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind not in _SKETCH_CONSTRAINT_KINDS:
+            raise ValueError(f"{name}.kind is unsupported")
+        row["kind"] = kind
+    if "reference" in row and row["reference"] not in (None, ""):
+        row["reference"] = str(row["reference"])
+    if "index" in row and row["index"] not in (None, ""):
+        row["index"] = int(row["index"])
+    if row.get("fingerprint") not in (None, ""):
+        row["fingerprint"] = str(row["fingerprint"])
+    if isinstance(row.get("entity"), dict):
+        row["entity"] = _normalize_sketch_entity_selector(row["entity"], name=f"{name}.entity")
+    if all(row.get(key) in (None, "") for key in ("reference", "index", "fingerprint")):
+        raise ValueError(f"{name} must include reference, index, or fingerprint")
+    return row
+
+
 def _snapshot_verified_envelope(
     operation: str,
     *,
@@ -1291,6 +1343,44 @@ class KompasAdapter:
             "dimension": _normalize_sketch_dimension_selector(dimension, name="dimension"),
         }
         return self.runner.call("inspect_sketch_dimension", payload)
+
+    def list_sketch_constraints(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        kinds: list[str] | tuple[str, ...] | str | None = None,
+        max_items: int = 100,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        if int(max_items) < 1:
+            raise ValueError("max_items must be greater than zero")
+        payload: dict[str, Any] = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "max_items": int(max_items),
+        }
+        normalized_kinds = _normalize_sketch_constraint_kinds(kinds)
+        if normalized_kinds:
+            payload["kinds"] = normalized_kinds
+        return self.runner.call("list_sketch_constraints", payload)
+
+    def inspect_sketch_constraint(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        constraint: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        payload = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "constraint": _normalize_sketch_constraint_selector(constraint, name="constraint"),
+        }
+        return self.runner.call("inspect_sketch_constraint", payload)
 
     def list_sketches(
         self,

@@ -42,6 +42,14 @@ Use these tools for read-only diagnostics:
 - `list_sketch_dimensions` / `inspect_sketch_dimension`: read live sketch
   dimensions from an existing `sketch_ref` and return bounded selectors
   (`reference`, `collection_index`, `fingerprint`) for repair workflows.
+- `list_sketch_constraints` / `inspect_sketch_constraint`: scan live sketch
+  entities for exposed constraint collections and return bounded owner/selector
+  diagnostics for repair workflows.
+
+Live note: the first KOMPAS check after creating a horizontal constraint found
+`Constraints` surfaces on some line entities, but those collections reported
+zero items. Treat constraint readback as a diagnostic probe until another COM
+surface is confirmed.
 
 Use these tools for offline verification:
 
