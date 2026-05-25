@@ -299,6 +299,42 @@ def _normalize_sketch_entity_geometry(kind: str, value: Any, *, name: str) -> di
     raise ValueError(f"{name}.kind is unsupported for geometry update")
 
 
+def _normalize_sketch_repair_operations(value: Any, *, max_operations: int = 20) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("operations must be a list")
+    if not value:
+        raise ValueError("operations must not be empty")
+    if len(value) > max_operations:
+        raise ValueError(f"operations must contain at most {max_operations} items")
+
+    normalized: list[dict[str, Any]] = []
+    aliases = {
+        "clear_constraints": "clear_constraints",
+        "clear_entity_constraints": "clear_constraints",
+        "delete_constraints": "clear_constraints",
+        "update_geometry": "update_geometry",
+        "update_entity_geometry": "update_geometry",
+        "delete_entity": "delete_entity",
+        "delete": "delete_entity",
+    }
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"operations[{index}] must be an object")
+        operation = aliases.get(str(item.get("operation") or item.get("type") or "").strip().lower())
+        if operation is None:
+            raise ValueError(f"operations[{index}].operation is unsupported")
+        entity = _normalize_sketch_entity_selector(item.get("entity") or item.get("selector"), name=f"operations[{index}].entity")
+        row: dict[str, Any] = {"operation": operation, "entity": entity}
+        if item.get("id") not in (None, ""):
+            row["id"] = str(item.get("id"))
+        if item.get("reason") not in (None, ""):
+            row["reason"] = str(item.get("reason"))
+        if operation == "update_geometry":
+            row["geometry"] = _normalize_sketch_entity_geometry(entity["kind"], item.get("geometry"), name=f"operations[{index}].geometry")
+        normalized.append(row)
+    return normalized
+
+
 def _normalize_sketch_entity_kinds(value: Any, *, name: str = "kinds") -> list[str]:
     if value in (None, ""):
         return []
@@ -1407,6 +1443,24 @@ class KompasAdapter:
             "entity": _normalize_sketch_entity_selector(entity, name="entity"),
         }
         return self.runner.call("clear_sketch_entity_constraints", payload)
+
+    def repair_sketch(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        operations: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        payload = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "operations": _normalize_sketch_repair_operations(operations),
+            "apply": bool(apply),
+        }
+        return self.runner.call("repair_sketch", payload)
 
     def list_sketches(
         self,

@@ -124,8 +124,14 @@ the deleted entity descriptor, before/after collection counts, and readback
 snapshots around the edit.
 
 Use `update_sketch_entity_geometry` to overwrite geometry for one existing
-`point`, `segment`, or `circle`. It uses the same selectors and returns
+`point`, `segment`, `circle`, or `arc`. It uses the same selectors and returns
 `before_item`, updated `item`, old/new geometry summary, and readback snapshots.
+
+Use `repair_sketch` when several selected fixes should be planned or applied as
+one bounded scenario. It defaults to `apply=false`, so the first call resolves
+selectors and returns the planned repair without mutating the sketch. Set
+`apply=true` to execute supported operations: `clear_constraints`,
+`update_geometry`, and `delete_entity`.
 
 ```json
 {

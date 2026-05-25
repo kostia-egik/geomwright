@@ -48,6 +48,9 @@ Use these tools for read-only diagnostics:
 - `clear_sketch_entity_constraints`: deletes all constraints attached to one
   selected sketch entity via `IDrawingObject1.DeleteConstraints`, then returns
   before/after entity snapshots and bounded constraint-count diagnostics.
+- `repair_sketch`: plans by default, or applies with `apply=true`, a bounded
+  repair scenario over one existing sketch. The first supported operations are
+  `clear_constraints`, `update_geometry`, and `delete_entity`.
 
 Live note: the first KOMPAS check after creating a horizontal constraint found
 `Constraints` surfaces on some line entities, but those collections reported

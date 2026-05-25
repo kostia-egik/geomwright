@@ -788,6 +788,22 @@ def clear_sketch_entity_constraints(
 
 
 @mcp.tool()
+def repair_sketch(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    operations: list[dict] | None = None,
+    apply: bool = False,
+) -> dict:
+    """Plan or apply a bounded repair scenario for one existing sketch."""
+    return adapter.repair_sketch(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        operations=operations,
+        apply=apply,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

@@ -3315,6 +3315,198 @@ def _update_existing_sketch_entity_geometry(model_container, payload):
     }, before, after
 
 
+def _normalize_sketch_repair_operation(value):
+    operation = str(value or "").strip().lower()
+    aliases = {
+        "clear_constraints": "clear_constraints",
+        "clear_entity_constraints": "clear_constraints",
+        "delete_constraints": "clear_constraints",
+        "update_geometry": "update_geometry",
+        "update_entity_geometry": "update_geometry",
+        "delete_entity": "delete_entity",
+        "delete": "delete_entity",
+    }
+    normalized = aliases.get(operation)
+    if normalized is None:
+        raise RuntimeError("invalid input: unsupported repair operation")
+    return normalized
+
+
+def _repair_existing_sketch(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    operations = payload.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise RuntimeError("invalid input: operations must be a non-empty list")
+    if len(operations) > 20:
+        raise RuntimeError("invalid input: operations must contain at most 20 items")
+    apply_changes = bool(payload.get("apply"))
+
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    items = []
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        resolved_sketch_ref = safe_get(sketch, "Reference", sketch_ref)
+        for index, raw_operation in enumerate(operations):
+            if not isinstance(raw_operation, dict):
+                raise RuntimeError("invalid input: operations[%d] must be an object" % index)
+            operation = _normalize_sketch_repair_operation(raw_operation.get("operation") or raw_operation.get("type"))
+            spec = raw_operation.get("entity") or raw_operation.get("selector")
+            if not isinstance(spec, dict):
+                raise RuntimeError("invalid input: operations[%d].entity must be an object" % index)
+
+            entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
+            entity_index = _existing_sketch_entity_index(drawing_container, entity, kind, collection_name, resolved_sketch_ref)
+            before = _sketch_entity_list_item(entity, kind, collection_name, entity_index, resolved_sketch_ref)
+            result = {
+                "ok": True,
+                "index": index,
+                "operation": operation,
+                "applied": apply_changes,
+                "kind": kind,
+                "collection": collection_name,
+                "collection_index": entity_index,
+                "reference": before.get("reference"),
+                "fingerprint": before.get("fingerprint"),
+                "before_item": before,
+            }
+            if raw_operation.get("id") not in (None, ""):
+                result["id"] = str(raw_operation.get("id"))
+            if raw_operation.get("reason") not in (None, ""):
+                result["reason"] = str(raw_operation.get("reason"))
+
+            if operation == "clear_constraints":
+                before_collection, before_surface = _get_constraint_collection(entity)
+                before_count = collection_count(before_collection)
+                if apply_changes:
+                    cleared = _clear_constraints_from_entity(entity)
+                    after_collection, after_surface = _get_constraint_collection(entity)
+                    after_count = collection_count(after_collection)
+                    updater = safe_get(entity, "Update")
+                    entity_update_ok = True
+                    if callable(updater):
+                        entity_update_ok = bool(updater())
+                    after = _sketch_entity_list_item(entity, kind, collection_name, entity_index, resolved_sketch_ref)
+                else:
+                    cleared = False
+                    after_surface = before_surface
+                    after_count = before_count
+                    entity_update_ok = None
+                    after = before
+                result.update(
+                    {
+                        "item": after,
+                        "summary": {
+                            "planned": not apply_changes,
+                            "cleared": cleared,
+                            "before_count": before_count,
+                            "after_count": after_count,
+                            "cleared_count": max(0, int(before_count) - int(after_count)) if apply_changes else 0,
+                            "before_surface": before_surface,
+                            "after_surface": after_surface,
+                            "entity_update_ok": entity_update_ok,
+                        },
+                    }
+                )
+            elif operation == "update_geometry":
+                if kind not in ("point", "segment", "circle", "arc"):
+                    raise RuntimeError("invalid input: unsupported geometry update kind: %s" % (kind or "<missing>"))
+                geometry = raw_operation.get("geometry")
+                if not isinstance(geometry, dict):
+                    raise RuntimeError("invalid input: operations[%d].geometry must be an object" % index)
+                edited_entity = _cast_sketch_entity_for_kind(entity, kind)
+                before = _sketch_entity_list_item(edited_entity, kind, collection_name, entity_index, resolved_sketch_ref)
+                if apply_changes:
+                    _apply_existing_sketch_entity_geometry(edited_entity, kind, geometry)
+                    updater = safe_get(edited_entity, "Update")
+                    if callable(updater) and not updater():
+                        raise RuntimeError("Sketch entity Update returned False")
+                    after = _sketch_entity_list_item(edited_entity, kind, collection_name, entity_index, resolved_sketch_ref)
+                else:
+                    after = before
+                result.update(
+                    {
+                        "before_item": before,
+                        "item": after,
+                        "summary": {
+                            "planned": not apply_changes,
+                            "old_geometry": before.get("geometry"),
+                            "geometry": after.get("geometry") if apply_changes else geometry,
+                        },
+                    }
+                )
+            elif operation == "delete_entity":
+                collection, _collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
+                before_count = collection_count(collection)
+                if entity_index < 0:
+                    raise RuntimeError("sketch_entity_index_not_found")
+                if apply_changes:
+                    deleted = _delete_entity_from_collection(collection, entity, entity_index)
+                    after_count = collection_count(collection)
+                    if after_count >= before_count:
+                        raise RuntimeError("sketch_entity_delete_not_confirmed")
+                else:
+                    deleted = False
+                    after_count = before_count
+                result.update(
+                    {
+                        "item": {
+                            "kind": before.get("kind"),
+                            "collection": before.get("collection"),
+                            "collection_index": before.get("collection_index"),
+                            "reference": before.get("reference"),
+                            "fingerprint": before.get("fingerprint"),
+                            "deleted": deleted,
+                            "before_count": before_count,
+                            "after_count": after_count,
+                            "deleted_count": before_count - after_count if apply_changes else 0,
+                        },
+                        "summary": {
+                            "planned": not apply_changes,
+                            "deleted": deleted,
+                            "before_count": before_count,
+                            "after_count": after_count,
+                            "deleted_count": before_count - after_count if apply_changes else 0,
+                        },
+                    }
+                )
+            items.append(result)
+    finally:
+        sketch.EndEdit()
+    sketch_update_ok = None
+    if apply_changes:
+        sketch_update_ok = bool(sketch.Update())
+        if not sketch_update_ok:
+            raise RuntimeError("Sketch Update after repair returned False")
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, items, {
+        "operation_count": len(items),
+        "applied": apply_changes,
+        "planned": not apply_changes,
+        "failed_count": sum(1 for item in items if not item.get("ok")),
+        "sketch_update_ok": sketch_update_ok,
+        "operations": [
+            {
+                "index": item.get("index"),
+                "operation": item.get("operation"),
+                "applied": item.get("applied"),
+                "kind": item.get("kind"),
+                "reference": item.get("reference"),
+                "fingerprint": item.get("fingerprint"),
+            }
+            for item in items
+        ],
+    }
+
+
 def _existing_sketch_entity_entry(entity, kind, role, target, spec):
     if kind == "segment":
         start = spec.get("start") if isinstance(spec.get("start"), list) else None
@@ -4177,6 +4369,51 @@ def handle_clear_sketch_entity_constraints(payload):
         "target": target,
         "item": after_item,
         "before_item": before_item,
+        "summary": summary,
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_repair_sketch(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, items, summary = _repair_existing_sketch(model_container, payload)
+    part_update_ok = None
+    if bool(payload.get("apply")):
+        updater = safe_get(top_part, "Update")
+        part_update_ok = True
+        if callable(updater):
+            part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+    summary = dict(summary)
+    summary["part_update_ok"] = part_update_ok
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "items": items,
+        "item": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "type": "SketchRepair",
+            "reference": safe_get(sketch, "Reference"),
+            "operation_count": len(items),
+            "applied": bool(payload.get("apply")),
+        },
         "summary": summary,
         "readback": {
             "before": _snapshot_from_tree(document, app, before_tree),
@@ -12748,6 +12985,8 @@ def dispatch(request):
         return handle_inspect_sketch_constraint(payload)
     if action == "clear_sketch_entity_constraints":
         return handle_clear_sketch_entity_constraints(payload)
+    if action == "repair_sketch":
+        return handle_repair_sketch(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

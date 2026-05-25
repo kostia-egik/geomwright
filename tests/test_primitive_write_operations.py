@@ -709,6 +709,51 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
+    def test_repair_sketch_forwards_bounded_operations_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.repair_sketch(
+            document_id="doc-1",
+            sketch_ref=100,
+            apply=True,
+            operations=[
+                {
+                    "id": "fix-line",
+                    "operation": "update_geometry",
+                    "entity": {"kind": "line", "reference": 201},
+                    "geometry": {"start": [1, 2], "end": [3, 4]},
+                    "reason": "move line",
+                },
+                {"operation": "delete_entity", "entity": {"kind": "point", "index": "0"}},
+                {"operation": "clear_constraints", "entity": {"kind": "arc", "fingerprint": "arc|1"}},
+            ],
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "repair_sketch",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "operations": [
+                        {
+                            "id": "fix-line",
+                            "operation": "update_geometry",
+                            "entity": {"kind": "segment", "reference": "201"},
+                            "geometry": {"start": [1.0, 2.0], "end": [3.0, 4.0]},
+                            "reason": "move line",
+                        },
+                        {"operation": "delete_entity", "entity": {"kind": "point", "index": 0}},
+                        {"operation": "clear_constraints", "entity": {"kind": "arc", "fingerprint": "arc|1"}},
+                    ],
+                    "apply": True,
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
     def test_sketch_constraint_readback_validates_payload_before_bridge_call(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -725,6 +770,15 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             adapter.clear_sketch_entity_constraints(entity={"kind": "segment", "index": 0})
         with self.assertRaises(ValueError):
             adapter.clear_sketch_entity_constraints(sketch_ref=100, entity={"kind": "unsupported", "index": 0})
+        with self.assertRaises(ValueError):
+            adapter.repair_sketch(sketch_ref=100, operations=[])
+        with self.assertRaises(ValueError):
+            adapter.repair_sketch(sketch_ref=100, operations=[{"operation": "missing", "entity": {"kind": "line", "index": 0}}])
+        with self.assertRaises(ValueError):
+            adapter.repair_sketch(
+                sketch_ref=100,
+                operations=[{"operation": "update_geometry", "entity": {"kind": "circle", "index": 0}, "geometry": {"radius": 0}}],
+            )
 
         self.assertEqual(runner.calls, [])
 
@@ -1675,6 +1729,109 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertTrue(line.updated)
         self.assertTrue(sketch.ended)
         self.assertTrue(sketch.updated)
+
+    def test_bridge_repair_sketch_can_plan_without_mutation(self) -> None:
+        bridge = _load_bridge_module()
+        line = _FakeSketchEntity(201)
+        line.Name = ""
+        line.X1 = 0.0
+        line.Y1 = 0.0
+        line.X2 = 10.0
+        line.Y2 = 0.0
+        line.Style = 1
+        collection = _FakeCollection([line])
+        view = types.SimpleNamespace(LineSegments=collection)
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, items, summary = bridge._repair_existing_sketch(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "apply": False,
+                "operations": [
+                    {
+                        "operation": "update_geometry",
+                        "entity": {"kind": "line", "reference": 201},
+                        "geometry": {"start": [5, 6], "end": [15, 16]},
+                    },
+                ],
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(len(items), 1)
+        self.assertFalse(items[0]["applied"])
+        self.assertEqual(items[0]["summary"]["geometry"]["start"], [5, 6])
+        self.assertEqual(line.X1, 0.0)
+        self.assertEqual(line.X2, 10.0)
+        self.assertTrue(sketch.ended)
+        self.assertFalse(sketch.updated)
+        self.assertTrue(summary["planned"])
+
+    def test_bridge_repair_sketch_applies_clear_update_and_delete(self) -> None:
+        bridge = _load_bridge_module()
+        constraint = types.SimpleNamespace(ConstraintType=3, Reference=401, Valid=True, Index=0)
+        line = _FakeSketchEntity(201)
+        line.Name = ""
+        line.X1 = 0.0
+        line.Y1 = 0.0
+        line.X2 = 10.0
+        line.Y2 = 0.0
+        line.Style = 1
+        line.Constraints = _FakeCollection([constraint])
+
+        def delete_constraints() -> bool:
+            line.Constraints._items.clear()
+            line.Constraints.Count = 0
+            return True
+
+        line.DeleteConstraints = delete_constraints
+        point = _FakeSketchEntity(301)
+        point.Name = ""
+        point.X = 3.0
+        point.Y = 4.0
+        line_collection = _FakeCollection([line])
+        point_collection = _FakeCollection([point])
+        view = types.SimpleNamespace(LineSegments=line_collection, Points=point_collection)
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, items, summary = bridge._repair_existing_sketch(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "apply": True,
+                "operations": [
+                    {"operation": "clear_constraints", "entity": {"kind": "line", "reference": 201}},
+                    {
+                        "operation": "update_geometry",
+                        "entity": {"kind": "line", "reference": 201},
+                        "geometry": {"start": [5, 6], "end": [15, 16]},
+                    },
+                    {"operation": "delete_entity", "entity": {"kind": "point", "reference": 301}},
+                ],
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(len(items), 3)
+        self.assertTrue(all(item["applied"] for item in items))
+        self.assertEqual(items[0]["summary"]["cleared_count"], 1)
+        self.assertEqual(items[1]["item"]["geometry"]["start"], [5.0, 6.0])
+        self.assertEqual(items[2]["summary"]["deleted_count"], 1)
+        self.assertEqual(line.X1, 5.0)
+        self.assertEqual(line.Y2, 16.0)
+        self.assertEqual(point_collection.Count, 0)
+        self.assertTrue(line.updated)
+        self.assertTrue(sketch.ended)
+        self.assertTrue(sketch.updated)
+        self.assertTrue(summary["applied"])
+        self.assertEqual(summary["operation_count"], 3)
 
     def test_bridge_list_sketches_returns_references_and_counts(self) -> None:
         bridge = _load_bridge_module()
