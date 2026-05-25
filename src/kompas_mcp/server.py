@@ -830,6 +830,20 @@ def inspect_feature(
 
 
 @mcp.tool()
+def repair_feature(
+    document_id: str | None = None,
+    operations: list[dict] | None = None,
+    apply: bool = False,
+) -> dict:
+    """Plan or apply bounded repairs to existing 3D features: rename, suppress, or delete."""
+    return adapter.repair_feature(
+        document_id=document_id,
+        operations=operations,
+        apply=apply,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

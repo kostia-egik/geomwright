@@ -826,6 +826,50 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
+    def test_repair_feature_forwards_bounded_operations(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.repair_feature(
+            document_id="doc-1",
+            operations=[
+                {
+                    "operation": "rename_feature",
+                    "feature": {"kind": "revolve", "reference": 501},
+                    "name": "RENAMED",
+                },
+                {
+                    "operation": "suppress",
+                    "feature": {"kind": "extrude", "index": "0"},
+                },
+            ],
+            apply=True,
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "repair_feature",
+                {
+                    "document_id": "doc-1",
+                    "operations": [
+                        {
+                            "operation": "rename",
+                            "feature": {"kind": "rotated", "reference": "501"},
+                            "name": "RENAMED",
+                        },
+                        {
+                            "operation": "set_suppressed",
+                            "feature": {"kind": "extrusion", "index": 0},
+                            "suppressed": True,
+                        },
+                    ],
+                    "apply": True,
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
     def test_feature_readback_validates_payload_before_bridge_call(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -838,6 +882,12 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             adapter.inspect_feature(feature={"kind": "unsupported", "index": 0})
         with self.assertRaises(ValueError):
             adapter.inspect_feature(feature={"kind": "rotated"})
+        with self.assertRaises(ValueError):
+            adapter.repair_feature(operations=[])
+        with self.assertRaises(ValueError):
+            adapter.repair_feature(operations=[{"operation": "rename", "feature": {"kind": "rotated", "index": 0}}])
+        with self.assertRaises(ValueError):
+            adapter.repair_feature(operations=[{"operation": "explode", "feature": {"kind": "rotated", "index": 0}}])
 
         self.assertEqual(runner.calls, [])
 
@@ -1941,6 +1991,55 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(item["variables"][0]["expression"], "L1")
         self.assertEqual(item["variable_count"], 1)
 
+    def test_bridge_repair_feature_plans_and_applies_rename_suppress_delete(self) -> None:
+        bridge = _load_bridge_module()
+        rotated = _FakeFeature("BaseRevolve", 501, suppressed=False)
+        extrusion = _FakeFeature("CutExtrude", 601, suppressed=False)
+        pattern = _FakeFeature("Pattern", 701, suppressed=False)
+        part = types.SimpleNamespace(
+            Rotateds=_FakeCollection([rotated]),
+            Extrusions=_FakeCollection([extrusion]),
+            FeaturePatterns=_FakeCollection([pattern]),
+        )
+
+        planned_items, planned_summary = bridge._repair_existing_features(
+            part,
+            {
+                "operations": [
+                    {"operation": "rename", "feature": {"kind": "rotated", "index": 0}, "name": "RENAMED"},
+                    {"operation": "suppress", "feature": {"kind": "extrusion", "index": 0}},
+                    {"operation": "delete", "feature": {"kind": "feature_pattern", "index": 0}},
+                ],
+                "apply": False,
+            },
+        )
+
+        self.assertFalse(planned_summary["applied"])
+        self.assertEqual(planned_items[0]["item"]["name"], "RENAMED")
+        self.assertEqual(rotated.Name, "BaseRevolve")
+        self.assertFalse(extrusion.Suppressed)
+        self.assertEqual(part.FeaturePatterns.Count, 1)
+
+        applied_items, applied_summary = bridge._repair_existing_features(
+            part,
+            {
+                "operations": [
+                    {"operation": "rename", "feature": {"kind": "rotated", "index": 0}, "name": "RENAMED"},
+                    {"operation": "suppress", "feature": {"kind": "extrusion", "index": 0}},
+                    {"operation": "delete_feature", "feature": {"kind": "feature_pattern", "index": 0}},
+                ],
+                "apply": True,
+            },
+        )
+
+        self.assertTrue(applied_summary["applied"])
+        self.assertEqual(rotated.Name, "RENAMED")
+        self.assertTrue(rotated.updated)
+        self.assertTrue(extrusion.Suppressed)
+        self.assertTrue(extrusion.updated)
+        self.assertEqual(part.FeaturePatterns.Count, 0)
+        self.assertEqual(applied_items[2]["summary"]["deleted_count"], 1)
+
     def test_bridge_list_sketches_returns_references_and_counts(self) -> None:
         bridge = _load_bridge_module()
         line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=0.0, Style=1, Reference=201)
@@ -2268,6 +2367,20 @@ class _FakeSketch:
 class _FakeSketchEntity:
     def __init__(self, reference: int) -> None:
         self.Reference = reference
+        self.updated = False
+
+    def Update(self) -> bool:
+        self.updated = True
+        return True
+
+
+class _FakeFeature:
+    def __init__(self, name: str, reference: int, *, suppressed: bool = False) -> None:
+        self.Name = name
+        self.Reference = reference
+        self.Suppressed = suppressed
+        self.Hidden = False
+        self.Type = 1
         self.updated = False
 
     def Update(self) -> bool:

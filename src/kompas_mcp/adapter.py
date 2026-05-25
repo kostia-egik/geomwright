@@ -504,6 +504,56 @@ def _normalize_feature_selector(value: Any, *, name: str) -> dict[str, Any]:
     return row
 
 
+def _normalize_feature_repair_operation(value: Any, *, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    row = dict(value)
+    raw_operation = str(row.get("operation") or row.get("type") or "").strip().lower()
+    aliases = {
+        "rename": "rename",
+        "rename_feature": "rename",
+        "set_name": "rename",
+        "suppress": "set_suppressed",
+        "unsuppress": "set_suppressed",
+        "set_suppressed": "set_suppressed",
+        "set_suppression": "set_suppressed",
+        "delete": "delete_feature",
+        "delete_feature": "delete_feature",
+        "remove": "delete_feature",
+    }
+    operation = aliases.get(raw_operation, raw_operation)
+    if operation not in {"rename", "set_suppressed", "delete_feature"}:
+        raise ValueError(f"{name}.operation is unsupported")
+    row["operation"] = operation
+    row["feature"] = _normalize_feature_selector(row.get("feature") or row.get("selector"), name=f"{name}.feature")
+    if operation == "rename":
+        new_name = str(row.get("name") or row.get("new_name") or "").strip()
+        if not new_name:
+            raise ValueError(f"{name}.name is required for rename")
+        row["name"] = new_name
+    elif operation == "set_suppressed":
+        if "suppressed" in row:
+            suppressed = row.get("suppressed")
+        elif "value" in row:
+            suppressed = row.get("value")
+        else:
+            suppressed = raw_operation == "suppress"
+        row["suppressed"] = bool(suppressed)
+    return row
+
+
+def _normalize_feature_repair_operations(value: Any, *, max_operations: int = 20) -> list[dict[str, Any]]:
+    rows = _normalize_object_list(value, name="operations")
+    if not rows:
+        raise ValueError("operations must not be empty")
+    if len(rows) > max_operations:
+        raise ValueError(f"operations must contain at most {max_operations} items")
+    return [
+        _normalize_feature_repair_operation(row, name=f"operations[{index}]")
+        for index, row in enumerate(rows)
+    ]
+
+
 def _snapshot_verified_envelope(
     operation: str,
     *,
@@ -1546,6 +1596,20 @@ class KompasAdapter:
             "feature": _normalize_feature_selector(feature, name="feature"),
         }
         return self.runner.call("inspect_feature", payload)
+
+    def repair_feature(
+        self,
+        document_id: str | None = None,
+        *,
+        operations: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            "document_id": document_id,
+            "operations": _normalize_feature_repair_operations(operations),
+            "apply": bool(apply),
+        }
+        return self.runner.call("repair_feature", payload)
 
     def list_sketches(
         self,

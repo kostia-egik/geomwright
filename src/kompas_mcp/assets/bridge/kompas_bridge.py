@@ -1185,6 +1185,227 @@ def _inspect_existing_feature(model_container, payload):
     return _feature_list_item(feature, kind, collection_name, index, include_details=True)
 
 
+def _normalize_feature_repair_operation(operation):
+    operation = str(operation or "").strip().lower()
+    aliases = {
+        "rename": "rename",
+        "rename_feature": "rename",
+        "set_name": "rename",
+        "suppress": "set_suppressed",
+        "unsuppress": "set_suppressed",
+        "set_suppressed": "set_suppressed",
+        "set_suppression": "set_suppressed",
+        "delete": "delete_feature",
+        "delete_feature": "delete_feature",
+        "remove": "delete_feature",
+    }
+    normalized = aliases.get(operation)
+    if normalized is None:
+        raise RuntimeError("invalid input: unsupported feature repair operation: %s" % (operation or "<missing>"))
+    return normalized
+
+
+def _update_feature_object(feature):
+    updater = safe_get(feature, "Update")
+    if not callable(updater):
+        return None
+    result = updater()
+    return True if result is None else bool(result)
+
+
+def _set_feature_suppressed(feature, suppressed):
+    report = {
+        "requested_suppressed": bool(suppressed),
+        "reference": safe_get(feature, "Reference"),
+        "name": safe_get(feature, "Name", ""),
+    }
+    current_suppressed = safe_get(feature, "Suppressed")
+    if current_suppressed is not None:
+        report["surface"] = "Suppressed"
+        report["before"] = bool(current_suppressed)
+        feature.Suppressed = bool(suppressed)
+        report["update_ok"] = _update_feature_object(feature)
+        applied = safe_get(feature, "Suppressed")
+        report["after"] = bool(applied) if applied is not None else None
+        report["ok"] = applied is not None and bool(applied) == bool(suppressed) and report["update_ok"] is not False
+        return report
+
+    current_enabled = safe_get(feature, "Enabled")
+    if current_enabled is not None:
+        report["surface"] = "Enabled"
+        report["before"] = not bool(current_enabled)
+        feature.Enabled = not bool(suppressed)
+        report["update_ok"] = _update_feature_object(feature)
+        applied = safe_get(feature, "Enabled")
+        report["after"] = (not bool(applied)) if applied is not None else None
+        report["ok"] = applied is not None and bool(applied) == (not bool(suppressed)) and report["update_ok"] is not False
+        return report
+
+    report["ok"] = False
+    report["reason"] = "feature_suppression_property_unavailable"
+    return report
+
+
+def _delete_feature_from_collection(collection, feature, index):
+    deleter = safe_get(feature, "Delete")
+    if callable(deleter):
+        result = deleter()
+        if result is None or bool(result):
+            return True
+    collection_deleter = safe_get(collection, "Delete")
+    if callable(collection_deleter):
+        result = collection_deleter(index)
+        return True if result is None else bool(result)
+    items = safe_get(collection, "_items")
+    if isinstance(items, list) and 0 <= index < len(items):
+        try:
+            items.pop(index)
+            collection.Count = len(items)
+        except Exception:
+            pass
+        return True
+    raise RuntimeError("feature_delete_not_supported")
+
+
+def _repair_existing_features(model_container, payload):
+    operations = payload.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise RuntimeError("invalid input: operations must be a non-empty list")
+    if len(operations) > 20:
+        raise RuntimeError("invalid input: operations must contain at most 20 items")
+    apply_changes = bool(payload.get("apply"))
+
+    items = []
+    for index, raw_operation in enumerate(operations):
+        if not isinstance(raw_operation, dict):
+            raise RuntimeError("invalid input: operations[%d] must be an object" % index)
+        operation = _normalize_feature_repair_operation(raw_operation.get("operation") or raw_operation.get("type"))
+        spec = raw_operation.get("feature") or raw_operation.get("selector")
+        feature, kind, collection_name, collection_index = _select_existing_feature(model_container, spec)
+        collection, _kind, _collection_name = _collection_for_feature_kind(model_container, kind)
+        before = _feature_list_item(feature, kind, collection_name, collection_index, include_details=True)
+        result = {
+            "ok": True,
+            "index": index,
+            "operation": operation,
+            "applied": apply_changes,
+            "kind": kind,
+            "collection": collection_name,
+            "collection_index": collection_index,
+            "reference": before.get("reference"),
+            "fingerprint": before.get("fingerprint"),
+            "before_item": before,
+        }
+        if raw_operation.get("id") not in (None, ""):
+            result["id"] = str(raw_operation.get("id"))
+        if raw_operation.get("reason") not in (None, ""):
+            result["reason"] = str(raw_operation.get("reason"))
+
+        if operation == "rename":
+            new_name = str(raw_operation.get("name") or raw_operation.get("new_name") or "").strip()
+            if not new_name:
+                raise RuntimeError("invalid input: operations[%d].name is required" % index)
+            if apply_changes:
+                feature.Name = new_name
+                update_ok = _update_feature_object(feature)
+                if update_ok is False:
+                    raise RuntimeError("Feature Update after rename returned False")
+                after = _feature_list_item(feature, kind, collection_name, collection_index, include_details=True)
+            else:
+                update_ok = None
+                after = dict(before)
+                after["name"] = new_name
+            result.update(
+                {
+                    "item": after,
+                    "summary": {
+                        "planned": not apply_changes,
+                        "old_name": before.get("name"),
+                        "name": new_name,
+                        "feature_update_ok": update_ok,
+                    },
+                }
+            )
+        elif operation == "set_suppressed":
+            if "suppressed" in raw_operation:
+                suppressed = bool(raw_operation.get("suppressed"))
+            elif "value" in raw_operation:
+                suppressed = bool(raw_operation.get("value"))
+            else:
+                suppressed = str(raw_operation.get("operation") or raw_operation.get("type") or "").strip().lower() == "suppress"
+            if apply_changes:
+                suppression_report = _set_feature_suppressed(feature, suppressed)
+                if not suppression_report.get("ok"):
+                    raise RuntimeError(suppression_report.get("reason") or "feature_suppression_failed")
+                after = _feature_list_item(feature, kind, collection_name, collection_index, include_details=True)
+            else:
+                suppression_report = {
+                    "requested_suppressed": suppressed,
+                    "before": before.get("state", {}).get("suppressed"),
+                    "planned": True,
+                }
+                after = before
+            result.update(
+                {
+                    "item": after,
+                    "summary": dict(suppression_report, planned=not apply_changes),
+                }
+            )
+        elif operation == "delete_feature":
+            before_count = collection_count(collection)
+            if collection_index < 0:
+                raise RuntimeError("feature_index_not_found")
+            if apply_changes:
+                deleted = _delete_feature_from_collection(collection, feature, collection_index)
+                after_count = collection_count(collection)
+                if after_count >= before_count:
+                    raise RuntimeError("feature_delete_not_confirmed")
+            else:
+                deleted = False
+                after_count = before_count
+            result.update(
+                {
+                    "item": {
+                        "kind": before.get("kind"),
+                        "collection": before.get("collection"),
+                        "collection_index": before.get("collection_index"),
+                        "reference": before.get("reference"),
+                        "fingerprint": before.get("fingerprint"),
+                        "deleted": deleted,
+                        "before_count": before_count,
+                        "after_count": after_count,
+                        "deleted_count": before_count - after_count if apply_changes else 0,
+                    },
+                    "summary": {
+                        "planned": not apply_changes,
+                        "deleted": deleted,
+                        "before_count": before_count,
+                        "after_count": after_count,
+                        "deleted_count": before_count - after_count if apply_changes else 0,
+                    },
+                }
+            )
+        items.append(result)
+
+    return items, {
+        "operation_count": len(items),
+        "applied": apply_changes,
+        "planned": not apply_changes,
+        "failed_count": sum(1 for item in items if not item.get("ok")),
+        "operations": [
+            {
+                "index": item.get("index"),
+                "operation": item.get("operation"),
+                "applied": item.get("applied"),
+                "kind": item.get("kind"),
+                "reference": item.get("reference"),
+                "fingerprint": item.get("fingerprint"),
+            }
+            for item in items
+        ],
+    }
+
+
 def probe_runtime_objects(runtime_objects, max_items=5):
     try:
         max_items = int(max_items)
@@ -4656,6 +4877,48 @@ def handle_inspect_feature(payload):
             "collection": item.get("collection"),
             "collection_index": item.get("collection_index"),
             "variable_count": item.get("variable_count", 0),
+        },
+    }
+
+
+def handle_repair_feature(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    items, summary = _repair_existing_features(model_container, payload)
+    part_update_ok = None
+    if bool(payload.get("apply")):
+        updater = safe_get(top_part, "Update")
+        part_update_ok = True
+        if callable(updater):
+            part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+    summary = dict(summary)
+    summary["part_update_ok"] = part_update_ok
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "items": items,
+        "item": {
+            "type": "FeatureRepair",
+            "operation_count": len(items),
+            "applied": bool(payload.get("apply")),
+        },
+        "summary": summary,
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
         },
     }
 
@@ -13229,6 +13492,8 @@ def dispatch(request):
         return handle_list_features(payload)
     if action == "inspect_feature":
         return handle_inspect_feature(payload)
+    if action == "repair_feature":
+        return handle_repair_feature(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

@@ -71,6 +71,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "repair_sketch",
             "list_features",
             "inspect_feature",
+            "repair_feature",
             "list_sketch_entities",
             "inspect_sketch_entity",
             "probe_document_readback",

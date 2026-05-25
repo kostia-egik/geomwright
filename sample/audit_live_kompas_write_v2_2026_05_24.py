@@ -393,6 +393,51 @@ def main() -> None:
                             ),
                         )
                     )
+                    feature_selector = {
+                        "kind": first_feature.get("kind"),
+                        "index": int(first_feature.get("collection_index")),
+                        "fingerprint": first_feature.get("fingerprint"),
+                    }
+                    audit["steps"].append(
+                        _run_step(
+                            "repair_feature_plan",
+                            lambda: adapter.repair_feature(
+                                document_id=opened_document_id,
+                                operations=[
+                                    {
+                                        "operation": "rename",
+                                        "feature": feature_selector,
+                                        "name": "AUDIT_RENAMED_FEATURE_PLAN",
+                                    },
+                                    {
+                                        "operation": "suppress",
+                                        "feature": feature_selector,
+                                    },
+                                    {
+                                        "operation": "delete_feature",
+                                        "feature": feature_selector,
+                                    },
+                                ],
+                                apply=False,
+                            ),
+                        )
+                    )
+                    audit["steps"].append(
+                        _run_step(
+                            "repair_feature_apply",
+                            lambda: adapter.repair_feature(
+                                document_id=opened_document_id,
+                                operations=[
+                                    {
+                                        "operation": "rename",
+                                        "feature": feature_selector,
+                                        "name": "AUDIT_RENAMED_FEATURE",
+                                    },
+                                ],
+                                apply=True,
+                            ),
+                        )
+                    )
                 audit["steps"].append(
                     _run_step(
                         "clear_existing_sketch_entity_constraints",
@@ -607,6 +652,8 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "repair_sketch_apply_ok": _step_ok(audit, "repair_sketch_apply"),
         "list_features_ok": _step_ok(audit, "list_existing_features"),
         "inspect_feature_ok": _step_ok(audit, "inspect_existing_feature"),
+        "repair_feature_plan_ok": _step_ok(audit, "repair_feature_plan"),
+        "repair_feature_apply_ok": _step_ok(audit, "repair_feature_apply"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,
