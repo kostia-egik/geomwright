@@ -132,6 +132,61 @@ def inspect_native_module(
     return payload
 
 
+def preview_native_module_launch(
+    module: str = "Spring",
+    *,
+    command_id: int | str | None = 101,
+    command_title: str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+) -> dict[str, Any]:
+    """Resolve a native KOMPAS module command before interactive launch."""
+    inspection = inspect_native_module(
+        module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_database_inventory=False,
+    )
+    if not inspection.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "command_id": command_id,
+            "command_title": command_title,
+            "stage": "inspect_native_module",
+            "error": inspection.get("error", "Native module was not found"),
+            "inspection": inspection,
+        }
+
+    command = _find_command(inspection.get("commands", []), command_id, command_title)
+    if command is None:
+        return {
+            "ok": False,
+            "module": inspection["module"],
+            "command_id": command_id,
+            "command_title": command_title,
+            "stage": "resolve_command",
+            "available_commands": inspection.get("commands", []),
+            "error": "Native module command was not found",
+        }
+
+    return {
+        "ok": True,
+        "module": inspection["module"],
+        "title": inspection.get("title"),
+        "app_id": inspection.get("app_id"),
+        "path": inspection.get("path"),
+        "manifest_path": inspection.get("manifest_path"),
+        "command": command,
+        "launch_contract": {
+            "mode": "interactive_native_module_command",
+            "parameter_automation": False,
+            "requires_registered_library": True,
+            "safety": "preview_only unless allow_interactive is true",
+        },
+    }
+
+
 def _resolve_libs_dir(
     *,
     kompas_root: str | None,
@@ -270,6 +325,25 @@ def _find_module_summary(modules: list[dict[str, Any]], query: str) -> dict[str,
         candidates = [item.get("name"), item.get("title")]
         if any(needle in str(candidate).lower() for candidate in candidates if candidate):
             return item
+    return None
+
+
+def _find_command(
+    commands: list[dict[str, Any]],
+    command_id: int | str | None,
+    command_title: str | None,
+) -> dict[str, Any] | None:
+    normalized_title = str(command_title or "").strip().lower()
+    normalized_id = str(command_id).strip() if command_id not in (None, "") else ""
+    if normalized_id:
+        for command in commands:
+            if str(command.get("id")).strip() == normalized_id:
+                return command
+    if normalized_title:
+        for command in commands:
+            title = str(command.get("title") or "").strip().lower()
+            if title == normalized_title or normalized_title in title:
+                return command
     return None
 
 

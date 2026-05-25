@@ -12,10 +12,11 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "native_modules",
-        "purpose": "Inspect installed native KOMPAS application modules without launching them.",
+        "purpose": "Inspect installed native KOMPAS application modules and safely launch registered commands when explicitly allowed.",
         "tools": [
             "list_native_modules",
             "inspect_native_module",
+            "launch_native_module_command",
         ],
     },
     {

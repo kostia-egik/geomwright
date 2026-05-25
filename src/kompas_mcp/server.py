@@ -76,6 +76,30 @@ def inspect_native_module(
 
 
 @mcp.tool()
+def launch_native_module_command(
+    module: str = "Spring",
+    command_id: int | str | None = 101,
+    command_title: str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    post: bool = True,
+    visible: bool = True,
+    allow_interactive: bool = False,
+) -> dict:
+    """Preview or interactively launch a registered native KOMPAS module command."""
+    return adapter.launch_native_module_command(
+        module=module,
+        command_id=command_id,
+        command_title=command_title,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        post=post,
+        visible=visible,
+        allow_interactive=allow_interactive,
+    )
+
+
+@mcp.tool()
 def list_thread_catalog_standards(database_path: str | None = None) -> dict:
     """List thread standards from KOMPAS thread.db with helical-thread V1 compatibility hints."""
     return build_thread_catalog_standards(database_path=database_path)

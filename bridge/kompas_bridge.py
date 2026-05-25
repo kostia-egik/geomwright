@@ -1902,6 +1902,184 @@ def convert_spec_column_value(column, after):
     return str(after)
 
 
+def _safe_call(obj, method_name, *args):
+    method = safe_get(obj, method_name)
+    if not callable(method):
+        return None
+    try:
+        return method(*args)
+    except Exception:
+        return None
+
+
+def _read_com_value(obj, names):
+    for name in names:
+        value = safe_get(obj, name)
+        if value not in (None, "") and not callable(value):
+            return value
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _get_library_manager(app):
+    manager = safe_get(app, "LibraryManager")
+    if manager is not None:
+        return manager
+    return _safe_call(app, "GetLibraryManager")
+
+
+def _get_procedure_libraries(manager):
+    if manager is None:
+        return None
+    libraries = safe_get(manager, "ProceduresLibraries")
+    if libraries is not None:
+        return libraries
+    return _safe_call(manager, "GetProceduresLibraries")
+
+
+def _describe_procedure_library(library, index=None):
+    return {
+        "index": index,
+        "name": _read_com_value(library, ("Name", "GetName", "LibraryName", "GetLibraryName")),
+        "title": _read_com_value(library, ("Title", "Caption", "DisplayName", "DisplayLibraryName", "GetDisplayName")),
+        "comment": _read_com_value(library, ("Comment", "GetComment")),
+        "file_name": _read_com_value(library, ("FileName", "FullName", "Path", "GetFileName")),
+        "reference": safe_get(library, "Reference"),
+    }
+
+
+def _procedure_library_matches(summary, query):
+    needle = str(query or "").strip().lower()
+    if not needle:
+        return False
+    for key in ("name", "title", "comment", "file_name"):
+        value = summary.get(key)
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if text == needle or needle in text:
+            return True
+    return False
+
+
+def _candidate_libraries_from_collection(collection):
+    libraries = []
+    for index, library in enumerate(iter_collection(collection)):
+        libraries.append((library, _describe_procedure_library(library, index=index)))
+    return libraries
+
+
+def _find_procedure_library(app, module, aliases=None):
+    queries = [module]
+    for alias in aliases or []:
+        if alias not in (None, "") and alias not in queries:
+            queries.append(alias)
+    manager = _get_library_manager(app)
+    libraries_collection = _get_procedure_libraries(manager)
+    report = {
+        "ok": False,
+        "module": module,
+        "queries": queries,
+        "library_manager_available": manager is not None,
+        "procedures_libraries_available": libraries_collection is not None,
+        "available_libraries": [],
+    }
+    if libraries_collection is None:
+        report["error"] = "KOMPAS procedures libraries collection is unavailable"
+        return None, manager, report
+
+    libraries = _candidate_libraries_from_collection(libraries_collection)
+    report["available_libraries"] = [summary for _, summary in libraries[:25]]
+    report["available_library_count"] = len(libraries)
+    report["available_libraries_truncated"] = len(libraries) > 25
+    for library, summary in libraries:
+        if any(_procedure_library_matches(summary, query) for query in queries):
+            report.update({"ok": True, "matched_library": summary})
+            return library, manager, report
+
+    item_accessor = safe_get(libraries_collection, "Item")
+    if callable(item_accessor):
+        for query in queries:
+            for candidate in (query, str(query).upper(), str(query).lower()):
+                try:
+                    library = item_accessor(candidate)
+                except Exception:
+                    continue
+                if library is None:
+                    continue
+                summary = _describe_procedure_library(library)
+                report.update({"ok": True, "matched_library": summary, "matched_by": "Item"})
+                return library, manager, report
+
+    report["error"] = "Native KOMPAS procedure library was not found among registered libraries"
+    return None, manager, report
+
+
+def _set_current_library(manager, library):
+    report = {"attempted": False, "ok": None}
+    if manager is None or library is None:
+        return report
+    method = safe_get(manager, "SetCurrentLibrary")
+    if not callable(method):
+        report["available"] = False
+        return report
+    report["available"] = True
+    report["attempted"] = True
+    try:
+        report["result"] = method(library)
+        report["ok"] = bool(report["result"]) if report["result"] is not None else True
+    except Exception as exc:
+        report["ok"] = False
+        report["error"] = str(exc)
+    return report
+
+
+def _execute_procedure_library_command(library, command_id, post):
+    execute = safe_get(library, "Execute")
+    report = {
+        "ok": False,
+        "command_id": command_id,
+        "post": bool(post),
+        "attempts": [],
+    }
+    if not callable(execute):
+        report["error"] = "Matched library does not expose Execute"
+        return report
+
+    command = int(command_id)
+    attempt_specs = [
+        ("automation_execute", (command, None, bool(post))),
+        ("ksapi_execute", (command, bool(post), None)),
+        ("two_arg_execute", (command, bool(post))),
+        ("one_arg_execute", (command,)),
+    ]
+    for name, args in attempt_specs:
+        attempt = {"name": name, "arg_count": len(args)}
+        try:
+            result = execute(*args)
+        except Exception as exc:
+            attempt["ok"] = False
+            attempt["error"] = str(exc)
+            report["attempts"].append(attempt)
+            continue
+        attempt["ok"] = bool(result) if result is not None else True
+        attempt["result"] = result
+        report["attempts"].append(attempt)
+        if attempt["ok"]:
+            report["ok"] = True
+            report["successful_attempt"] = name
+            return report
+
+    report["error"] = "All Execute call signatures failed or returned false"
+    return report
+
+
 def list_documents(app):
     documents = safe_get(app, "Documents")
     if documents is None:
@@ -2277,6 +2455,73 @@ def get_session_state():
 def handle_list_documents():
     app = make_app()
     return {"documents": list_documents(app)}
+
+
+def handle_launch_native_module_command(payload):
+    app = make_app()
+    requested_visible = bool(payload.get("visible", True))
+    visibility_report = {
+        "requested_visible": requested_visible,
+        "visible_before": bool(safe_get(app, "Visible", False)),
+    }
+    try:
+        app.Visible = requested_visible
+        visibility_report["ok"] = bool(safe_get(app, "Visible", False)) == requested_visible
+    except Exception as exc:
+        visibility_report["ok"] = False
+        visibility_report["error"] = str(exc)
+    visibility_report["visible_after"] = bool(safe_get(app, "Visible", False))
+
+    before_documents = list_documents(app)
+    before_active = safe_get(app, "ActiveDocument")
+    before_active_info = describe_document(before_active, app) if before_active is not None else None
+
+    library, manager, library_report = _find_procedure_library(
+        app,
+        payload.get("module") or "Spring",
+        aliases=[payload.get("module_title"), payload.get("app_id")],
+    )
+    set_current_report = _set_current_library(manager, library) if library is not None else {"attempted": False, "ok": None}
+    execute_report = None
+    if library is not None:
+        execute_report = _execute_procedure_library_command(
+            library,
+            payload.get("command_id") or 101,
+            bool(payload.get("post", True)),
+        )
+
+    after_documents = list_documents(app)
+    after_active = safe_get(app, "ActiveDocument")
+    after_active_info = describe_document(after_active, app) if after_active is not None else None
+    before_ids = {item.get("id") for item in before_documents}
+    after_ids = {item.get("id") for item in after_documents}
+
+    ok = bool(library_report.get("ok")) and bool(execute_report and execute_report.get("ok"))
+    return {
+        "ok": ok,
+        "module": payload.get("module") or "Spring",
+        "command": {
+            "id": payload.get("command_id") or 101,
+            "title": payload.get("command_title"),
+        },
+        "interactive": True,
+        "post": bool(payload.get("post", True)),
+        "visibility": visibility_report,
+        "library": library_report,
+        "set_current_library": set_current_report,
+        "execute": execute_report,
+        "documents": {
+            "before_count": len(before_documents),
+            "after_count": len(after_documents),
+            "added_ids": sorted(item for item in after_ids - before_ids if item),
+            "removed_ids": sorted(item for item in before_ids - after_ids if item),
+            "before_active": before_active_info,
+            "after_active": after_active_info,
+            "before": before_documents[:25],
+            "after": after_documents[:25],
+            "truncated": len(before_documents) > 25 or len(after_documents) > 25,
+        },
+    }
 
 
 def handle_get_document_tree(payload):
@@ -13531,6 +13776,8 @@ def dispatch(request):
         return get_session_state()
     if action == "list_documents":
         return handle_list_documents()
+    if action == "launch_native_module_command":
+        return handle_launch_native_module_command(payload)
     if action == "get_document_tree":
         return handle_get_document_tree(payload)
     if action == "create_point3d":

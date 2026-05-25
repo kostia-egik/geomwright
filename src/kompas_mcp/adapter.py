@@ -21,6 +21,7 @@ from .document_snapshot_diff import diff_document_snapshots as build_document_sn
 from .document_snapshot_verify import verify_document_snapshot_delta as build_document_snapshot_delta_verification
 from .document_stability import verify_document_readback_stability as build_document_readback_stability
 from .document_state import get_active_document_state as build_active_document_state
+from .native_modules import preview_native_module_launch as build_native_module_launch_preview
 from .operation_result import normalize_operation_result as build_operation_result_envelope
 from .properties import get_item_properties as build_item_properties
 from .properties import preview_property_changes as build_property_preview
@@ -613,6 +614,72 @@ class KompasAdapter:
 
     def list_documents(self) -> dict[str, Any]:
         return self.runner.call("list_documents")
+
+    def launch_native_module_command(
+        self,
+        *,
+        module: str = "Spring",
+        command_id: int | str | None = 101,
+        command_title: str | None = None,
+        kompas_root: str | None = None,
+        libs_dir: str | None = None,
+        post: bool = True,
+        visible: bool = True,
+        allow_interactive: bool = False,
+    ) -> dict[str, Any]:
+        preview = build_native_module_launch_preview(
+            module,
+            command_id=command_id,
+            command_title=command_title,
+            kompas_root=kompas_root,
+            libs_dir=libs_dir,
+        )
+        if not preview.get("ok"):
+            return preview
+
+        command = preview["command"]
+        payload = {
+            "module": preview["module"],
+            "module_title": preview.get("title"),
+            "app_id": preview.get("app_id"),
+            "command_id": command.get("id"),
+            "command_title": command.get("title"),
+            "post": bool(post),
+            "visible": bool(visible),
+        }
+        if not allow_interactive:
+            return {
+                "ok": True,
+                "module": preview["module"],
+                "command": command,
+                "launch_attempted": False,
+                "status": "preview_only",
+                "preview": preview,
+                "next_step": "Set allow_interactive=true to launch the native KOMPAS command.",
+            }
+
+        try:
+            launch = self.runner.call("launch_native_module_command", payload)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "module": preview["module"],
+                "command": command,
+                "launch_attempted": True,
+                "stage": "launch_native_module_command",
+                "preview": preview,
+                "error": str(exc),
+                "exception_type": exc.__class__.__name__,
+            }
+
+        return {
+            "ok": bool(launch.get("ok")),
+            "module": preview["module"],
+            "command": command,
+            "launch_attempted": True,
+            "preview": preview,
+            "launch": launch,
+        }
 
     def preflight_document_context(
         self,

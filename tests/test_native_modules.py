@@ -7,6 +7,8 @@ from pathlib import Path
 
 from kompas_mcp.native_modules import inspect_native_module
 from kompas_mcp.native_modules import list_native_modules
+from kompas_mcp.native_modules import preview_native_module_launch
+from kompas_mcp.adapter import KompasAdapter
 
 
 class NativeModuleDiscoveryTests(unittest.TestCase):
@@ -49,6 +51,47 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertIn("Spring", payload["available_modules"])
         self.assertIn("was not found", payload["error"])
 
+    def test_previews_native_spring_launch_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+
+            payload = preview_native_module_launch("Spring", libs_dir=str(libs_dir), command_id=101)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["module"], "Spring")
+        self.assertEqual(payload["command"]["id"], 101)
+        self.assertEqual(payload["launch_contract"]["mode"], "interactive_native_module_command")
+        self.assertFalse(payload["launch_contract"]["parameter_automation"])
+
+    def test_adapter_requires_explicit_interactive_launch_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            runner = _FakeNativeLaunchRunner()
+            adapter = KompasAdapter(runner=runner)
+
+            payload = adapter.launch_native_module_command(libs_dir=str(libs_dir))
+
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["launch_attempted"])
+        self.assertEqual(runner.calls, [])
+
+    def test_adapter_calls_bridge_for_allowed_interactive_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            runner = _FakeNativeLaunchRunner()
+            adapter = KompasAdapter(runner=runner)
+
+            payload = adapter.launch_native_module_command(
+                libs_dir=str(libs_dir),
+                allow_interactive=True,
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["launch_attempted"])
+        self.assertEqual(runner.calls[0][0], "launch_native_module_command")
+        self.assertEqual(runner.calls[0][1]["module"], "Spring")
+        self.assertEqual(runner.calls[0][1]["command_id"], 101)
+
 
 def _create_spring_fixture(root: Path) -> Path:
     libs_dir = root / "Libs"
@@ -72,6 +115,21 @@ def _create_spring_fixture(root: Path) -> Path:
     _create_sqlite_database(base_dir / "Spring.sdb")
     _create_help_database(spring_dir / "SPRING_ru-RU.db")
     return libs_dir
+
+
+class _FakeNativeLaunchRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def call(self, action: str, payload: dict | None = None) -> dict:
+        payload = payload or {}
+        self.calls.append((action, payload))
+        return {
+            "ok": True,
+            "module": payload.get("module"),
+            "execute": {"ok": True, "successful_attempt": "automation_execute"},
+            "documents": {"before_count": 0, "after_count": 0},
+        }
 
 
 def _create_sqlite_database(path: Path) -> None:
