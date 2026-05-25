@@ -774,6 +774,20 @@ def inspect_sketch_constraint(
 
 
 @mcp.tool()
+def clear_sketch_entity_constraints(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    entity: dict | None = None,
+) -> dict:
+    """Delete all constraints attached to one existing sketch entity."""
+    return adapter.clear_sketch_entity_constraints(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        entity=entity,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

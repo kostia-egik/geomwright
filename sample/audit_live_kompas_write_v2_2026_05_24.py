@@ -294,6 +294,20 @@ def main() -> None:
                             ),
                         )
                     )
+                audit["steps"].append(
+                    _run_step(
+                        "clear_existing_sketch_entity_constraints",
+                        lambda: adapter.clear_sketch_entity_constraints(
+                            document_id=opened_document_id,
+                            sketch_ref=sketch_ref,
+                            entity={
+                                "kind": "segment",
+                                "index": int(inspected_tail.get("collection_index")),
+                                "fingerprint": inspected_tail.get("fingerprint"),
+                            },
+                        ),
+                    )
+                )
 
         audit["steps"].append(
             _run_step(
@@ -488,6 +502,7 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "inspect_sketch_dimension_ok": _step_ok(audit, "inspect_existing_sketch_dimension"),
         "list_sketch_constraints_ok": _step_ok(audit, "list_existing_sketch_constraints"),
         "inspect_sketch_constraint_ok": _step_ok(audit, "inspect_existing_sketch_constraint"),
+        "clear_sketch_entity_constraints_ok": _step_ok(audit, "clear_existing_sketch_entity_constraints"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,

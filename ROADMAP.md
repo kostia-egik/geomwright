@@ -72,10 +72,11 @@
 1. `delete_sketch_entity`: удаление ошибочно созданного объекта эскиза по `reference` / `index` / `fingerprint` — реализовано, требуется поддерживать в live-audit.
 2. `update_sketch_entity_geometry`: правка геометрии существующего `point`, `segment`, `circle` — реализовано; затем добавить `arc`.
 3. `list_sketch_dimensions` и `inspect_sketch_dimension`: readback размеров по `reference` / `index` / `fingerprint` — реализовано и подтверждено live-audit; дальше расширять поля привязок/переменных по фактической COM-доступности.
-4. `list_sketch_constraints` и `inspect_sketch_constraint`: readback геометрических ограничений и их целевых объектов — в работе; первый слой сканирует constraint surfaces у sketch entities и должен быть подтвержден live-audit.
-5. `repair_sketch`: безопасный сценарий “диагностика -> предложенный ремонт -> применение выбранных правок” для типовых ошибок эскиза.
-6. `list_features` и `inspect_feature`: базовый readback операций детали, чтобы крупные модули могли проверять не только эскиз, но и созданные 3D-примитивы.
-7. Минимальный feature repair: rename/suppress/delete для ошибочно созданной операции, если API позволяет это надежно подтвердить live-audit.
+4. `list_sketch_constraints` и `inspect_sketch_constraint`: readback геометрических ограничений и их целевых объектов — диагностический probe реализован; live KOMPAS пока показывает пустые exposed constraint collections после успешного `NewConstraint`, поэтому полный readback остается COM gap.
+5. `clear_sketch_entity_constraints`: repair-механизм для удаления ограничений с выбранной sketch entity через `IDrawingObject1.DeleteConstraints` — реализовано, требуется поддерживать в live-audit.
+6. `repair_sketch`: безопасный сценарий “диагностика -> предложенный ремонт -> применение выбранных правок” для типовых ошибок эскиза.
+7. `list_features` и `inspect_feature`: базовый readback операций детали, чтобы крупные модули могли проверять не только эскиз, но и созданные 3D-примитивы.
+8. Минимальный feature repair: rename/suppress/delete для ошибочно созданной операции, если API позволяет это надежно подтвердить live-audit.
 
 Критерий готовности low-level минимума: агент может найти созданный объект, понять его размеры/ограничения/связанные операции, изменить или удалить ошибочный элемент, выполнить `Update()` и получить диагностический отчет, подтверждающий новое состояние.
 

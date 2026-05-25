@@ -2999,6 +2999,67 @@ def _inspect_existing_sketch_entity(model_container, payload):
     }, item
 
 
+def _clear_constraints_from_entity(entity):
+    drawing_object = _cast_to_com_interface(entity, "IDrawingObject1")
+    deleter = safe_get(drawing_object, "DeleteConstraints")
+    if not callable(deleter):
+        raise RuntimeError("object does not expose IDrawingObject1.DeleteConstraints")
+    result = deleter()
+    return True if result is None else bool(result)
+
+
+def _clear_existing_sketch_entity_constraints(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    spec = payload.get("entity") or payload.get("selector")
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: entity selector must be an object")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
+        resolved_sketch_ref = safe_get(sketch, "Reference", sketch_ref)
+        index = _existing_sketch_entity_index(drawing_container, entity, kind, collection_name, resolved_sketch_ref)
+        before = _sketch_entity_list_item(entity, kind, collection_name, index, resolved_sketch_ref)
+        before_collection, before_surface = _get_constraint_collection(entity)
+        before_count = collection_count(before_collection)
+        cleared = _clear_constraints_from_entity(entity)
+        after_collection, after_surface = _get_constraint_collection(entity)
+        after_count = collection_count(after_collection)
+        updater = safe_get(entity, "Update")
+        entity_update_ok = True
+        if callable(updater):
+            entity_update_ok = bool(updater())
+        after = _sketch_entity_list_item(entity, kind, collection_name, index, resolved_sketch_ref)
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, before, after, {
+        "kind": kind,
+        "collection": collection_name,
+        "collection_index": index,
+        "reference": before.get("reference"),
+        "fingerprint": before.get("fingerprint"),
+        "cleared": cleared,
+        "before_count": before_count,
+        "after_count": after_count,
+        "cleared_count": max(0, int(before_count) - int(after_count)),
+        "before_surface": before_surface,
+        "after_surface": after_surface,
+        "entity_update_ok": entity_update_ok,
+    }
+
+
 def _select_existing_sketch_entity(drawing_container, spec):
     kind = _normalize_sketch_entity_kind(spec.get("kind") or spec.get("type"))
     collection, collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
@@ -4061,6 +4122,43 @@ def handle_inspect_sketch_constraint(payload):
             "kind": item.get("kind"),
             "reference": item.get("reference"),
             "collection_index": item.get("collection_index"),
+        },
+    }
+
+
+def handle_clear_sketch_entity_constraints(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, before_item, after_item, summary = _clear_existing_sketch_entity_constraints(model_container, payload)
+    updater = safe_get(top_part, "Update")
+    part_update_ok = True
+    if callable(updater):
+        part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+    summary = dict(summary)
+    summary["part_update_ok"] = part_update_ok
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": after_item,
+        "before_item": before_item,
+        "summary": summary,
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
         },
     }
 
@@ -12626,6 +12724,8 @@ def dispatch(request):
         return handle_list_sketch_constraints(payload)
     if action == "inspect_sketch_constraint":
         return handle_inspect_sketch_constraint(payload)
+    if action == "clear_sketch_entity_constraints":
+        return handle_clear_sketch_entity_constraints(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

@@ -45,11 +45,15 @@ Use these tools for read-only diagnostics:
 - `list_sketch_constraints` / `inspect_sketch_constraint`: scan live sketch
   entities for exposed constraint collections and return bounded owner/selector
   diagnostics for repair workflows.
+- `clear_sketch_entity_constraints`: deletes all constraints attached to one
+  selected sketch entity via `IDrawingObject1.DeleteConstraints`, then returns
+  before/after entity snapshots and bounded constraint-count diagnostics.
 
 Live note: the first KOMPAS check after creating a horizontal constraint found
 `Constraints` surfaces on some line entities, but those collections reported
 zero items. Treat constraint readback as a diagnostic probe until another COM
-surface is confirmed.
+surface is confirmed; constraint repair is currently handled by clearing
+constraints from the selected owner entity.
 
 Use these tools for offline verification:
 

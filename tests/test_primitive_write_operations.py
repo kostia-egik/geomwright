@@ -655,6 +655,29 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
+    def test_clear_sketch_entity_constraints_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.clear_sketch_entity_constraints(
+            document_id="doc-1",
+            sketch_ref=100,
+            entity={"kind": "line", "reference": 201},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "clear_sketch_entity_constraints",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "entity": {"kind": "segment", "reference": "201"},
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
     def test_sketch_constraint_readback_validates_payload_before_bridge_call(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -667,6 +690,10 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             adapter.inspect_sketch_constraint(sketch_ref=100, constraint={"kind": "horizontal"})
         with self.assertRaises(ValueError):
             adapter.inspect_sketch_constraint(sketch_ref=100, constraint={"kind": "unsupported", "index": 0})
+        with self.assertRaises(ValueError):
+            adapter.clear_sketch_entity_constraints(entity={"kind": "segment", "index": 0})
+        with self.assertRaises(ValueError):
+            adapter.clear_sketch_entity_constraints(sketch_ref=100, entity={"kind": "unsupported", "index": 0})
 
         self.assertEqual(runner.calls, [])
 
@@ -1573,6 +1600,50 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(item["kind"], "horizontal")
         self.assertEqual(item["owner"]["collection_index"], 0)
         self.assertTrue(sketch.ended)
+
+    def test_bridge_clear_sketch_entity_constraints_calls_delete_constraints(self) -> None:
+        bridge = _load_bridge_module()
+        constraint = types.SimpleNamespace(ConstraintType=3, Reference=401, Valid=True, Index=0)
+        line = _FakeSketchEntity(201)
+        line.Name = ""
+        line.X1 = 0.0
+        line.Y1 = 0.0
+        line.X2 = 10.0
+        line.Y2 = 0.0
+        line.Style = 1
+        line.Constraints = _FakeCollection([constraint])
+
+        def delete_constraints() -> bool:
+            line.Constraints._items.clear()
+            line.Constraints.Count = 0
+            line.constraints_deleted = True
+            return True
+
+        line.DeleteConstraints = delete_constraints
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, before, after, summary = bridge._clear_existing_sketch_entity_constraints(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "entity": {"kind": "line", "reference": 201},
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(before["reference"], 201)
+        self.assertEqual(after["reference"], 201)
+        self.assertTrue(summary["cleared"])
+        self.assertEqual(summary["before_count"], 1)
+        self.assertEqual(summary["after_count"], 0)
+        self.assertTrue(line.constraints_deleted)
+        self.assertTrue(line.updated)
+        self.assertTrue(sketch.ended)
+        self.assertTrue(sketch.updated)
 
     def test_bridge_list_sketches_returns_references_and_counts(self) -> None:
         bridge = _load_bridge_module()
