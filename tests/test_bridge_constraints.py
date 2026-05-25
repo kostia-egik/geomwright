@@ -36,6 +36,94 @@ BRIDGE = _load_bridge_module()
 
 
 class BridgeConstraintTests(unittest.TestCase):
+    def test_bind_extrusion_operation_variables_matches_distance_alias(self) -> None:
+        class FakeVariable:
+            Name = "var_1"
+            ParameterNote = "Расстояние"
+            Expression = "12"
+
+            def Update(self):
+                return True
+
+        class FakeOwner:
+            def __init__(self):
+                self.variable = FakeVariable()
+
+            def Variables(self, *args):
+                return [self.variable]
+
+        class FakeExtrusion:
+            def __init__(self):
+                self.Owner = FakeOwner()
+                self.updated = False
+
+            def Update(self):
+                self.updated = True
+                return True
+
+        extrusion = FakeExtrusion()
+        report = BRIDGE._bind_extrusion_operation_variables(
+            extrusion,
+            {
+                "operation_variable_bindings": [
+                    {
+                        "parameter_note_aliases": ["Distance", "Расстояние"],
+                        "expression": "FLAT01_L1",
+                    }
+                ]
+            },
+            "external_flat_step",
+        )
+
+        self.assertIsNotNone(report)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["scenario"], "external_flat_step")
+        self.assertEqual(report["applied_count"], 1)
+        self.assertEqual(extrusion.Owner.variable.Expression, "FLAT01_L1")
+        self.assertTrue(extrusion.updated)
+
+    def test_bind_extrusion_operation_variables_reports_missing_distance_alias(self) -> None:
+        class FakeVariable:
+            Name = "var_1"
+            ParameterNote = "Angle"
+            Expression = "12"
+
+            def Update(self):
+                return True
+
+        class FakeOwner:
+            def __init__(self):
+                self.variable = FakeVariable()
+
+            def Variables(self, *args):
+                return [self.variable]
+
+        class FakeExtrusion:
+            Owner = FakeOwner()
+
+            def Update(self):
+                return True
+
+        report = BRIDGE._bind_extrusion_operation_variables(
+            FakeExtrusion(),
+            {
+                "operation_variable_bindings": [
+                    {
+                        "parameter_note_aliases": ["Distance", "Расстояние"],
+                        "expression": "FLAT01_L1",
+                    }
+                ]
+            },
+            "external_flat_step",
+        )
+
+        self.assertIsNotNone(report)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["scenario"], "external_flat_step")
+        self.assertEqual(report["target"], "extrusion")
+        self.assertEqual(report["failed_count"], 1)
+        self.assertEqual(report["failed"][0]["error"], "operation_variable_not_found")
+
     def test_apply_sketch_constraints_skips_redundant_arc_merge_points(self) -> None:
         original = BRIDGE._apply_constraint_to_line
 

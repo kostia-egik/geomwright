@@ -872,6 +872,8 @@ def preview_external_polygonal_step(params: dict[str, Any]) -> dict[str, Any]:
             "operation": "boss_extrusion",
             "length": normalized["length"],
             "axial_direction": normalized["axial_direction"],
+            "operation_variable_bindings": list(normalized.get("operation_variable_bindings") or []),
+            "live_status": "planned",
         },
     ]
     return {
@@ -980,6 +982,8 @@ def preview_internal_polygonal_step(params: dict[str, Any]) -> dict[str, Any]:
                 "operation": "cut_extrusion",
                 "length": normalized["length"],
                 "axial_direction": normalized["axial_direction"],
+                "operation_variable_bindings": list(normalized.get("operation_variable_bindings") or []),
+                "live_status": "planned",
             },
         ]
     )
@@ -1078,6 +1082,8 @@ def preview_external_flat_step(params: dict[str, Any]) -> dict[str, Any]:
             "operation": "boss_extrusion",
             "length": normalized["length"],
             "axial_direction": normalized["axial_direction"],
+            "operation_variable_bindings": list(normalized.get("operation_variable_bindings") or []),
+            "live_status": "planned",
         },
     ]
     return {
@@ -1185,6 +1191,8 @@ def preview_internal_flat_step(params: dict[str, Any]) -> dict[str, Any]:
                 "operation": "cut_extrusion",
                 "length": normalized["length"],
                 "axial_direction": normalized["axial_direction"],
+                "operation_variable_bindings": list(normalized.get("operation_variable_bindings") or []),
+                "live_status": "planned",
             },
         ]
     )
@@ -2243,6 +2251,9 @@ def normalize_external_polygonal_step_params(params: dict[str, Any]) -> dict[str
         "polygon_radius": polygon_radius,
         "rotation_angle_degrees": rotation_angle_degrees,
         "axial_direction": axial_direction,
+        "operation_variable_bindings": _build_extrusion_length_variable_bindings(
+            {"parameter_prefix": parameter_prefix}
+        ),
         "output_path": output_path,
         "close_after_save": bool(params.get("close_after_save", True)),
     }
@@ -2358,6 +2369,9 @@ def normalize_external_flat_step_params(params: dict[str, Any]) -> dict[str, Any
         "chord_half": chord_half,
         "flats_count": flats_count,
         "axial_direction": axial_direction,
+        "operation_variable_bindings": _build_extrusion_length_variable_bindings(
+            {"parameter_prefix": parameter_prefix}
+        ),
         "output_path": output_path,
         "close_after_save": bool(params.get("close_after_save", True)),
     }
@@ -3491,6 +3505,32 @@ def _coalesce_defined(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload and payload.get(key) not in (None, ""):
             return payload.get(key)
     return None
+
+
+def _build_extrusion_length_variable_bindings(
+    normalized: dict[str, Any],
+    *,
+    target: str = "extrusion",
+) -> list[dict[str, Any]]:
+    parameter_prefix = normalized["parameter_prefix"]
+    length_variable = build_parameter_name("L", 1, prefix=parameter_prefix)
+    return [
+        {
+            "target": target,
+            "parameter_note": "Distance",
+            "parameter_note_aliases": [
+                "Distance",
+                "Length",
+                "Depth",
+                "Extrusion depth",
+                "Расстояние",
+                "Длина",
+                "Глубина",
+            ],
+            "expression": length_variable,
+            "role": "extrusion_length",
+        }
+    ]
 
 
 def _optional_positive_float(payload: dict[str, Any], field_name: str, *keys: str) -> float | None:

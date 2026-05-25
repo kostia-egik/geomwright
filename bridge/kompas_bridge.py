@@ -235,6 +235,16 @@ def _bind_operation_variables(model_object, planned_bindings):
     return report
 
 
+def _bind_extrusion_operation_variables(extrusion, params, scenario, target="extrusion"):
+    planned_bindings = list(params.get("operation_variable_bindings") or [])
+    if not planned_bindings:
+        return None
+    report = _bind_operation_variables(extrusion, planned_bindings)
+    report["scenario"] = scenario
+    report["target"] = target
+    return report
+
+
 MATERIAL_CATALOG = (
     {
         "name": "Сталь 10 ГОСТ 1050-2013",
@@ -8191,6 +8201,17 @@ def _build_flat_step_feature(part, model_container, params, preview, steps_repor
             if extrusion_type == 26:
                 raise RuntimeError("Cut Extrusion Update returned False")
             raise RuntimeError("Boss Extrusion Update returned False")
+    operation_binding_report = _bind_extrusion_operation_variables(
+        extrusion,
+        params,
+        "internal_flat_step" if extrusion_type == 26 else "external_flat_step",
+    )
+    if operation_binding_report is not None:
+        steps_report.append(operation_binding_report)
+        if not operation_binding_report.get("ok"):
+            raise RuntimeError("Failed to bind flat-step extrusion operation variables")
+        depth_binding = "operation_variable"
+        depth_value = operation_binding_report.get("applied", [{}])[0].get("expression_after", depth_value)
     steps_report.append(
         {
             "step": "cut_extrusion" if extrusion_type == 26 else "boss_extrusion",
@@ -8631,6 +8652,17 @@ def _build_polygonal_step_feature(part, model_container, params, preview, steps_
             if extrusion_type == 26:
                 raise RuntimeError("Cut Extrusion Update returned False")
             raise RuntimeError("Boss Extrusion Update returned False")
+    operation_binding_report = _bind_extrusion_operation_variables(
+        extrusion,
+        params,
+        "internal_polygonal_step" if extrusion_type == 26 else "external_polygonal_step",
+    )
+    if operation_binding_report is not None:
+        steps_report.append(operation_binding_report)
+        if not operation_binding_report.get("ok"):
+            raise RuntimeError("Failed to bind polygonal-step extrusion operation variables")
+        depth_binding = "operation_variable"
+        depth_value = operation_binding_report.get("applied", [{}])[0].get("expression_after", depth_value)
     steps_report.append(
         {
             "step": "cut_extrusion" if extrusion_type == 26 else "boss_extrusion",
