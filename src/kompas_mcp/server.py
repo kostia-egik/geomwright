@@ -142,6 +142,36 @@ def diff_native_module_results(
 
 
 @mcp.tool()
+def start_native_module_result_probe(
+    module: str = "Spring",
+    command_id: int | str | None = 101,
+    command_title: str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    include_tree: bool = True,
+    include_items: bool = True,
+    max_items: int = 25,
+    post: bool = True,
+    visible: bool = True,
+    allow_interactive: bool = False,
+) -> dict:
+    """Capture before-state and optionally launch a native command for manual result probing."""
+    return adapter.start_native_module_result_probe(
+        module=module,
+        command_id=command_id,
+        command_title=command_title,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_tree=include_tree,
+        include_items=include_items,
+        max_items=max_items,
+        post=post,
+        visible=visible,
+        allow_interactive=allow_interactive,
+    )
+
+
+@mcp.tool()
 def list_thread_catalog_standards(database_path: str | None = None) -> dict:
     """List thread standards from KOMPAS thread.db with helical-thread V1 compatibility hints."""
     return build_thread_catalog_standards(database_path=database_path)

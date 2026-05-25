@@ -21,6 +21,19 @@ class NativeModuleResultAdapter(Protocol):
         max_items: int = 25,
     ) -> dict[str, Any]: ...
 
+    def launch_native_module_command(
+        self,
+        *,
+        module: str = "Spring",
+        command_id: int | str | None = 101,
+        command_title: str | None = None,
+        kompas_root: str | None = None,
+        libs_dir: str | None = None,
+        post: bool = True,
+        visible: bool = True,
+        allow_interactive: bool = False,
+    ) -> dict[str, Any]: ...
+
 
 def capture_native_module_result(
     adapter: NativeModuleResultAdapter,
@@ -127,6 +140,102 @@ def capture_native_module_result(
             },
         ],
         "next_step": next_step,
+    }
+
+
+def start_native_module_result_probe(
+    adapter: NativeModuleResultAdapter,
+    *,
+    module: str = "Spring",
+    command_id: int | str | None = 101,
+    command_title: str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    include_tree: bool = True,
+    include_items: bool = True,
+    max_items: int = 25,
+    post: bool = True,
+    visible: bool = True,
+    allow_interactive: bool = False,
+) -> dict[str, Any]:
+    """Capture before-state and optionally launch an interactive native command."""
+    before = capture_native_module_result(
+        adapter,
+        module=module,
+        command_id=command_id,
+        command_title=command_title,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        require_active_document=False,
+        include_tree=include_tree,
+        include_items=include_items,
+        max_items=max_items,
+    )
+    if not before.get("ok"):
+        return {
+            "ok": False,
+            "module": before.get("module", module),
+            "command": before.get("command") or {"id": command_id, "title": command_title},
+            "status": "before_capture_failed",
+            "before_capture": before,
+            "launch_attempted": False,
+            "next_step": "Fix the before capture error, then start the native module result probe again.",
+        }
+
+    launch = adapter.launch_native_module_command(
+        module=module,
+        command_id=command_id,
+        command_title=command_title,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        post=post,
+        visible=visible,
+        allow_interactive=allow_interactive,
+    )
+    launch_attempted = bool(launch.get("launch_attempted"))
+    launch_ok = bool(launch.get("ok"))
+    status = (
+        "waiting_for_manual_native_workflow_completion"
+        if launch_attempted and launch_ok
+        else "preview_only"
+        if not launch_attempted and launch_ok
+        else "launch_failed"
+    )
+    return {
+        "ok": launch_ok,
+        "module": before.get("module"),
+        "command": before.get("command"),
+        "status": status,
+        "workflow": {
+            "mode": "manual_native_module_probe",
+            "parameter_automation": False,
+            "before_capture_done": True,
+            "launch_attempted": launch_attempted,
+            "requires_user_to_complete_native_ui": launch_attempted and launch_ok,
+        },
+        "before_capture": before,
+        "launch": launch,
+        "next_calls": {
+            "after_capture": {
+                "tool": "capture_native_module_result",
+                "arguments": {
+                    "module": module,
+                    "command_id": command_id,
+                    "command_title": command_title,
+                    "include_tree": include_tree,
+                    "include_items": include_items,
+                    "max_items": max_items,
+                },
+            },
+            "diff": {
+                "tool": "diff_native_module_results",
+                "arguments": {
+                    "before": "<before_capture from this payload>",
+                    "after": "<after capture payload>",
+                },
+            },
+        },
+        "next_step": _native_probe_next_step(status),
     }
 
 
@@ -367,3 +476,11 @@ def _native_result_next_step(evidence_level: str) -> str:
     if evidence_level in {"new_document_detected", "active_document_state_changed"}:
         return "Run capture_native_module_result on the candidate document with include_tree/include_items enabled, then inspect feature names and counts."
     return "Capture before launching the native command, complete the native workflow, then capture after and diff again."
+
+
+def _native_probe_next_step(status: str) -> str:
+    if status == "waiting_for_manual_native_workflow_completion":
+        return "Complete the native module UI manually, create the model or drawing, then run capture_native_module_result and diff_native_module_results with the saved before_capture."
+    if status == "preview_only":
+        return "Set allow_interactive=true to capture before-state and launch the native KOMPAS command."
+    return "Inspect the launch error and retry the probe only after the native command can be launched."

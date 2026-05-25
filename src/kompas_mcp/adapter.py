@@ -23,6 +23,7 @@ from .document_stability import verify_document_readback_stability as build_docu
 from .document_state import get_active_document_state as build_active_document_state
 from .native_module_result import capture_native_module_result as build_native_module_result
 from .native_module_result import diff_native_module_results as build_native_module_result_diff
+from .native_module_result import start_native_module_result_probe as build_native_module_result_probe
 from .native_modules import preview_native_module_launch as build_native_module_launch_preview
 from .operation_result import normalize_operation_result as build_operation_result_envelope
 from .properties import get_item_properties as build_item_properties
@@ -722,6 +723,36 @@ class KompasAdapter:
             before,
             after,
             max_documents=max_documents,
+        )
+
+    def start_native_module_result_probe(
+        self,
+        *,
+        module: str = "Spring",
+        command_id: int | str | None = 101,
+        command_title: str | None = None,
+        kompas_root: str | None = None,
+        libs_dir: str | None = None,
+        include_tree: bool = True,
+        include_items: bool = True,
+        max_items: int = 25,
+        post: bool = True,
+        visible: bool = True,
+        allow_interactive: bool = False,
+    ) -> dict[str, Any]:
+        return build_native_module_result_probe(
+            self,
+            module=module,
+            command_id=command_id,
+            command_title=command_title,
+            kompas_root=kompas_root,
+            libs_dir=libs_dir,
+            include_tree=include_tree,
+            include_items=include_items,
+            max_items=max_items,
+            post=post,
+            visible=visible,
+            allow_interactive=allow_interactive,
         )
 
     def preflight_document_context(

@@ -10,6 +10,7 @@ from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import preview_native_module_launch
 from kompas_mcp.native_module_result import capture_native_module_result
 from kompas_mcp.native_module_result import diff_native_module_results
+from kompas_mcp.native_module_result import start_native_module_result_probe
 from kompas_mcp.adapter import KompasAdapter
 
 
@@ -169,6 +170,38 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(payload["evidence_level"], "no_detected_delta")
         self.assertEqual(payload["summary"]["added_documents"], 0)
 
+    def test_starts_native_module_result_probe_preview_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            adapter = _FakeNativeResultAdapter()
+
+            payload = start_native_module_result_probe(adapter, libs_dir=str(libs_dir))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "preview_only")
+        self.assertFalse(payload["workflow"]["launch_attempted"])
+        self.assertEqual(payload["before_capture"]["status"], "document_readback_captured")
+        self.assertEqual(adapter.launches[0]["allow_interactive"], False)
+        self.assertIn("allow_interactive=true", payload["next_step"])
+
+    def test_starts_native_module_result_probe_with_interactive_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            adapter = _FakeNativeResultAdapter()
+
+            payload = start_native_module_result_probe(
+                adapter,
+                libs_dir=str(libs_dir),
+                allow_interactive=True,
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "waiting_for_manual_native_workflow_completion")
+        self.assertTrue(payload["workflow"]["launch_attempted"])
+        self.assertTrue(payload["workflow"]["requires_user_to_complete_native_ui"])
+        self.assertEqual(payload["next_calls"]["after_capture"]["tool"], "capture_native_module_result")
+        self.assertEqual(adapter.launches[0]["allow_interactive"], True)
+
 
 def _create_spring_fixture(root: Path) -> Path:
     libs_dir = root / "Libs"
@@ -214,6 +247,7 @@ class _FakeNativeResultAdapter:
         self.document = {"id": "doc-1", "name": "spring.m3d", "path": r"C:\Temp\spring.m3d", "active": True}
         self.documents = [self.document] if documents is None else documents
         self.calls: list[str] = []
+        self.launches: list[dict] = []
 
     def get_session_state(self) -> dict:
         self.calls.append("session")
@@ -245,6 +279,35 @@ class _FakeNativeResultAdapter:
                 "tree_preview": {"id": "doc-1", "name": "spring.m3d", "children_count": 1},
                 "items_preview": [{"id": "solid-1", "name": "Spring"}][:max_items],
             },
+        }
+
+    def launch_native_module_command(
+        self,
+        *,
+        module: str = "Spring",
+        command_id: int | str | None = 101,
+        command_title: str | None = None,
+        kompas_root: str | None = None,
+        libs_dir: str | None = None,
+        post: bool = True,
+        visible: bool = True,
+        allow_interactive: bool = False,
+    ) -> dict:
+        self.launches.append(
+            {
+                "module": module,
+                "command_id": command_id,
+                "allow_interactive": allow_interactive,
+                "post": post,
+                "visible": visible,
+            }
+        )
+        return {
+            "ok": True,
+            "module": module,
+            "command": {"id": command_id, "title": command_title or "Compression springs"},
+            "launch_attempted": bool(allow_interactive),
+            "status": "launched" if allow_interactive else "preview_only",
         }
 
 
