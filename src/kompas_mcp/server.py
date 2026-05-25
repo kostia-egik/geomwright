@@ -24,6 +24,7 @@ from .native_modules import inspect_native_module_entrypoints as build_native_mo
 from .native_modules import inspect_native_module_interfaces as build_native_module_interface_inspection
 from .native_modules import inspect_native_spring_workflow as build_native_spring_workflow_inspection
 from .native_modules import list_native_modules as build_native_modules
+from .native_modules import plan_native_entrypoint_validation as build_native_entrypoint_validation_plan
 from .native_modules import probe_native_module_programmatic_access as build_native_module_programmatic_access_probe
 from .thread_catalog import list_thread_catalog_standards as build_thread_catalog_standards
 from .thread_catalog import list_helical_thread_v1_candidates as build_helical_thread_v1_candidates
@@ -153,6 +154,26 @@ def inspect_native_module_entrypoints(
         kompas_root=kompas_root,
         libs_dir=libs_dir,
         include_registry=include_registry,
+        max_exports_per_file=max_exports_per_file,
+    )
+
+
+@mcp.tool()
+def plan_native_entrypoint_validation(
+    module: str = "Spring",
+    export_name: str | None = None,
+    command_id: int | str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_exports_per_file: int | None = 120,
+) -> dict:
+    """Build a non-executing isolated validation plan for private native exports."""
+    return build_native_entrypoint_validation_plan(
+        module=module,
+        export_name=export_name,
+        command_id=command_id,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
         max_exports_per_file=max_exports_per_file,
     )
 

@@ -11,6 +11,7 @@ from kompas_mcp.native_modules import inspect_native_module_entrypoints
 from kompas_mcp.native_modules import inspect_native_module_interfaces
 from kompas_mcp.native_modules import inspect_native_spring_workflow
 from kompas_mcp.native_modules import list_native_modules
+from kompas_mcp.native_modules import plan_native_entrypoint_validation
 from kompas_mcp.native_modules import preview_native_module_launch
 from kompas_mcp.native_modules import probe_native_module_programmatic_access
 from kompas_mcp.native_module_result import capture_native_module_result
@@ -137,6 +138,8 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
                         "suffix": ".dll",
                         "ok": True,
                         "is_pe": True,
+                        "machine": "0x8664",
+                        "architecture": "x64",
                         "export_count": 1,
                         "exports_returned": 1,
                         "exports_truncated": False,
@@ -160,9 +163,55 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(candidate["command_id"], 101)
         self.assertEqual(candidate["command_title"], "Compression springs")
         self.assertEqual(candidate["spring_kind"], "compression_spring")
+        self.assertEqual(candidate["architecture"], "x64")
         self.assertFalse(candidate["production_safe"])
         self.assertFalse(payload["assessment"]["full_autonomous_access_supported"])
         self.assertIn("Do not call unknown exports", payload["assessment"]["safe_validation_plan"][0])
+
+    def test_plans_entrypoint_validation_without_allowing_export_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            fake_exports = {
+                "enabled": True,
+                "summary": {
+                    "file_count": 1,
+                    "pe_file_count": 1,
+                    "exporting_file_count": 1,
+                    "automation_export_count": 1,
+                },
+                "files": [
+                    {
+                        "relative_path": "SPR_CCS.dll",
+                        "name": "SPR_CCS.dll",
+                        "suffix": ".dll",
+                        "ok": True,
+                        "is_pe": True,
+                        "machine": "0x8664",
+                        "architecture": "x64",
+                        "export_count": 1,
+                        "exports_returned": 1,
+                        "exports_truncated": False,
+                        "automation_exports": ["SpringCCS"],
+                    }
+                ],
+            }
+
+            with patch("kompas_mcp.native_modules._runtime_export_inventory", return_value=fake_exports):
+                payload = plan_native_entrypoint_validation(
+                    "Spring",
+                    libs_dir=str(libs_dir),
+                    export_name="SpringCCS",
+                )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["probe_kind"], "native_entrypoint_validation_plan")
+        self.assertEqual(payload["selected_count"], 1)
+        self.assertEqual(payload["selected_candidates"][0]["architecture"], "x64")
+        self.assertFalse(payload["assessment"]["may_call_export_now"])
+        self.assertFalse(payload["assessment"]["production_bridge_allowed"])
+        self.assertTrue(payload["assessment"]["requires_isolated_process"])
+        self.assertEqual(payload["harness"]["mode"], "specification_only_no_execution")
+        self.assertIn("LoadLibrary", payload["harness"]["phases"][0]["blocked_actions"])
 
     def test_missing_module_returns_available_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -495,6 +495,59 @@ def inspect_native_module_entrypoints(
     }
 
 
+def plan_native_entrypoint_validation(
+    module: str = "Spring",
+    *,
+    export_name: str | None = None,
+    command_id: int | str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_exports_per_file: int | None = 120,
+) -> dict[str, Any]:
+    """Build a safe, non-executing validation plan for private native exports."""
+    dossier = inspect_native_module_entrypoints(
+        module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_registry=False,
+        max_exports_per_file=max_exports_per_file,
+    )
+    if not dossier.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "probe_kind": "native_entrypoint_validation_plan",
+            "stage": "inspect_native_module_entrypoints",
+            "entrypoint_dossier": dossier,
+            "error": dossier.get("error", "Native entrypoint validation plan could not be built"),
+        }
+
+    selected = _select_entrypoint_validation_candidates(
+        dossier.get("candidates", []),
+        export_name=export_name,
+        command_id=command_id,
+    )
+    assessment = _entrypoint_validation_assessment(dossier, selected)
+    return {
+        "ok": True,
+        "module": dossier["module"],
+        "query": module,
+        "title": dossier.get("title"),
+        "app_id": dossier.get("app_id"),
+        "path": dossier.get("path"),
+        "probe_kind": "native_entrypoint_validation_plan",
+        "filters": {
+            "export_name": export_name,
+            "command_id": command_id,
+        },
+        "selected_count": len(selected),
+        "selected_candidates": selected,
+        "assessment": assessment,
+        "harness": _entrypoint_validation_harness(selected),
+        "source_entrypoint_status": dossier.get("assessment", {}).get("status"),
+    }
+
+
 def preview_native_module_launch(
     module: str = "Spring",
     *,
@@ -1076,6 +1129,8 @@ def _runtime_export_inventory(
                 "suffix": item.get("suffix"),
                 "ok": export_info.get("ok"),
                 "is_pe": export_info.get("is_pe", False),
+                "machine": export_info.get("machine"),
+                "architecture": export_info.get("architecture"),
                 "export_count": export_info.get("export_count", 0),
                 "exports_returned": len(export_info.get("exports", [])),
                 "exports_truncated": export_info.get("truncated", False),
@@ -1115,6 +1170,9 @@ def _pe_export_names(path: Path, *, max_exports: int) -> dict[str, Any]:
             payload["error"] = "PE signature not found"
             return payload
         coff = pe_offset + 4
+        machine = struct.unpack_from("<H", data, coff)[0]
+        payload["machine"] = f"0x{machine:04X}"
+        payload["architecture"] = _pe_machine_architecture(machine)
         section_count = struct.unpack_from("<H", data, coff + 2)[0]
         optional_size = struct.unpack_from("<H", data, coff + 16)[0]
         optional = coff + 20
@@ -1171,6 +1229,16 @@ def _pe_rva_to_offset(rva: int, sections: list[tuple[int, int, int, int]]) -> in
             if offset < raw_pointer + raw_size:
                 return offset
     return None
+
+
+def _pe_machine_architecture(machine: int) -> str:
+    return {
+        0x014C: "x86",
+        0x8664: "x64",
+        0x01C0: "arm",
+        0x01C4: "armv7",
+        0xAA64: "arm64",
+    }.get(machine, "unknown")
 
 
 def _read_c_string(data: bytes, offset: int) -> str:
@@ -1514,6 +1582,8 @@ def _entrypoint_candidates_from_probe(probe: dict[str, Any]) -> list[dict[str, A
                     "export": export_name,
                     "relative_path": file_info.get("relative_path"),
                     "file": file_info.get("name"),
+                    "machine": file_info.get("machine"),
+                    "architecture": file_info.get("architecture"),
                     "spring_kind": metadata.get("spring_kind"),
                     "command_id": command_id,
                     "command_title": command.get("title") if command else None,
@@ -1588,6 +1658,139 @@ def _entrypoint_candidate_assessment(probe: dict[str, Any], candidates: list[dic
             "native Spring remains diagnostic/reference only."
         ),
         "source_programmatic_access_status": probe.get("assessment", {}).get("status"),
+    }
+
+
+def _select_entrypoint_validation_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    export_name: str | None,
+    command_id: int | str | None,
+) -> list[dict[str, Any]]:
+    selected = candidates
+    if export_name:
+        requested = export_name.casefold()
+        selected = [
+            candidate
+            for candidate in selected
+            if str(candidate.get("export", "")).casefold() == requested
+        ]
+    if command_id is not None:
+        try:
+            requested_command = int(command_id)
+        except (TypeError, ValueError):
+            requested_command = None
+        selected = [
+            candidate
+            for candidate in selected
+            if requested_command is not None and candidate.get("command_id") == requested_command
+        ]
+    return [_entrypoint_validation_candidate_summary(candidate) for candidate in selected[:10]]
+
+
+def _entrypoint_validation_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "export": candidate.get("export"),
+        "relative_path": candidate.get("relative_path"),
+        "file": candidate.get("file"),
+        "architecture": candidate.get("architecture"),
+        "machine": candidate.get("machine"),
+        "spring_kind": candidate.get("spring_kind"),
+        "command_id": candidate.get("command_id"),
+        "command_title": candidate.get("command_title"),
+        "confidence": candidate.get("confidence"),
+        "callability": candidate.get("callability"),
+        "production_safe": False,
+        "risk": candidate.get("risk"),
+    }
+
+
+def _entrypoint_validation_assessment(dossier: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
+    if not dossier.get("candidate_count"):
+        status = "no_entrypoint_candidates"
+    elif not selected:
+        status = "no_candidate_selected"
+    else:
+        status = "isolated_validation_plan_ready"
+    return {
+        "status": status,
+        "may_call_export_now": False,
+        "production_bridge_allowed": False,
+        "full_autonomous_access_supported": False,
+        "public_callable_contract_detected": False,
+        "requires_isolated_process": bool(selected),
+        "requires_explicit_operator_approval": bool(selected),
+        "verdict": (
+            "This plan is only a reverse-engineering harness specification. "
+            "It does not validate Spring as an autonomous production API."
+        ),
+        "hard_blocks": [
+            "Never call an unknown native export from the production MCP bridge process.",
+            "Never run the harness with open user documents or unsaved KOMPAS state.",
+            "Do not promote a candidate without a repeatable signature, input/output, ownership, threading, and error contract.",
+        ],
+        "promotion_gates": [
+            "Static ABI inventory identifies architecture, dependencies, export ordinal/name, and plausible calling convention.",
+            "Isolated LoadLibrary/GetProcAddress probe exits cleanly without touching KOMPAS documents.",
+            "A no-op or documented introspection call is demonstrated repeatedly in a throwaway process.",
+            "A minimal input/output contract is documented and covered by crash-contained tests.",
+            "Only then consider a separate experimental adapter; production remains disabled by default.",
+        ],
+        "fallback": (
+            "If these gates fail, use an owned autonomous spring calculation/modeling path and keep native Spring as a reference tool."
+        ),
+    }
+
+
+def _entrypoint_validation_harness(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "mode": "specification_only_no_execution",
+        "selected_exports": [
+            {
+                "dll": candidate.get("relative_path") or candidate.get("file"),
+                "export": candidate.get("export"),
+                "architecture": candidate.get("architecture") or "unknown",
+                "command_id": candidate.get("command_id"),
+                "spring_kind": candidate.get("spring_kind"),
+            }
+            for candidate in selected
+        ],
+        "phases": [
+            {
+                "name": "static_abi_inventory",
+                "allowed_actions": [
+                    "parse PE headers and export table",
+                    "inspect imports/dependencies with static tools",
+                    "record architecture and decorated/undecorated export names",
+                ],
+                "blocked_actions": ["LoadLibrary", "GetProcAddress", "calling the export"],
+                "expected_evidence": ["machine architecture", "export name/ordinal", "dependency list"],
+            },
+            {
+                "name": "isolated_loader_probe",
+                "allowed_actions": [
+                    "spawn a throwaway process",
+                    "set an empty temporary working directory",
+                    "LoadLibrary and GetProcAddress only",
+                    "exit immediately after resolving addresses",
+                ],
+                "blocked_actions": ["calling unresolved exports", "opening user documents", "running inside MCP bridge"],
+                "expected_evidence": ["load status", "GetProcAddress status", "process exit code"],
+            },
+            {
+                "name": "signature_validation",
+                "allowed_actions": [
+                    "test only after a plausible signature is documented",
+                    "use crash containment and timeout",
+                    "start with no-op/introspection style calls only",
+                ],
+                "blocked_actions": ["passing guessed structs into production files", "saving documents", "batch execution"],
+                "expected_evidence": ["repeatable return value", "stable error handling", "no document side effects"],
+            },
+        ],
+        "default_timeout_seconds": 10,
+        "recommended_workdir_policy": "new_empty_temp_dir_per_run",
+        "result_policy": "write bounded JSON result plus process exit code; never rely on UI state",
     }
 
 
