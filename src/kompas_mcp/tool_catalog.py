@@ -11,6 +11,14 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
         "tools": ["get_mcp_tool_catalog"],
     },
     {
+        "name": "native_modules",
+        "purpose": "Inspect installed native KOMPAS application modules without launching them.",
+        "tools": [
+            "list_native_modules",
+            "inspect_native_module",
+        ],
+    },
+    {
         "name": "thread_catalog",
         "purpose": "Inspect KOMPAS thread.db standards and resolve thread sizes.",
         "tools": [

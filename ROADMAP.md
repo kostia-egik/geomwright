@@ -47,6 +47,7 @@
 - добавлены `external_polygonal_step` и `internal_polygonal_step` на extrude/cut-extrude базе;
 - добавлены `external_threaded_step` и `internal_threaded_step` через штатный каталог резьб КОМПАС и native thread API;
 - добавлены `external_helical_thread` и `internal_helical_thread` как реальные винтовые резьбы через `ICylindricSpiral3D` + `IEvolution`;
+- добавлен read-only слой `native_modules`: обнаружение установленных прикладных модулей КОМПАС по `Libs`, чтение manifest-команд и bounded SQLite-инвентаря; `Spring` определяется как native calculation workflow, а не как ручной CAD-builder;
 - polygonal-ступени доведены до параметрического эскиза с управляющим диаметром по внутренней окружности (`inscribed_circle`) и `well_constrained`-состоянием;
 - устойчивое сохранение базовых свойств детали (`name`, `designation`, `material`) после повторного открытия пока отдельная задача.
 
@@ -278,6 +279,7 @@
 Ближайший порядок:
 
 - `bind_operation_variables` по текущим extrude/cut-extrude/pattern сценариям закрыт на уровне preview-контракта; оставшиеся числовые значения считаем transient fallback до `Update`, а не отдельным roadmap-блокером;
-- пружины по параметрам: preview-контракт `compression_spring` добавлен; следующий шаг - live bridge-построение через цилиндрическую спираль, круглый профиль проволоки и boss evolution;
-- после пружин продолжить крупные модули: шкивы/звёзды/шестерни;
+- пружины: не развивать ручной CAD-builder; считать `compression_spring` intent/preview-контрактом для родного модуля `Механика: Пружины`;
+- следующий шаг по пружинам - исследовательский native-module этап: безопасный запуск команды `Spring`/`101` в интерактивном режиме, фиксация lifecycle/ошибок/состояния документа до и после запуска;
+- после проверки native Spring launch обобщить тот же слой под шкивы/звёзды/шестерни и другие родные модули КОМПАС;
 - low-level расширять только по блокерам этих модулей: например, если понадобится редактирование/удаление sketch entity, readback constraints/dimensions или feature-level primitive, добавлять ровно этот tool с тестами и live-audit.
