@@ -704,7 +704,7 @@ def update_sketch_entity_geometry(
     entity: dict | None = None,
     geometry: dict | None = None,
 ) -> dict:
-    """Update geometry for one existing point, segment, or circle selected by reference, index, or fingerprint."""
+    """Update geometry for one existing point, segment, circle, or arc selected by reference, index, or fingerprint."""
     return adapter.update_sketch_entity_geometry(
         document_id=document_id,
         sketch_ref=sketch_ref,

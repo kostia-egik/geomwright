@@ -127,6 +127,39 @@ def main() -> None:
                     ),
                 )
             )
+            list_arcs_step = _run_step(
+                "list_existing_sketch_arcs",
+                lambda: adapter.list_sketch_entities(
+                    document_id=opened_document_id,
+                    sketch_ref=sketch_ref,
+                    kinds=["arc"],
+                    max_items=10,
+                ),
+            )
+            audit["steps"].append(list_arcs_step)
+            arc_row = _extract_first_list_item(list_arcs_step.get("payload"), "arc")
+            if arc_row is not None:
+                audit["steps"].append(
+                    _run_step(
+                        "update_existing_sketch_arc_geometry",
+                        lambda: adapter.update_sketch_entity_geometry(
+                            document_id=opened_document_id,
+                            sketch_ref=sketch_ref,
+                            entity={
+                                "kind": "arc",
+                                "index": int(arc_row.get("collection_index")),
+                                "fingerprint": arc_row.get("fingerprint"),
+                            },
+                            geometry={
+                                "center": [25, 12],
+                                "radius": 9,
+                                "start": [34, 12],
+                                "end": [25, 21],
+                                "direction": bool(arc_row.get("geometry", {}).get("direction", False)),
+                            },
+                        ),
+                    )
+                )
             append_inputs = {
                 "sketch_ref": sketch_ref,
                 "create_new_sketch": False,
@@ -498,6 +531,7 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "set_sketch_entity_style_ok": _step_ok(audit, "set_existing_sketch_entity_style"),
         "delete_sketch_entity_ok": _step_ok(audit, "delete_existing_sketch_entity"),
         "update_sketch_entity_geometry_ok": _step_ok(audit, "update_existing_sketch_entity_geometry"),
+        "update_sketch_arc_geometry_ok": _step_ok(audit, "update_existing_sketch_arc_geometry"),
         "list_sketch_dimensions_ok": _step_ok(audit, "list_existing_sketch_dimensions"),
         "inspect_sketch_dimension_ok": _step_ok(audit, "inspect_existing_sketch_dimension"),
         "list_sketch_constraints_ok": _step_ok(audit, "list_existing_sketch_constraints"),

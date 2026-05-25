@@ -531,6 +531,37 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
+    def test_update_sketch_entity_geometry_forwards_arc_geometry_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.update_sketch_entity_geometry(
+            document_id="doc-1",
+            sketch_ref=100,
+            entity={"kind": "arc", "index": 1},
+            geometry={"center": [5, 5], "radius": 7, "start": [12, 5], "end": [5, 12], "direction": True},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "update_sketch_entity_geometry",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "entity": {"kind": "arc", "index": 1},
+                    "geometry": {
+                        "center": [5.0, 5.0],
+                        "radius": 7.0,
+                        "start": [12.0, 5.0],
+                        "end": [5.0, 12.0],
+                        "direction": True,
+                    },
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
     def test_update_sketch_entity_geometry_validates_payload_before_bridge_call(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -538,7 +569,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.update_sketch_entity_geometry(entity={"kind": "segment", "index": 0}, geometry={"start": [0, 0], "end": [1, 0]})
         with self.assertRaises(ValueError):
-            adapter.update_sketch_entity_geometry(sketch_ref=100, entity={"kind": "arc", "index": 0}, geometry={})
+            adapter.update_sketch_entity_geometry(sketch_ref=100, entity={"kind": "ellipse", "index": 0}, geometry={})
         with self.assertRaises(ValueError):
             adapter.update_sketch_entity_geometry(sketch_ref=100, entity={"kind": "circle", "index": 0}, geometry={"center": [0, 0], "radius": 0})
 
@@ -1789,6 +1820,44 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(line.X1, 5.0)
         self.assertEqual(line.Y2, 16.0)
         self.assertTrue(line.updated)
+        self.assertTrue(sketch.ended)
+        self.assertTrue(sketch.updated)
+
+    def test_bridge_update_sketch_entity_geometry_updates_arc(self) -> None:
+        bridge = _load_bridge_module()
+        arc = _FakeSketchEntity(301)
+        arc.Name = ""
+        arc.Xc = 0.0
+        arc.Yc = 0.0
+        arc.Radius = 5.0
+        arc.X1 = 5.0
+        arc.Y1 = 0.0
+        arc.X2 = 0.0
+        arc.Y2 = 5.0
+        arc.Direction = False
+        collection = _FakeCollection([arc])
+        view = types.SimpleNamespace(Arcs=collection)
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, before, after = bridge._update_existing_sketch_entity_geometry(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "entity": {"kind": "arc", "reference": 301},
+                "geometry": {"center": [2, 3], "radius": 8, "start": [10, 3], "end": [2, 11], "direction": True},
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(before["geometry"]["center"], [0.0, 0.0])
+        self.assertEqual(after["geometry"]["center"], [2.0, 3.0])
+        self.assertEqual(after["geometry"]["radius"], 8.0)
+        self.assertEqual(after["geometry"]["end"], [2.0, 11.0])
+        self.assertTrue(arc.Direction)
+        self.assertTrue(arc.updated)
         self.assertTrue(sketch.ended)
         self.assertTrue(sketch.updated)
 

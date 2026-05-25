@@ -3250,6 +3250,28 @@ def _apply_existing_sketch_entity_geometry(entity, kind, geometry):
         entity.X = float(point[0])
         entity.Y = float(point[1])
         return
+    if kind == "arc":
+        center = _normalize_point2d_payload(geometry.get("center"), "geometry.center", None)
+        start = _normalize_point2d_payload(geometry.get("start"), "geometry.start", None)
+        end = _normalize_point2d_payload(geometry.get("end"), "geometry.end", None)
+        radius = float(geometry.get("radius"))
+        if radius <= 0:
+            raise RuntimeError("invalid input: geometry.radius must be greater than zero")
+        entity.Xc = float(center[0])
+        entity.Yc = float(center[1])
+        entity.Radius = radius
+        entity.X1 = float(start[0])
+        entity.Y1 = float(start[1])
+        entity.X2 = float(end[0])
+        entity.Y2 = float(end[1])
+        if geometry.get("direction") not in (None, ""):
+            try:
+                entity.Direction = bool(geometry.get("direction"))
+            except Exception:
+                set_direction = safe_get(entity, "SetDirection")
+                if callable(set_direction):
+                    set_direction(bool(geometry.get("direction")))
+        return
     raise RuntimeError("invalid input: unsupported geometry update kind: %s" % (kind or "<missing>"))
 
 
@@ -3271,7 +3293,7 @@ def _update_existing_sketch_entity_geometry(model_container, payload):
     try:
         drawing_container = _get_sketch_drawing_container(sketch_doc)
         entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
-        if kind not in ("point", "segment", "circle"):
+        if kind not in ("point", "segment", "circle", "arc"):
             raise RuntimeError("invalid input: unsupported geometry update kind: %s" % (kind or "<missing>"))
         resolved_sketch_ref = safe_get(sketch, "Reference", sketch_ref)
         index = _existing_sketch_entity_index(drawing_container, entity, kind, collection_name, resolved_sketch_ref)

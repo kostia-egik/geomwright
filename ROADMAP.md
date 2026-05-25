@@ -70,7 +70,7 @@
 Обязательный low-level минимум перед следующим крупным модулем:
 
 1. `delete_sketch_entity`: удаление ошибочно созданного объекта эскиза по `reference` / `index` / `fingerprint` — реализовано, требуется поддерживать в live-audit.
-2. `update_sketch_entity_geometry`: правка геометрии существующего `point`, `segment`, `circle` — реализовано; затем добавить `arc`.
+2. `update_sketch_entity_geometry`: правка геометрии существующего `point`, `segment`, `circle`, `arc` — реализовано и подтверждается live-audit.
 3. `list_sketch_dimensions` и `inspect_sketch_dimension`: readback размеров по `reference` / `index` / `fingerprint` — реализовано и подтверждено live-audit; дальше расширять поля привязок/переменных по фактической COM-доступности.
 4. `list_sketch_constraints` и `inspect_sketch_constraint`: readback геометрических ограничений и их целевых объектов — диагностический probe реализован; live KOMPAS пока показывает пустые exposed constraint collections после успешного `NewConstraint`, поэтому полный readback остается COM gap.
 5. `clear_sketch_entity_constraints`: repair-механизм для удаления ограничений с выбранной sketch entity через `IDrawingObject1.DeleteConstraints` — реализовано, требуется поддерживать в live-audit.

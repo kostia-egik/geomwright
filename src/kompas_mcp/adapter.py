@@ -286,6 +286,16 @@ def _normalize_sketch_entity_geometry(kind: str, value: Any, *, name: str) -> di
         return {
             "point": _normalize_point2d(value.get("point", value.get("position")), name=f"{name}.point"),
         }
+    if kind == "arc":
+        row = {
+            "center": _normalize_point2d(value.get("center"), name=f"{name}.center"),
+            "radius": _normalize_positive_float(value.get("radius"), name=f"{name}.radius", default=10.0),
+            "start": _normalize_point2d(value.get("start"), name=f"{name}.start"),
+            "end": _normalize_point2d(value.get("end"), name=f"{name}.end"),
+        }
+        if value.get("direction") not in (None, ""):
+            row["direction"] = bool(value.get("direction"))
+        return row
     raise ValueError(f"{name}.kind is unsupported for geometry update")
 
 
