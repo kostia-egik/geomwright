@@ -8,6 +8,7 @@ from pathlib import Path
 from kompas_mcp.native_modules import inspect_native_module
 from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import preview_native_module_launch
+from kompas_mcp.native_module_result import capture_native_module_result
 from kompas_mcp.adapter import KompasAdapter
 
 
@@ -92,6 +93,37 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(runner.calls[0][1]["module"], "Spring")
         self.assertEqual(runner.calls[0][1]["command_id"], 101)
 
+    def test_captures_native_module_result_after_interactive_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            adapter = _FakeNativeResultAdapter()
+
+            payload = capture_native_module_result(adapter, libs_dir=str(libs_dir), max_items=1)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["module"], "Spring")
+        self.assertEqual(payload["command"]["id"], 101)
+        self.assertEqual(payload["status"], "document_readback_captured")
+        self.assertIn("not proven", payload["result_assumption"])
+        self.assertFalse(payload["launch_attempted"])
+        self.assertTrue(payload["readback_only"])
+        self.assertEqual(payload["documents"]["selected"]["id"], "doc-1")
+        self.assertEqual(payload["active_document_state"]["state"]["counts"]["items_returned"], 1)
+        self.assertEqual(adapter.calls, ["session", "list", "active:doc-1"])
+
+    def test_native_module_result_reports_missing_document_without_launching(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            adapter = _FakeNativeResultAdapter(documents=[])
+
+            payload = capture_native_module_result(adapter, libs_dir=str(libs_dir))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "no_document_readback_available")
+        self.assertIsNone(payload["documents"]["selected"])
+        self.assertIsNone(payload["active_document_state"])
+        self.assertEqual(adapter.calls, ["session", "list"])
+
 
 def _create_spring_fixture(root: Path) -> Path:
     libs_dir = root / "Libs"
@@ -129,6 +161,45 @@ class _FakeNativeLaunchRunner:
             "module": payload.get("module"),
             "execute": {"ok": True, "successful_attempt": "automation_execute"},
             "documents": {"before_count": 0, "after_count": 0},
+        }
+
+
+class _FakeNativeResultAdapter:
+    def __init__(self, documents: list[dict] | None = None) -> None:
+        self.document = {"id": "doc-1", "name": "spring.m3d", "path": r"C:\Temp\spring.m3d", "active": True}
+        self.documents = [self.document] if documents is None else documents
+        self.calls: list[str] = []
+
+    def get_session_state(self) -> dict:
+        self.calls.append("session")
+        return {
+            "kompas_connected": True,
+            "documents_count": len(self.documents),
+            "active_document": self.documents[0] if self.documents else None,
+        }
+
+    def list_documents(self) -> dict:
+        self.calls.append("list")
+        return {"documents": self.documents}
+
+    def get_active_document_state(
+        self,
+        document_id: str | None = None,
+        *,
+        require_active_document: bool = True,
+        include_tree: bool = False,
+        include_items: bool = False,
+        max_items: int = 25,
+    ) -> dict:
+        self.calls.append(f"active:{document_id}")
+        return {
+            "ok": True,
+            "state": {
+                "document": self.document,
+                "counts": {"tree_nodes": 3, "items": 2, "items_returned": min(max_items, 2)},
+                "tree_preview": {"id": "doc-1", "name": "spring.m3d", "children_count": 1},
+                "items_preview": [{"id": "solid-1", "name": "Spring"}][:max_items],
+            },
         }
 
 

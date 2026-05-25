@@ -100,6 +100,34 @@ def launch_native_module_command(
 
 
 @mcp.tool()
+def capture_native_module_result(
+    module: str = "Spring",
+    command_id: int | str | None = 101,
+    command_title: str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    document_id: str | None = None,
+    require_active_document: bool = False,
+    include_tree: bool = True,
+    include_items: bool = True,
+    max_items: int = 25,
+) -> dict:
+    """Read bounded document state after a native module command has completed interactively."""
+    return adapter.capture_native_module_result(
+        module=module,
+        command_id=command_id,
+        command_title=command_title,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        document_id=document_id,
+        require_active_document=require_active_document,
+        include_tree=include_tree,
+        include_items=include_items,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
 def list_thread_catalog_standards(database_path: str | None = None) -> dict:
     """List thread standards from KOMPAS thread.db with helical-thread V1 compatibility hints."""
     return build_thread_catalog_standards(database_path=database_path)

@@ -17,6 +17,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "list_native_modules",
             "inspect_native_module",
             "launch_native_module_command",
+            "capture_native_module_result",
         ],
     },
     {

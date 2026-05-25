@@ -21,6 +21,7 @@ from .document_snapshot_diff import diff_document_snapshots as build_document_sn
 from .document_snapshot_verify import verify_document_snapshot_delta as build_document_snapshot_delta_verification
 from .document_stability import verify_document_readback_stability as build_document_readback_stability
 from .document_state import get_active_document_state as build_active_document_state
+from .native_module_result import capture_native_module_result as build_native_module_result
 from .native_modules import preview_native_module_launch as build_native_module_launch_preview
 from .operation_result import normalize_operation_result as build_operation_result_envelope
 from .properties import get_item_properties as build_item_properties
@@ -680,6 +681,34 @@ class KompasAdapter:
             "preview": preview,
             "launch": launch,
         }
+
+    def capture_native_module_result(
+        self,
+        *,
+        module: str = "Spring",
+        command_id: int | str | None = 101,
+        command_title: str | None = None,
+        kompas_root: str | None = None,
+        libs_dir: str | None = None,
+        document_id: str | None = None,
+        require_active_document: bool = False,
+        include_tree: bool = True,
+        include_items: bool = True,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        return build_native_module_result(
+            self,
+            module=module,
+            command_id=command_id,
+            command_title=command_title,
+            kompas_root=kompas_root,
+            libs_dir=libs_dir,
+            document_id=document_id,
+            require_active_document=require_active_document,
+            include_tree=include_tree,
+            include_items=include_items,
+            max_items=max_items,
+        )
 
     def preflight_document_context(
         self,
