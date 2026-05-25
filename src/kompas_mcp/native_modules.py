@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -10,6 +11,67 @@ from typing import Any
 DEFAULT_KOMPAS_ENV_VARS = ("KOMPAS_ROOT", "KOMPAS_INSTALL_DIR", "KOMPAS_HOME")
 DEFAULT_MODULE_DATABASE_SUFFIXES = (".db", ".sdb")
 DEFAULT_RUNTIME_SUFFIXES = (".dll", ".rtw")
+DEFAULT_INTERFACE_SCAN_SUFFIXES = (
+    ".dll",
+    ".rtw",
+    ".chm",
+    ".db",
+    ".sdb",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".json",
+    ".txt",
+)
+INTERFACE_HINT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "parameter_api": (
+        "externalinterface",
+        "external interface",
+        "externalruncommand",
+        "iexchange",
+        "iparam",
+        "parameter",
+        "setparameter",
+        "getparameter",
+        "propertybag",
+    ),
+    "job_file": (
+        ".ini",
+        ".json",
+        ".xml",
+        ".cfg",
+        "template",
+        "profile",
+        "schema",
+        "import",
+        "export",
+    ),
+    "calculation": (
+        "calculate",
+        "calculation",
+        "verification",
+        "design",
+        "force",
+        "material",
+        "spring",
+    ),
+    "model_build": (
+        "buildmodel",
+        "build model",
+        "createdocument",
+        "createpart",
+        "model",
+        "drawing",
+    ),
+    "ui_workflow": (
+        "dialog",
+        "wizard",
+        "propertypage",
+        "modal",
+        "messagebox",
+        "window",
+    ),
+}
 
 
 def list_native_modules(
@@ -130,6 +192,73 @@ def inspect_native_module(
     if resolved["name"].lower() == "spring":
         payload["spring"] = _spring_module_summary(module_dir, payload["commands"])
     return payload
+
+
+def inspect_native_module_interfaces(
+    module: str = "Spring",
+    *,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_files: int | None = 40,
+    max_string_hits: int | None = 80,
+    max_bytes_per_file: int | None = 1_000_000,
+) -> dict[str, Any]:
+    """Inspect static evidence for native-module parameter/session interfaces."""
+    inspection = inspect_native_module(
+        module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_database_inventory=True,
+    )
+    if not inspection.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "stage": "inspect_native_module",
+            "inspection": inspection,
+            "error": inspection.get("error", "Native module was not found"),
+        }
+
+    module_dir = Path(inspection["path"])
+    file_limit = _normalize_limit(max_files, default=40, maximum=200)
+    hit_limit = _normalize_limit(max_string_hits, default=80, maximum=500)
+    byte_limit = _normalize_limit(max_bytes_per_file, default=1_000_000, maximum=8_000_000)
+    files = inspection.get("files", {}).get("files", [])
+    scan_files = _interface_scan_files(files, limit=file_limit)
+    string_hints = _scan_interface_string_hints(
+        module_dir,
+        scan_files,
+        max_hits=hit_limit,
+        max_bytes_per_file=byte_limit,
+    )
+    database_hints = _database_interface_hints(inspection.get("database_inventory", []))
+    manifest_hints = _manifest_interface_hints(inspection)
+    assessment = _native_interface_assessment(
+        inspection,
+        string_hints=string_hints,
+        database_hints=database_hints,
+        manifest_hints=manifest_hints,
+    )
+    return {
+        "ok": True,
+        "module": inspection["module"],
+        "query": module,
+        "title": inspection.get("title"),
+        "app_id": inspection.get("app_id"),
+        "path": inspection.get("path"),
+        "manifest": manifest_hints,
+        "artifact_summary": {
+            "runtime_files": len(inspection.get("runtime_files", [])),
+            "databases": len(inspection.get("databases", [])),
+            "scanned_files": len(scan_files),
+            "scan_file_limit": file_limit,
+            "max_bytes_per_file": byte_limit,
+        },
+        "database_hints": database_hints,
+        "string_hints": string_hints,
+        "assessment": assessment,
+        "spring": _spring_interface_summary(inspection) if inspection["module"].lower() == "spring" else None,
+    }
 
 
 def preview_native_module_launch(
@@ -417,6 +546,270 @@ def _sqlite_inventory(path: Path, *, max_tables: int) -> dict[str, Any]:
         if connection is not None:
             connection.close()
     return payload
+
+
+def _interface_scan_files(files: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for item in files:
+        suffix = str(item.get("suffix") or "").lower()
+        if suffix not in DEFAULT_INTERFACE_SCAN_SUFFIXES:
+            continue
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _scan_interface_string_hints(
+    module_dir: Path,
+    files: list[dict[str, Any]],
+    *,
+    max_hits: int,
+    max_bytes_per_file: int,
+) -> dict[str, Any]:
+    hits: list[dict[str, Any]] = []
+    scanned: list[dict[str, Any]] = []
+    for item in files:
+        path = Path(str(item.get("path", "")))
+        if not _is_relative_to(path, module_dir):
+            continue
+        suffix = str(item.get("suffix") or "").lower()
+        try:
+            data = path.read_bytes()[:max_bytes_per_file]
+            size = path.stat().st_size
+        except OSError as exc:
+            scanned.append(
+                {
+                    "relative_path": item.get("relative_path"),
+                    "suffix": suffix,
+                    "ok": False,
+                    "error": str(exc),
+                }
+            )
+            continue
+        scanned.append(
+            {
+                "relative_path": item.get("relative_path"),
+                "suffix": suffix,
+                "ok": True,
+                "size_bytes": size,
+                "bytes_scanned": min(size, max_bytes_per_file),
+                "truncated": size > max_bytes_per_file,
+            }
+        )
+        for text in _extract_bounded_strings(data):
+            categories = _hint_categories(text)
+            if not categories:
+                continue
+            hits.append(
+                {
+                    "relative_path": item.get("relative_path"),
+                    "suffix": suffix,
+                    "categories": categories,
+                    "text": _compact_hint_text(text),
+                }
+            )
+            if len(hits) >= max_hits:
+                break
+        if len(hits) >= max_hits:
+            break
+    category_counts: dict[str, int] = {category: 0 for category in INTERFACE_HINT_PATTERNS}
+    for hit in hits:
+        for category in hit["categories"]:
+            category_counts[category] = category_counts.get(category, 0) + 1
+    return {
+        "scanned": scanned,
+        "hit_count": len(hits),
+        "truncated": len(hits) >= max_hits,
+        "category_counts": category_counts,
+        "hits": hits,
+    }
+
+
+def _extract_bounded_strings(data: bytes) -> list[str]:
+    strings: list[str] = []
+    seen: set[str] = set()
+    for raw in re.findall(rb"[\x20-\x7e]{4,}", data):
+        text = raw.decode("ascii", errors="ignore").strip()
+        if text and text not in seen:
+            strings.append(text)
+            seen.add(text)
+    try:
+        decoded = data.decode("utf-16le", errors="ignore")
+    except UnicodeError:
+        decoded = ""
+    for text in re.findall(r"[ -~]{4,}", decoded):
+        text = text.strip()
+        if text and text not in seen:
+            strings.append(text)
+            seen.add(text)
+    return strings[:2000]
+
+
+def _hint_categories(text: str) -> list[str]:
+    lowered = text.lower()
+    categories = []
+    for category, patterns in INTERFACE_HINT_PATTERNS.items():
+        if any(pattern in lowered for pattern in patterns):
+            categories.append(category)
+    return categories
+
+
+def _compact_hint_text(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) <= 160:
+        return text
+    return f"{text[:157]}..."
+
+
+def _database_interface_hints(inventory: list[dict[str, Any]]) -> dict[str, Any]:
+    databases: list[dict[str, Any]] = []
+    candidate_terms = (
+        "param",
+        "material",
+        "spring",
+        "calc",
+        "result",
+        "force",
+        "diagram",
+        "table",
+    )
+    for database in inventory:
+        tables = []
+        for table in database.get("tables", []):
+            haystack = " ".join(
+                [str(table.get("name") or "")]
+                + [str(column) for column in table.get("columns", [])]
+            ).lower()
+            matched_terms = [term for term in candidate_terms if term in haystack]
+            if matched_terms:
+                tables.append(
+                    {
+                        "name": table.get("name"),
+                        "type": table.get("type"),
+                        "row_count": table.get("row_count"),
+                        "matched_terms": matched_terms,
+                        "columns": table.get("columns", [])[:20],
+                    }
+                )
+        databases.append(
+            {
+                "name": database.get("name"),
+                "ok": database.get("ok"),
+                "table_count": database.get("table_count"),
+                "candidate_table_count": len(tables),
+                "candidate_tables": tables[:20],
+                "truncated": len(tables) > 20 or bool(database.get("truncated")),
+            }
+        )
+    return {
+        "database_count": len(databases),
+        "databases": databases,
+        "notes": [
+            "SQLite/SDB tables are treated as calculation/reference data, not as a supported automation API.",
+        ],
+    }
+
+
+def _manifest_interface_hints(inspection: dict[str, Any]) -> dict[str, Any]:
+    commands = inspection.get("commands", [])
+    return {
+        "manifest_path": inspection.get("manifest_path"),
+        "app_id": inspection.get("app_id"),
+        "title": inspection.get("title"),
+        "command_count": len(commands),
+        "commands": commands[:50],
+        "parameter_schema_detected": False,
+        "notes": [
+            "The native module manifest exposes commands, not a parameter/session schema.",
+        ],
+    }
+
+
+def _native_interface_assessment(
+    inspection: dict[str, Any],
+    *,
+    string_hints: dict[str, Any],
+    database_hints: dict[str, Any],
+    manifest_hints: dict[str, Any],
+) -> dict[str, Any]:
+    category_counts = string_hints.get("category_counts", {})
+    parameter_hits = int(category_counts.get("parameter_api", 0))
+    job_hits = int(category_counts.get("job_file", 0))
+    model_hits = int(category_counts.get("model_build", 0))
+    manifest_schema = bool(manifest_hints.get("parameter_schema_detected"))
+    public_contract_detected = manifest_schema or (parameter_hits >= 3 and (job_hits > 0 or model_hits > 0))
+    status = (
+        "public_parameter_contract_detected"
+        if public_contract_detected
+        else "interface_hints_detected_requires_manual_validation"
+        if parameter_hits > 0 or job_hits > 0
+        else "no_public_parameter_contract_detected"
+    )
+    return {
+        "status": status,
+        "public_parameter_contract_detected": public_contract_detected,
+        "parameter_api_hint_count": parameter_hits,
+        "job_file_hint_count": job_hits,
+        "model_build_hint_count": model_hits,
+        "job_file_hints_detected": job_hits > 0,
+        "database_reference_detected": any(
+            database.get("candidate_table_count", 0) > 0
+            for database in database_hints.get("databases", [])
+        ),
+        "confidence": "heuristic_static_scan",
+        "limits": [
+            "This is a static artifact scan; it cannot prove absence of a private COM interface.",
+            "DLL strings and database table names are hints only.",
+        ],
+        "next_experiments": _native_interface_next_experiments(inspection["module"], status),
+    }
+
+
+def _native_interface_next_experiments(module: str, status: str) -> list[str]:
+    generic = [
+        "Run start_native_module_result_probe with allow_interactive=true, finish the native UI manually, then diff before/after captures.",
+        "Look for files created or modified by the native workflow during manual completion.",
+    ]
+    if module.lower() == "spring":
+        generic.insert(
+            0,
+            "For Spring/101, complete one compression-spring workflow to 3D model creation and inspect the resulting model tree.",
+        )
+    if status == "public_parameter_contract_detected":
+        generic.append("Inspect the specific hinted artifacts before attempting parameter automation.")
+    elif status == "interface_hints_detected_requires_manual_validation":
+        generic.append("Validate whether hinted artifacts are real input contracts or just internal resources.")
+    else:
+        generic.append("Treat the module as interactive until a documented external/session contract is found.")
+    return generic
+
+
+def _spring_interface_summary(inspection: dict[str, Any]) -> dict[str, Any]:
+    spring = inspection.get("spring") or {}
+    commands = spring.get("commands", [])
+    return {
+        "module_kind": spring.get("module_kind", "calculation_workflow"),
+        "workflow_layers": [
+            "interactive_launch",
+            "manual_calculation_session",
+            "model_or_drawing_creation",
+            "post_workflow_readback",
+        ],
+        "commands": commands,
+        "automation_boundary": (
+            "compression_spring remains an intent/preview contract until a supported "
+            "Spring parameter/session interface is found."
+        ),
+    }
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _quote_sqlite_identifier(value: str) -> str:

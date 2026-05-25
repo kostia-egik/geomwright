@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from kompas_mcp.native_modules import inspect_native_module
+from kompas_mcp.native_modules import inspect_native_module_interfaces
 from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import preview_native_module_launch
 from kompas_mcp.native_module_result import capture_native_module_result
@@ -43,6 +44,31 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(payload["spring"]["commands"][0]["help_key"], "IDD_HELP_CCS")
         self.assertEqual(payload["database_inventory"][0]["tables"][0]["name"], "MATERIALS")
         self.assertEqual(payload["database_inventory"][0]["tables"][0]["row_count"], 2)
+
+    def test_inspects_native_module_interface_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+
+            payload = inspect_native_module_interfaces(
+                "Spring",
+                libs_dir=str(libs_dir),
+                max_files=10,
+                max_string_hits=10,
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["module"], "Spring")
+        self.assertEqual(payload["manifest"]["command_count"], 2)
+        self.assertEqual(payload["artifact_summary"]["databases"], 2)
+        self.assertGreaterEqual(payload["string_hints"]["category_counts"]["parameter_api"], 1)
+        self.assertTrue(
+            any(
+                database["candidate_table_count"] >= 1
+                for database in payload["database_hints"]["databases"]
+            )
+        )
+        self.assertIn("static artifact scan", payload["assessment"]["limits"][0])
+        self.assertEqual(payload["spring"]["module_kind"], "calculation_workflow")
 
     def test_missing_module_returns_available_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -221,7 +247,10 @@ def _create_spring_fixture(root: Path) -> Path:
 """,
         encoding="utf-16",
     )
-    (spring_dir / "SPR_CCS.dll").write_bytes(b"fake")
+    (spring_dir / "SPR_CCS.dll").write_bytes(
+        b"ExternalRunCommand\x00IExchange\x00SetParameter\x00Dialog\x00Build model\x00"
+    )
+    (spring_dir / "spring.cfg").write_text("profile=spring.json\nexport=report.xml\n", encoding="utf-8")
     _create_sqlite_database(base_dir / "Spring.sdb")
     _create_help_database(spring_dir / "SPRING_ru-RU.db")
     return libs_dir

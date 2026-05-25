@@ -20,6 +20,7 @@ from .relink import relink_file_to_output as run_relink_file_to_output
 from .relink import relink_to_export as run_relink_to_export
 from .rules import load_rules
 from .native_modules import inspect_native_module as build_native_module_inspection
+from .native_modules import inspect_native_module_interfaces as build_native_module_interface_inspection
 from .native_modules import list_native_modules as build_native_modules
 from .thread_catalog import list_thread_catalog_standards as build_thread_catalog_standards
 from .thread_catalog import list_helical_thread_v1_candidates as build_helical_thread_v1_candidates
@@ -72,6 +73,26 @@ def inspect_native_module(
         libs_dir=libs_dir,
         include_database_inventory=include_database_inventory,
         max_tables_per_database=max_tables_per_database,
+    )
+
+
+@mcp.tool()
+def inspect_native_module_interfaces(
+    module: str = "Spring",
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_files: int | None = 40,
+    max_string_hits: int | None = 80,
+    max_bytes_per_file: int | None = 1_000_000,
+) -> dict:
+    """Inspect static evidence for native module parameter/session/job-file interfaces."""
+    return build_native_module_interface_inspection(
+        module=module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        max_files=max_files,
+        max_string_hits=max_string_hits,
+        max_bytes_per_file=max_bytes_per_file,
     )
 
 
