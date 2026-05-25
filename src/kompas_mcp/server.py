@@ -20,6 +20,7 @@ from .relink import relink_file_to_output as run_relink_file_to_output
 from .relink import relink_to_export as run_relink_to_export
 from .rules import load_rules
 from .native_modules import inspect_native_module as build_native_module_inspection
+from .native_modules import inspect_native_module_entrypoints as build_native_module_entrypoint_inspection
 from .native_modules import inspect_native_module_interfaces as build_native_module_interface_inspection
 from .native_modules import inspect_native_spring_workflow as build_native_spring_workflow_inspection
 from .native_modules import list_native_modules as build_native_modules
@@ -134,6 +135,24 @@ def probe_native_module_programmatic_access(
         include_exports=include_exports,
         max_registry_keys=max_registry_keys,
         max_registry_matches=max_registry_matches,
+        max_exports_per_file=max_exports_per_file,
+    )
+
+
+@mcp.tool()
+def inspect_native_module_entrypoints(
+    module: str = "Spring",
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    include_registry: bool = False,
+    max_exports_per_file: int | None = 120,
+) -> dict:
+    """Map native DLL exports to cautious reverse-engineering candidates without calling them."""
+    return build_native_module_entrypoint_inspection(
+        module=module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_registry=include_registry,
         max_exports_per_file=max_exports_per_file,
     )
 

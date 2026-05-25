@@ -4,8 +4,10 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from kompas_mcp.native_modules import inspect_native_module
+from kompas_mcp.native_modules import inspect_native_module_entrypoints
 from kompas_mcp.native_modules import inspect_native_module_interfaces
 from kompas_mcp.native_modules import inspect_native_spring_workflow
 from kompas_mcp.native_modules import list_native_modules
@@ -116,6 +118,51 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertFalse(payload["assessment"]["job_session_contract_detected"])
         self.assertGreaterEqual(payload["evidence"]["job_session_artifacts"]["artifact_count"], 1)
         self.assertIn("not sufficient", payload["assessment"]["limits"][1])
+
+    def test_inspects_native_module_entrypoint_candidates_without_calling_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            fake_exports = {
+                "enabled": True,
+                "summary": {
+                    "file_count": 1,
+                    "pe_file_count": 1,
+                    "exporting_file_count": 1,
+                    "automation_export_count": 1,
+                },
+                "files": [
+                    {
+                        "relative_path": "SPR_CCS.dll",
+                        "name": "SPR_CCS.dll",
+                        "suffix": ".dll",
+                        "ok": True,
+                        "is_pe": True,
+                        "export_count": 1,
+                        "exports_returned": 1,
+                        "exports_truncated": False,
+                        "automation_exports": ["SpringCCS"],
+                    }
+                ],
+            }
+
+            with patch("kompas_mcp.native_modules._runtime_export_inventory", return_value=fake_exports):
+                payload = inspect_native_module_entrypoints(
+                    "Spring",
+                    libs_dir=str(libs_dir),
+                    include_registry=False,
+                )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["probe_kind"], "native_entrypoints")
+        self.assertEqual(payload["candidate_count"], 1)
+        candidate = payload["candidates"][0]
+        self.assertEqual(candidate["export"], "SpringCCS")
+        self.assertEqual(candidate["command_id"], 101)
+        self.assertEqual(candidate["command_title"], "Compression springs")
+        self.assertEqual(candidate["spring_kind"], "compression_spring")
+        self.assertFalse(candidate["production_safe"])
+        self.assertFalse(payload["assessment"]["full_autonomous_access_supported"])
+        self.assertIn("Do not call unknown exports", payload["assessment"]["safe_validation_plan"][0])
 
     def test_missing_module_returns_available_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

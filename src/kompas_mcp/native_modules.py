@@ -88,6 +88,33 @@ PROGRAMMATIC_ACCESS_TERMS = (
     "spring",
     "пруж",
 )
+SPRING_ENTRYPOINT_HINTS: dict[str, dict[str, Any]] = {
+    "springccs": {
+        "command_id": 101,
+        "spring_kind": "compression_spring",
+        "native_file_hint": "SPR_CCS.dll",
+    },
+    "springces": {
+        "command_id": 102,
+        "spring_kind": "extension_spring",
+        "native_file_hint": "SPR_CES.dll",
+    },
+    "springcps": {
+        "command_id": 103,
+        "spring_kind": "disc_spring",
+        "native_file_hint": "SPR_CPS.dll",
+    },
+    "springcon": {
+        "command_id": 104,
+        "spring_kind": "conical_spring",
+        "native_file_hint": "SPR_CON.dll",
+    },
+    "springcrs": {
+        "command_id": 105,
+        "spring_kind": "torsion_spring",
+        "native_file_hint": "SPR_CRS.dll",
+    },
+}
 
 
 def list_native_modules(
@@ -421,6 +448,50 @@ def probe_native_module_programmatic_access(
             "manifest": _manifest_interface_hints(inspection),
         },
         "assessment": assessment,
+    }
+
+
+def inspect_native_module_entrypoints(
+    module: str = "Spring",
+    *,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    include_registry: bool = False,
+    max_exports_per_file: int | None = 120,
+) -> dict[str, Any]:
+    """Return a static dossier for native DLL exports that look callable."""
+    probe = probe_native_module_programmatic_access(
+        module,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        include_registry=include_registry,
+        include_exports=True,
+        max_exports_per_file=max_exports_per_file,
+    )
+    if not probe.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "probe_kind": "native_entrypoints",
+            "stage": "probe_native_module_programmatic_access",
+            "programmatic_probe": probe,
+            "error": probe.get("error", "Native module entrypoints could not be inspected"),
+        }
+
+    candidates = _entrypoint_candidates_from_probe(probe)
+    assessment = _entrypoint_candidate_assessment(probe, candidates)
+    return {
+        "ok": True,
+        "module": probe["module"],
+        "query": module,
+        "title": probe.get("title"),
+        "app_id": probe.get("app_id"),
+        "path": probe.get("path"),
+        "probe_kind": "native_entrypoints",
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "assessment": assessment,
+        "programmatic_access_status": probe.get("assessment", {}).get("status"),
     }
 
 
@@ -1417,6 +1488,106 @@ def _programmatic_access_assessment(
             "If no candidate appears for Spring, stop investing in UI-driven integration and design an autonomous spring calculation/modeling path.",
             "Keep launch/readback tools as diagnostics and fallback, not as the production autonomous workflow.",
         ],
+    }
+
+
+def _entrypoint_candidates_from_probe(probe: dict[str, Any]) -> list[dict[str, Any]]:
+    commands_by_id = {
+        int(command["id"]): command
+        for command in probe.get("evidence", {}).get("manifest", {}).get("commands", [])
+        if command.get("id") is not None
+    }
+    candidates: list[dict[str, Any]] = []
+    for file_info in probe.get("evidence", {}).get("exports", {}).get("files", []):
+        exports = list(file_info.get("automation_exports") or [])
+        if not exports:
+            continue
+        for export_name in exports:
+            metadata = _entrypoint_candidate_metadata(
+                export_name,
+                relative_path=str(file_info.get("relative_path") or file_info.get("name") or ""),
+            )
+            command_id = metadata.get("command_id")
+            command = commands_by_id.get(command_id) if isinstance(command_id, int) else None
+            candidates.append(
+                {
+                    "export": export_name,
+                    "relative_path": file_info.get("relative_path"),
+                    "file": file_info.get("name"),
+                    "spring_kind": metadata.get("spring_kind"),
+                    "command_id": command_id,
+                    "command_title": command.get("title") if command else None,
+                    "confidence": metadata["confidence"],
+                    "evidence": metadata["evidence"],
+                    "callability": "unknown_signature",
+                    "production_safe": False,
+                    "risk": "native_private_entrypoint_without_signature",
+                }
+            )
+    return candidates
+
+
+def _entrypoint_candidate_metadata(export_name: str, *, relative_path: str) -> dict[str, Any]:
+    lowered_export = export_name.lower()
+    lowered_path = relative_path.lower()
+    hint = SPRING_ENTRYPOINT_HINTS.get(lowered_export)
+    evidence = []
+    if hint:
+        evidence.append("known_spring_export_name")
+        native_file_hint = str(hint["native_file_hint"]).lower()
+        if native_file_hint in lowered_path:
+            evidence.append("export_file_matches_spring_kind")
+        return {
+            "command_id": hint["command_id"],
+            "spring_kind": hint["spring_kind"],
+            "confidence": "medium_static_name_match",
+            "evidence": evidence,
+        }
+    for name, candidate in SPRING_ENTRYPOINT_HINTS.items():
+        if name in lowered_export or str(candidate["native_file_hint"]).lower() in lowered_path:
+            evidence.append("partial_spring_name_or_file_match")
+            return {
+                "command_id": candidate["command_id"],
+                "spring_kind": candidate["spring_kind"],
+                "confidence": "low_static_name_match",
+                "evidence": evidence,
+            }
+    return {
+        "command_id": None,
+        "spring_kind": None,
+        "confidence": "unclassified_export",
+        "evidence": ["programmatic_symbol_name"],
+    }
+
+
+def _entrypoint_candidate_assessment(probe: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    mapped_candidates = [candidate for candidate in candidates if candidate.get("command_id") is not None]
+    return {
+        "status": (
+            "private_entrypoint_candidates_mapped"
+            if mapped_candidates
+            else "no_domain_entrypoint_candidates_mapped"
+        ),
+        "public_callable_contract_detected": False,
+        "full_autonomous_access_supported": False,
+        "reverse_engineering_candidate_count": len(candidates),
+        "mapped_to_native_command_count": len(mapped_candidates),
+        "validation_stage": "static_export_dossier",
+        "verdict": (
+            "Domain exports can guide reverse engineering, but they are not a supported Spring API without signatures, "
+            "input structs, ownership rules, threading model, and success/error contracts."
+        ),
+        "safe_validation_plan": [
+            "Do not call unknown exports inside the production bridge process.",
+            "If validation is approved, use an isolated throwaway process with crash containment and no open user documents.",
+            "First inspect signatures with dedicated native tooling before any call attempt.",
+            "Only promote an entrypoint after a repeatable no-op/introspection call and a documented input/output contract.",
+        ],
+        "fallback_decision": (
+            "Until an export contract is validated, production autonomous spring work should use an owned calculation/modeling path; "
+            "native Spring remains diagnostic/reference only."
+        ),
+        "source_programmatic_access_status": probe.get("assessment", {}).get("status"),
     }
 
 
