@@ -217,6 +217,39 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertTrue(result["execution"]["preflight_ran"])
         self.assertEqual(result["delta"]["summary"]["added_items"], 1)
 
+    def test_create_sketch_entities_forwards_entity_ids_and_parameterization_payload(self) -> None:
+        class _ParameterizationRunner(_FakeRunner):
+            def call(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+                result = super().call(action, payload)
+                result["parameterization"] = {
+                    "ok": True,
+                    "constraints": {"live_status": "applied", "applied_count": 1},
+                    "dimensions": {"live_status": "disabled"},
+                }
+                return result
+
+        runner = _ParameterizationRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.create_sketch_entities(
+            document_id="doc-1",
+            entities=[{"kind": "segment", "id": "base", "role": "profile", "start": [0, 0], "end": [10, 0]}],
+            constraints=[{"kind": "horizontal", "target": "base"}],
+            sketch_options={"readback_geometry": True},
+        )
+
+        self.assertEqual(
+            runner.calls[0][1],
+            {
+                "document_id": "doc-1",
+                "target": {"mode": "create_new_sketch", "name": "SKETCH_BATCH_1", "plane": "XOY"},
+                "entities": [{"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1, "entity_id": "base", "role": "profile"}],
+                "constraints": [{"kind": "horizontal", "target": "base"}],
+                "sketch_options": {"readback_geometry": True},
+            },
+        )
+        self.assertEqual(result["parameterization"]["constraints"]["live_status"], "applied")
+
     def test_create_sketch_entities_rejects_ambiguous_target_before_bridge_call(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -254,6 +287,204 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_parameterize_sketch_forwards_existing_entity_refs(self) -> None:
+        class _ParameterizationRunner(_FakeRunner):
+            def call(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+                result = super().call(action, payload)
+                result["parameterization"] = {
+                    "ok": True,
+                    "constraints": {"live_status": "applied", "applied_count": 1},
+                    "dimensions": {"live_status": "disabled"},
+                }
+                return result
+
+        runner = _ParameterizationRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.parameterize_sketch(
+            document_id="doc-1",
+            sketch_ref=100,
+            entities=[{"id": "base", "kind": "line", "reference": 201}],
+            constraints=[{"kind": "horizontal", "target": "base"}],
+            sketch_options={"readback_geometry": True},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "parameterize_sketch",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "entities": [{"id": "base", "kind": "segment", "reference": "201"}],
+                    "constraints": [{"kind": "horizontal", "target": "base"}],
+                    "sketch_options": {"readback_geometry": True},
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["parameterization"]["constraints"]["live_status"], "applied")
+
+    def test_parameterize_sketch_requires_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.parameterize_sketch(sketch_ref=100, entities=[{"id": "base", "kind": "segment", "reference": 201}])
+
+        with self.assertRaises(ValueError):
+            adapter.parameterize_sketch(
+                sketch_ref=100,
+                entities=[{"kind": "segment", "reference": 201}],
+                constraints=[{"kind": "horizontal", "target": "base"}],
+            )
+
+        self.assertEqual(runner.calls, [])
+
+    def test_list_sketch_entities_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.list_sketch_entities(document_id="doc-1", sketch_ref=100, kinds=["line", "circle"], max_items=12)
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "list_sketch_entities",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "max_items": 12,
+                    "kinds": ["segment", "circle"],
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_list_sketch_entities_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.list_sketch_entities(sketch_ref=100, kinds=["spline"])
+        with self.assertRaises(ValueError):
+            adapter.list_sketch_entities(kinds=["segment"])
+        with self.assertRaises(ValueError):
+            adapter.list_sketch_entities(sketch_ref=100, max_items=0)
+
+        self.assertEqual(runner.calls, [])
+
+    def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.inspect_sketch_entity(
+            document_id="doc-1",
+            sketch_ref=100,
+            entity={"kind": "line", "index": "2"},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "inspect_sketch_entity",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "entity": {"kind": "segment", "index": 2},
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_inspect_sketch_entity_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.inspect_sketch_entity(sketch_ref=100, entity={"kind": "spline", "index": 0})
+        with self.assertRaises(ValueError):
+            adapter.inspect_sketch_entity(entity={"kind": "segment", "index": 0})
+        with self.assertRaises(ValueError):
+            adapter.inspect_sketch_entity(sketch_ref=100, entity={"kind": "segment"})
+
+        self.assertEqual(runner.calls, [])
+
+    def test_create_sketch_line_segment_can_append_to_existing_sketch_target(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.create_sketch_line_segment(
+            document_id="doc-1",
+            sketch_ref=100,
+            create_new_sketch=False,
+            start=[0, 0],
+            end=[10, 0],
+        )
+
+        self.assertEqual(result["operation"], "create_sketch_line_segment")
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    "create_sketch_entities",
+                    {
+                        "document_id": "doc-1",
+                        "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                        "entities": [{"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1}],
+                    },
+                )
+            ],
+        )
+
+    def test_create_sketch_point_uses_single_entity_batch_contract(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.create_sketch_point(
+            document_id="doc-1",
+            sketch_ref=100,
+            create_new_sketch=False,
+            point=[1, 2],
+        )
+
+        self.assertEqual(result["operation"], "create_sketch_point")
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    "create_sketch_entities",
+                    {
+                        "document_id": "doc-1",
+                        "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                        "entities": [{"kind": "point", "point": [1.0, 2.0], "line_style": 1}],
+                    },
+                )
+            ],
+        )
+
+    def test_create_sketch_arc_and_ellipse_validate_single_entity_payloads(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        adapter.create_sketch_arc(center=[5, 5], radius=3, start=[8, 5], end=[5, 8], direction=False)
+        adapter.create_sketch_ellipse(center=[5, 5], radius_x=4, radius_y=2, angle=15)
+
+        self.assertEqual(runner.calls[0][0], "create_sketch_entities")
+        self.assertEqual(runner.calls[0][1]["entities"][0]["kind"], "arc")
+        self.assertEqual(runner.calls[0][1]["entities"][0]["direction"], False)
+        self.assertEqual(runner.calls[1][1]["entities"][0]["kind"], "ellipse")
+        self.assertEqual(runner.calls[1][1]["entities"][0]["angle"], 15.0)
+
+    def test_create_sketch_polyline_rejects_too_few_points_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.create_sketch_polyline(points=[[0, 0]])
+
+        self.assertEqual(runner.calls, [])
 
     def test_bridge_create_point3d_targets_active_part(self) -> None:
         bridge = _load_bridge_module()
@@ -582,7 +813,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         def create_entities(model_container: Any, part_arg: Any, payload: dict[str, Any]) -> Any:
             created.update({"model_container": model_container, "part": part_arg, "payload": payload})
             part.Sketchs = _FakeCollection([sketch])
-            return sketch, {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "xoy_plane", "sketch_ref": 100}, entity_results
+            return sketch, {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "xoy_plane", "sketch_ref": 100}, entity_results, None
 
         bridge._create_sketch_entities = create_entities
 
@@ -599,7 +830,60 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(result["target"]["sketch_ref"], 100)
         self.assertEqual(result["items"], entity_results)
         self.assertEqual(result["summary"]["entity_count"], 1)
+        self.assertTrue(result["summary"]["update_ok"])
+        self.assertTrue(result["summary"]["sketch_update_ok"])
+        self.assertTrue(result["summary"]["part_update_ok"])
         self.assertEqual(result["readback"]["after"]["snapshot"]["counts"]["items"], 2)
+
+    def test_bridge_create_sketch_entities_reports_nonfatal_part_update_status(self) -> None:
+        bridge = _load_bridge_module()
+        app = object()
+        part = _FakePart()
+        document = types.SimpleNamespace(TopPart=part)
+        sketch = types.SimpleNamespace(Name="SK_BATCH", Reference=100)
+        entity_results = [{"index": 0, "kind": "segment", "ok": True, "reference": 201}]
+
+        def update_false() -> bool:
+            part.updated = True
+            return False
+
+        part.Update = update_false  # type: ignore[method-assign]
+
+        original_make_app = bridge.make_app
+        original_resolve_document = bridge.resolve_document
+        original_cast_model_container = bridge.cast_model_container
+        original_create_entities = bridge._create_sketch_entities
+        original_describe_document = bridge.describe_document
+        self.addCleanup(setattr, bridge, "make_app", original_make_app)
+        self.addCleanup(setattr, bridge, "resolve_document", original_resolve_document)
+        self.addCleanup(setattr, bridge, "cast_model_container", original_cast_model_container)
+        self.addCleanup(setattr, bridge, "_create_sketch_entities", original_create_entities)
+        self.addCleanup(setattr, bridge, "describe_document", original_describe_document)
+
+        bridge.make_app = lambda: app
+        bridge.resolve_document = lambda live_app, document_id: document
+        bridge.cast_model_container = lambda live_part: live_part
+        bridge.describe_document = lambda live_document, live_app: {"id": "doc-1"}
+        bridge._create_sketch_entities = lambda model_container, part_arg, payload: (
+            sketch,
+            {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "xoy_plane", "sketch_ref": 100},
+            entity_results,
+            None,
+        )
+
+        result = bridge.handle_create_sketch_entities(
+            {
+                "document_id": "doc-1",
+                "target": {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "XOY"},
+                "entities": [{"kind": "segment", "start": [0.0, 0.0], "end": [10.0, 0.0]}],
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["summary"]["update_ok"])
+        self.assertTrue(result["summary"]["sketch_update_ok"])
+        self.assertFalse(result["summary"]["part_update_ok"])
+        self.assertTrue(part.updated)
 
     def test_bridge_create_sketch_entities_supports_v2_entity_batch(self) -> None:
         bridge = _load_bridge_module()
@@ -625,7 +909,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "xoy_plane", "sketch_ref": 100},
         )
 
-        _, target, results = bridge._create_sketch_entities(
+        _, target, results, parameterization = bridge._create_sketch_entities(
             object(),
             object(),
             {
@@ -639,11 +923,51 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
 
         self.assertEqual(target["sketch_ref"], 100)
+        self.assertIsNone(parameterization)
         self.assertEqual([item["kind"] for item in results], ["point", "polyline", "arc", "ellipse"])
         self.assertEqual(results[1]["line_count"], 2)
         self.assertTrue(all(entity.updated for bucket in created_entities.values() for entity in bucket))
         self.assertTrue(sketch.ended)
         self.assertTrue(sketch.updated)
+
+    def test_bridge_create_sketch_entities_applies_parameterization_to_entity_ids(self) -> None:
+        bridge = _load_bridge_module()
+        line = _FakeSketchEntity(501)
+        view = types.SimpleNamespace(LineSegments=_FakeAddCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_BATCH", 100, sketch_doc)
+        captured: dict[str, Any] = {}
+
+        original_resolve_target = bridge._resolve_sketch_write_target
+        original_apply_parameterization = bridge._apply_sketch_parameterization
+        self.addCleanup(setattr, bridge, "_resolve_sketch_write_target", original_resolve_target)
+        self.addCleanup(setattr, bridge, "_apply_sketch_parameterization", original_apply_parameterization)
+        bridge._resolve_sketch_write_target = lambda model_container, part, payload, default_name: (
+            sketch,
+            {"mode": "create_new_sketch", "name": "SK_BATCH", "plane": "xoy_plane", "sketch_ref": 100},
+        )
+
+        def apply_parameterization(view_arg: Any, sketch_entities: dict[str, Any], constraints: list[dict[str, Any]], dimensions: list[dict[str, Any]], options: dict[str, Any], steps: list[Any], total_length: float) -> dict[str, Any]:
+            captured.update({"view": view_arg, "entities": sketch_entities, "constraints": constraints, "dimensions": dimensions, "options": options})
+            return {"ok": True, "constraints": {"live_status": "applied"}, "dimensions": {"live_status": "disabled"}}
+
+        bridge._apply_sketch_parameterization = apply_parameterization
+
+        _, _, results, parameterization = bridge._create_sketch_entities(
+            object(),
+            object(),
+            {
+                "entities": [{"kind": "segment", "entity_id": "base", "role": "profile", "start": [0.0, 0.0], "end": [10.0, 0.0], "line_style": 1}],
+                "constraints": [{"kind": "horizontal", "target": "base"}],
+                "sketch_options": {"readback_geometry": True},
+            },
+        )
+
+        self.assertEqual(results[0]["id"], "base")
+        self.assertIs(captured["entities"]["base"]["object"], line)
+        self.assertEqual(captured["constraints"], [{"kind": "horizontal", "target": "base"}])
+        self.assertTrue(captured["options"]["constraints"]["enabled"])
+        self.assertEqual(parameterization["constraints"]["live_status"], "applied")
 
     def test_bridge_create_sketch_entities_targets_existing_sketch_ref(self) -> None:
         bridge = _load_bridge_module()
@@ -654,7 +978,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         other = _FakeSketch("SK_OTHER", 99, sketch_doc)
         part = types.SimpleNamespace(Sketchs=_FakeCollection([other, existing]))
 
-        sketch, target, results = bridge._create_sketch_entities(
+        sketch, target, results, parameterization = bridge._create_sketch_entities(
             part,
             part,
             {
@@ -664,6 +988,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
 
         self.assertIs(sketch, existing)
+        self.assertIsNone(parameterization)
         self.assertEqual(target, {"mode": "existing_sketch", "name": "SK_EXISTING", "sketch_ref": 100})
         self.assertEqual(results[0]["reference"], 401)
         self.assertTrue(existing.ended)
@@ -738,6 +1063,101 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(sketch_node["children"][2]["geometry"]["point"], [1.0, 2.0])
         self.assertIn("arc|204", sketch_node["children"][3]["fingerprint"])
         self.assertEqual(sketch_node["children"][4]["geometry"]["radius_y"], 2.0)
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_parameterize_sketch_selects_existing_entities_by_reference(self) -> None:
+        bridge = _load_bridge_module()
+        line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=0.0, Style=1, Reference=201)
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+        captured: dict[str, Any] = {}
+
+        original_apply = bridge._apply_sketch_parameterization
+        self.addCleanup(setattr, bridge, "_apply_sketch_parameterization", original_apply)
+
+        def apply_parameterization(view_arg: Any, sketch_entities: dict[str, Any], constraints: list[dict[str, Any]], dimensions: list[dict[str, Any]], options: dict[str, Any], steps: list[Any], total_length: float) -> dict[str, Any]:
+            captured["entities"] = sketch_entities
+            captured["constraints"] = constraints
+            captured["options"] = options
+            return {
+                "ok": True,
+                "constraints": {"live_status": "applied", "applied_count": len(constraints)},
+                "dimensions": {"live_status": "disabled"},
+                "geometry_checks": {"ok": True},
+            }
+
+        bridge._apply_sketch_parameterization = apply_parameterization
+
+        sketch_result, target, selected, report = bridge._parameterize_existing_sketch(
+            part,
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "entities": [{"id": "base", "kind": "segment", "reference": 201}],
+                "constraints": [{"kind": "horizontal", "target": "base"}],
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(selected[0]["reference"], 201)
+        self.assertIn("base", captured["entities"])
+        self.assertEqual(captured["entities"]["base"]["x2"], 10.0)
+        self.assertEqual(report["constraints"]["applied_count"], 1)
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_list_sketch_entities_returns_selectors(self) -> None:
+        bridge = _load_bridge_module()
+        line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=0.0, Style=1, Reference=201)
+        circle = types.SimpleNamespace(Name="", Xc=5.0, Yc=5.0, Radius=2.0, Style=1, Reference=202)
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]), Circles=_FakeCollection([circle]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, items, summary = bridge._list_existing_sketch_entities(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "kinds": ["line", "circle"],
+                "max_items": 10,
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual([item["kind"] for item in items], ["segment", "circle"])
+        self.assertEqual(items[0]["collection_index"], 0)
+        self.assertEqual(items[0]["geometry"]["end"], [10.0, 0.0])
+        self.assertIn("segment|201", items[0]["fingerprint"])
+        self.assertEqual(summary["counts"], {"segments": 1, "circles": 1})
+        self.assertFalse(summary["truncated"])
+        self.assertTrue(sketch.ended)
+
+    def test_bridge_inspect_sketch_entity_returns_one_selector(self) -> None:
+        bridge = _load_bridge_module()
+        line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=0.0, Style=1, Reference=201)
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, item = bridge._inspect_existing_sketch_entity(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "entity": {"kind": "line", "reference": 201},
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(item["kind"], "segment")
+        self.assertEqual(item["collection_index"], 0)
+        self.assertEqual(item["geometry"]["end"], [10.0, 0.0])
+        self.assertIn("segment|201", item["fingerprint"])
         self.assertTrue(sketch.ended)
 
 

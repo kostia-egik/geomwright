@@ -72,6 +72,12 @@ class LiveAuditSampleTests(unittest.TestCase):
                 "summary": {"added_items": 2, "removed_items": 0, "changed_items": 0},
                 "counts_delta": {"items": {"delta": 2}},
             },
+            "parameterization": {
+                "ok": True,
+                "constraints": {"live_status": "applied", "applied_count": 3, "failed_count": 0, "skipped_count": 0},
+                "dimensions": {"live_status": "applied", "applied_count": 2, "failed_count": 0},
+                "geometry_checks": {"ok": True, "checked_count": 2, "failed_count": 0},
+            },
             "failures": [],
         }
 
@@ -82,6 +88,9 @@ class LiveAuditSampleTests(unittest.TestCase):
         self.assertEqual(manifest["before_summary"]["items"], 1)
         self.assertEqual(manifest["after_summary"]["items"], 3)
         self.assertEqual(manifest["delta_summary"]["added_items"], 2)
+        self.assertTrue(manifest["parameterization"]["ok"])
+        self.assertEqual(manifest["parameterization"]["constraints"]["applied_count"], 3)
+        self.assertEqual(manifest["parameterization"]["dimensions"]["applied_count"], 2)
         self.assertNotIn("snapshots", manifest)
 
 

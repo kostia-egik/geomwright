@@ -49,6 +49,13 @@ Only explicit `sketch_ref` targeting is supported for existing sketches. Name-ba
 
 Use `create_sketch_entities` to create multiple entities in one target sketch. Supported entity kinds are currently `point`, `segment`, `polyline`, `arc`, `circle`, `ellipse`, and `rectangle`.
 
+The same entity set is also available as single-primitive tools:
+`create_sketch_point`, `create_sketch_line_segment`, `create_sketch_polyline`,
+`create_sketch_arc`, `create_sketch_circle`, `create_sketch_ellipse`, and
+`create_sketch_rectangle`. Single-primitive tools accept the same
+`sketch_ref`/`create_new_sketch` target parameters, so they can append to a
+previously created sketch without switching to the batch API.
+
 ```json
 {
   "name": "SKETCH_BATCH_1",
@@ -66,6 +73,57 @@ Use `create_sketch_entities` to create multiple entities in one target sketch. S
 ```
 
 The tool returns per-entity results plus a shared after snapshot and delta. Batch execution is fail-fast and does not attempt rollback yet.
+
+Batch entities may include `id` or `entity_id`. These IDs are used by optional
+low-level `constraints` and `dimensions` payloads in the same call. For
+multi-line entities, the bridge also exposes generated child IDs such as
+`polyline_id_1` or `rectangle_id_3` in each result's `entity_ids`.
+
+```json
+{
+  "name": "SKETCH_PARAM_1",
+  "entities": [
+    {"kind": "segment", "id": "base", "start": [0, 0], "end": [50, 0]}
+  ],
+  "constraints": [
+    {"kind": "horizontal", "target": "base"}
+  ],
+  "sketch_options": {
+    "readback_geometry": true
+  }
+}
+```
+
+Use `parameterize_sketch` when the geometry already exists. It requires
+`sketch_ref`, an explicit `entities` selection map, and `constraints` or
+`dimensions`. Existing entities can be selected by `reference`, collection
+`index`, or exact readback `fingerprint`. Creation results include
+`collection_index` to support a follow-up parameterization call when raw COM
+`reference` values are renumbered after `Sketch.Update()`.
+
+Use `list_sketch_entities` first when the sketch was not created in the same
+agent step. It returns bounded selector rows with `reference`,
+`collection_index`, `fingerprint`, and `geometry` for `segment`, `circle`,
+`point`, `arc`, and `ellipse` entities.
+
+Use `inspect_sketch_entity` when one selector needs a fresh readback row before
+parameterization. It accepts the same `reference`, collection `index`, or
+`fingerprint` selectors and returns one entity descriptor with geometry.
+
+```json
+{
+  "sketch_ref": "12345",
+  "entities": [
+    {"id": "base", "kind": "segment", "reference": "201"}
+  ],
+  "constraints": [
+    {"kind": "horizontal", "target": "base"}
+  ],
+  "sketch_options": {
+    "readback_geometry": true
+  }
+}
+```
 
 `require_no_removed` defaults to `false` for batch sketch writes. Live KOMPAS readback can renumber or reshape existing sketch entity references after edit, so the stable default contract is `min_added >= 1` plus after-snapshot readback. Set `require_no_removed=true` only for tightly controlled models where removed-item deltas are known to be stable.
 

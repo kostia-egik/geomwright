@@ -41,14 +41,29 @@ def main() -> None:
         "name": "WRITE_V2_AUDIT_SKETCH",
         "plane": "XOY",
         "entities": [
-            {"kind": "point", "point": [0, 0]},
-            {"kind": "segment", "start": [0, 0], "end": [50, 0]},
+            {"kind": "point", "id": "origin_marker", "point": [0, 0]},
+            {"kind": "segment", "id": "base", "start": [0, 0], "end": [50, 0]},
+            {"kind": "segment", "id": "upright", "start": [50, 0], "end": [50, 24]},
             {"kind": "polyline", "points": [[0, 24], [12, 34], [24, 24], [36, 34], [48, 24]]},
             {"kind": "arc", "center": [25, 12], "radius": 10, "start": [35, 12], "end": [25, 22]},
-            {"kind": "circle", "center": [25, 12], "radius": 6},
+            {"kind": "circle", "id": "hole", "center": [25, 12], "radius": 6},
             {"kind": "ellipse", "center": [25, -12], "radius_x": 14, "radius_y": 5},
             {"kind": "rectangle", "corner1": [0, 0], "corner2": [50, 24]},
         ],
+        "constraints": [
+            {"kind": "horizontal", "target": "base"},
+            {"kind": "vertical", "target": "upright"},
+            {"kind": "perpendicular", "target": "base", "partner": "upright"},
+        ],
+        "dimensions": [
+            {"kind": "line_length", "target": "base", "value": 50, "driving": False, "point_y": -10},
+            {"kind": "circle_diameter", "target": "hole", "value": 12, "driving": False, "angle": 0},
+        ],
+        "sketch_options": {
+            "constraints": {"enabled": True},
+            "dimensions": {"enabled": True, "driving": False},
+            "readback_geometry": True,
+        },
         "min_added": 1,
         "require_no_removed": False,
     }
@@ -96,7 +111,7 @@ def main() -> None:
                 "sketch_ref": sketch_ref,
                 "create_new_sketch": False,
                 "entities": [
-                    {"kind": "segment", "start": [60, 0], "end": [80, 20]},
+                    {"kind": "segment", "id": "tail", "start": [60, 0], "end": [80, 0]},
                     {"kind": "point", "point": [80, 20]},
                 ],
                 "min_added": 1,
@@ -109,6 +124,67 @@ def main() -> None:
             )
             audit["steps"].append(append_step)
             audit["append_write_manifest"] = _build_write_manifest(append_inputs, append_step.get("payload"))
+            tail_index = _extract_item_field(append_step.get("payload"), "tail", "collection_index")
+            list_step = _run_step(
+                "list_existing_sketch_entities",
+                lambda: adapter.list_sketch_entities(
+                    document_id=opened_document_id,
+                    sketch_ref=sketch_ref,
+                    kinds=["segment"],
+                    max_items=50,
+                ),
+            )
+            audit["steps"].append(list_step)
+            tail_row = _extract_list_item_by_collection_index(list_step.get("payload"), "segment", tail_index)
+            if tail_index not in (None, "") and tail_row is not None:
+                inspect_step = _run_step(
+                    "inspect_existing_sketch_entity",
+                    lambda: adapter.inspect_sketch_entity(
+                        document_id=opened_document_id,
+                        sketch_ref=sketch_ref,
+                        entity={
+                            "kind": "segment",
+                            "index": int(tail_row.get("collection_index")),
+                            "fingerprint": tail_row.get("fingerprint"),
+                        },
+                    ),
+                )
+                audit["steps"].append(inspect_step)
+                inspected_tail = inspect_step.get("payload", {}).get("item") if isinstance(inspect_step.get("payload"), dict) else None
+                if not isinstance(inspected_tail, dict):
+                    inspected_tail = tail_row
+                parameterize_inputs = {
+                    "sketch_ref": sketch_ref,
+                    "entities": [
+                        {
+                            "id": "tail",
+                            "kind": "segment",
+                            "index": int(inspected_tail.get("collection_index")),
+                            "fingerprint": inspected_tail.get("fingerprint"),
+                            "start": [60, 0],
+                            "end": [80, 0],
+                        },
+                    ],
+                    "constraints": [
+                        {"kind": "horizontal", "target": "tail"},
+                    ],
+                    "dimensions": [
+                        {"kind": "line_length", "target": "tail", "value": 20, "driving": False, "point_y": -18},
+                    ],
+                    "sketch_options": {
+                        "constraints": {"enabled": True},
+                        "dimensions": {"enabled": True, "driving": False},
+                        "readback_geometry": True,
+                    },
+                    "require_no_removed": False,
+                    "require_no_changed": False,
+                }
+                parameterize_step = _run_step(
+                    "parameterize_existing_sketch",
+                    lambda: adapter.parameterize_sketch(document_id=opened_document_id, **parameterize_inputs),
+                )
+                audit["steps"].append(parameterize_step)
+                audit["parameterize_manifest"] = _build_write_manifest(parameterize_inputs, parameterize_step.get("payload"))
 
         audit["steps"].append(
             _run_step(
@@ -166,12 +242,40 @@ def _build_write_manifest(tool_inputs: dict[str, Any], raw_result: Any) -> dict[
         "after_summary": _snapshot_summary(snapshots.get("after")),
         "delta_summary": delta.get("summary") if isinstance(delta.get("summary"), dict) else {},
         "counts_delta": delta.get("counts_delta") if isinstance(delta.get("counts_delta"), dict) else {},
+        "parameterization": _parameterization_summary(result.get("parameterization")),
         "failures": result.get("failures") if isinstance(result.get("failures"), list) else [],
     }
 
 
 def _snapshot_summary(snapshot: Any) -> dict[str, Any]:
     return snapshot.get("summary") if isinstance(snapshot, dict) and isinstance(snapshot.get("summary"), dict) else {}
+
+
+def _parameterization_summary(parameterization: Any) -> dict[str, Any]:
+    if not isinstance(parameterization, dict):
+        return {}
+    constraints = parameterization.get("constraints") if isinstance(parameterization.get("constraints"), dict) else {}
+    dimensions = parameterization.get("dimensions") if isinstance(parameterization.get("dimensions"), dict) else {}
+    geometry = parameterization.get("geometry_checks") if isinstance(parameterization.get("geometry_checks"), dict) else {}
+    return {
+        "ok": bool(parameterization.get("ok")),
+        "constraints": {
+            "live_status": constraints.get("live_status"),
+            "applied_count": constraints.get("applied_count"),
+            "failed_count": constraints.get("failed_count"),
+            "skipped_count": constraints.get("skipped_count"),
+        },
+        "dimensions": {
+            "live_status": dimensions.get("live_status"),
+            "applied_count": dimensions.get("applied_count"),
+            "failed_count": dimensions.get("failed_count"),
+        },
+        "geometry_checks": {
+            "ok": geometry.get("ok"),
+            "checked_count": geometry.get("checked_count"),
+            "failed_count": geometry.get("failed_count"),
+        },
+    }
 
 
 def _preview_payload(payload: Any) -> dict[str, Any]:
@@ -211,6 +315,42 @@ def _extract_sketch_ref(payload: Any) -> Any:
     return None
 
 
+def _extract_item_field(payload: Any, entity_id: str, field: str) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if isinstance(item, dict) and str(item.get("id") or "") == str(entity_id):
+            return item.get(field)
+    return None
+
+
+def _extract_list_item_by_collection_index(payload: Any, kind: str, collection_index: Any) -> dict[str, Any] | None:
+    if collection_index in (None, "") or not isinstance(payload, dict):
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    wanted_index = int(collection_index)
+    for item in items:
+        if (
+            isinstance(item, dict)
+            and item.get("kind") == kind
+            and item.get("collection_index") == wanted_index
+        ):
+            return item
+    return None
+
+
+def _step_ok(audit: dict[str, Any], name: str) -> bool | None:
+    for step in audit.get("steps", []):
+        if isinstance(step, dict) and step.get("name") == name:
+            return bool(step.get("ok"))
+    return None
+
+
 def _finish(audit: dict[str, Any], output_dir: Path) -> None:
     audit["ok"] = all(step.get("ok") for step in audit.get("steps", []))
     audit["summary"] = {
@@ -218,6 +358,9 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "failed_steps": [step.get("name") for step in audit.get("steps", []) if not step.get("ok")],
         "write_ok": bool(audit.get("write_manifest", {}).get("ok")),
         "append_write_ok": bool(audit.get("append_write_manifest", {}).get("ok")) if "append_write_manifest" in audit else None,
+        "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
+        "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
+        "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,
     }
     manifest_path = output_dir / "write_v2_audit_manifest.json"
     manifest_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")

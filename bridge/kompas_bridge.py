@@ -2168,44 +2168,455 @@ def _create_sketch_entities(model_container, part, payload):
     entities = payload.get("entities")
     if not isinstance(entities, list) or not entities:
         raise RuntimeError("invalid input: entities must be a non-empty list")
+    planned_constraints = payload.get("constraints") or []
+    planned_dimensions = payload.get("dimensions") or []
+    if not isinstance(planned_constraints, list):
+        raise RuntimeError("invalid input: constraints must be a list")
+    if not isinstance(planned_dimensions, list):
+        raise RuntimeError("invalid input: dimensions must be a list")
     sketch_doc = sketch.BeginEdit()
     if sketch_doc is None:
         raise RuntimeError("BeginEdit returned None")
     results = []
+    sketch_entities = {}
+    parameterization_report = None
     try:
-        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
         for index, entity in enumerate(entities):
             if not isinstance(entity, dict):
                 raise RuntimeError("invalid input: entities[%s] must be an object" % index)
             kind = str(entity.get("kind") or "").strip().lower()
+            entity_id = str(entity.get("entity_id") or entity.get("id") or "entity_%s" % (index + 1))
+            role = str(entity.get("role") or kind)
             if kind == "segment":
+                collection_index = _sketch_entity_collection_count(drawing_container, "segment")
                 created = _add_sketch_line_segment(drawing_container, entity.get("start"), entity.get("end"), int(entity.get("line_style", 1)))
-                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+                start, end = entity.get("start"), entity.get("end")
+                sketch_entities[entity_id] = _sketch_line_entry(created, start[0], start[1], end[0], end[1], role=role, target=entity_id)
+                results.append({"index": index, "id": entity_id, "kind": kind, "ok": True, "reference": safe_get(created, "Reference"), "collection_index": collection_index})
             elif kind == "circle":
+                collection_index = _sketch_entity_collection_count(drawing_container, "circle")
                 created = _add_sketch_circle(drawing_container, entity.get("center"), float(entity.get("radius")), int(entity.get("line_style", 1)))
-                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+                center = entity.get("center")
+                sketch_entities[entity_id] = _sketch_circle_entry(created, center[0], center[1], entity.get("radius"), role=role, target=entity_id)
+                results.append({"index": index, "id": entity_id, "kind": kind, "ok": True, "reference": safe_get(created, "Reference"), "collection_index": collection_index})
             elif kind == "point":
+                collection_index = _sketch_entity_collection_count(drawing_container, "point")
                 created = _add_sketch_point(drawing_container, entity.get("point"), int(entity.get("line_style", 1)))
-                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+                point = entity.get("point")
+                sketch_entities[entity_id] = _sketch_point_entry(created, point[0], point[1], role="point", target=entity_id)
+                results.append({"index": index, "id": entity_id, "kind": kind, "ok": True, "reference": safe_get(created, "Reference"), "collection_index": collection_index})
             elif kind == "polyline":
-                lines = _add_sketch_polyline(drawing_container, entity.get("points"), bool(entity.get("closed", False)), int(entity.get("line_style", 1)))
-                results.append({"index": index, "kind": kind, "ok": True, "line_count": len(lines), "reference": safe_get(lines[0], "Reference") if lines else None})
+                points = list(entity.get("points") or [])
+                closed = bool(entity.get("closed", False))
+                collection_index = _sketch_entity_collection_count(drawing_container, "segment")
+                lines = _add_sketch_polyline(drawing_container, points, closed, int(entity.get("line_style", 1)))
+                line_ids = []
+                collection_indices = []
+                pairs = list(zip(points, points[1:]))
+                if closed and len(points) > 2:
+                    pairs.append((points[-1], points[0]))
+                for line_index, (line, pair) in enumerate(zip(lines, pairs), start=1):
+                    line_id = "%s_%s" % (entity_id, line_index)
+                    start, end = pair
+                    sketch_entities[line_id] = _sketch_line_entry(line, start[0], start[1], end[0], end[1], role=role, target=line_id)
+                    line_ids.append(line_id)
+                    collection_indices.append(collection_index + line_index - 1 if collection_index is not None else None)
+                if line_ids:
+                    sketch_entities[entity_id] = sketch_entities[line_ids[0]]
+                results.append({"index": index, "id": entity_id, "entity_ids": line_ids, "kind": kind, "ok": True, "line_count": len(lines), "reference": safe_get(lines[0], "Reference") if lines else None, "collection_index": collection_index, "collection_indices": collection_indices})
             elif kind == "arc":
+                collection_index = _sketch_entity_collection_count(drawing_container, "arc")
                 created = _add_sketch_arc(drawing_container, entity.get("center"), float(entity.get("radius")), entity.get("start"), entity.get("end"), bool(entity.get("direction", True)), int(entity.get("line_style", 1)))
-                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+                center, start, end = entity.get("center"), entity.get("start"), entity.get("end")
+                sketch_entities[entity_id] = _sketch_arc_entry(
+                    created, center[0], center[1], entity.get("radius"), start[0], start[1], end[0], end[1],
+                    direction=bool(entity.get("direction", True)), role=role, target=entity_id,
+                )
+                results.append({"index": index, "id": entity_id, "kind": kind, "ok": True, "reference": safe_get(created, "Reference"), "collection_index": collection_index})
             elif kind == "ellipse":
+                collection_index = _sketch_entity_collection_count(drawing_container, "ellipse")
                 created = _add_sketch_ellipse(drawing_container, entity.get("center"), float(entity.get("radius_x")), float(entity.get("radius_y")), float(entity.get("angle", 0.0)), int(entity.get("line_style", 1)))
-                results.append({"index": index, "kind": kind, "ok": True, "reference": safe_get(created, "Reference")})
+                center = entity.get("center")
+                sketch_entities[entity_id] = {
+                    "object": created,
+                    "role": role,
+                    "target": entity_id,
+                    "xc": float(center[0]),
+                    "yc": float(center[1]),
+                    "radius_x": float(entity.get("radius_x")),
+                    "radius_y": float(entity.get("radius_y")),
+                    "angle": float(entity.get("angle", 0.0)),
+                }
+                results.append({"index": index, "id": entity_id, "kind": kind, "ok": True, "reference": safe_get(created, "Reference"), "collection_index": collection_index})
             elif kind == "rectangle":
-                lines = _add_sketch_rectangle(drawing_container, entity.get("corner1"), entity.get("corner2"), int(entity.get("line_style", 1)))
-                results.append({"index": index, "kind": kind, "ok": True, "line_count": len(lines), "reference": safe_get(lines[0], "Reference") if lines else None})
+                corner1, corner2 = entity.get("corner1"), entity.get("corner2")
+                collection_index = _sketch_entity_collection_count(drawing_container, "segment")
+                lines = _add_sketch_rectangle(drawing_container, corner1, corner2, int(entity.get("line_style", 1)))
+                x1, y1 = float(corner1[0]), float(corner1[1])
+                x2, y2 = float(corner2[0]), float(corner2[1])
+                pairs = (([x1, y1], [x2, y1]), ([x2, y1], [x2, y2]), ([x2, y2], [x1, y2]), ([x1, y2], [x1, y1]))
+                line_ids = []
+                collection_indices = []
+                for line_index, (line, pair) in enumerate(zip(lines, pairs), start=1):
+                    line_id = "%s_%s" % (entity_id, line_index)
+                    start, end = pair
+                    sketch_entities[line_id] = _sketch_line_entry(line, start[0], start[1], end[0], end[1], role=role, target=line_id)
+                    line_ids.append(line_id)
+                    collection_indices.append(collection_index + line_index - 1 if collection_index is not None else None)
+                if line_ids:
+                    sketch_entities[entity_id] = sketch_entities[line_ids[0]]
+                results.append({"index": index, "id": entity_id, "entity_ids": line_ids, "kind": kind, "ok": True, "line_count": len(lines), "reference": safe_get(lines[0], "Reference") if lines else None, "collection_index": collection_index, "collection_indices": collection_indices})
             else:
                 raise RuntimeError("invalid input: unsupported sketch entity kind: %s" % (kind or "<missing>"))
+        if planned_constraints or planned_dimensions:
+            sketch_options = dict(payload.get("sketch_options") or payload.get("sketch") or {})
+            constraint_options = dict(sketch_options.get("constraints") or {})
+            dimension_options = dict(sketch_options.get("dimensions") or {})
+            if planned_constraints:
+                constraint_options.setdefault("enabled", True)
+            if planned_dimensions:
+                dimension_options.setdefault("enabled", True)
+                dimension_options.setdefault("driving", True)
+            sketch_options["constraints"] = constraint_options
+            sketch_options["dimensions"] = dimension_options
+            parameterization_report = _apply_sketch_parameterization(
+                view,
+                sketch_entities,
+                planned_constraints,
+                planned_dimensions,
+                sketch_options,
+                [],
+                0.0,
+            )
     finally:
         sketch.EndEdit()
     if not sketch.Update():
         raise RuntimeError("Sketch Update after edit returned False")
-    return sketch, target, results
+    return sketch, target, results, parameterization_report
+
+
+def _collection_for_sketch_entity_kind(drawing_container, kind):
+    if kind == "segment":
+        return _resolve_model_object_collection(drawing_container, ("LineSegments", "GetLineSegments"))[0], "segments"
+    if kind == "circle":
+        return _resolve_model_object_collection(drawing_container, ("Circles", "GetCircles"))[0], "circles"
+    if kind == "point":
+        return _resolve_model_object_collection(drawing_container, ("Points", "GetPoints"))[0], "points"
+    if kind == "arc":
+        return _resolve_model_object_collection(drawing_container, ("Arcs", "GetArcs"))[0], "arcs"
+    if kind == "ellipse":
+        return _resolve_model_object_collection(drawing_container, ("Ellipses", "GetEllipses"))[0], "ellipses"
+    raise RuntimeError("unsupported_sketch_entity_kind")
+
+
+def _normalize_sketch_entity_kind(kind):
+    value = str(kind or "").strip().lower()
+    if value in ("line", "line_segment"):
+        return "segment"
+    return value
+
+
+def _sketch_entity_collection_count(drawing_container, kind):
+    try:
+        collection, _ = _collection_for_sketch_entity_kind(drawing_container, kind)
+        return collection_count(collection)
+    except Exception:
+        return None
+
+
+def _sketch_entity_list_item(entity, kind, collection_name, index, sketch_ref):
+    reference = safe_get(entity, "Reference")
+    geometry = _sketch_entity_geometry(kind, entity)
+    fingerprint = _sketch_entity_fingerprint(kind, geometry, reference)
+    return {
+        "index": index,
+        "collection_index": index,
+        "kind": kind,
+        "collection": collection_name,
+        "sketch_ref": sketch_ref,
+        "reference": reference,
+        "fingerprint": fingerprint,
+        "geometry": geometry,
+        "line_style": safe_get(entity, "Style"),
+        "name": safe_get(entity, "Name", ""),
+    }
+
+
+def _list_existing_sketch_entities(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    raw_kinds = payload.get("kinds") or payload.get("entity_kinds")
+    if raw_kinds in (None, ""):
+        kinds = ["segment", "circle", "point", "arc", "ellipse"]
+    elif isinstance(raw_kinds, (list, tuple)):
+        kinds = [_normalize_sketch_entity_kind(item) for item in raw_kinds]
+    else:
+        kinds = [_normalize_sketch_entity_kind(raw_kinds)]
+    allowed = {"segment", "circle", "point", "arc", "ellipse"}
+    for kind in kinds:
+        if kind not in allowed:
+            raise RuntimeError("invalid input: unsupported sketch entity kind: %s" % (kind or "<missing>"))
+    max_items = int(payload.get("max_items", 100))
+    if max_items < 1:
+        raise RuntimeError("invalid input: max_items must be greater than zero")
+
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    items = []
+    counts = {}
+    truncated = False
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        for kind in kinds:
+            collection, collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
+            count = collection_count(collection)
+            counts[collection_name] = count
+            for index in range(count):
+                if len(items) >= max_items:
+                    truncated = True
+                    break
+                entity = get_collection_item(collection, index)
+                if entity is not None:
+                    items.append(_sketch_entity_list_item(entity, kind, collection_name, index, safe_get(sketch, "Reference", sketch_ref)))
+            if truncated:
+                break
+    finally:
+        sketch.EndEdit()
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, items, {
+        "entity_count": len(items),
+        "counts": counts,
+        "truncated": truncated,
+        "max_items": max_items,
+    }
+
+
+def _inspect_existing_sketch_entity(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    spec = payload.get("entity") or payload.get("selector")
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: entity selector must be an object")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
+        item = _sketch_entity_list_item(
+            entity,
+            kind,
+            collection_name,
+            int(spec.get("index")) if spec.get("index") not in (None, "") else -1,
+            safe_get(sketch, "Reference", sketch_ref),
+        )
+        if item["collection_index"] < 0:
+            collection, _collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
+            count = collection_count(collection)
+            for index in range(count):
+                candidate = get_collection_item(collection, index)
+                if candidate is None:
+                    continue
+                candidate_item = _sketch_entity_list_item(
+                    candidate,
+                    kind,
+                    collection_name,
+                    index,
+                    safe_get(sketch, "Reference", sketch_ref),
+                )
+                if (
+                    candidate is entity
+                    or (
+                        item.get("reference") not in (None, "")
+                        and str(candidate_item.get("reference")) == str(item.get("reference"))
+                    )
+                    or (
+                        item.get("fingerprint") not in (None, "")
+                        and candidate_item.get("fingerprint") == item.get("fingerprint")
+                    )
+                ):
+                    item["index"] = index
+                    item["collection_index"] = index
+                    break
+    finally:
+        sketch.EndEdit()
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, item
+
+
+def _select_existing_sketch_entity(drawing_container, spec):
+    kind = _normalize_sketch_entity_kind(spec.get("kind") or spec.get("type"))
+    collection, collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
+    expected_reference = spec.get("reference")
+    expected_reference = str(expected_reference) if expected_reference not in (None, "") else None
+    expected_fingerprint = str(spec.get("fingerprint") or "") or None
+    if spec.get("index") not in (None, ""):
+        entity = get_collection_item(collection, int(spec.get("index")))
+        if entity is None:
+            raise RuntimeError("sketch_entity_index_not_found")
+        return entity, kind, collection_name
+    count = collection_count(collection)
+    for index in range(count):
+        entity = get_collection_item(collection, index)
+        if entity is None:
+            continue
+        reference = safe_get(entity, "Reference")
+        geometry = _sketch_entity_geometry(kind, entity)
+        fingerprint = _sketch_entity_fingerprint(kind, geometry, reference)
+        if expected_reference is not None and str(reference) == expected_reference:
+            return entity, kind, collection_name
+        if expected_fingerprint is not None and fingerprint == expected_fingerprint:
+            return entity, kind, collection_name
+    raise RuntimeError("sketch_entity_not_found")
+
+
+def _existing_sketch_entity_entry(entity, kind, role, target, spec):
+    if kind == "segment":
+        start = spec.get("start") if isinstance(spec.get("start"), list) else None
+        end = spec.get("end") if isinstance(spec.get("end"), list) else None
+        return _sketch_line_entry(
+            entity,
+            start[0] if start else safe_get(entity, "X1"),
+            start[1] if start else safe_get(entity, "Y1"),
+            end[0] if end else safe_get(entity, "X2"),
+            end[1] if end else safe_get(entity, "Y2"),
+            role=role or "segment",
+            target=target,
+        )
+    if kind == "circle":
+        center = spec.get("center") if isinstance(spec.get("center"), list) else None
+        return _sketch_circle_entry(
+            entity,
+            center[0] if center else safe_get(entity, "Xc"),
+            center[1] if center else safe_get(entity, "Yc"),
+            spec.get("radius", safe_get(entity, "Radius")),
+            role=role or "circle",
+            target=target,
+        )
+    if kind == "point":
+        point = spec.get("point") if isinstance(spec.get("point"), list) else None
+        return _sketch_point_entry(
+            entity,
+            point[0] if point else safe_get(entity, "X"),
+            point[1] if point else safe_get(entity, "Y"),
+            role=role or "point",
+            target=target,
+        )
+    if kind == "arc":
+        center = spec.get("center") if isinstance(spec.get("center"), list) else None
+        start = spec.get("start") if isinstance(spec.get("start"), list) else None
+        end = spec.get("end") if isinstance(spec.get("end"), list) else None
+        return _sketch_arc_entry(
+            entity,
+            center[0] if center else safe_get(entity, "Xc"),
+            center[1] if center else safe_get(entity, "Yc"),
+            spec.get("radius", safe_get(entity, "Radius")),
+            start[0] if start else safe_get(entity, "X1"),
+            start[1] if start else safe_get(entity, "Y1"),
+            end[0] if end else safe_get(entity, "X2"),
+            end[1] if end else safe_get(entity, "Y2"),
+            direction=bool(spec.get("direction", safe_get(entity, "Direction", True))),
+            role=role or "arc",
+            target=target,
+        )
+    if kind == "ellipse":
+        geometry = _sketch_entity_geometry(kind, entity)
+        center = spec.get("center") if isinstance(spec.get("center"), list) else geometry.get("center") or [0.0, 0.0]
+        return {
+            "object": entity,
+            "role": role or "ellipse",
+            "target": target,
+            "xc": float(center[0]),
+            "yc": float(center[1]),
+            "radius_x": float(spec.get("radius_x", geometry.get("radius_x") or 0.0)),
+            "radius_y": float(spec.get("radius_y", geometry.get("radius_y") or 0.0)),
+            "angle": float(spec.get("angle", geometry.get("angle") or 0.0)),
+        }
+    raise RuntimeError("unsupported_sketch_entity_kind")
+
+
+def _parameterize_existing_sketch(model_container, part, payload):
+    sketch, target = _resolve_sketch_write_target(model_container, part, payload, "SKETCH_BATCH_1")
+    entity_specs = payload.get("entities")
+    if not isinstance(entity_specs, list) or not entity_specs:
+        raise RuntimeError("invalid input: entities must be a non-empty list")
+    planned_constraints = payload.get("constraints") or []
+    planned_dimensions = payload.get("dimensions") or []
+    if not isinstance(planned_constraints, list):
+        raise RuntimeError("invalid input: constraints must be a list")
+    if not isinstance(planned_dimensions, list):
+        raise RuntimeError("invalid input: dimensions must be a list")
+    if not planned_constraints and not planned_dimensions:
+        raise RuntimeError("invalid input: constraints or dimensions must be provided")
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    selected = []
+    parameterization_report = None
+    try:
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
+        sketch_entities = {}
+        for index, spec in enumerate(entity_specs):
+            if not isinstance(spec, dict):
+                raise RuntimeError("invalid input: entities[%s] must be an object" % index)
+            entity_id = str(spec.get("entity_id") or spec.get("id") or "")
+            if not entity_id:
+                raise RuntimeError("invalid input: entities[%s] must include id or entity_id" % index)
+            entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
+            role = str(spec.get("role") or kind)
+            geometry = _sketch_entity_geometry(kind, entity)
+            fingerprint = _sketch_entity_fingerprint(kind, geometry, safe_get(entity, "Reference"))
+            sketch_entities[entity_id] = _existing_sketch_entity_entry(entity, kind, role, entity_id, spec)
+            selected.append({
+                "index": index,
+                "id": entity_id,
+                "kind": kind,
+                "collection": collection_name,
+                "reference": safe_get(entity, "Reference"),
+                "fingerprint": fingerprint,
+                "ok": True,
+            })
+        sketch_options = dict(payload.get("sketch_options") or payload.get("sketch") or {})
+        constraint_options = dict(sketch_options.get("constraints") or {})
+        dimension_options = dict(sketch_options.get("dimensions") or {})
+        if planned_constraints:
+            constraint_options.setdefault("enabled", True)
+        if planned_dimensions:
+            dimension_options.setdefault("enabled", True)
+            dimension_options.setdefault("driving", True)
+        sketch_options["constraints"] = constraint_options
+        sketch_options["dimensions"] = dimension_options
+        parameterization_report = _apply_sketch_parameterization(
+            view,
+            sketch_entities,
+            planned_constraints,
+            planned_dimensions,
+            sketch_options,
+            [],
+            0.0,
+        )
+    finally:
+        sketch.EndEdit()
+    sketch_update_ok = bool(sketch.Update())
+    if not sketch_update_ok:
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, target, selected, parameterization_report
 
 
 def _create_sketch_line_segment(model_container, part, name, plane, start, end, line_style):
@@ -2518,11 +2929,11 @@ def handle_create_sketch_entities(payload):
         raise RuntimeError("Document TopPart cannot be used as a model container")
 
     before_tree = serialize_part(top_part, "root", None)
-    sketch, target, entity_results = _create_sketch_entities(model_container, top_part, payload)
+    sketch, target, entity_results, parameterization_report = _create_sketch_entities(model_container, top_part, payload)
     updater = safe_get(top_part, "Update")
-    update_ok = True
+    part_update_ok = True
     if callable(updater):
-        update_ok = bool(updater())
+        part_update_ok = bool(updater())
     after_tree = serialize_part(top_part, "root", None)
 
     return {
@@ -2542,11 +2953,117 @@ def handle_create_sketch_entities(payload):
             "plane": target.get("plane"),
             "entity_count": len(entity_results),
             "failed_count": sum(1 for item in entity_results if not item.get("ok")),
-            "update_ok": update_ok,
+            "update_ok": True,
+            "sketch_update_ok": True,
+            "part_update_ok": part_update_ok,
         },
+        "parameterization": parameterization_report,
         "readback": {
             "before": _snapshot_from_tree(document, app, before_tree),
             "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_parameterize_sketch(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, selected_entities, parameterization_report = _parameterize_existing_sketch(model_container, top_part, payload)
+    updater = safe_get(top_part, "Update")
+    part_update_ok = True
+    if callable(updater):
+        part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    ok = True if parameterization_report is None else bool(parameterization_report.get("ok", True))
+    return {
+        "ok": ok,
+        "document": describe_document(document, app),
+        "target": target,
+        "items": selected_entities,
+        "item": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "type": "SketchParameterization",
+            "reference": safe_get(sketch, "Reference"),
+        },
+        "summary": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "selected_entity_count": len(selected_entities),
+            "update_ok": True,
+            "sketch_update_ok": True,
+            "part_update_ok": part_update_ok,
+        },
+        "parameterization": parameterization_report,
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_list_sketch_entities(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    sketch, target, items, summary = _list_existing_sketch_entities(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "items": items,
+        "item": {
+            "name": safe_get(sketch, "Name", target.get("name")),
+            "type": "SketchEntityList",
+            "reference": safe_get(sketch, "Reference"),
+        },
+        "summary": summary,
+    }
+
+
+def handle_inspect_sketch_entity(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    sketch, target, item = _inspect_existing_sketch_entity(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": item,
+        "summary": {
+            "found": True,
+            "kind": item.get("kind"),
+            "collection": item.get("collection"),
+            "collection_index": item.get("collection_index"),
         },
     }
 
@@ -11036,6 +11553,12 @@ def dispatch(request):
         return handle_create_sketch_rectangle(payload)
     if action == "create_sketch_entities":
         return handle_create_sketch_entities(payload)
+    if action == "parameterize_sketch":
+        return handle_parameterize_sketch(payload)
+    if action == "list_sketch_entities":
+        return handle_list_sketch_entities(payload)
+    if action == "inspect_sketch_entity":
+        return handle_inspect_sketch_entity(payload)
     if action == "probe_model_object_collections":
         return handle_probe_model_object_collections(payload)
     if action == "get_specification_descriptions":

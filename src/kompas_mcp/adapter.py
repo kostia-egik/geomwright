@@ -199,6 +199,89 @@ def _normalize_sketch_entities(entities: list[dict[str, Any]] | tuple[dict[str, 
             )
         else:
             raise ValueError(f"unsupported sketch entity kind: {kind or '<missing>'}")
+        entity_id = entity.get("entity_id", entity.get("id"))
+        if entity_id not in (None, ""):
+            normalized[-1]["entity_id"] = str(entity_id)
+        role = entity.get("role")
+        if role not in (None, ""):
+            normalized[-1]["role"] = str(role)
+    return normalized
+
+
+def _normalize_object_list(value: Any, *, name: str) -> list[dict[str, Any]]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{name} must be a list")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"{name}[{index}] must be an object")
+        normalized.append(dict(item))
+    return normalized
+
+
+def _normalize_sketch_entity_refs(value: Any, *, name: str) -> list[dict[str, Any]]:
+    refs = _normalize_object_list(value, name=name)
+    if not refs:
+        raise ValueError(f"{name} must be a non-empty list")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(refs):
+        entity_id = item.get("entity_id", item.get("id"))
+        if entity_id in (None, ""):
+            raise ValueError(f"{name}[{index}] must include id or entity_id")
+        kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+        if kind in ("line", "line_segment"):
+            kind = "segment"
+        if kind not in {"segment", "circle", "point", "arc", "ellipse"}:
+            raise ValueError(f"{name}[{index}].kind is unsupported")
+        row = dict(item)
+        row["id"] = str(entity_id)
+        row["kind"] = kind
+        if "reference" in row and row["reference"] not in (None, ""):
+            row["reference"] = str(row["reference"])
+        if "index" in row and row["index"] not in (None, ""):
+            row["index"] = int(row["index"])
+        if row.get("role") not in (None, ""):
+            row["role"] = str(row["role"])
+        normalized.append(row)
+    return normalized
+
+
+def _normalize_sketch_entity_selector(value: Any, *, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    kind = str(value.get("kind") or value.get("type") or "").strip().lower()
+    if kind in ("line", "line_segment"):
+        kind = "segment"
+    if kind not in {"segment", "circle", "point", "arc", "ellipse"}:
+        raise ValueError(f"{name}.kind is unsupported")
+    row = dict(value)
+    row["kind"] = kind
+    if "reference" in row and row["reference"] not in (None, ""):
+        row["reference"] = str(row["reference"])
+    if "index" in row and row["index"] not in (None, ""):
+        row["index"] = int(row["index"])
+    if row.get("fingerprint") not in (None, ""):
+        row["fingerprint"] = str(row["fingerprint"])
+    if all(row.get(key) in (None, "") for key in ("reference", "index", "fingerprint")):
+        raise ValueError(f"{name} must include reference, index, or fingerprint")
+    return row
+
+
+def _normalize_sketch_entity_kinds(value: Any, *, name: str = "kinds") -> list[str]:
+    if value in (None, ""):
+        return []
+    raw_values = value if isinstance(value, (list, tuple)) else [value]
+    normalized: list[str] = []
+    for index, item in enumerate(raw_values):
+        kind = str(item or "").strip().lower()
+        if kind in ("line", "line_segment"):
+            kind = "segment"
+        if kind not in {"segment", "circle", "point", "arc", "ellipse"}:
+            raise ValueError(f"{name}[{index}] is unsupported")
+        if kind not in normalized:
+            normalized.append(kind)
     return normalized
 
 
@@ -530,6 +613,8 @@ class KompasAdapter:
         plane: str = "XOY",
         start: list[float] | tuple[float, float] | None = None,
         end: list[float] | tuple[float, float] | None = None,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
         line_style: int = 1,
         min_added: int = 1,
         require_no_removed: bool = True,
@@ -538,6 +623,20 @@ class KompasAdapter:
     ) -> dict[str, Any]:
         start_point = _normalize_point2d(start, name="start")
         end_point = _normalize_point2d([100.0, 0.0] if end is None else end, name="end")
+        if sketch_ref is not None or not create_new_sketch:
+            return self._create_sketch_entities_operation(
+                "create_sketch_line_segment",
+                document_id=document_id,
+                name=name,
+                plane=plane,
+                sketch_ref=sketch_ref,
+                create_new_sketch=create_new_sketch,
+                entities=[{"kind": "segment", "start": start_point, "end": end_point, "line_style": int(line_style)}],
+                min_added=min_added,
+                require_no_removed=require_no_removed,
+                require_no_changed=require_no_changed,
+                max_items=max_items,
+            )
         result = self.runner.call(
             "create_sketch_line_segment",
             {
@@ -603,6 +702,8 @@ class KompasAdapter:
         plane: str = "XOY",
         center: list[float] | tuple[float, float] | None = None,
         radius: float = 10.0,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
         line_style: int = 1,
         min_added: int = 1,
         require_no_removed: bool = True,
@@ -611,6 +712,20 @@ class KompasAdapter:
     ) -> dict[str, Any]:
         center_point = _normalize_point2d(center, name="center")
         circle_radius = _normalize_positive_float(radius, name="radius", default=10.0)
+        if sketch_ref is not None or not create_new_sketch:
+            return self._create_sketch_entities_operation(
+                "create_sketch_circle",
+                document_id=document_id,
+                name=name,
+                plane=plane,
+                sketch_ref=sketch_ref,
+                create_new_sketch=create_new_sketch,
+                entities=[{"kind": "circle", "center": center_point, "radius": circle_radius, "line_style": int(line_style)}],
+                min_added=min_added,
+                require_no_removed=require_no_removed,
+                require_no_changed=require_no_changed,
+                max_items=max_items,
+            )
         result = self.runner.call(
             "create_sketch_circle",
             {
@@ -676,6 +791,8 @@ class KompasAdapter:
         plane: str = "XOY",
         corner1: list[float] | tuple[float, float] | None = None,
         corner2: list[float] | tuple[float, float] | None = None,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
         line_style: int = 1,
         min_added: int = 1,
         require_no_removed: bool = True,
@@ -684,6 +801,20 @@ class KompasAdapter:
     ) -> dict[str, Any]:
         first_corner = _normalize_point2d(corner1, name="corner1")
         second_corner = _normalize_point2d([100.0, 50.0] if corner2 is None else corner2, name="corner2")
+        if sketch_ref is not None or not create_new_sketch:
+            return self._create_sketch_entities_operation(
+                "create_sketch_rectangle",
+                document_id=document_id,
+                name=name,
+                plane=plane,
+                sketch_ref=sketch_ref,
+                create_new_sketch=create_new_sketch,
+                entities=[{"kind": "rectangle", "corner1": first_corner, "corner2": second_corner, "line_style": int(line_style)}],
+                min_added=min_added,
+                require_no_removed=require_no_removed,
+                require_no_changed=require_no_changed,
+                max_items=max_items,
+            )
         result = self.runner.call(
             "create_sketch_rectangle",
             {
@@ -741,19 +872,175 @@ class KompasAdapter:
         )
         return envelope
 
-    def create_sketch_entities(
+    def create_sketch_point(
         self,
         *,
         document_id: str | None = None,
-        name: str = "SKETCH_BATCH_1",
+        name: str = "SKETCH_POINT_1",
         plane: str = "XOY",
-        entities: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        point: list[float] | tuple[float, float] | None = None,
         sketch_ref: str | int | None = None,
         create_new_sketch: bool = True,
+        line_style: int = 1,
         min_added: int = 1,
         require_no_removed: bool = False,
         require_no_changed: bool = False,
         max_items: int = 25,
+    ) -> dict[str, Any]:
+        point_value = _normalize_point2d(point, name="point")
+        return self._create_sketch_entities_operation(
+            "create_sketch_point",
+            document_id=document_id,
+            name=name,
+            plane=plane,
+            sketch_ref=sketch_ref,
+            create_new_sketch=create_new_sketch,
+            entities=[{"kind": "point", "point": point_value, "line_style": int(line_style)}],
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            max_items=max_items,
+        )
+
+    def create_sketch_polyline(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_POLYLINE_1",
+        plane: str = "XOY",
+        points: list[list[float]] | tuple[tuple[float, float], ...] | None = None,
+        closed: bool = False,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
+        line_style: int = 1,
+        min_added: int = 1,
+        require_no_removed: bool = False,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        point_values = _normalize_point2d_list(points, name="points", min_count=2)
+        return self._create_sketch_entities_operation(
+            "create_sketch_polyline",
+            document_id=document_id,
+            name=name,
+            plane=plane,
+            sketch_ref=sketch_ref,
+            create_new_sketch=create_new_sketch,
+            entities=[{"kind": "polyline", "points": point_values, "closed": bool(closed), "line_style": int(line_style)}],
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            max_items=max_items,
+        )
+
+    def create_sketch_arc(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_ARC_1",
+        plane: str = "XOY",
+        center: list[float] | tuple[float, float] | None = None,
+        radius: float = 10.0,
+        start: list[float] | tuple[float, float] | None = None,
+        end: list[float] | tuple[float, float] | None = None,
+        direction: bool = True,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
+        line_style: int = 1,
+        min_added: int = 1,
+        require_no_removed: bool = False,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        center_point = _normalize_point2d(center, name="center")
+        radius_value = _normalize_positive_float(radius, name="radius", default=10.0)
+        start_point = _normalize_point2d(start, name="start")
+        end_point = _normalize_point2d(end, name="end")
+        return self._create_sketch_entities_operation(
+            "create_sketch_arc",
+            document_id=document_id,
+            name=name,
+            plane=plane,
+            sketch_ref=sketch_ref,
+            create_new_sketch=create_new_sketch,
+            entities=[
+                {
+                    "kind": "arc",
+                    "center": center_point,
+                    "radius": radius_value,
+                    "start": start_point,
+                    "end": end_point,
+                    "direction": bool(direction),
+                    "line_style": int(line_style),
+                }
+            ],
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            max_items=max_items,
+        )
+
+    def create_sketch_ellipse(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_ELLIPSE_1",
+        plane: str = "XOY",
+        center: list[float] | tuple[float, float] | None = None,
+        radius_x: float = 10.0,
+        radius_y: float = 5.0,
+        angle: float = 0.0,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
+        line_style: int = 1,
+        min_added: int = 1,
+        require_no_removed: bool = False,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        center_point = _normalize_point2d(center, name="center")
+        radius_x_value = _normalize_positive_float(radius_x, name="radius_x", default=10.0)
+        radius_y_value = _normalize_positive_float(radius_y, name="radius_y", default=5.0)
+        return self._create_sketch_entities_operation(
+            "create_sketch_ellipse",
+            document_id=document_id,
+            name=name,
+            plane=plane,
+            sketch_ref=sketch_ref,
+            create_new_sketch=create_new_sketch,
+            entities=[
+                {
+                    "kind": "ellipse",
+                    "center": center_point,
+                    "radius_x": radius_x_value,
+                    "radius_y": radius_y_value,
+                    "angle": float(angle),
+                    "line_style": int(line_style),
+                }
+            ],
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            max_items=max_items,
+        )
+
+    def _create_sketch_entities_operation(
+        self,
+        operation: str,
+        *,
+        document_id: str | None,
+        name: str,
+        plane: str,
+        entities: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+        sketch_ref: str | int | None,
+        create_new_sketch: bool,
+        min_added: int,
+        require_no_removed: bool,
+        require_no_changed: bool,
+        max_items: int,
+        constraints: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        dimensions: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        sketch_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         target = _normalize_sketch_target(
             name=name,
@@ -762,16 +1049,25 @@ class KompasAdapter:
             create_new_sketch=create_new_sketch,
         )
         normalized_entities = _normalize_sketch_entities(entities)
+        normalized_constraints = _normalize_object_list(constraints, name="constraints")
+        normalized_dimensions = _normalize_object_list(dimensions, name="dimensions")
+        payload: dict[str, Any] = {
+            "document_id": document_id,
+            "target": target,
+            "entities": normalized_entities,
+        }
+        if normalized_constraints:
+            payload["constraints"] = normalized_constraints
+        if normalized_dimensions:
+            payload["dimensions"] = normalized_dimensions
+        if sketch_options:
+            payload["sketch_options"] = dict(sketch_options)
         result = self.runner.call(
             "create_sketch_entities",
-            {
-                "document_id": document_id,
-                "target": target,
-                "entities": normalized_entities,
-            },
+            payload,
         )
         envelope = _snapshot_verified_envelope(
-            "create_sketch_entities",
+            operation,
             result=result,
             min_added=min_added,
             require_no_removed=require_no_removed,
@@ -784,7 +1080,129 @@ class KompasAdapter:
             envelope["items"] = result["items"]
         if isinstance(result.get("summary"), dict):
             envelope["summary"] = result["summary"]
+        if isinstance(result.get("parameterization"), dict):
+            envelope["parameterization"] = result["parameterization"]
         return envelope
+
+    def create_sketch_entities(
+        self,
+        *,
+        document_id: str | None = None,
+        name: str = "SKETCH_BATCH_1",
+        plane: str = "XOY",
+        entities: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        sketch_ref: str | int | None = None,
+        create_new_sketch: bool = True,
+        constraints: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        dimensions: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        sketch_options: dict[str, Any] | None = None,
+        min_added: int = 1,
+        require_no_removed: bool = False,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        return self._create_sketch_entities_operation(
+            "create_sketch_entities",
+            document_id=document_id,
+            name=name,
+            plane=plane,
+            sketch_ref=sketch_ref,
+            create_new_sketch=create_new_sketch,
+            entities=entities,
+            constraints=constraints,
+            dimensions=dimensions,
+            sketch_options=sketch_options,
+            min_added=min_added,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            max_items=max_items,
+        )
+
+    def parameterize_sketch(
+        self,
+        *,
+        document_id: str | None = None,
+        sketch_ref: str | int | None = None,
+        entities: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        constraints: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        dimensions: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        sketch_options: dict[str, Any] | None = None,
+        require_no_removed: bool = False,
+        require_no_changed: bool = False,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        normalized_entities = _normalize_sketch_entity_refs(entities, name="entities")
+        normalized_constraints = _normalize_object_list(constraints, name="constraints")
+        normalized_dimensions = _normalize_object_list(dimensions, name="dimensions")
+        if not normalized_constraints and not normalized_dimensions:
+            raise ValueError("constraints or dimensions must be provided")
+        payload: dict[str, Any] = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "entities": normalized_entities,
+        }
+        if normalized_constraints:
+            payload["constraints"] = normalized_constraints
+        if normalized_dimensions:
+            payload["dimensions"] = normalized_dimensions
+        if sketch_options:
+            payload["sketch_options"] = dict(sketch_options)
+        result = self.runner.call("parameterize_sketch", payload)
+        envelope = _snapshot_verified_envelope(
+            "parameterize_sketch",
+            result=result,
+            min_added=0,
+            require_no_removed=require_no_removed,
+            require_no_changed=require_no_changed,
+            max_items=max_items,
+        )
+        if isinstance(result.get("target"), dict):
+            envelope["target"] = result["target"]
+        if isinstance(result.get("summary"), dict):
+            envelope["summary"] = result["summary"]
+        if isinstance(result.get("parameterization"), dict):
+            envelope["parameterization"] = result["parameterization"]
+        return envelope
+
+    def list_sketch_entities(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        kinds: list[str] | tuple[str, ...] | str | None = None,
+        max_items: int = 100,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        if int(max_items) < 1:
+            raise ValueError("max_items must be greater than zero")
+        payload: dict[str, Any] = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "max_items": int(max_items),
+        }
+        normalized_kinds = _normalize_sketch_entity_kinds(kinds)
+        if normalized_kinds:
+            payload["kinds"] = normalized_kinds
+        return self.runner.call("list_sketch_entities", payload)
+
+    def inspect_sketch_entity(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        entity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        payload = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "entity": _normalize_sketch_entity_selector(entity, name="entity"),
+        }
+        return self.runner.call("inspect_sketch_entity", payload)
 
     def check_file_access(self, path: str) -> dict[str, Any]:
         return self._check_file_access(path)
