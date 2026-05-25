@@ -60,6 +60,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "parameterize_sketch",
             "list_sketches",
             "rename_sketch",
+            "set_sketch_entity_style",
             "list_sketch_entities",
             "inspect_sketch_entity",
             "probe_document_readback",

@@ -668,6 +668,22 @@ def rename_sketch(
 
 
 @mcp.tool()
+def set_sketch_entity_style(
+    document_id: str | None = None,
+    sketch_ref: str | None = None,
+    entity: dict | None = None,
+    line_style: int = 1,
+) -> dict:
+    """Set line style on one existing sketch entity selected by reference, index, or fingerprint."""
+    return adapter.set_sketch_entity_style(
+        document_id=document_id,
+        sketch_ref=sketch_ref,
+        entity=entity,
+        line_style=line_style,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

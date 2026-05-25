@@ -173,6 +173,20 @@ def main() -> None:
                 inspected_tail = inspect_step.get("payload", {}).get("item") if isinstance(inspect_step.get("payload"), dict) else None
                 if not isinstance(inspected_tail, dict):
                     inspected_tail = tail_row
+                style_step = _run_step(
+                    "set_existing_sketch_entity_style",
+                    lambda: adapter.set_sketch_entity_style(
+                        document_id=opened_document_id,
+                        sketch_ref=sketch_ref,
+                        entity={
+                            "kind": "segment",
+                            "index": int(inspected_tail.get("collection_index")),
+                            "fingerprint": inspected_tail.get("fingerprint"),
+                        },
+                        line_style=2,
+                    ),
+                )
+                audit["steps"].append(style_step)
                 parameterize_inputs = {
                     "sketch_ref": sketch_ref,
                     "entities": [
@@ -380,6 +394,7 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "append_write_ok": bool(audit.get("append_write_manifest", {}).get("ok")) if "append_write_manifest" in audit else None,
         "list_sketches_ok": _step_ok(audit, "list_sketches"),
         "rename_sketch_ok": _step_ok(audit, "rename_sketch"),
+        "set_sketch_entity_style_ok": _step_ok(audit, "set_existing_sketch_entity_style"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,

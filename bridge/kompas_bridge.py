@@ -2573,6 +2573,80 @@ def _select_existing_sketch_entity(drawing_container, spec):
     raise RuntimeError("sketch_entity_not_found")
 
 
+def _existing_sketch_entity_index(drawing_container, entity, kind, collection_name, sketch_ref):
+    collection, _ = _collection_for_sketch_entity_kind(drawing_container, kind)
+    count = collection_count(collection)
+    expected_reference = safe_get(entity, "Reference")
+    expected_geometry = _sketch_entity_geometry(kind, entity)
+    expected_fingerprint = _sketch_entity_fingerprint(kind, expected_geometry, expected_reference)
+    for index in range(count):
+        candidate = get_collection_item(collection, index)
+        if candidate is None:
+            continue
+        candidate_item = _sketch_entity_list_item(candidate, kind, collection_name, index, sketch_ref)
+        if (
+            candidate is entity
+            or (
+                expected_reference not in (None, "")
+                and str(candidate_item.get("reference")) == str(expected_reference)
+            )
+            or candidate_item.get("fingerprint") == expected_fingerprint
+        ):
+            return index
+    return -1
+
+
+def _cast_sketch_entity_for_kind(entity, kind):
+    interface_name = {
+        "segment": "ILineSegment",
+        "circle": "ICircle",
+        "point": "IPoint",
+        "arc": "IArc",
+        "ellipse": "IEllipse",
+    }.get(kind)
+    if not interface_name:
+        return entity
+    return _cast_to_com_interface(entity, interface_name)
+
+
+def _set_existing_sketch_entity_style(model_container, payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    sketch_ref = target.get("sketch_ref", payload.get("sketch_ref"))
+    if sketch_ref in (None, ""):
+        raise RuntimeError("invalid input: sketch_ref is required")
+    spec = payload.get("entity") or payload.get("selector")
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: entity selector must be an object")
+    line_style = int(payload.get("line_style", 1))
+    if line_style < 1:
+        raise RuntimeError("invalid input: line_style must be greater than zero")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        entity, kind, collection_name = _select_existing_sketch_entity(drawing_container, spec)
+        resolved_sketch_ref = safe_get(sketch, "Reference", sketch_ref)
+        index = _existing_sketch_entity_index(drawing_container, entity, kind, collection_name, resolved_sketch_ref)
+        styled_entity = _cast_sketch_entity_for_kind(entity, kind)
+        before = _sketch_entity_list_item(styled_entity, kind, collection_name, index, resolved_sketch_ref)
+        _apply_line_style(styled_entity, line_style)
+        updater = safe_get(styled_entity, "Update")
+        if callable(updater) and not updater():
+            raise RuntimeError("Sketch entity Update returned False")
+        after = _sketch_entity_list_item(styled_entity, kind, collection_name, index, resolved_sketch_ref)
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, {
+        "mode": "existing_sketch",
+        "name": safe_get(sketch, "Name", ""),
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+    }, before, after
+
+
 def _existing_sketch_entity_entry(entity, kind, role, target, spec):
     if kind == "segment":
         start = spec.get("start") if isinstance(spec.get("start"), list) else None
@@ -3157,6 +3231,48 @@ def handle_rename_sketch(payload):
             "old_name": target.get("old_name"),
             "name": safe_get(sketch, "Name", target.get("name")),
             "sketch_update_ok": sketch_update_ok,
+            "part_update_ok": part_update_ok,
+        },
+        "readback": {
+            "before": _snapshot_from_tree(document, app, before_tree),
+            "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_set_sketch_entity_style(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    before_tree = serialize_part(top_part, "root", None)
+    sketch, target, before_item, after_item = _set_existing_sketch_entity_style(model_container, payload)
+    updater = safe_get(top_part, "Update")
+    part_update_ok = True
+    if callable(updater):
+        part_update_ok = bool(updater())
+    after_tree = serialize_part(top_part, "root", None)
+
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": target,
+        "item": after_item,
+        "before_item": before_item,
+        "summary": {
+            "kind": after_item.get("kind"),
+            "collection": after_item.get("collection"),
+            "collection_index": after_item.get("collection_index"),
+            "old_line_style": before_item.get("line_style"),
+            "line_style": after_item.get("line_style"),
             "part_update_ok": part_update_ok,
         },
         "readback": {
@@ -11713,6 +11829,8 @@ def dispatch(request):
         return handle_list_sketches(payload)
     if action == "rename_sketch":
         return handle_rename_sketch(payload)
+    if action == "set_sketch_entity_style":
+        return handle_set_sketch_entity_style(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

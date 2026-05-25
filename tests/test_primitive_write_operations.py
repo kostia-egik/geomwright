@@ -434,6 +434,44 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_set_sketch_entity_style_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.set_sketch_entity_style(
+            document_id="doc-1",
+            sketch_ref=100,
+            entity={"kind": "line", "index": "2"},
+            line_style=3,
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "set_sketch_entity_style",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "entity": {"kind": "segment", "index": 2},
+                    "line_style": 3,
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_set_sketch_entity_style_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.set_sketch_entity_style(sketch_ref=100, entity={"kind": "segment", "index": 0}, line_style=0)
+        with self.assertRaises(ValueError):
+            adapter.set_sketch_entity_style(entity={"kind": "segment", "index": 0}, line_style=1)
+        with self.assertRaises(ValueError):
+            adapter.set_sketch_entity_style(sketch_ref=100, entity={"kind": "spline", "index": 0}, line_style=1)
+
+        self.assertEqual(runner.calls, [])
+
     def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -1235,6 +1273,39 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(target["name"], "NEW_NAME")
         self.assertEqual(target["sketch_ref"], 100)
         self.assertTrue(update_ok)
+        self.assertTrue(sketch.updated)
+
+    def test_bridge_set_sketch_entity_style_updates_selected_entity(self) -> None:
+        bridge = _load_bridge_module()
+        line = _FakeSketchEntity(201)
+        line.Name = ""
+        line.X1 = 0.0
+        line.Y1 = 0.0
+        line.X2 = 10.0
+        line.Y2 = 0.0
+        line.Style = 1
+        view = types.SimpleNamespace(LineSegments=_FakeCollection([line]))
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SK_A", 100, sketch_doc)
+        part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
+
+        sketch_result, target, before, after = bridge._set_existing_sketch_entity_style(
+            part,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                "entity": {"kind": "line", "reference": 201},
+                "line_style": 3,
+            },
+        )
+
+        self.assertIs(sketch_result, sketch)
+        self.assertEqual(target["sketch_ref"], 100)
+        self.assertEqual(before["line_style"], 1)
+        self.assertEqual(after["line_style"], 3)
+        self.assertEqual(after["collection_index"], 0)
+        self.assertEqual(line.Style, 3)
+        self.assertTrue(line.updated)
+        self.assertTrue(sketch.ended)
         self.assertTrue(sketch.updated)
 
     def test_bridge_inspect_sketch_entity_returns_one_selector(self) -> None:

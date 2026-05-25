@@ -1229,6 +1229,27 @@ class KompasAdapter:
             },
         )
 
+    def set_sketch_entity_style(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        entity: dict[str, Any] | None = None,
+        line_style: int = 1,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        style = int(line_style)
+        if style < 1:
+            raise ValueError("line_style must be greater than zero")
+        payload = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "entity": _normalize_sketch_entity_selector(entity, name="entity"),
+            "line_style": style,
+        }
+        return self.runner.call("set_sketch_entity_style", payload)
+
     def inspect_sketch_entity(
         self,
         document_id: str | None = None,

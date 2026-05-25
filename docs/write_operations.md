@@ -115,6 +115,9 @@ Use `inspect_sketch_entity` when one selector needs a fresh readback row before
 parameterization. It accepts the same `reference`, collection `index`, or
 `fingerprint` selectors and returns one entity descriptor with geometry.
 
+Use `set_sketch_entity_style` to update the line style for one selected
+existing entity without changing its geometry.
+
 ```json
 {
   "sketch_ref": "12345",
