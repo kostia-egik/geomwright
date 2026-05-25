@@ -1001,6 +1001,190 @@ def probe_model_object_collections(part, max_items=5, include_empty=True):
     }
 
 
+FEATURE_COLLECTION_SPECS = [
+    ("rotated", "rotateds", ("Rotateds", "GetRotateds")),
+    ("extrusion", "extrusions", ("Extrusions", "GetExtrusions")),
+    ("evolution", "evolutions", ("Evolutions", "GetEvolutions")),
+    ("feature_pattern", "feature_patterns", ("FeaturePatterns", "GetFeaturePatterns")),
+]
+
+
+def _normalize_feature_kind(kind):
+    value = str(kind or "").strip().lower()
+    aliases = {
+        "rotate": "rotated",
+        "revolve": "rotated",
+        "rotateds": "rotated",
+        "extrude": "extrusion",
+        "extrusions": "extrusion",
+        "sweep": "evolution",
+        "evolutions": "evolution",
+        "pattern": "feature_pattern",
+        "circular_pattern": "feature_pattern",
+        "feature_patterns": "feature_pattern",
+    }
+    return aliases.get(value, value)
+
+
+def _feature_collection_specs_for(kinds):
+    if kinds in (None, ""):
+        wanted = None
+    elif isinstance(kinds, (list, tuple)):
+        wanted = {_normalize_feature_kind(item) for item in kinds}
+    else:
+        wanted = {_normalize_feature_kind(kinds)}
+    allowed = {kind for kind, _collection_name, _accessors in FEATURE_COLLECTION_SPECS}
+    if wanted:
+        unsupported = sorted(kind for kind in wanted if kind not in allowed)
+        if unsupported:
+            raise RuntimeError("invalid input: unsupported feature kind: %s" % ", ".join(unsupported))
+    return [
+        (kind, collection_name, accessors)
+        for kind, collection_name, accessors in FEATURE_COLLECTION_SPECS
+        if wanted is None or kind in wanted
+    ]
+
+
+def _feature_state_payload(feature):
+    state = {}
+    for attr in ("Hidden", "Visible", "Suppressed", "Enabled", "Changed", "Valid", "Type"):
+        value = safe_get(feature, attr)
+        if value is not None:
+            state[attr[:1].lower() + attr[1:]] = _json_safe_scalar(value)
+    return state
+
+
+def _feature_variables_payload(feature, max_items=25):
+    variables = []
+    for index, variable in enumerate(_iter_operation_variables(feature)[:max_items]):
+        row = {"index": index}
+        for attr in ("Name", "Expression", "Value", "ParameterNote", "Note"):
+            value = safe_get(variable, attr)
+            if value is not None:
+                row[attr[:1].lower() + attr[1:]] = _json_safe_scalar(value)
+        variables.append(row)
+    return variables
+
+
+def _feature_fingerprint(kind, reference, name, com_type, state):
+    return "|".join(
+        [
+            str(kind),
+            str(reference if reference not in (None, "") else ""),
+            str(name or ""),
+            str(com_type or ""),
+            str(state.get("type", "")),
+        ]
+    )
+
+
+def _feature_list_item(feature, kind, collection_name, index, include_details=False):
+    reference = safe_get(feature, "Reference")
+    name = safe_get(feature, "Name", "")
+    com_type = feature.__class__.__name__ if feature is not None else None
+    state = _feature_state_payload(feature)
+    item = {
+        "index": index,
+        "collection_index": index,
+        "kind": kind,
+        "collection": collection_name,
+        "reference": reference,
+        "name": name,
+        "com_type": com_type,
+        "fingerprint": _feature_fingerprint(kind, reference, name, com_type, state),
+        "state": state,
+    }
+    if include_details:
+        variables = _feature_variables_payload(feature)
+        item["variables"] = variables
+        item["variable_count"] = len(variables)
+    return item
+
+
+def _list_existing_features(model_container, payload):
+    max_items = int(payload.get("max_items", 100))
+    if max_items < 1:
+        raise RuntimeError("invalid input: max_items must be greater than zero")
+    items = []
+    counts = {}
+    available = {}
+    truncated = False
+    for kind, collection_name, accessors in _feature_collection_specs_for(payload.get("kinds")):
+        collection, accessor, errors = _resolve_model_object_collection(model_container, accessors)
+        available[collection_name] = collection is not None
+        count = collection_count(collection)
+        counts[collection_name] = count
+        for index in range(count):
+            if len(items) >= max_items:
+                truncated = True
+                break
+            feature = get_collection_item(collection, index)
+            if feature is not None:
+                item = _feature_list_item(feature, kind, collection_name, index)
+                if errors:
+                    item["collection_errors"] = errors
+                item["accessor"] = accessor
+                items.append(item)
+        if truncated:
+            break
+    return items, {
+        "feature_count": len(items),
+        "counts": counts,
+        "available": available,
+        "truncated": truncated,
+        "max_items": max_items,
+    }
+
+
+def _collection_for_feature_kind(model_container, kind):
+    normalized = _normalize_feature_kind(kind)
+    for feature_kind, collection_name, accessors in FEATURE_COLLECTION_SPECS:
+        if feature_kind == normalized:
+            collection, _accessor, _errors = _resolve_model_object_collection(model_container, accessors)
+            if collection is None:
+                raise RuntimeError("feature_collection_unavailable")
+            return collection, feature_kind, collection_name
+    raise RuntimeError("unsupported_feature_kind")
+
+
+def _select_existing_feature(model_container, spec):
+    if not isinstance(spec, dict):
+        raise RuntimeError("invalid input: feature selector must be an object")
+    collection, kind, collection_name = _collection_for_feature_kind(
+        model_container,
+        spec.get("kind") or spec.get("type") or spec.get("collection"),
+    )
+    if spec.get("index") not in (None, ""):
+        index = int(spec.get("index"))
+        feature = get_collection_item(collection, index)
+        if feature is None:
+            raise RuntimeError("feature_index_not_found")
+        return feature, kind, collection_name, index
+
+    expected_reference = str(spec.get("reference")) if spec.get("reference") not in (None, "") else None
+    expected_fingerprint = str(spec.get("fingerprint") or "") or None
+    expected_name = str(spec.get("name") or "") or None
+    count = collection_count(collection)
+    for index in range(count):
+        feature = get_collection_item(collection, index)
+        if feature is None:
+            continue
+        item = _feature_list_item(feature, kind, collection_name, index)
+        if expected_reference is not None and str(item.get("reference")) == expected_reference:
+            return feature, kind, collection_name, index
+        if expected_fingerprint is not None and item.get("fingerprint") == expected_fingerprint:
+            return feature, kind, collection_name, index
+        if expected_name is not None and str(item.get("name") or "") == expected_name:
+            return feature, kind, collection_name, index
+    raise RuntimeError("feature_not_found")
+
+
+def _inspect_existing_feature(model_container, payload):
+    spec = payload.get("feature") or payload.get("selector")
+    feature, kind, collection_name, index = _select_existing_feature(model_container, spec)
+    return _feature_list_item(feature, kind, collection_name, index, include_details=True)
+
+
 def probe_runtime_objects(runtime_objects, max_items=5):
     try:
         max_items = int(max_items)
@@ -4418,6 +4602,60 @@ def handle_repair_sketch(payload):
         "readback": {
             "before": _snapshot_from_tree(document, app, before_tree),
             "after": _snapshot_from_tree(document, app, after_tree),
+        },
+    }
+
+
+def handle_list_features(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    items, summary = _list_existing_features(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "items": items,
+        "item": {
+            "type": "FeatureList",
+            "feature_count": len(items),
+        },
+        "summary": summary,
+    }
+
+
+def handle_inspect_feature(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    item = _inspect_existing_feature(model_container, payload)
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "item": item,
+        "summary": {
+            "found": True,
+            "kind": item.get("kind"),
+            "collection": item.get("collection"),
+            "collection_index": item.get("collection_index"),
+            "variable_count": item.get("variable_count", 0),
         },
     }
 
@@ -12987,6 +13225,10 @@ def dispatch(request):
         return handle_clear_sketch_entity_constraints(payload)
     if action == "repair_sketch":
         return handle_repair_sketch(payload)
+    if action == "list_features":
+        return handle_list_features(payload)
+    if action == "inspect_feature":
+        return handle_inspect_feature(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
     if action == "inspect_sketch_entity":

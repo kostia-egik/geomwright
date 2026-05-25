@@ -449,6 +449,61 @@ def _normalize_sketch_constraint_selector(value: Any, *, name: str) -> dict[str,
     return row
 
 
+_FEATURE_KINDS = {"rotated", "extrusion", "evolution", "feature_pattern"}
+
+
+def _normalize_feature_kind(value: Any) -> str:
+    kind = str(value or "").strip().lower()
+    aliases = {
+        "rotate": "rotated",
+        "revolve": "rotated",
+        "rotateds": "rotated",
+        "extrude": "extrusion",
+        "extrusions": "extrusion",
+        "sweep": "evolution",
+        "evolutions": "evolution",
+        "pattern": "feature_pattern",
+        "circular_pattern": "feature_pattern",
+        "feature_patterns": "feature_pattern",
+    }
+    return aliases.get(kind, kind)
+
+
+def _normalize_feature_kinds(value: Any, *, name: str = "kinds") -> list[str]:
+    if value in (None, ""):
+        return []
+    raw_values = value if isinstance(value, (list, tuple)) else [value]
+    normalized: list[str] = []
+    for index, item in enumerate(raw_values):
+        kind = _normalize_feature_kind(item)
+        if kind not in _FEATURE_KINDS:
+            raise ValueError(f"{name}[{index}] is unsupported")
+        if kind not in normalized:
+            normalized.append(kind)
+    return normalized
+
+
+def _normalize_feature_selector(value: Any, *, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    row = dict(value)
+    kind = _normalize_feature_kind(row.get("kind") or row.get("type") or row.get("collection"))
+    if kind not in _FEATURE_KINDS:
+        raise ValueError(f"{name}.kind is unsupported")
+    row["kind"] = kind
+    if "reference" in row and row["reference"] not in (None, ""):
+        row["reference"] = str(row["reference"])
+    if "index" in row and row["index"] not in (None, ""):
+        row["index"] = int(row["index"])
+    if row.get("fingerprint") not in (None, ""):
+        row["fingerprint"] = str(row["fingerprint"])
+    if row.get("name") not in (None, ""):
+        row["name"] = str(row["name"])
+    if all(row.get(key) in (None, "") for key in ("reference", "index", "fingerprint", "name")):
+        raise ValueError(f"{name} must include reference, index, fingerprint, or name")
+    return row
+
+
 def _snapshot_verified_envelope(
     operation: str,
     *,
@@ -1461,6 +1516,36 @@ class KompasAdapter:
             "apply": bool(apply),
         }
         return self.runner.call("repair_sketch", payload)
+
+    def list_features(
+        self,
+        document_id: str | None = None,
+        *,
+        kinds: list[str] | tuple[str, ...] | str | None = None,
+        max_items: int = 100,
+    ) -> dict[str, Any]:
+        if int(max_items) < 1:
+            raise ValueError("max_items must be greater than zero")
+        payload: dict[str, Any] = {
+            "document_id": document_id,
+            "max_items": int(max_items),
+        }
+        normalized_kinds = _normalize_feature_kinds(kinds)
+        if normalized_kinds:
+            payload["kinds"] = normalized_kinds
+        return self.runner.call("list_features", payload)
+
+    def inspect_feature(
+        self,
+        document_id: str | None = None,
+        *,
+        feature: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "document_id": document_id,
+            "feature": _normalize_feature_selector(feature, name="feature"),
+        }
+        return self.runner.call("inspect_feature", payload)
 
     def list_sketches(
         self,

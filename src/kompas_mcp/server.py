@@ -804,6 +804,32 @@ def repair_sketch(
 
 
 @mcp.tool()
+def list_features(
+    document_id: str | None = None,
+    kinds: list[str] | str | None = None,
+    max_items: int = 100,
+) -> dict:
+    """List existing 3D features with reference, index, fingerprint, and state fields."""
+    return adapter.list_features(
+        document_id=document_id,
+        kinds=kinds,
+        max_items=max_items,
+    )
+
+
+@mcp.tool()
+def inspect_feature(
+    document_id: str | None = None,
+    feature: dict | None = None,
+) -> dict:
+    """Inspect one existing 3D feature selected by reference, index, fingerprint, or name."""
+    return adapter.inspect_feature(
+        document_id=document_id,
+        feature=feature,
+    )
+
+
+@mcp.tool()
 def list_sketch_entities(
     document_id: str | None = None,
     sketch_ref: str | None = None,

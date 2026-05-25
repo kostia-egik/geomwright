@@ -368,6 +368,31 @@ def main() -> None:
                         ),
                     )
                 )
+                feature_list_step = _run_step(
+                    "list_existing_features",
+                    lambda: adapter.list_features(
+                        document_id=opened_document_id,
+                        kinds=["rotated", "extrusion", "evolution", "feature_pattern"],
+                        max_items=25,
+                    ),
+                )
+                audit["steps"].append(feature_list_step)
+                feature_items = (feature_list_step.get("payload") or {}).get("items")
+                first_feature = feature_items[0] if isinstance(feature_items, list) and feature_items else None
+                if isinstance(first_feature, dict):
+                    audit["steps"].append(
+                        _run_step(
+                            "inspect_existing_feature",
+                            lambda: adapter.inspect_feature(
+                                document_id=opened_document_id,
+                                feature={
+                                    "kind": first_feature.get("kind"),
+                                    "index": int(first_feature.get("collection_index")),
+                                    "fingerprint": first_feature.get("fingerprint"),
+                                },
+                            ),
+                        )
+                    )
                 audit["steps"].append(
                     _run_step(
                         "clear_existing_sketch_entity_constraints",
@@ -580,6 +605,8 @@ def _finish(audit: dict[str, Any], output_dir: Path) -> None:
         "clear_sketch_entity_constraints_ok": _step_ok(audit, "clear_existing_sketch_entity_constraints"),
         "repair_sketch_plan_ok": _step_ok(audit, "repair_sketch_plan"),
         "repair_sketch_apply_ok": _step_ok(audit, "repair_sketch_apply"),
+        "list_features_ok": _step_ok(audit, "list_existing_features"),
+        "inspect_feature_ok": _step_ok(audit, "inspect_existing_feature"),
         "list_sketch_entities_ok": _step_ok(audit, "list_existing_sketch_entities"),
         "inspect_sketch_entity_ok": _step_ok(audit, "inspect_existing_sketch_entity"),
         "parameterize_ok": bool(audit.get("parameterize_manifest", {}).get("ok")) if "parameterize_manifest" in audit else None,

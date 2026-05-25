@@ -782,6 +782,65 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         self.assertEqual(runner.calls, [])
 
+    def test_list_features_forwards_filter_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.list_features(
+            document_id="doc-1",
+            kinds=["revolve", "extrude"],
+            max_items=10,
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "list_features",
+                {
+                    "document_id": "doc-1",
+                    "max_items": 10,
+                    "kinds": ["rotated", "extrusion"],
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_inspect_feature_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.inspect_feature(
+            document_id="doc-1",
+            feature={"kind": "revolve", "reference": 501},
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "inspect_feature",
+                {
+                    "document_id": "doc-1",
+                    "feature": {"kind": "rotated", "reference": "501"},
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
+    def test_feature_readback_validates_payload_before_bridge_call(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        with self.assertRaises(ValueError):
+            adapter.list_features(kinds=["unsupported"])
+        with self.assertRaises(ValueError):
+            adapter.list_features(max_items=0)
+        with self.assertRaises(ValueError):
+            adapter.inspect_feature(feature={"kind": "unsupported", "index": 0})
+        with self.assertRaises(ValueError):
+            adapter.inspect_feature(feature={"kind": "rotated"})
+
+        self.assertEqual(runner.calls, [])
+
     def test_inspect_sketch_entity_forwards_selector_payload(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)
@@ -1832,6 +1891,55 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertTrue(sketch.updated)
         self.assertTrue(summary["applied"])
         self.assertEqual(summary["operation_count"], 3)
+
+    def test_bridge_list_features_returns_selectors(self) -> None:
+        bridge = _load_bridge_module()
+        rotated = types.SimpleNamespace(Name="BaseRevolve", Reference=501, Hidden=False, Type=12)
+        extrusion = types.SimpleNamespace(Name="CutPocket", Reference=502, Visible=True, Type=8)
+        part = types.SimpleNamespace(
+            Rotateds=_FakeCollection([rotated]),
+            Extrusions=_FakeCollection([extrusion]),
+        )
+
+        items, summary = bridge._list_existing_features(
+            part,
+            {
+                "kinds": ["revolve", "extrusion"],
+                "max_items": 10,
+            },
+        )
+
+        self.assertEqual([item["kind"] for item in items], ["rotated", "extrusion"])
+        self.assertEqual(items[0]["collection"], "rotateds")
+        self.assertEqual(items[0]["collection_index"], 0)
+        self.assertEqual(items[0]["reference"], 501)
+        self.assertIn("rotated|501|BaseRevolve", items[0]["fingerprint"])
+        self.assertEqual(summary["counts"], {"rotateds": 1, "extrusions": 1})
+        self.assertFalse(summary["truncated"])
+
+    def test_bridge_inspect_feature_returns_state_and_variables(self) -> None:
+        bridge = _load_bridge_module()
+        variables = _FakeCollection(
+            [
+                types.SimpleNamespace(Name="Length", Expression="L1", Value=42.0, ParameterNote="length"),
+            ]
+        )
+        feature = types.SimpleNamespace(Name="BaseRevolve", Reference=501, Hidden=False, Type=12, Variables=variables)
+        part = types.SimpleNamespace(Rotateds=_FakeCollection([feature]))
+
+        item = bridge._inspect_existing_feature(
+            part,
+            {
+                "feature": {"kind": "revolve", "reference": 501},
+            },
+        )
+
+        self.assertEqual(item["kind"], "rotated")
+        self.assertEqual(item["collection_index"], 0)
+        self.assertFalse(item["state"]["hidden"])
+        self.assertEqual(item["variables"][0]["name"], "Length")
+        self.assertEqual(item["variables"][0]["expression"], "L1")
+        self.assertEqual(item["variable_count"], 1)
 
     def test_bridge_list_sketches_returns_references_and_counts(self) -> None:
         bridge = _load_bridge_module()
