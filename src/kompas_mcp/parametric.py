@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .connect_curve import normalize_connect_curve_params
 from .materials import resolve_material_payload
 from .sketch import apply_dimension_display_mode
 from .sketch import apply_placement_to_points
@@ -36,6 +37,7 @@ from .thread_profile_geometry import resolve_thread_profile_geometry
 from .thread_profile_sketch import build_v60_flat_thread_profile_constraints
 from .thread_profile_sketch import build_v60_flat_thread_profile_sketch
 from .thread_profile_sketch import verify_v60_flat_thread_profile_contract
+from .trimmed_curve import normalize_trimmed_curve_params
 
 
 SUPPORTED_PART_SCENARIOS = (
@@ -1430,10 +1432,24 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
         float(placement_origin[1]),
         0.0,
     ]
-    wire_center = [
+    selector_points = _build_compression_spring_selector_points(
+        normalized,
+        start_center,
+        end_center,
+    )
+    start_end_summary = _build_compression_spring_end_summary(normalized, side_name="start")
+    finish_end_summary = _build_compression_spring_end_summary(normalized, side_name="finish")
+    mean_radius = float(normalized["mean_diameter"]) / 2.0
+    profile_phase_degrees = (
+        float(normalized["segment_plan"][0]["phase_degrees"])
+        if normalized["segment_plan"]
+        else 90.0
+    )
+    profile_phase_radians = math.radians(profile_phase_degrees)
+    profile_center = [
         float(placement_origin[0]),
-        float(placement_origin[1]) + float(normalized["mean_diameter"]) / 2.0,
-        0.0,
+        float(placement_origin[1]) + mean_radius * math.cos(profile_phase_radians),
+        mean_radius * math.sin(profile_phase_radians),
     ]
     operations = [
         {
@@ -1455,42 +1471,153 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
             "description": "Create the spring axis reference",
             "live_status": "planned",
         },
-        {
-            "operation": "create_spiral_path",
-            "mean_diameter": normalized["mean_diameter"],
-            "pitch": normalized["pitch"],
-            "height": normalized["height"],
-            "turns": normalized["turns"],
-            "left_hand": normalized["left_hand"],
-            "operation_variable_bindings": list(
-                normalized["operation_variable_bindings"]
-            ),
-            "description": "Create the cylindrical spiral used as the sweep path",
-            "live_status": "planned",
-        },
-        {
-            "operation": "create_wire_profile",
-            "profile": "circle",
-            "center": wire_center,
-            "radius": normalized["wire_diameter"] / 2.0,
-            "description": "Create the circular wire profile at the spring start",
-            "live_status": "planned",
-        },
-        {
-            "operation": "boss_evolution",
-            "profile": "wire_profile",
-            "path": "spiral_path",
-            "description": "Sweep the wire profile along the spiral path",
-            "live_status": "preview_only",
-        },
     ]
+    for segment in normalized["segment_plan"]:
+        operations.append(
+            {
+                "operation": "create_spiral_path",
+                "name": segment["path_name"],
+                "role": segment["role"],
+                "mean_diameter": normalized["mean_diameter"],
+                "pitch": segment["pitch"],
+                "height": segment["height"],
+                "turns": segment["turns"],
+                "start_offset": segment["start_offset"],
+                "start_offset_expression": segment.get("start_offset_expression"),
+                "phase_degrees": segment["phase_degrees"],
+                "turning_angle_degrees": segment["turning_angle_degrees"],
+                "orientation_angle_degrees": segment["orientation_angle_degrees"],
+                "anchor_rotation_expression": segment.get("anchor_rotation_expression"),
+                "angle_application_mode": segment["angle_application_mode"],
+                "end_phase_degrees": segment["end_phase_degrees"],
+                "left_hand": normalized["left_hand"],
+                "operation_variable_bindings": list(segment["operation_variable_bindings"]),
+                "description": segment["description"],
+                "live_status": "planned",
+            }
+        )
+    for connector in normalized["connector_plan"]:
+        if str(connector.get("builder") or "") == "trimmed_connect_curve":
+            curve1_trim = dict(connector["curve1_trim"])
+            curve2_trim = dict(connector["curve2_trim"])
+            connect_curve = dict(connector["connect_curve"])
+            operations.extend(
+                [
+                    {
+                        "operation": "create_trimmed_curve_path",
+                        "name": curve1_trim["name"],
+                        "role": f"{connector['role']}_curve1_trim",
+                        "source_curve": connector["curve1_path_name"],
+                        "point_name": curve1_trim["point_name"],
+                        "offset": curve1_trim["offset"],
+                        "offset_expression": connector.get("trim_length_expression"),
+                        "offset_type": curve1_trim["offset_type"],
+                        "direction": bool(curve1_trim["direction"]),
+                        "sense": bool(curve1_trim["sense"]),
+                        "point_operation_variable_bindings": list(
+                            curve1_trim.get("point_operation_variable_bindings") or []
+                        ),
+                        "description": "Trim the local end of the previous spring segment near the transition joint",
+                        "live_status": "planned",
+                    },
+                    {
+                        "operation": "create_trimmed_curve_path",
+                        "name": curve2_trim["name"],
+                        "role": f"{connector['role']}_curve2_trim",
+                        "source_curve": connector["curve2_path_name"],
+                        "point_name": curve2_trim["point_name"],
+                        "offset": curve2_trim["offset"],
+                        "offset_expression": connector.get("trim_length_expression"),
+                        "offset_type": curve2_trim["offset_type"],
+                        "direction": bool(curve2_trim["direction"]),
+                        "sense": bool(curve2_trim["sense"]),
+                        "point_operation_variable_bindings": list(
+                            curve2_trim.get("point_operation_variable_bindings") or []
+                        ),
+                        "description": "Trim the local start of the next spring segment near the transition joint",
+                        "live_status": "planned",
+                    },
+                    {
+                        "operation": "create_connect_curve_path",
+                        "name": connect_curve["name"],
+                        "role": connector["role"],
+                        "curve1": curve1_trim["name"],
+                        "curve2": curve2_trim["name"],
+                        "curve1_connect_vertex": bool(connect_curve["curve1_connect_vertex"]),
+                        "curve2_connect_vertex": bool(connect_curve["curve2_connect_vertex"]),
+                        "curve1_connect_type": int(connect_curve["curve1_connect_type"]),
+                        "curve2_connect_type": int(connect_curve["curve2_connect_type"]),
+                        "tension": float(connect_curve["tension"]),
+                        "tension_expression": connector.get("tension_expression"),
+                        "operation_variable_bindings": list(
+                            connect_curve.get("operation_variable_bindings") or []
+                        ),
+                        "description": connector["description"],
+                        "live_status": "planned",
+                    },
+                ]
+            )
+            continue
+        operations.append(
+            {
+                "operation": "create_curve_fillet_path",
+                "name": connector["path_name"],
+                "role": connector["role"],
+                "curve1": connector["curve1_path_name"],
+                "curve2": connector["curve2_path_name"],
+                "radius": connector["radius"],
+                "trim_curve1": bool(connector["trim_curve1"]),
+                "trim_curve2": bool(connector["trim_curve2"]),
+                "joint_point": list(connector["joint_point"]),
+                "description": connector["description"],
+                "live_status": "planned",
+            }
+        )
+    operations.extend(
+        [
+            {
+                "operation": "create_wire_profile",
+                "name": normalized["profile_name"],
+                "role": "full_path",
+                "profile": "circle",
+                "plane": normalized["plane"],
+                "center": profile_center,
+                "radius": normalized["wire_diameter"] / 2.0,
+                "phase_degrees": profile_phase_degrees,
+                "sketch_parameterization": {
+                    "constraint_count": len(normalized["profile_sketch_constraints"]),
+                    "dimension_count": len(normalized["profile_sketch_dimensions"]),
+                    "constraints": list(normalized["profile_sketch_constraints"]),
+                    "dimensions": list(normalized["profile_sketch_dimensions"]),
+                    "target_state": normalized["profile_sketch_target_state"],
+                },
+                "description": "Create one circular wire profile at the start of the composed spring path",
+                "live_status": "planned",
+            },
+            {
+                "operation": "boss_evolution",
+                "name": normalized["sweep_name"],
+                "role": "full_path",
+                "profile": normalized["profile_name"],
+                "paths": list(normalized["full_path_sequence"]),
+                "path_count": len(normalized["full_path_sequence"]),
+                "sweep_alignment": normalized["sweep_alignment_mode"],
+                "description": "Sweep one wire profile along the full spring path orthogonally to the trajectory",
+                "live_status": "planned",
+            },
+        ]
+    )
     if normalized["auxiliary_geometry_hidden"]:
         operations.append(
             {
                 "operation": "hide_auxiliary_geometry",
-                "objects": ["spring_axis", "spiral_path", "wire_profile_lcs"],
+                "objects": [
+                    "spring_axis",
+                    *[segment["path_name"] for segment in normalized["segment_plan"]],
+                    normalized["profile_name"],
+                ],
                 "description": "Hide service geometry created for the spring",
-                "live_status": "preview_only",
+                "live_status": "planned",
             }
         )
 
@@ -1506,6 +1633,21 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
             "pitch": normalized["pitch"],
             "height": normalized["height"],
             "turns": normalized["turns"],
+            "working_turns": normalized["working_turns"],
+            "total_turns": normalized["total_turns"],
+            "end_turns_per_side": normalized["end_turns_per_side"],
+            "ground_turns_per_side": normalized["ground_turns_per_side"],
+            "transition_fillet_radius": normalized["transition_fillet_radius"],
+            "transition_trim_length": normalized["transition_trim_length"],
+            "transition_trim_length_expression": normalized["transition_trim_length_expression"],
+            "transition_trim_length_variable": normalized["transition_trim_length_variable"],
+            "transition_connect_tension": normalized["transition_connect_tension"],
+            "transition_connect_tension_expression": normalized["transition_connect_tension_expression"],
+            "transition_connect_tension_variable": normalized["transition_connect_tension_variable"],
+            "end_contract_mode": normalized["end_contract_mode"],
+            "end_projection_mode": normalized["end_projection_mode"],
+            "start_end_summary": start_end_summary,
+            "finish_end_summary": finish_end_summary,
             "left_hand": normalized["left_hand"],
             "auxiliary_geometry_hidden": normalized["auxiliary_geometry_hidden"],
             "parameter_prefix": parameter_prefix,
@@ -1518,12 +1660,18 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
             "placement_local_offset": normalized["placement"]["local_offset"],
             "placement_reference": normalized["placement"]["reference"],
             "live_supported": normalized["live_supported"],
+            "profile_plane": normalized["plane"],
+            "sweep_alignment": normalized["sweep_alignment_mode"],
+            "connector_count": len(normalized["connector_plan"]),
+            "contour_ready": bool(normalized["path_verification"]["contour_ready"]),
+            "max_joint_gap": float(normalized["path_verification"]["max_joint_gap"]),
         },
+        "selectors": selector_points,
         "interface": _build_compression_spring_interface(
             normalized,
             start_center,
             end_center,
-            wire_center,
+            selector_points,
         ),
         "operations": operations,
     }
@@ -2738,14 +2886,6 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     if not isinstance(params, dict):
         raise ValueError("params must be an object")
 
-    mean_diameter = _optional_positive_float(
-        params,
-        "mean_diameter",
-        "mean_diameter",
-        "coil_diameter",
-        "diameter",
-        "d",
-    )
     wire_diameter = _optional_positive_float(
         params,
         "wire_diameter",
@@ -2754,46 +2894,132 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         "bar_diameter",
         "wire_d",
     )
-    pitch = _optional_positive_float(params, "pitch", "pitch", "step", "p")
-    height = _optional_positive_float(
-        params,
-        "height",
-        "height",
-        "length",
-        "free_length",
-        "h",
-        "l",
-    )
-    turns = _optional_positive_float(
-        params,
-        "turns",
-        "turns",
-        "turn_count",
-        "coil_count",
-        "active_turns",
-        "n",
-    )
-
-    if mean_diameter is None:
-        raise ValueError("compression_spring requires mean_diameter")
     if wire_diameter is None:
         raise ValueError("compression_spring requires wire_diameter")
+    wire_diameter = float(wire_diameter)
+
+    mean_diameter, diameter_mode = _resolve_compression_spring_mean_diameter(
+        params,
+        wire_diameter=wire_diameter,
+    )
+    free_length = _optional_positive_float(
+        params,
+        "free_length",
+        "free_length",
+        "length",
+        "height",
+        "h",
+        "l",
+        "L0",
+    )
+    standard_length = _optional_positive_float(
+        params,
+        "standard_length",
+        "standard_length",
+        "full_length",
+        "overall_length",
+        "L",
+    )
+    working_turns = _optional_positive_float(
+        params,
+        "working_turns",
+        "working_turns",
+        "active_turns",
+        "working_coils",
+        "working_turn_count",
+        "turns",
+        "turn_count",
+        "n",
+    )
+    total_turns = _optional_non_negative_float(
+        params,
+        "total_turns",
+        "total_turns",
+        "coil_count",
+        "total_coils",
+        "Nt",
+    )
+    end_contract = _parse_compression_spring_end_contract(params)
+    end_projection_mode = str(end_contract["end_projection_mode"])
+    start_end_turns = float(end_contract["start_end_turns"])
+    finish_end_turns = float(end_contract["finish_end_turns"])
+    start_ground_turns = float(end_contract["start_ground_turns"])
+    finish_ground_turns = float(end_contract["finish_ground_turns"])
+    transition_fillet_radius_explicit = "transition_fillet_radius" in params
+    transition_fillet_radius = _optional_non_negative_float(
+        params,
+        "transition_fillet_radius",
+        "transition_fillet_radius",
+    )
+    if transition_fillet_radius is not None and transition_fillet_radius <= 1e-9:
+        transition_fillet_radius = None
+    transition_trim_length = _optional_non_negative_float(
+        params,
+        "transition_trim_length",
+        "transition_trim_length",
+    )
+    if transition_trim_length is not None and transition_trim_length <= 1e-9:
+        transition_trim_length = None
+    transition_connect_tension = _optional_non_negative_float(
+        params,
+        "transition_connect_tension",
+        "transition_connect_tension",
+        "transition_tension",
+    )
+    end_turns_per_side = (
+        float(end_contract["end_turns_per_side"])
+        if end_contract["end_turns_per_side"] is not None
+        else None
+    )
+    ground_turns_per_side = (
+        float(end_contract["ground_turns_per_side"])
+        if end_contract["ground_turns_per_side"] is not None
+        else None
+    )
+    total_end_turns = start_end_turns + finish_end_turns
+
+    if working_turns is None and total_turns is None:
+        working_turns = 6.0
+    if total_turns is not None and working_turns is None:
+        derived_working_turns = float(total_turns) - total_end_turns
+        if derived_working_turns <= 0.0:
+            if end_projection_mode == "projected_to_v1_symmetric":
+                raise ValueError("compression_spring total_turns must exceed twice the end_turns_per_side")
+            raise ValueError("compression_spring total_turns must exceed start_end_turns + finish_end_turns")
+        working_turns = derived_working_turns
+    if working_turns is None:
+        raise ValueError("compression_spring requires working_turns or total_turns")
+    working_turns = _normalize_spring_fractional_turn(
+        float(working_turns),
+        field_name="working_turns",
+    )
+    if working_turns <= 0.0:
+        raise ValueError("compression_spring working_turns must be a positive number")
+
+    total_turns_resolved = working_turns + total_end_turns
+    if total_turns is not None and abs(float(total_turns) - total_turns_resolved) > 1e-6:
+        if end_projection_mode == "projected_to_v1_symmetric":
+            raise ValueError("compression_spring total_turns must equal working_turns + 2 * end_turns_per_side")
+        raise ValueError("compression_spring total_turns must equal working_turns + start_end_turns + finish_end_turns")
+
     if mean_diameter <= wire_diameter:
         raise ValueError("compression_spring requires mean_diameter greater than wire_diameter")
-    if turns is None:
-        turns = 6.0
-    if turns <= 0.0:
-        raise ValueError("compression_spring turns must be a positive number")
-    if pitch is None and height is None:
-        raise ValueError("compression_spring requires pitch or height")
-    if pitch is None:
-        pitch = float(height) / float(turns)
-    if height is None:
-        height = float(pitch) * float(turns)
-    expected_height = float(pitch) * float(turns)
-    if abs(float(height) - expected_height) > 1e-6:
-        raise ValueError("compression_spring height must equal pitch * turns")
-    if float(pitch) < float(wire_diameter):
+    length_model = _build_compression_spring_length_model(
+        standard_length=float(standard_length) if standard_length is not None else None,
+        centerline_length=float(free_length) if free_length is not None else None,
+        wire_diameter=wire_diameter,
+        start_end_turns=start_end_turns,
+        finish_end_turns=finish_end_turns,
+        start_ground_turns=start_ground_turns,
+        finish_ground_turns=finish_ground_turns,
+    )
+    free_length = float(length_model["centerline_length"])
+    minimum_length = total_end_turns * wire_diameter
+    if free_length <= minimum_length:
+        raise ValueError("compression_spring free_length is too small for the requested end turns")
+    active_height = free_length - minimum_length
+    pitch = active_height / working_turns
+    if pitch < float(wire_diameter):
         raise ValueError("compression_spring requires pitch greater than or equal to wire_diameter")
 
     direction_value = str(
@@ -2832,16 +3058,21 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         params.get("name") or "Compression spring",
         parameter_prefix=parameter_prefix,
     )
-    mean_diameter_variable = build_parameter_name("D", 1, prefix=parameter_prefix)
+    spring_diameter_variable = build_parameter_name("D", 1, prefix=parameter_prefix)
     wire_diameter_variable = build_parameter_name("WD", 1, prefix=parameter_prefix)
     pitch_variable = build_parameter_name("P", 1, prefix=parameter_prefix)
+    standard_length_variable = build_parameter_name("L", 1, prefix=parameter_prefix)
     height_variable = build_parameter_name("H", 1, prefix=parameter_prefix)
     turns_variable = build_parameter_name("N", 1, prefix=parameter_prefix)
+    transition_trim_length_variable = build_parameter_name("TL", 1, prefix=parameter_prefix)
+    transition_connect_tension_variable = build_parameter_name("TN", 1, prefix=parameter_prefix)
+    outer_diameter = float(mean_diameter) + float(wire_diameter)
+    mean_diameter_expression = f"({spring_diameter_variable}) - ({wire_diameter_variable})"
     variable_plan = [
         {
-            "name": mean_diameter_variable,
-            "value": float(mean_diameter),
-            "note": build_parameter_note(operation_label, "spring", mean_diameter_variable, "Mean coil diameter"),
+            "name": spring_diameter_variable,
+            "value": outer_diameter,
+            "note": build_parameter_note(operation_label, "spring", spring_diameter_variable, "Outer coil diameter"),
             "kind": "driving_mean_diameter",
             "step_name": "spring",
             "operation_label": operation_label,
@@ -2859,37 +3090,632 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         {
             "name": pitch_variable,
             "value": float(pitch),
-            "note": build_parameter_note(operation_label, "spring", pitch_variable, "Pitch"),
+            "note": build_parameter_note(operation_label, "spring", pitch_variable, "Pitch of working turns"),
             "kind": "driving_pitch",
             "step_name": "spring",
             "operation_label": operation_label,
             "external": True,
         },
+        *(
+            [
+                {
+                    "name": standard_length_variable,
+                    "value": float(length_model["standard_length"]),
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        standard_length_variable,
+                        "Standard full spring length",
+                    ),
+                    "kind": "driving_standard_length",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                }
+            ]
+            if length_model["source"] == "standard_length"
+            else []
+        ),
         {
             "name": height_variable,
-            "value": float(height),
-            "note": build_parameter_note(operation_label, "spring", height_variable, "Free height"),
-            "kind": "driving_height",
+            "value": float(free_length),
+            "note": build_parameter_note(operation_label, "spring", height_variable, "Centerline construction height"),
+            "kind": "derived_centerline_height"
+            if length_model["source"] == "standard_length"
+            else "driving_height",
             "step_name": "spring",
             "operation_label": operation_label,
-            "external": True,
+            "external": length_model["source"] != "standard_length",
         },
         {
             "name": turns_variable,
-            "value": float(turns),
-            "note": build_parameter_note(operation_label, "spring", turns_variable, "Turn count"),
+            "value": float(working_turns),
+            "note": build_parameter_note(operation_label, "spring", turns_variable, "Working turn count"),
             "kind": "driving_turn_count",
             "step_name": "spring",
             "operation_label": operation_label,
             "external": True,
         },
     ]
+    end_turns_variable: str | None = None
+    ground_turns_variable: str | None = None
+    start_end_turns_variable: str | None = None
+    finish_end_turns_variable: str | None = None
+    start_ground_turns_variable: str | None = None
+    finish_ground_turns_variable: str | None = None
+    if end_contract["end_contract_mode"] == "v1_symmetric":
+        end_turns_variable = build_parameter_name("N2", 1, prefix=parameter_prefix)
+        ground_turns_variable = build_parameter_name("N3", 1, prefix=parameter_prefix)
+        start_end_turns_variable = end_turns_variable
+        finish_end_turns_variable = end_turns_variable
+        start_ground_turns_variable = ground_turns_variable
+        finish_ground_turns_variable = ground_turns_variable
+        variable_plan.extend(
+            [
+                {
+                    "name": end_turns_variable,
+                    "value": float(end_turns_per_side or 0.0),
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        end_turns_variable,
+                        "Closed turns per side",
+                    ),
+                    "kind": "driving_end_turn_count_per_side",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": ground_turns_variable,
+                    "value": float(ground_turns_per_side or 0.0),
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        ground_turns_variable,
+                        "Ground turns per side",
+                    ),
+                    "kind": "driving_ground_turn_count_per_side",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+            ]
+        )
+    else:
+        start_end_turns_variable = build_parameter_name("N2", 1, prefix=parameter_prefix)
+        finish_end_turns_variable = build_parameter_name("N2", 2, prefix=parameter_prefix)
+        start_ground_turns_variable = build_parameter_name("N3", 1, prefix=parameter_prefix)
+        finish_ground_turns_variable = build_parameter_name("N3", 2, prefix=parameter_prefix)
+        variable_plan.extend(
+            [
+                {
+                    "name": start_end_turns_variable,
+                    "value": float(start_end_turns),
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        start_end_turns_variable,
+                        "Closed start-end turns",
+                    ),
+                    "kind": "driving_start_end_turn_count",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": finish_end_turns_variable,
+                    "value": float(finish_end_turns),
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        finish_end_turns_variable,
+                        "Closed finish-end turns",
+                    ),
+                    "kind": "driving_finish_end_turn_count",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": start_ground_turns_variable,
+                    "value": float(start_ground_turns),
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        start_ground_turns_variable,
+                        "Grounded start-end turns",
+                    ),
+                    "kind": "driving_start_ground_turn_count",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": finish_ground_turns_variable,
+                    "value": float(finish_ground_turns),
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        finish_ground_turns_variable,
+                        "Grounded finish-end turns",
+                    ),
+                    "kind": "driving_finish_ground_turn_count",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+            ]
+        )
+
+    sketch.setdefault("parameterization_order", "staged")
 
     mean_diameter = float(mean_diameter)
-    wire_diameter = float(wire_diameter)
     pitch = float(pitch)
-    height = float(height)
-    turns = float(turns)
+    turns = float(working_turns)
+    start_end_turn_span = start_end_turns * wire_diameter
+    finish_end_turn_span = finish_end_turns * wire_diameter
+    active_height = pitch * turns
+    if (
+        end_projection_mode == "projected_to_v1_symmetric"
+        and start_end_turns_variable is not None
+        and finish_end_turns_variable is not None
+    ):
+        start_end_height_expression = f"{start_end_turns_variable} * {wire_diameter_variable}"
+        finish_end_height_expression = f"{finish_end_turns_variable} * {wire_diameter_variable}"
+        if end_contract["end_contract_mode"] == "v1_symmetric":
+            active_height_expression = f"{height_variable} - 2 * ({start_end_height_expression})"
+        else:
+            active_height_expression = (
+                f"{height_variable} - (({start_end_height_expression}) + ({finish_end_height_expression}))"
+            )
+        working_start_offset_expression = (
+            start_end_height_expression if start_end_turn_span > 1e-9 else None
+        )
+        finish_start_offset_expression = (
+            f"({start_end_height_expression}) + ({active_height_expression})"
+            if finish_end_turn_span > 1e-9
+            else None
+        )
+        working_rotation_turns_expression = (
+            f"{start_end_turns_variable}" if start_end_turn_span > 1e-9 else None
+        )
+        finish_rotation_turns_expression = (
+            f"({start_end_turns_variable}) + (({active_height_expression}) / ({pitch_variable}))"
+            if finish_end_turn_span > 1e-9
+            else None
+        )
+    else:
+        start_end_height_expression = (
+            _format_compression_spring_expression_literal(start_end_turn_span)
+            if start_end_turn_span > 1e-9
+            else None
+        )
+        finish_end_height_expression = (
+            _format_compression_spring_expression_literal(finish_end_turn_span)
+            if finish_end_turn_span > 1e-9
+            else None
+        )
+        active_height_expression = _format_compression_spring_expression_literal(active_height)
+        working_start_offset_expression = (
+            _format_compression_spring_expression_literal(start_end_turn_span)
+            if start_end_turn_span > 1e-9
+            else None
+        )
+        finish_start_offset_expression = (
+            _format_compression_spring_expression_literal(start_end_turn_span + active_height)
+            if finish_end_turn_span > 1e-9
+            else None
+        )
+        working_rotation_turns_expression = (
+            _format_compression_spring_expression_literal(start_end_turns)
+            if start_end_turn_span > 1e-9
+            else None
+        )
+        finish_rotation_turns_expression = (
+            _format_compression_spring_expression_literal(start_end_turns + turns)
+            if finish_end_turn_span > 1e-9
+            else None
+        )
+    phase_multiplier = 360.0 if left_hand else -360.0
+    start_phase_raw = _optional_float(
+        params,
+        "start_phase_degrees",
+        "start_phase_degrees",
+        "initial_phase_degrees",
+        "start_angle_degrees",
+        "start_angle",
+    )
+    if start_phase_raw is None:
+        start_phase_raw = 90.0
+    start_phase_degrees = _normalize_spring_phase_degrees(start_phase_raw)
+    start_turning_angle_degrees = _normalize_spring_turning_angle_degrees(start_phase_raw)
+    first_segment_initial_rotation_degrees = _resolve_spring_segment_initial_angle_degrees(
+        start_phase_raw,
+        turns_before=0.0,
+        left_hand=left_hand,
+    )
+    first_segment_rotation_expression = (
+        _format_compression_spring_expression_literal(first_segment_initial_rotation_degrees)
+        if abs(first_segment_initial_rotation_degrees) > 1e-9
+        else None
+    )
+    transfer_first_segment_half_turn = (
+        not left_hand
+        and abs(_normalize_spring_turning_angle_degrees(first_segment_initial_rotation_degrees) - 180.0) <= 1e-9
+    )
+    if transfer_first_segment_half_turn:
+        first_segment_rotation_expression = None
+    working_rotation_expression = _build_spring_rotation_expression_from_turns(
+        working_rotation_turns_expression,
+        start_phase_degrees=start_phase_raw,
+        left_hand=left_hand,
+        extra_angle_offset_degrees=180.0 if transfer_first_segment_half_turn else 0.0,
+    )
+    finish_rotation_expression = _build_spring_rotation_expression_from_turns(
+        finish_rotation_turns_expression,
+        start_phase_degrees=start_phase_raw,
+        left_hand=left_hand,
+        extra_angle_offset_degrees=180.0 if transfer_first_segment_half_turn else 0.0,
+    )
+    segment_plan: list[dict[str, Any]] = []
+    segment_phase_raw = float(start_phase_raw)
+    if start_end_turn_span > 1e-9:
+        segment_end_phase_raw = segment_phase_raw + phase_multiplier * (start_end_turn_span / wire_diameter)
+        segment_plan.append(
+            {
+                "role": "start_end",
+                "label": "start closed-end",
+                "description": "Create the closed start turns",
+                "path_name": "spring_start_end_path",
+                "profile_name": "spring_start_end_profile",
+                "sweep_name": "spring_start_end_body",
+                "height": start_end_turn_span,
+                "height_expression": start_end_height_expression,
+                "pitch": wire_diameter,
+                "pitch_expression": wire_diameter_variable,
+                "turns": float(start_end_turns),
+                "start_offset": 0.0,
+                "start_offset_expression": None,
+                "phase_degrees": _normalize_spring_phase_degrees(segment_phase_raw),
+                "turning_angle_degrees": 0.0,
+                "orientation_angle_degrees": 0.0,
+                "anchor_rotation_expression": first_segment_rotation_expression,
+                "angle_application_mode": "orientation",
+                "end_phase_degrees": _normalize_spring_phase_degrees(segment_end_phase_raw),
+                "start_angle_degrees_raw": float(segment_phase_raw),
+                "end_angle_degrees_raw": float(segment_end_phase_raw),
+                "turn_delta_degrees": float(segment_end_phase_raw - segment_phase_raw),
+                "operation_variable_bindings": _build_spring_spiral_variable_bindings(
+                    mean_diameter_expression,
+                    wire_diameter_variable,
+                    start_end_height_expression or _format_compression_spring_expression_literal(start_end_turn_span),
+                ),
+            }
+        )
+        segment_phase_raw = segment_end_phase_raw
+    segment_end_phase_raw = segment_phase_raw + phase_multiplier * (active_height / pitch)
+    segment_plan.append(
+        {
+            "role": "working",
+            "label": "working",
+            "description": "Create the working turns with the specified pitch",
+            "path_name": "spring_working_path",
+            "profile_name": "spring_working_profile",
+            "sweep_name": "spring_working_body",
+            "height": active_height,
+            "height_expression": active_height_expression,
+            "pitch": pitch,
+            "pitch_expression": pitch_variable,
+            "turns": turns,
+            "start_offset": start_end_turn_span,
+            "start_offset_expression": working_start_offset_expression,
+            "phase_degrees": _normalize_spring_phase_degrees(segment_phase_raw),
+            "turning_angle_degrees": 0.0,
+            "orientation_angle_degrees": 0.0,
+            "anchor_rotation_expression": (
+                first_segment_rotation_expression if not segment_plan else working_rotation_expression
+            ),
+            "angle_application_mode": "orientation",
+            "end_phase_degrees": _normalize_spring_phase_degrees(segment_end_phase_raw),
+            "start_angle_degrees_raw": float(segment_phase_raw),
+            "end_angle_degrees_raw": float(segment_end_phase_raw),
+            "turn_delta_degrees": float(segment_end_phase_raw - segment_phase_raw),
+            "operation_variable_bindings": _build_spring_spiral_variable_bindings(
+                mean_diameter_expression,
+                pitch_variable,
+                active_height_expression,
+            ),
+        }
+    )
+    segment_phase_raw = segment_end_phase_raw
+    if finish_end_turn_span > 1e-9:
+        segment_end_phase_raw = segment_phase_raw + phase_multiplier * (finish_end_turn_span / wire_diameter)
+        segment_plan.append(
+            {
+                "role": "finish_end",
+                "label": "finish closed-end",
+                "description": "Create the closed finish turns",
+                "path_name": "spring_finish_end_path",
+                "profile_name": "spring_finish_end_profile",
+                "sweep_name": "spring_finish_end_body",
+                "height": finish_end_turn_span,
+                "height_expression": finish_end_height_expression,
+                "pitch": wire_diameter,
+                "pitch_expression": wire_diameter_variable,
+                "turns": float(finish_end_turns),
+                "start_offset": start_end_turn_span + active_height,
+                "start_offset_expression": finish_start_offset_expression,
+                "phase_degrees": _normalize_spring_phase_degrees(segment_phase_raw),
+                "turning_angle_degrees": 0.0,
+                "orientation_angle_degrees": 0.0,
+                "anchor_rotation_expression": (
+                    first_segment_rotation_expression
+                    if not segment_plan
+                    else finish_rotation_expression
+                ),
+                "angle_application_mode": "orientation",
+                "end_phase_degrees": _normalize_spring_phase_degrees(segment_end_phase_raw),
+                "start_angle_degrees_raw": float(segment_phase_raw),
+                "end_angle_degrees_raw": float(segment_end_phase_raw),
+                "turn_delta_degrees": float(segment_end_phase_raw - segment_phase_raw),
+                "operation_variable_bindings": _build_spring_spiral_variable_bindings(
+                    mean_diameter_expression,
+                    wire_diameter_variable,
+                    finish_end_height_expression
+                    or _format_compression_spring_expression_literal(finish_end_turn_span),
+                ),
+            }
+        )
+    path_verification = _build_compression_spring_path_verification(
+        segment_plan,
+        mean_radius=mean_diameter / 2.0,
+    )
+    if (
+        transition_fillet_radius is None
+        and not transition_fillet_radius_explicit
+        and len(segment_plan) >= 2
+    ):
+        transition_fillet_radius = _resolve_compression_spring_transition_fillet_radius(
+            wire_diameter=wire_diameter,
+        )
+    connector_plan: list[dict[str, Any]] = []
+    resolved_transition_trim_length = transition_trim_length
+    resolved_transition_connect_tension: float | None = transition_connect_tension
+    transition_trim_length_expression: str | None = None
+    transition_connect_tension_expression: str | None = None
+    if transition_fillet_radius is not None and len(segment_plan) >= 2:
+        resolved_transition_trim_length = (
+            float(transition_trim_length)
+            if transition_trim_length is not None
+            else _resolve_compression_spring_transition_trim_length(
+                mean_diameter=mean_diameter,
+                wire_diameter=wire_diameter,
+                pitch=pitch,
+            )
+        )
+        if transition_trim_length is not None:
+            transition_trim_length_expression = _format_compression_spring_expression_literal(
+                resolved_transition_trim_length
+            )
+        else:
+            base_trim_length_expression = _compression_spring_expression_max(
+                f"0.85 * ({wire_diameter_variable})",
+                f"0.46 * sqrt(({mean_diameter_expression}) * ({wire_diameter_variable}))",
+            )
+            transition_trim_length_expression = _compression_spring_expression_min(
+                f"0.85 * ({pitch_variable})",
+                base_trim_length_expression,
+            )
+        resolved_transition_connect_tension = (
+            float(transition_connect_tension)
+            if transition_connect_tension is not None
+            else _resolve_compression_spring_transition_connect_tension(
+                mean_diameter=mean_diameter,
+                wire_diameter=wire_diameter,
+                pitch=pitch,
+            )
+        )
+        if transition_connect_tension is not None:
+            transition_connect_tension_expression = _format_compression_spring_expression_literal(
+                resolved_transition_connect_tension
+            )
+        else:
+            base_tension_expression = (
+                f"2.03 * sqrt("
+                f"{_compression_spring_expression_non_negative(f'({mean_diameter_expression}) - 15')}"
+                f")"
+            )
+            pitch_adjustment_expression = _compression_spring_expression_min(
+                "0",
+                f"0.8 * ((({pitch_variable}) / ({wire_diameter_variable})) - 2)",
+            )
+            transition_connect_tension_expression = _compression_spring_expression_min(
+                "15",
+                _compression_spring_expression_non_negative(
+                    f"({base_tension_expression}) + ({pitch_adjustment_expression})"
+                ),
+            )
+        variable_plan.extend(
+            [
+                {
+                    "name": transition_trim_length_variable,
+                    "value": float(resolved_transition_trim_length),
+                    "expression": transition_trim_length_expression,
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        transition_trim_length_variable,
+                        "Transition trim length",
+                    ),
+                    "kind": "derived_transition_trim_length",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": transition_connect_tension_variable,
+                    "value": float(resolved_transition_connect_tension),
+                    "expression": transition_connect_tension_expression,
+                    "note": build_parameter_note(
+                        operation_label,
+                        "spring",
+                        transition_connect_tension_variable,
+                        "Transition connect-curve tension",
+                    ),
+                    "kind": "derived_transition_connect_tension",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+            ]
+        )
+
+        def _build_trimmed_transition_connector(
+            previous_segment: dict[str, Any],
+            current_segment: dict[str, Any],
+            *,
+            curve1_source_path_name: str | None = None,
+        ) -> dict[str, Any]:
+            connector_role = f"{str(previous_segment['role'])}_to_{str(current_segment['role'])}"
+            curve1_trim = normalize_trimmed_curve_params(
+                {
+                    "name": "spring_%s_curve1_local_path" % connector_role,
+                    "point_name": "spring_%s_curve1_local_point" % connector_role,
+                    "offset": resolved_transition_trim_length,
+                    "direction": False,
+                    "sense": True,
+                    "offset_type": 2,
+                }
+            )
+            curve1_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
+                transition_trim_length_variable,
+                f"{connector_role}_curve1_trim_offset",
+            )
+            curve2_trim = normalize_trimmed_curve_params(
+                {
+                    "name": "spring_%s_curve2_local_path" % connector_role,
+                    "point_name": "spring_%s_curve2_local_point" % connector_role,
+                    "offset": resolved_transition_trim_length,
+                    "direction": True,
+                    "sense": False,
+                    "offset_type": 2,
+                }
+            )
+            curve2_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
+                transition_trim_length_variable,
+                f"{connector_role}_curve2_trim_offset",
+            )
+            connect_curve = normalize_connect_curve_params(
+                {
+                    "name": "spring_%s_connect_path" % connector_role,
+                    "curve1_connect_vertex": False,
+                    "curve2_connect_vertex": True,
+                    "curve1_connect_type": "smooth",
+                    "curve2_connect_type": "smooth",
+                    "tension": resolved_transition_connect_tension,
+                }
+            )
+            connect_curve["operation_variable_bindings"] = (
+                _build_transition_connect_curve_variable_bindings(
+                    transition_connect_tension_variable,
+                    f"{connector_role}_connect_curve_tension",
+                )
+            )
+            return {
+                "builder": "trimmed_connect_curve",
+                "role": connector_role,
+                "label": connector_role.replace("_", " "),
+                "description": (
+                    "Trim the joint between %s and %s and connect the local spiral ends with a smooth bridge curve"
+                    % (previous_segment["label"], current_segment["label"])
+                ),
+                "path_name": connect_curve["name"],
+                "curve1_path_name": curve1_source_path_name or str(previous_segment["path_name"]),
+                "curve2_path_name": str(current_segment["path_name"]),
+                "curve1_trim": curve1_trim,
+                "curve2_trim": curve2_trim,
+                "connect_curve": connect_curve,
+                "sequence_curve1_path_name": curve1_trim["name"],
+                "sequence_curve2_path_name": curve2_trim["name"],
+                "radius": float(transition_fillet_radius),
+                "trim_length": resolved_transition_trim_length,
+                "trim_length_expression": transition_trim_length_variable,
+                "tension": resolved_transition_connect_tension,
+                "tension_expression": transition_connect_tension_variable,
+            }
+
+        prior_connector_curve2_path_name: str | None = None
+        for segment_index in range(len(segment_plan) - 1):
+            previous_segment = segment_plan[segment_index]
+            current_segment = segment_plan[segment_index + 1]
+            connector = _build_trimmed_transition_connector(
+                previous_segment,
+                current_segment,
+                curve1_source_path_name=prior_connector_curve2_path_name,
+            )
+            connector_plan.append(connector)
+            prior_connector_curve2_path_name = str(connector["sequence_curve2_path_name"])
+    full_path_sequence: list[str] = []
+    if connector_plan:
+        if all(
+            str(connector.get("builder") or "") == "trimmed_connect_curve"
+            for connector in connector_plan
+        ):
+            full_path_sequence.append(str(connector_plan[0]["sequence_curve1_path_name"]))
+            for index, connector in enumerate(connector_plan):
+                full_path_sequence.append(str(connector["path_name"]))
+                if index + 1 < len(connector_plan):
+                    full_path_sequence.append(
+                        str(connector_plan[index + 1]["sequence_curve1_path_name"])
+                    )
+                else:
+                    full_path_sequence.append(str(connector["sequence_curve2_path_name"]))
+        else:
+            full_path_sequence.append(str(segment_plan[0]["path_name"]))
+            for index, connector in enumerate(connector_plan):
+                full_path_sequence.append(str(connector["path_name"]))
+                full_path_sequence.append(str(segment_plan[index + 1]["path_name"]))
+    else:
+        full_path_sequence = [str(segment["path_name"]) for segment in segment_plan]
+    length_model["standard_length_expression"] = (
+        standard_length_variable if length_model["source"] == "standard_length" else None
+    )
+    length_model["centerline_height_variable"] = height_variable
+    if length_model["source"] == "standard_length":
+        if start_ground_turns > 1e-9 or finish_ground_turns > 1e-9:
+            length_model["centerline_height_expression"] = (
+                f"{standard_length_variable} - {wire_diameter_variable} + "
+                f"(({start_ground_turns_variable} + {finish_ground_turns_variable}) * {wire_diameter_variable})"
+            )
+        else:
+            length_model["centerline_height_expression"] = f"{standard_length_variable} - {wire_diameter_variable}"
+    ground_trim_plan = _build_compression_spring_ground_trim_plan(
+        enabled=start_ground_turns > 1e-9 or finish_ground_turns > 1e-9,
+        height_expression=height_variable,
+        wire_diameter_expression=wire_diameter_variable,
+        start_end_turns_expression=start_end_turns_variable,
+        finish_end_turns_expression=finish_end_turns_variable,
+        start_ground_turns_expression=(
+            start_ground_turns_variable
+            if end_contract["end_contract_mode"] == "v2_per_end"
+            else ground_turns_variable
+        ),
+        finish_ground_turns_expression=(
+            finish_ground_turns_variable
+            if end_contract["end_contract_mode"] == "v2_per_end"
+            else ground_turns_variable
+        ),
+        start_ground_turns=start_ground_turns,
+        finish_ground_turns=finish_ground_turns,
+        axis=direction,
+    )
+    profile_sketch_constraints = _build_compression_spring_profile_sketch_constraints()
+    profile_sketch_dimensions = _build_compression_spring_profile_sketch_dimensions(
+        spring_diameter_variable,
+        wire_diameter_variable,
+    )
+
     return {
         "name": str(params.get("name") or "Compression spring"),
         "designation": str(params.get("designation") or ""),
@@ -2897,43 +3723,220 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         "density": material_payload["density"],
         "material_catalog_matched": material_payload["catalog_matched"],
         "comment": str(params.get("comment") or ""),
-        "plane": str(params.get("plane") or "YOZ"),
+        "plane": str(params.get("plane") or "XOY"),
         "axis": str(params.get("axis") or "OX"),
         "sketch": sketch,
         "placement": placement,
         "parameter_prefix": parameter_prefix,
+        "diameter_mode": diameter_mode,
         "mean_diameter": mean_diameter,
-        "outer_diameter": mean_diameter + wire_diameter,
+        "outer_diameter": outer_diameter,
         "inner_diameter": mean_diameter - wire_diameter,
         "wire_diameter": wire_diameter,
         "pitch": pitch,
-        "height": height,
+        "standard_length": length_model["standard_length"],
+        "length_model": length_model,
+        "height": free_length,
+        "free_length": free_length,
         "turns": turns,
+        "working_turns": turns,
+        "total_turns": total_turns_resolved,
+        "end_turns_per_side": float(end_turns_per_side) if end_turns_per_side is not None else None,
+        "ground_turns_per_side": (
+            float(ground_turns_per_side) if ground_turns_per_side is not None else None
+        ),
+        "transition_fillet_radius": transition_fillet_radius,
+        "transition_trim_length": resolved_transition_trim_length,
+        "transition_trim_length_expression": transition_trim_length_expression,
+        "transition_trim_length_variable": (
+            transition_trim_length_variable if transition_trim_length_expression else None
+        ),
+        "transition_connect_tension": resolved_transition_connect_tension,
+        "transition_connect_tension_expression": transition_connect_tension_expression,
+        "transition_connect_tension_variable": (
+            transition_connect_tension_variable if transition_connect_tension_expression else None
+        ),
+        "end_contract_mode": str(end_contract["end_contract_mode"]),
+        "end_projection_mode": end_projection_mode,
+        "start_end_turns": start_end_turns,
+        "finish_end_turns": finish_end_turns,
+        "start_ground_turns": start_ground_turns,
+        "finish_ground_turns": finish_ground_turns,
+        "start_end_kind": str(end_contract["start_end_kind"]),
+        "finish_end_kind": str(end_contract["finish_end_kind"]),
+        "active_height": active_height,
+        "end_turn_height": max(start_end_turn_span, finish_end_turn_span),
+        "start_end_turn_height": start_end_turn_span,
+        "finish_end_turn_height": finish_end_turn_span,
+        "segment_plan": segment_plan,
+        "connector_plan": connector_plan,
+        "ground_trim_plan": ground_trim_plan,
+        "full_path_sequence": full_path_sequence,
+        "start_phase_degrees": start_phase_degrees,
+        "start_turning_angle_degrees": start_turning_angle_degrees,
+        "spiral_diameter": mean_diameter,
+        "path_verification": path_verification,
         "turn_direction": direction,
         "left_hand": left_hand,
         "variable_plan": variable_plan,
-        "mean_diameter_expression": mean_diameter_variable,
+        "mean_diameter_expression": mean_diameter_expression,
+        "outer_diameter_expression": spring_diameter_variable,
         "wire_diameter_expression": wire_diameter_variable,
         "pitch_expression": pitch_variable,
         "height_expression": height_variable,
         "turns_expression": turns_variable,
-        "operation_variable_bindings": _build_spring_spiral_variable_bindings(
-            mean_diameter_variable,
-            pitch_variable,
-            height_variable,
+        "end_turns_expression": end_turns_variable,
+        "ground_turns_expression": ground_turns_variable,
+        "start_end_turns_expression": (
+            start_end_turns_variable if end_contract["end_contract_mode"] == "v2_per_end" else None
         ),
-        "profile_circles": [
-            {
-                "target": "wire_profile",
-                "center": [0.0, mean_diameter / 2.0],
-                "radius": wire_diameter / 2.0,
-                "radius_expression": f"{wire_diameter_variable} / 2",
-            }
-        ],
+        "finish_end_turns_expression": (
+            finish_end_turns_variable if end_contract["end_contract_mode"] == "v2_per_end" else None
+        ),
+        "start_ground_turns_expression": (
+            start_ground_turns_variable
+            if end_contract["end_contract_mode"] == "v2_per_end"
+            else None
+        ),
+        "finish_ground_turns_expression": (
+            finish_ground_turns_variable
+            if end_contract["end_contract_mode"] == "v2_per_end"
+            else None
+        ),
+        "profile_name": "spring_wire_profile",
+        "profile_sketch_constraints": profile_sketch_constraints,
+        "profile_sketch_dimensions": profile_sketch_dimensions,
+        "profile_sketch_target_state": "fully_defined",
+        "sweep_name": "spring_body",
+        "sweep_alignment_mode": "orthogonal_to_path",
         "auxiliary_geometry_hidden": bool(params.get("auxiliary_geometry_hidden", True)),
-        "live_supported": False,
+        "live_supported": True,
         "output_path": output_path,
         "close_after_save": bool(params.get("close_after_save", True)),
+    }
+
+
+def _build_compression_spring_ground_trim_plan(
+    *,
+    enabled: bool,
+    height_expression: str,
+    wire_diameter_expression: str,
+    start_end_turns_expression: str | None,
+    finish_end_turns_expression: str | None,
+    start_ground_turns_expression: str | None,
+    finish_ground_turns_expression: str | None,
+    start_ground_turns: float,
+    finish_ground_turns: float,
+    axis: str,
+) -> dict[str, Any]:
+    """Describe future end-grinding section cuts without executing unsupported bridge geometry."""
+    if not enabled:
+        return {
+            "enabled": False,
+            "status": "not_requested",
+            "height_reference": "centerline_start_to_centerline_finish",
+            "operations": [],
+        }
+
+    start_ground_expression = start_ground_turns_expression or _format_compression_spring_expression_literal(
+        start_ground_turns
+    )
+    finish_ground_expression = finish_ground_turns_expression or _format_compression_spring_expression_literal(
+        finish_ground_turns
+    )
+    start_end_expression = start_end_turns_expression or "start_end_turns"
+    finish_end_expression = finish_end_turns_expression or "finish_end_turns"
+    start_depth_expression = (
+        f"-(({start_end_expression} - {start_ground_expression} + 0.5) * {wire_diameter_expression})"
+    )
+    finish_depth_expression = (
+        f"(({finish_end_expression} - {finish_ground_expression} + 0.5) * {wire_diameter_expression})"
+    )
+    operations: list[dict[str, Any]] = []
+    if start_ground_turns > 1e-9:
+        operations.append(
+            {
+                "operation": "section_by_surface",
+                "role": "start_ground_trim",
+                "surface_reference": "start_end_to_working_joint_plane",
+                "offset_expression": start_depth_expression,
+                "normal_direction": "axis_negative",
+            }
+        )
+    if finish_ground_turns > 1e-9:
+        operations.append(
+            {
+                "operation": "section_by_surface",
+                "role": "finish_ground_trim",
+                "surface_reference": "working_to_finish_end_joint_plane",
+                "offset_expression": finish_depth_expression,
+                "normal_direction": "axis_positive",
+            }
+        )
+    return {
+        "enabled": True,
+        "status": "planned_bridge_action_required",
+        "bridge_action_required": "section_by_surface",
+        "height_reference": "centerline_start_to_centerline_finish",
+        "full_height_status": "unverified_against_standard",
+        "axis": axis,
+        "offset_formula_model": "joint_based_end_turns_minus_ground_turns_times_wire_diameter",
+        "standards_link_variables": {
+            "start_end_turns": start_end_expression,
+            "finish_end_turns": finish_end_expression,
+            "start_ground_turns": start_ground_expression,
+            "finish_ground_turns": finish_ground_expression,
+            "wire_diameter": wire_diameter_expression,
+            "height": height_expression,
+        },
+        "operations": operations,
+    }
+
+
+def _build_compression_spring_length_model(
+    *,
+    standard_length: float | None,
+    centerline_length: float | None,
+    wire_diameter: float,
+    start_end_turns: float,
+    finish_end_turns: float,
+    start_ground_turns: float,
+    finish_ground_turns: float,
+) -> dict[str, Any]:
+    if standard_length is None:
+        if centerline_length is None:
+            raise ValueError("compression_spring requires free_length or standard_length")
+        return {
+            "source": "centerline_length",
+            "standard_length": None,
+            "centerline_length": float(centerline_length),
+            "height_reference": "centerline_start_to_centerline_finish",
+            "centerline_height_expression": "H1",
+        }
+
+    if centerline_length is not None:
+        raise ValueError("Use either free_length/height or standard_length/L, not both")
+
+    if start_ground_turns > 1e-9 or finish_ground_turns > 1e-9:
+        centerline_offset = (-1.0 + float(start_ground_turns) + float(finish_ground_turns)) * float(wire_diameter)
+        expression = "L1 - WD1 + ((N31 + N32) * WD1)"
+        reference = "ground_cut_to_ground_cut"
+    else:
+        centerline_offset = -float(wire_diameter)
+        expression = "L1 - WD1"
+        reference = "outer_extreme_to_outer_extreme"
+
+    centerline_length_value = float(standard_length) + centerline_offset
+    if centerline_length_value <= 0.0:
+        raise ValueError("standard_length produces a non-positive centerline construction height")
+    return {
+        "source": "standard_length",
+        "standard_length": float(standard_length),
+        "centerline_length": centerline_length_value,
+        "height_reference": reference,
+        "centerline_height_expression": expression,
+        "centerline_offset": centerline_offset,
+        "full_height_status": "standard_length_drives_centerline_height",
     }
 
 
@@ -3653,6 +4656,7 @@ def _default_operation_output_key(scenario: str) -> str:
         "internal_polygonal_step",
         "face_ring_groove",
         "bolt_circle_holes",
+        "compression_spring",
     }:
         return "body"
     if normalized_scenario == "point":
@@ -3960,19 +4964,68 @@ def _build_circular_pattern_variable_bindings(
     ]
 
 
+def _build_transition_point_variable_bindings(expression: str, role: str) -> list[dict[str, Any]]:
+    text = str(expression or "").strip()
+    if not text:
+        return []
+    return [
+        {
+            "target": "transition_trim_point",
+            "parameter_note": "Расстояние",
+            "parameter_note_aliases": [
+                "Расстояние",
+                "Смещение (длина сегмента)",
+                "Distance",
+                "Offset",
+                "Segment length offset",
+            ],
+            "expression": text,
+            "role": str(role or "transition_trim_offset"),
+        }
+    ]
+
+
+def _build_transition_connect_curve_variable_bindings(
+    expression: str,
+    role: str,
+) -> list[dict[str, Any]]:
+    text = str(expression or "").strip()
+    if not text:
+        return []
+    return [
+        {
+            "target": "connect_curve",
+            "parameter_note": "Натяжение 1, %",
+            "parameter_note_aliases": [
+                "Натяжение 1, %",
+                "Натяжение 1",
+                "Tension 1, %",
+                "Tension 1",
+                "Tension",
+            ],
+            "expression": text,
+            "role": str(role or "transition_connect_tension"),
+        }
+    ]
+
+
 def _build_spring_spiral_variable_bindings(
     mean_diameter_expression: str,
     pitch_expression: str,
     height_expression: str,
 ) -> list[dict[str, Any]]:
-    return [
+    bindings = [
         {
             "target": "spiral_path",
             "parameter_note": "Diameter",
             "parameter_note_aliases": [
                 "Diameter",
+                "Diameter 1",
+                "Diameter 2",
                 "Mean diameter",
                 "Coil diameter",
+                "\u0414\u0438\u0430\u043c\u0435\u0442\u0440 1",
+                "\u0414\u0438\u0430\u043c\u0435\u0442\u0440 2",
                 "Диаметр",
                 "Средний диаметр",
             ],
@@ -4003,6 +5056,7 @@ def _build_spring_spiral_variable_bindings(
             "role": "spring_height",
         },
     ]
+    return bindings
 
 
 def _optional_positive_float(payload: dict[str, Any], field_name: str, *keys: str) -> float | None:
@@ -4010,6 +5064,551 @@ def _optional_positive_float(payload: dict[str, Any], field_name: str, *keys: st
     if value in (None, ""):
         return None
     return _positive_float(value, field_name)
+
+
+def _optional_non_negative_float(payload: dict[str, Any], field_name: str, *keys: str) -> float | None:
+    value = _coalesce_defined(payload, *keys)
+    if value in (None, ""):
+        return None
+    try:
+        result = float(value)
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
+    if result < 0.0:
+        raise ValueError(f"{field_name} must be greater than or equal to zero")
+    return result
+
+
+def _optional_float(payload: dict[str, Any], field_name: str, *keys: str) -> float | None:
+    value = _coalesce_defined(payload, *keys)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
+
+
+def _normalize_spring_fractional_turn(value: float, *, field_name: str) -> float:
+    scaled = float(value) * 4.0
+    rounded = round(scaled)
+    if abs(scaled - rounded) > 1e-6:
+        raise ValueError(f"{field_name} must use 0.25-turn increments")
+    return rounded / 4.0
+
+
+def _resolve_compression_spring_end_kind(end_turns: float, ground_turns: float) -> str:
+    if ground_turns > 1e-6:
+        return "closed_ground"
+    if end_turns > 1e-6:
+        return "closed"
+    return "open"
+
+
+def _format_compression_spring_expression_literal(value: float) -> str:
+    normalized = 0.0 if abs(float(value)) <= 1e-9 else float(value)
+    return f"{normalized:g}"
+
+
+def _compression_spring_expression_max(left: str, right: str) -> str:
+    return f"((({left}) + ({right}) + abs(({left}) - ({right}))) / 2)"
+
+
+def _compression_spring_expression_min(left: str, right: str) -> str:
+    return f"((({left}) + ({right}) - abs(({left}) - ({right}))) / 2)"
+
+
+def _compression_spring_expression_non_negative(expression: str) -> str:
+    return f"((({expression}) + abs({expression})) / 2)"
+
+
+def _parse_compression_spring_end_contract(params: dict[str, Any]) -> dict[str, Any]:
+    v1_end_turns = _coalesce_defined(
+        params,
+        "end_turns_per_side",
+        "compressed_turns_per_side",
+        "end_coils_per_side",
+        "support_turns_per_side",
+        "n2",
+    )
+    v1_ground_turns = _coalesce_defined(
+        params,
+        "ground_turns_per_side",
+        "processed_turns_per_side",
+        "ground_coils_per_side",
+        "n3",
+    )
+    v2_start_end_turns = _coalesce_defined(params, "start_end_turns")
+    v2_finish_end_turns = _coalesce_defined(params, "finish_end_turns")
+    v2_start_ground_turns = _coalesce_defined(params, "start_ground_turns")
+    v2_finish_ground_turns = _coalesce_defined(params, "finish_ground_turns")
+
+    has_v1_fields = v1_end_turns is not None or v1_ground_turns is not None
+    has_v2_fields = any(
+        value is not None
+        for value in (
+            v2_start_end_turns,
+            v2_finish_end_turns,
+            v2_start_ground_turns,
+            v2_finish_ground_turns,
+        )
+    )
+    if has_v1_fields and has_v2_fields:
+        raise ValueError(
+            "compression_spring cannot mix V1 per-side end fields with V2 per-end end fields"
+        )
+
+    if not has_v2_fields:
+        end_turns_per_side = _optional_non_negative_float(
+            params,
+            "end_turns_per_side",
+            "end_turns_per_side",
+            "compressed_turns_per_side",
+            "end_coils_per_side",
+            "support_turns_per_side",
+            "n2",
+        )
+        ground_turns_per_side = _optional_non_negative_float(
+            params,
+            "ground_turns_per_side",
+            "ground_turns_per_side",
+            "processed_turns_per_side",
+            "ground_coils_per_side",
+            "n3",
+        )
+        end_turns_per_side = _normalize_spring_fractional_turn(
+            float(end_turns_per_side or 0.0),
+            field_name="end_turns_per_side",
+        )
+        ground_turns_per_side = _normalize_spring_fractional_turn(
+            float(ground_turns_per_side or 0.0),
+            field_name="ground_turns_per_side",
+        )
+        if ground_turns_per_side > end_turns_per_side + 1e-6:
+            raise ValueError(
+                "compression_spring ground_turns_per_side cannot exceed end_turns_per_side"
+            )
+        start_end_kind = _resolve_compression_spring_end_kind(
+            end_turns_per_side,
+            ground_turns_per_side,
+        )
+        return {
+            "end_contract_mode": "v1_symmetric",
+            "end_projection_mode": "projected_to_v1_symmetric",
+            "end_turns_per_side": end_turns_per_side,
+            "ground_turns_per_side": ground_turns_per_side,
+            "start_end_turns": end_turns_per_side,
+            "finish_end_turns": end_turns_per_side,
+            "start_ground_turns": ground_turns_per_side,
+            "finish_ground_turns": ground_turns_per_side,
+            "start_end_kind": start_end_kind,
+            "finish_end_kind": start_end_kind,
+        }
+
+    start_end_turns = _normalize_spring_fractional_turn(
+        float(
+            _optional_non_negative_float(
+                params,
+                "start_end_turns",
+                "start_end_turns",
+            )
+            or 0.0
+        ),
+        field_name="start_end_turns",
+    )
+    finish_end_turns = _normalize_spring_fractional_turn(
+        float(
+            _optional_non_negative_float(
+                params,
+                "finish_end_turns",
+                "finish_end_turns",
+            )
+            or 0.0
+        ),
+        field_name="finish_end_turns",
+    )
+    start_ground_turns = _normalize_spring_fractional_turn(
+        float(
+            _optional_non_negative_float(
+                params,
+                "start_ground_turns",
+                "start_ground_turns",
+            )
+            or 0.0
+        ),
+        field_name="start_ground_turns",
+    )
+    finish_ground_turns = _normalize_spring_fractional_turn(
+        float(
+            _optional_non_negative_float(
+                params,
+                "finish_ground_turns",
+                "finish_ground_turns",
+            )
+            or 0.0
+        ),
+        field_name="finish_ground_turns",
+    )
+    if start_ground_turns > start_end_turns + 1e-6:
+        raise ValueError("compression_spring start_ground_turns cannot exceed start_end_turns")
+    if finish_ground_turns > finish_end_turns + 1e-6:
+        raise ValueError("compression_spring finish_ground_turns cannot exceed finish_end_turns")
+
+    symmetric_end_turns = abs(start_end_turns - finish_end_turns) <= 1e-6
+    symmetric_ground_turns = abs(start_ground_turns - finish_ground_turns) <= 1e-6
+    projected_to_v1 = symmetric_end_turns and symmetric_ground_turns
+    return {
+        "end_contract_mode": "v2_per_end",
+        "end_projection_mode": (
+            "projected_to_v1_symmetric" if projected_to_v1 else "native_v2"
+        ),
+        "end_turns_per_side": start_end_turns if projected_to_v1 else None,
+        "ground_turns_per_side": start_ground_turns if projected_to_v1 else None,
+        "start_end_turns": start_end_turns,
+        "finish_end_turns": finish_end_turns,
+        "start_ground_turns": start_ground_turns,
+        "finish_ground_turns": finish_ground_turns,
+        "start_end_kind": _resolve_compression_spring_end_kind(
+            start_end_turns,
+            start_ground_turns,
+        ),
+        "finish_end_kind": _resolve_compression_spring_end_kind(
+            finish_end_turns,
+            finish_ground_turns,
+        ),
+    }
+
+
+def _build_compression_spring_end_summary(
+    normalized: dict[str, Any],
+    *,
+    side_name: str,
+) -> dict[str, Any]:
+    role = f"{side_name}_end"
+    segment_names = [
+        str(segment["path_name"])
+        for segment in normalized["segment_plan"]
+        if str(segment.get("role") or "") == role
+    ]
+    end_kind = str(normalized[f"{side_name}_end_kind"])
+    label = end_kind.replace("_", "-")
+    support_selector_names = [f"{side_name}_support_point"] if float(normalized[f"{side_name}_end_turns"]) > 1e-6 else []
+    return {
+        "end_turns": float(normalized[f"{side_name}_end_turns"]),
+        "ground_turns": float(normalized[f"{side_name}_ground_turns"]),
+        "label": label,
+        "has_end_segment": bool(segment_names),
+        "segment_names": segment_names,
+        "support_selector_names": support_selector_names,
+        "grounded_geometry_signal": False,
+    }
+
+
+def _build_compression_spring_selector_points(
+    normalized: dict[str, Any],
+    start_center: list[float],
+    end_center: list[float],
+) -> dict[str, list[float]]:
+    segment_plan = normalized["segment_plan"]
+    if not segment_plan:
+        return {
+            "start_tip_point": list(start_center),
+            "finish_tip_point": list(end_center),
+            "start_body_entry_point": list(start_center),
+            "finish_body_exit_point": list(end_center),
+        }
+    working_segment = next(
+        segment
+        for segment in segment_plan
+        if str(segment.get("role") or "") == "working"
+    )
+    selector_points: dict[str, list[float]] = {
+        "start_tip_point": list(segment_plan[0]["start_point"]),
+        "finish_tip_point": list(segment_plan[-1]["end_point"]),
+        "start_body_entry_point": list(working_segment["start_point"]),
+        "finish_body_exit_point": list(working_segment["end_point"]),
+    }
+    start_end_segment = next(
+        (
+            segment
+            for segment in segment_plan
+            if str(segment.get("role") or "") == "start_end"
+        ),
+        None,
+    )
+    if start_end_segment is not None:
+        selector_points["start_support_point"] = list(start_end_segment["end_point"])
+    finish_end_segment = next(
+        (
+            segment
+            for segment in segment_plan
+            if str(segment.get("role") or "") == "finish_end"
+        ),
+        None,
+    )
+    if finish_end_segment is not None:
+        selector_points["finish_support_point"] = list(finish_end_segment["start_point"])
+    return selector_points
+
+
+def _build_compression_spring_point_output(
+    selector_name: str,
+    origin: list[float],
+    *,
+    live_supported: bool,
+) -> dict[str, Any]:
+    return {
+        "type": "point",
+        "name": selector_name,
+        "selector": selector_name,
+        "origin": list(origin),
+        "live_supported": live_supported,
+    }
+
+
+def _normalize_spring_phase_degrees(value: float) -> float:
+    return math.fmod(float(value), 360.0)
+
+
+def _normalize_spring_turning_angle_degrees(value: float) -> float:
+    normalized = math.fmod(float(value), 360.0)
+    if abs(normalized) <= 1e-9:
+        return 0.0
+    if normalized < 0.0:
+        normalized += 360.0
+    return normalized
+
+
+def _build_spring_rotation_expression_from_turns(
+    turns_expression: str | None,
+    *,
+    start_phase_degrees: float,
+    left_hand: bool,
+    extra_angle_offset_degrees: float = 0.0,
+) -> str | None:
+    if turns_expression in (None, ""):
+        return None
+    if left_hand:
+        angle_offset = 90.0 + float(start_phase_degrees) + float(extra_angle_offset_degrees)
+        if abs(angle_offset) <= 1e-9:
+            angle_offset = 0.0
+        return _build_spring_normalized_degrees_expression(
+            f"({angle_offset}) - (360 * ({turns_expression}))"
+        )
+    angle_offset = 90.0 - float(start_phase_degrees) + float(extra_angle_offset_degrees)
+    if abs(angle_offset) <= 1e-9:
+        angle_offset = 0.0
+    return _build_spring_normalized_degrees_expression(f"({angle_offset}) + (360 * ({turns_expression}))")
+
+
+def _build_spring_normalized_degrees_expression(expression: str) -> str:
+    wrapped = f"({expression})"
+    return f"({wrapped} - (floor(({wrapped}) / 360) * 360))"
+
+def _resolve_spring_segment_initial_angle_degrees(
+    start_phase_degrees: float,
+    *,
+    turns_before: float,
+    left_hand: bool,
+) -> float:
+    if left_hand:
+        return _normalize_spring_turning_angle_degrees(-(360.0 * float(turns_before)))
+    turn_delta = -360.0 * float(turns_before)
+    signed_phase = float(start_phase_degrees) + turn_delta
+    return _normalize_spring_turning_angle_degrees(90.0 - signed_phase)
+
+
+def _resolve_spring_segment_orientation_angle_degrees(
+    phase_degrees: float,
+    *,
+    is_first_segment: bool,
+    has_rotation_expression: bool = False,
+) -> float | None:
+    if has_rotation_expression:
+        return 0.0
+    normalized_phase = _normalize_spring_phase_degrees(phase_degrees)
+    if abs(normalized_phase) <= 1e-9:
+        normalized_phase = 0.0
+    if is_first_segment and abs(normalized_phase - 90.0) <= 1e-9:
+        return None
+    return float(normalized_phase)
+
+
+def _build_compression_spring_profile_sketch_constraints() -> list[dict[str, Any]]:
+    return [
+        {"kind": "fixed_point", "target": "radius_ref", "index": 0},
+        {"kind": "vertical", "target": "radius_ref"},
+        {"kind": "merge_points", "target": "radius_ref", "index": 1, "partner": "profile_radius_ref", "partner_index": 0},
+        {"kind": "merge_points", "target": "radius_ref", "index": 1, "partner": "profile_circle", "partner_index": 0},
+        {"kind": "horizontal", "target": "profile_radius_ref"},
+        {"kind": "point_on_curve", "target": "profile_radius_ref", "index": 1, "partner": "profile_circle"},
+    ]
+
+
+def _build_compression_spring_profile_sketch_dimensions(
+    outer_diameter_expression: str,
+    wire_diameter_expression: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "line_length",
+            "target": "radius_ref",
+            "expression": f"(({outer_diameter_expression}) - ({wire_diameter_expression})) / 2",
+            "driving": True,
+        },
+        {
+            "kind": "line_length",
+            "target": "profile_radius_ref",
+            "expression": f"({wire_diameter_expression}) / 2",
+            "driving": True,
+            "placement_index": 1,
+        },
+    ]
+
+
+def _build_compression_spring_path_verification(
+    segment_plan: list[dict[str, Any]],
+    *,
+    mean_radius: float,
+) -> dict[str, Any]:
+    joints: list[dict[str, Any]] = []
+    max_joint_gap = 0.0
+    max_joint_angle_gap = 0.0
+    contour_ready = True
+    for index, segment in enumerate(segment_plan):
+        start_angle_radians = math.radians(float(segment["start_angle_degrees_raw"]))
+        end_angle_radians = math.radians(float(segment["end_angle_degrees_raw"]))
+        start_offset = float(segment["start_offset"])
+        end_offset = start_offset + float(segment["height"])
+        segment["start_point"] = [
+            start_offset,
+            float(mean_radius) * math.cos(start_angle_radians),
+            float(mean_radius) * math.sin(start_angle_radians),
+        ]
+        segment["end_point"] = [
+            end_offset,
+            float(mean_radius) * math.cos(end_angle_radians),
+            float(mean_radius) * math.sin(end_angle_radians),
+        ]
+        if index == 0:
+            continue
+        previous_segment = segment_plan[index - 1]
+        gap_vector = [
+            float(segment["start_point"][axis]) - float(previous_segment["end_point"][axis])
+            for axis in range(3)
+        ]
+        gap_length = math.sqrt(sum(component * component for component in gap_vector))
+        angle_gap = _normalize_spring_phase_degrees(
+            float(segment["start_angle_degrees_raw"]) - float(previous_segment["end_angle_degrees_raw"])
+        )
+        max_joint_gap = max(max_joint_gap, gap_length)
+        max_joint_angle_gap = max(max_joint_angle_gap, abs(angle_gap))
+        joint_ok = gap_length <= 1e-6 and abs(angle_gap) <= 1e-6
+        contour_ready = contour_ready and joint_ok
+        joints.append(
+            {
+                "from_role": str(previous_segment["role"]),
+                "to_role": str(segment["role"]),
+                "gap_length": gap_length,
+                "gap_vector": gap_vector,
+                "angle_gap_degrees": angle_gap,
+                "ok": joint_ok,
+            }
+        )
+    return {
+        "contour_ready": contour_ready,
+        "joint_count": len(joints),
+        "max_joint_gap": max_joint_gap,
+        "max_joint_angle_gap": max_joint_angle_gap,
+        "joints": joints,
+    }
+
+
+def _resolve_compression_spring_transition_trim_length(
+    *,
+    mean_diameter: float,
+    wire_diameter: float,
+    pitch: float,
+) -> float:
+    base_trim_length = max(
+        0.85 * float(wire_diameter),
+        0.46 * math.sqrt(float(mean_diameter) * float(wire_diameter)),
+    )
+    return min(0.85 * float(pitch), base_trim_length)
+
+
+def _resolve_compression_spring_transition_fillet_radius(
+    *,
+    wire_diameter: float,
+) -> float:
+    return max(0.01, 0.375 * float(wire_diameter))
+
+
+def _resolve_compression_spring_transition_connect_tension(
+    *,
+    mean_diameter: float,
+    wire_diameter: float,
+    pitch: float,
+) -> float:
+    base_tension = 2.03 * math.sqrt(max(float(mean_diameter) - 15.0, 0.0))
+    pitch_ratio = float(pitch) / float(wire_diameter)
+    pitch_adjustment = min(0.0, 0.8 * (pitch_ratio - 2.0))
+    return max(0.0, min(15.0, base_tension + pitch_adjustment))
+
+
+def _resolve_compression_spring_mean_diameter(
+    params: dict[str, Any],
+    *,
+    wire_diameter: float,
+) -> tuple[float, str]:
+    outer_diameter = _optional_positive_float(
+        params,
+        "outer_diameter",
+        "outer_diameter",
+        "outside_diameter",
+        "outer",
+        "D1",
+        "d1",
+    )
+    mean_diameter = _optional_positive_float(
+        params,
+        "mean_diameter",
+        "mean_diameter",
+        "coil_diameter",
+        "diameter",
+        "D",
+    )
+    inner_diameter = _optional_positive_float(
+        params,
+        "inner_diameter",
+        "inner_diameter",
+        "inside_diameter",
+        "inner",
+        "D2",
+        "d2",
+    )
+
+    resolved_mean = mean_diameter
+    resolved_mode = "mean"
+    if outer_diameter is not None:
+        candidate = float(outer_diameter) - float(wire_diameter)
+        if candidate <= 0.0:
+            raise ValueError("compression_spring outer_diameter must exceed wire_diameter")
+        if resolved_mean is None:
+            resolved_mean = candidate
+            resolved_mode = "outer"
+        elif abs(float(resolved_mean) - candidate) > 1e-6:
+            raise ValueError("compression_spring diameter inputs are inconsistent")
+    if inner_diameter is not None:
+        candidate = float(inner_diameter) + float(wire_diameter)
+        if resolved_mean is None:
+            resolved_mean = candidate
+            resolved_mode = "inner"
+        elif abs(float(resolved_mean) - candidate) > 1e-6:
+            raise ValueError("compression_spring diameter inputs are inconsistent")
+    if resolved_mean is None:
+        raise ValueError("compression_spring requires mean_diameter, outer_diameter, or inner_diameter")
+    return float(resolved_mean), resolved_mode
 
 
 def _normalize_external_conical_step_definition_mode(value: Any) -> str | None:
@@ -9688,13 +11287,34 @@ def _build_compression_spring_interface(
     normalized: dict[str, Any],
     start_center: list[float],
     end_center: list[float],
-    wire_center: list[float],
+    selector_points: dict[str, list[float]],
 ) -> dict[str, Any]:
     driving_variables = {
         str(item.get("kind") or ""): item["name"]
         for item in (normalized.get("variable_plan") or [])
         if str(item.get("kind") or "").startswith("driving_")
     }
+    outputs: dict[str, dict[str, Any]] = {
+        "body": {"type": "body", "live_supported": normalized["live_supported"]},
+        "axis": {
+            "type": "axis",
+            "name": "spring_axis",
+            "origin": list(start_center),
+            "end": list(end_center),
+            "live_supported": normalized["live_supported"],
+        },
+        "spiral_path": {
+            "type": "curve3d",
+            "name": "spiral_path",
+            "live_supported": normalized["live_supported"],
+        },
+    }
+    for selector_name, origin in selector_points.items():
+        outputs[selector_name] = _build_compression_spring_point_output(
+            selector_name,
+            origin,
+            live_supported=normalized["live_supported"],
+        )
     return {
         "feature_type": "spring.compression",
         "parameter_namespace": normalized["parameter_prefix"],
@@ -9716,11 +11336,21 @@ def _build_compression_spring_interface(
             "pitch": normalized["pitch"],
             "height": normalized["height"],
             "turns": normalized["turns"],
+            "working_turns": normalized["working_turns"],
+            "total_turns": normalized["total_turns"],
+            "end_turns_per_side": normalized["end_turns_per_side"],
+            "ground_turns_per_side": normalized["ground_turns_per_side"],
             "driving_mean_diameter": driving_variables.get("driving_mean_diameter", ""),
             "driving_wire_diameter": driving_variables.get("driving_wire_diameter", ""),
             "driving_pitch": driving_variables.get("driving_pitch", ""),
             "driving_height": driving_variables.get("driving_height", ""),
             "driving_turn_count": driving_variables.get("driving_turn_count", ""),
+            "driving_end_turn_count_per_side": driving_variables.get("driving_end_turn_count_per_side", ""),
+            "driving_ground_turn_count_per_side": driving_variables.get("driving_ground_turn_count_per_side", ""),
+            "driving_start_end_turn_count": driving_variables.get("driving_start_end_turn_count", ""),
+            "driving_finish_end_turn_count": driving_variables.get("driving_finish_end_turn_count", ""),
+            "driving_start_ground_turn_count": driving_variables.get("driving_start_ground_turn_count", ""),
+            "driving_finish_ground_turn_count": driving_variables.get("driving_finish_ground_turn_count", ""),
             "mean_diameter_expression": normalized["mean_diameter_expression"],
             "wire_diameter_expression": normalized["wire_diameter_expression"],
             "pitch_expression": normalized["pitch_expression"],
@@ -9730,29 +11360,10 @@ def _build_compression_spring_interface(
         "anchors": {
             "start_center": list(start_center),
             "end_center": list(end_center),
-            "wire_profile_center": list(wire_center),
+            "selector_points": {name: list(origin) for name, origin in selector_points.items()},
         },
-        "outputs": {
-            "body": {"type": "body", "live_supported": normalized["live_supported"]},
-            "axis": {
-                "type": "axis",
-                "name": "spring_axis",
-                "origin": list(start_center),
-                "end": list(end_center),
-                "live_supported": normalized["live_supported"],
-            },
-            "spiral_path": {
-                "type": "curve3d",
-                "name": "spiral_path",
-                "live_supported": normalized["live_supported"],
-            },
-            "wire_profile": {
-                "type": "sketch",
-                "name": "wire_profile",
-                "origin": list(wire_center),
-                "live_supported": normalized["live_supported"],
-            },
-        },
+        "selectors": {name: list(origin) for name, origin in selector_points.items()},
+        "outputs": outputs,
         "placement_contract": {
             "base_mode": normalized["placement"]["base"]["mode"],
             "base_origin": normalized["placement"]["base_origin"],

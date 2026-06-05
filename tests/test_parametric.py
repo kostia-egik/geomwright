@@ -8,6 +8,7 @@ import unittest
 
 from kompas_mcp.adapter import KompasAdapter
 from kompas_mcp.metric_thread_geometry import build_metric_thread_geometry
+from kompas_mcp.parametric import normalize_compression_spring_params
 from kompas_mcp.parametric import preview_part_scenario
 from kompas_mcp.sketch import normalize_line_style
 from kompas_mcp.thread_profile_geometry import build_pipe_bsp_parallel_thread_geometry
@@ -3014,7 +3015,7 @@ class ParametricPartTests(unittest.TestCase):
             {
                 "mean_diameter": 30,
                 "wire_diameter": 4,
-                "pitch": 8,
+                "height": 48,
                 "turns": 6,
                 "parameter_prefix": "spg01",
             },
@@ -3026,38 +3027,1069 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["summary"]["inner_diameter"], 26.0)
         self.assertEqual(preview["summary"]["height"], 48.0)
         self.assertEqual(preview["summary"]["turns"], 6.0)
-        self.assertFalse(preview["summary"]["live_supported"])
+        self.assertEqual(preview["summary"]["working_turns"], 6.0)
+        self.assertEqual(preview["summary"]["total_turns"], 6.0)
+        self.assertEqual(preview["summary"]["end_turns_per_side"], 0.0)
+        self.assertEqual(preview["summary"]["ground_turns_per_side"], 0.0)
+        self.assertTrue(preview["summary"]["live_supported"])
+        self.assertEqual(preview["summary"]["profile_plane"], "XOY")
+        self.assertEqual(preview["summary"]["sweep_alignment"], "orthogonal_to_path")
+        self.assertEqual(preview["summary"]["connector_count"], 0)
+        self.assertEqual(preview["params"]["sketch"]["parameterization_order"], "staged")
         self.assertEqual(preview["operations"][1]["operation"], "add_variables")
         self.assertEqual(preview["operations"][3]["operation"], "create_spiral_path")
-        self.assertEqual(preview["operations"][3]["operation_variable_bindings"][0]["expression"], "SPG01_D1")
+        self.assertEqual(preview["operations"][3]["phase_degrees"], 90.0)
+        self.assertEqual(preview["operations"][3]["turning_angle_degrees"], 0.0)
+        self.assertEqual(preview["operations"][3]["orientation_angle_degrees"], 0.0)
+        self.assertIsNone(preview["operations"][3]["anchor_rotation_expression"])
+        self.assertEqual(preview["operations"][3]["angle_application_mode"], "orientation")
+        self.assertIsNone(preview["operations"][3]["start_offset_expression"])
+        self.assertEqual(
+            preview["operations"][3]["operation_variable_bindings"][0]["expression"],
+            "(SPG01_D1) - (SPG01_WD1)",
+        )
         self.assertEqual(preview["operations"][3]["operation_variable_bindings"][1]["expression"], "SPG01_P1")
-        self.assertEqual(preview["operations"][3]["operation_variable_bindings"][2]["expression"], "SPG01_H1")
+        self.assertEqual(
+            preview["operations"][3]["operation_variable_bindings"][2]["expression"],
+            "SPG01_H1 - 2 * (SPG01_N21 * SPG01_WD1)",
+        )
+        self.assertEqual(preview["operations"][4]["operation"], "create_wire_profile")
+        self.assertEqual(preview["operations"][4]["plane"], "XOY")
+        self.assertEqual(preview["operations"][4]["name"], "spring_wire_profile")
+        self.assertEqual(preview["operations"][4]["sketch_parameterization"]["target_state"], "fully_defined")
+        self.assertEqual(preview["operations"][4]["sketch_parameterization"]["constraint_count"], 6)
+        self.assertEqual(preview["operations"][4]["sketch_parameterization"]["dimension_count"], 2)
+        circle_center_lock = next(
+            constraint
+            for constraint in preview["operations"][4]["sketch_parameterization"]["constraints"]
+            if constraint["kind"] == "merge_points" and constraint["partner"] == "profile_circle"
+        )
+        self.assertEqual(circle_center_lock["target"], "radius_ref")
+        self.assertEqual(circle_center_lock["index"], 1)
+        self.assertEqual(circle_center_lock["partner_index"], 0)
+        self.assertEqual(
+            preview["operations"][4]["sketch_parameterization"]["dimensions"][0]["expression"],
+            "((SPG01_D1) - (SPG01_WD1)) / 2",
+        )
+        self.assertEqual(
+            preview["operations"][4]["sketch_parameterization"]["dimensions"][1],
+            {
+                "kind": "line_length",
+                "target": "profile_radius_ref",
+                "expression": "(SPG01_WD1) / 2",
+                "driving": True,
+                "placement_index": 1,
+            },
+        )
         self.assertEqual(preview["operations"][5]["operation"], "boss_evolution")
-        self.assertEqual(preview["operations"][5]["live_status"], "preview_only")
+        self.assertEqual(preview["operations"][5]["path_count"], 1)
+        self.assertEqual(preview["operations"][5]["sweep_alignment"], "orthogonal_to_path")
+        self.assertEqual(preview["operations"][5]["live_status"], "planned")
+        self.assertTrue(preview["summary"]["contour_ready"])
+        self.assertAlmostEqual(preview["summary"]["max_joint_gap"], 0.0, places=9)
         self.assertEqual(preview["interface"]["feature_type"], "spring.compression")
-        self.assertFalse(preview["interface"]["outputs"]["body"]["live_supported"])
+        self.assertTrue(preview["interface"]["outputs"]["body"]["live_supported"])
         self.assertEqual(preview["interface"]["parameters"]["driving_mean_diameter"], "SPG01_D1")
         self.assertEqual(preview["interface"]["parameters"]["driving_wire_diameter"], "SPG01_WD1")
         self.assertEqual(preview["interface"]["parameters"]["driving_pitch"], "SPG01_P1")
         self.assertEqual(preview["interface"]["parameters"]["driving_height"], "SPG01_H1")
         self.assertEqual(preview["interface"]["parameters"]["driving_turn_count"], "SPG01_N1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_end_turn_count_per_side"], "SPG01_N21")
+        self.assertEqual(preview["interface"]["parameters"]["driving_ground_turn_count_per_side"], "SPG01_N31")
+        self.assertEqual(preview["interface"]["parameters"]["driving_start_end_turn_count"], "")
+        self.assertEqual(preview["interface"]["parameters"]["driving_finish_end_turn_count"], "")
+        self.assertEqual(preview["interface"]["parameters"]["driving_start_ground_turn_count"], "")
+        self.assertEqual(preview["interface"]["parameters"]["driving_finish_ground_turn_count"], "")
 
-    def test_create_compression_spring_from_scenario_rejects_preview_only_contract(self) -> None:
-        adapter = KompasAdapter(runner=FakeRunner())
+    def test_preview_compression_spring_supports_segmented_end_turns(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "outer_diameter": 34,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "ground_turns_per_side": 0.5,
+            },
+        )
+        segment_roles = [
+            operation["role"]
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        segment_phases = [
+            operation["phase_degrees"]
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        segment_turning_angles = [
+            operation["turning_angle_degrees"]
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        segment_orientation_angles = [
+            operation["orientation_angle_degrees"]
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        segment_angle_modes = [
+            operation["angle_application_mode"]
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        segment_start_offset_expressions = [
+            operation.get("start_offset_expression")
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        segment_anchor_rotation_expressions = [
+            operation.get("anchor_rotation_expression")
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        segment_bindings = [
+            operation["operation_variable_bindings"]
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        self.assertEqual(segment_roles, ["start_end", "working", "finish_end"])
+        self.assertEqual(segment_phases[:2], [90.0, -180.0])
+        self.assertEqual(segment_turning_angles, [0.0, 0.0, 0.0])
+        self.assertEqual(segment_orientation_angles, [0.0, 0.0, 0.0])
+        self.assertEqual(segment_angle_modes, ["orientation", "orientation", "orientation"])
+        self.assertEqual(
+            segment_start_offset_expressions,
+            [
+                None,
+                "N21 * WD1",
+                "(N21 * WD1) + (H1 - 2 * (N21 * WD1))",
+            ],
+        )
+        self.assertIsNone(segment_anchor_rotation_expressions[0])
+        self.assertIn("floor", str(segment_anchor_rotation_expressions[1]).lower())
+        self.assertIn("N21", str(segment_anchor_rotation_expressions[1]))
+        self.assertNotIn("AR", str(segment_anchor_rotation_expressions[1]))
+        self.assertIn("floor", str(segment_anchor_rotation_expressions[2]).lower())
+        self.assertIn("N21", str(segment_anchor_rotation_expressions[2]))
+        self.assertIn("P1", str(segment_anchor_rotation_expressions[2]))
+        self.assertNotIn("AR", str(segment_anchor_rotation_expressions[2]))
+        self.assertEqual(len(segment_bindings[0]), 3)
+        self.assertEqual(len(segment_bindings[1]), 3)
+        self.assertEqual(len(segment_bindings[2]), 3)
+        boss_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "boss_evolution"
+        ]
+        self.assertEqual(len(boss_operations), 1)
+        self.assertEqual(boss_operations[0]["path_count"], 5)
+        self.assertEqual(preview["summary"]["mean_diameter"], 30.0)
+        self.assertEqual(preview["summary"]["total_turns"], 7.0)
+        self.assertEqual(preview["summary"]["end_turns_per_side"], 0.75)
+        self.assertEqual(preview["summary"]["ground_turns_per_side"], 0.5)
+        self.assertEqual(preview["summary"]["connector_count"], 2)
+        self.assertEqual(preview["summary"]["transition_fillet_radius"], 1.5)
+        self.assertAlmostEqual(preview["summary"]["transition_trim_length"], 5.0390475290475285)
+        self.assertAlmostEqual(preview["summary"]["transition_connect_tension"], 7.862156192801056)
+        self.assertTrue(preview["summary"]["contour_ready"])
+        self.assertAlmostEqual(preview["summary"]["max_joint_gap"], 0.0, places=9)
 
-        with self.assertRaisesRegex(ValueError, r"compression_spring live creation is not implemented yet"):
-            adapter.create_part_from_scenario(
+    def test_preview_compression_spring_accepts_negative_start_phase(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 48,
+                "working_turns": 6,
+                "start_phase_degrees": -90,
+            },
+        )
+        spiral_operation = next(
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        )
+        self.assertEqual(spiral_operation["phase_degrees"], -90.0)
+        self.assertEqual(spiral_operation["turning_angle_degrees"], 0.0)
+        self.assertEqual(spiral_operation["orientation_angle_degrees"], 0.0)
+        self.assertIsNone(spiral_operation["anchor_rotation_expression"])
+        self.assertEqual(spiral_operation["angle_application_mode"], "orientation")
+        self.assertTrue(preview["summary"]["contour_ready"])
+
+    def test_preview_compression_spring_allows_disabling_default_transition_connectors(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "transition_fillet_radius": 0,
+            },
+        )
+        self.assertEqual(preview["summary"]["connector_count"], 0)
+        self.assertIsNone(preview["summary"]["transition_fillet_radius"])
+        self.assertIsNone(preview["summary"]["transition_trim_length"])
+        self.assertIsNone(preview["summary"]["transition_connect_tension"])
+        self.assertEqual(preview["params"]["connector_plan"], [])
+
+    def test_preview_compression_spring_plans_first_transition_connect_curve(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "transition_fillet_radius": 1.5,
+            },
+        )
+        summary = preview["summary"]
+        self.assertEqual(summary["connector_count"], 2)
+        self.assertEqual(summary["transition_fillet_radius"], 1.5)
+        self.assertAlmostEqual(summary["transition_trim_length"], 5.0390475290475285)
+        self.assertAlmostEqual(summary["transition_connect_tension"], 7.862156192801056)
+        self.assertEqual(summary["transition_trim_length_variable"], "TL1")
+        self.assertEqual(summary["transition_connect_tension_variable"], "TN1")
+        self.assertIn("sqrt", str(summary["transition_trim_length_expression"]))
+        self.assertIn("abs", str(summary["transition_trim_length_expression"]))
+        self.assertIn("sqrt", str(summary["transition_connect_tension_expression"]))
+        self.assertIn("abs", str(summary["transition_connect_tension_expression"]))
+        self.assertEqual(
+            preview["params"]["full_path_sequence"],
+            [
+                "spring_start_end_to_working_curve1_local_path",
+                "spring_start_end_to_working_connect_path",
+                "spring_working_to_finish_end_curve1_local_path",
+                "spring_working_to_finish_end_connect_path",
+                "spring_working_to_finish_end_curve2_local_path",
+            ],
+        )
+        self.assertEqual(len(preview["params"]["connector_plan"]), 2)
+        first_connector = preview["params"]["connector_plan"][0]
+        self.assertEqual(first_connector["builder"], "trimmed_connect_curve")
+        self.assertEqual(first_connector["path_name"], "spring_start_end_to_working_connect_path")
+        second_connector = preview["params"]["connector_plan"][1]
+        self.assertEqual(second_connector["builder"], "trimmed_connect_curve")
+        self.assertEqual(second_connector["path_name"], "spring_working_to_finish_end_connect_path")
+        self.assertEqual(
+            second_connector["curve1_path_name"],
+            "spring_start_end_to_working_curve2_local_path",
+        )
+        self.assertAlmostEqual(first_connector["trim_length"], summary["transition_trim_length"])
+        self.assertAlmostEqual(first_connector["tension"], summary["transition_connect_tension"])
+        self.assertEqual(first_connector["trim_length_expression"], "TL1")
+        self.assertEqual(first_connector["tension_expression"], "TN1")
+        self.assertAlmostEqual(second_connector["trim_length"], summary["transition_trim_length"])
+        self.assertAlmostEqual(second_connector["tension"], summary["transition_connect_tension"])
+        self.assertEqual(second_connector["trim_length_expression"], "TL1")
+        self.assertEqual(second_connector["tension_expression"], "TN1")
+        trimmed_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_trimmed_curve_path"
+        ]
+        self.assertEqual(len(trimmed_operations), 4)
+        self.assertEqual(
+            [operation["source_curve"] for operation in trimmed_operations],
+            [
+                "spring_start_end_path",
+                "spring_working_path",
+                "spring_start_end_to_working_curve2_local_path",
+                "spring_finish_end_path",
+            ],
+        )
+        self.assertEqual(
+            [operation["offset_type"] for operation in trimmed_operations],
+            [2, 2, 2, 2],
+        )
+        self.assertEqual(
+            [operation["offset_expression"] for operation in trimmed_operations],
+            ["TL1", "TL1", "TL1", "TL1"],
+        )
+        self.assertTrue(
+            all(operation["point_operation_variable_bindings"] for operation in trimmed_operations)
+        )
+        self.assertTrue(
+            all(
+                "Смещение (длина сегмента)"
+                in operation["point_operation_variable_bindings"][0]["parameter_note_aliases"]
+                for operation in trimmed_operations
+            )
+        )
+        connector_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_connect_curve_path"
+        ]
+        self.assertEqual(len(connector_operations), 2)
+        self.assertEqual(
+            connector_operations[0]["curve1"],
+            "spring_start_end_to_working_curve1_local_path",
+        )
+        self.assertAlmostEqual(
+            connector_operations[0]["tension"],
+            summary["transition_connect_tension"],
+        )
+        self.assertEqual(connector_operations[0]["tension_expression"], "TN1")
+        self.assertTrue(connector_operations[0]["operation_variable_bindings"])
+        self.assertEqual(
+            connector_operations[0]["curve2"],
+            "spring_start_end_to_working_curve2_local_path",
+        )
+        self.assertEqual(
+            connector_operations[1]["curve1"],
+            "spring_working_to_finish_end_curve1_local_path",
+        )
+        self.assertEqual(
+            connector_operations[1]["curve2"],
+            "spring_working_to_finish_end_curve2_local_path",
+        )
+        self.assertAlmostEqual(
+            connector_operations[1]["tension"],
+            summary["transition_connect_tension"],
+        )
+        self.assertEqual(connector_operations[1]["tension_expression"], "TN1")
+        self.assertTrue(connector_operations[1]["operation_variable_bindings"])
+        boss_evolution = next(
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "boss_evolution"
+        )
+        self.assertEqual(boss_evolution["path_count"], 5)
+
+    def test_preview_compression_spring_transition_tuning_tracks_diameter_and_pitch(self) -> None:
+        small_diameter = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 15,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "transition_fillet_radius": 1.5,
+            },
+        )
+        baseline = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "transition_fillet_radius": 1.5,
+            },
+        )
+        large_diameter = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 50,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "transition_fillet_radius": 1.5,
+            },
+        )
+        reduced_pitch = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 40,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "transition_fillet_radius": 1.5,
+            },
+        )
+
+        self.assertAlmostEqual(small_diameter["summary"]["transition_connect_tension"], 0.0)
+        self.assertGreater(
+            baseline["summary"]["transition_trim_length"],
+            small_diameter["summary"]["transition_trim_length"],
+        )
+        self.assertGreater(
+            large_diameter["summary"]["transition_trim_length"],
+            baseline["summary"]["transition_trim_length"],
+        )
+        self.assertGreater(
+            large_diameter["summary"]["transition_connect_tension"],
+            baseline["summary"]["transition_connect_tension"],
+        )
+        self.assertLess(
+            reduced_pitch["summary"]["transition_connect_tension"],
+            baseline["summary"]["transition_connect_tension"],
+        )
+
+    def test_preview_compression_spring_segment_anchor_rotation_tracks_start_phase(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "start_phase_degrees": 0,
+                "turn_direction": "right",
+            },
+        )
+        spiral_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        self.assertEqual(
+            [operation["orientation_angle_degrees"] for operation in spiral_operations],
+            [0.0, 0.0, 0.0],
+        )
+        self.assertEqual(spiral_operations[0]["anchor_rotation_expression"], "90")
+        self.assertIn("(90.0)", str(spiral_operations[1]["anchor_rotation_expression"]))
+        self.assertIn("(90.0)", str(spiral_operations[2]["anchor_rotation_expression"]))
+
+    def test_preview_compression_spring_right_hand_transfers_half_turn_to_later_segments(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "start_phase_degrees": -90,
+                "turn_direction": "right",
+            },
+        )
+        spiral_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        self.assertEqual(spiral_operations[0]["role"], "start_end")
+        self.assertIsNone(spiral_operations[0]["anchor_rotation_expression"])
+        self.assertIn("360.0", str(spiral_operations[1]["anchor_rotation_expression"]))
+        self.assertIn("360.0", str(spiral_operations[2]["anchor_rotation_expression"]))
+        self.assertNotIn("180.0", str(spiral_operations[1]["anchor_rotation_expression"]))
+        self.assertNotIn("180.0", str(spiral_operations[2]["anchor_rotation_expression"]))
+        self.assertIn("+ (360 * (N21))", str(spiral_operations[1]["anchor_rotation_expression"]))
+
+    def test_preview_compression_spring_without_ground_has_empty_trim_plan(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 48,
+                "working_turns": 6,
+            },
+        )
+
+        trim_plan = preview["params"]["ground_trim_plan"]
+        self.assertFalse(trim_plan["enabled"])
+        self.assertEqual(trim_plan["status"], "not_requested")
+        self.assertEqual(trim_plan["operations"], [])
+
+    def test_preview_compression_spring_ground_trim_plan_uses_per_end_standard_variables(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.75,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.25,
+            },
+        )
+
+        trim_plan = preview["params"]["ground_trim_plan"]
+        self.assertTrue(trim_plan["enabled"])
+        self.assertEqual(trim_plan["bridge_action_required"], "section_by_surface")
+        self.assertEqual(trim_plan["height_reference"], "centerline_start_to_centerline_finish")
+        self.assertEqual(trim_plan["standards_link_variables"]["start_ground_turns"], "N31")
+        self.assertEqual(trim_plan["standards_link_variables"]["finish_ground_turns"], "N32")
+        self.assertEqual(trim_plan["standards_link_variables"]["wire_diameter"], "WD1")
+        self.assertEqual(trim_plan["standards_link_variables"]["height"], "H1")
+        self.assertEqual(trim_plan["standards_link_variables"]["start_end_turns"], "N21")
+        self.assertEqual(trim_plan["standards_link_variables"]["finish_end_turns"], "N22")
+        self.assertEqual(trim_plan["operations"][0]["surface_reference"], "start_end_to_working_joint_plane")
+        self.assertEqual(trim_plan["operations"][0]["offset_expression"], "-((N21 - N31 + 0.5) * WD1)")
+        self.assertEqual(trim_plan["operations"][1]["surface_reference"], "working_to_finish_end_joint_plane")
+        self.assertEqual(trim_plan["operations"][1]["offset_expression"], "((N22 - N32 + 0.5) * WD1)")
+
+    def test_preview_compression_spring_explicit_zero_ground_depth_disables_trim_plan(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 48,
+                "working_turns": 5.5,
+                "start_end_turns": 1.0,
+                "finish_end_turns": 1.0,
+                "start_ground_turns": 0.0,
+                "finish_ground_turns": 0.0,
+            },
+        )
+
+        trim_plan = preview["params"]["ground_trim_plan"]
+        self.assertFalse(trim_plan["enabled"])
+        self.assertEqual(trim_plan["operations"], [])
+
+    def test_preview_compression_spring_zero_ground_depth_can_disable_one_trim_side(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 48,
+                "working_turns": 5.5,
+                "start_end_turns": 1.0,
+                "finish_end_turns": 1.0,
+                "start_ground_turns": 0.0,
+                "finish_ground_turns": 0.5,
+            },
+        )
+
+        trim_plan = preview["params"]["ground_trim_plan"]
+        self.assertTrue(trim_plan["enabled"])
+        self.assertEqual([operation["role"] for operation in trim_plan["operations"]], ["finish_ground_trim"])
+
+    def test_preview_compression_spring_standard_length_derives_centerline_height(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "standard_length": 50,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.75,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.25,
+            },
+        )
+
+        self.assertEqual(preview["params"]["standard_length"], 50)
+        self.assertEqual(preview["params"]["height"], 49)
+        length_model = preview["params"]["length_model"]
+        self.assertEqual(length_model["source"], "standard_length")
+        self.assertEqual(length_model["height_reference"], "ground_cut_to_ground_cut")
+        self.assertEqual(
+            length_model["centerline_height_expression"],
+            "L1 - WD1 + ((N31 + N32) * WD1)",
+        )
+
+    def test_preview_compression_spring_accepts_L_alias_for_standard_length(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "L": 52,
+                "working_turns": 5.5,
+            },
+        )
+
+        self.assertEqual(preview["params"]["standard_length"], 52)
+        self.assertEqual(preview["params"]["height"], 48)
+        self.assertEqual(preview["params"]["length_model"]["centerline_height_expression"], "L1 - WD1")
+
+    def test_preview_compression_spring_left_hand_segment_anchor_rotation_flips_direction(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "start_phase_degrees": -90,
+                "turn_direction": "left",
+            },
+        )
+        spiral_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        self.assertEqual(
+            [operation["orientation_angle_degrees"] for operation in spiral_operations],
+            [0.0, 0.0, 0.0],
+        )
+        self.assertIn("(0.0) - (360 * (N21))", str(spiral_operations[1]["anchor_rotation_expression"]))
+        self.assertNotIn("+ (360 * (N21))", str(spiral_operations[1]["anchor_rotation_expression"]))
+        self.assertIn("- (360 * (", str(spiral_operations[2]["anchor_rotation_expression"]))
+        self.assertIn("N21", str(spiral_operations[2]["anchor_rotation_expression"]))
+        self.assertIn("H1", str(spiral_operations[2]["anchor_rotation_expression"]))
+        self.assertIn("WD1", str(spiral_operations[2]["anchor_rotation_expression"]))
+        self.assertIn("P1", str(spiral_operations[2]["anchor_rotation_expression"]))
+        self.assertNotIn("N1", str(spiral_operations[2]["anchor_rotation_expression"]))
+
+    def test_preview_compression_spring_rejects_ground_turns_above_end_turns(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"compression_spring ground_turns_per_side cannot exceed end_turns_per_side",
+        ):
+            preview_part_scenario(
                 "compression_spring",
                 {
                     "mean_diameter": 30,
                     "wire_diameter": 4,
-                    "height": 48,
-                    "turns": 6,
+                    "free_length": 54,
+                    "working_turns": 5.5,
+                    "end_turns_per_side": 0.5,
+                    "ground_turns_per_side": 0.75,
                 },
-                output_path=r"C:\\Temp\\kompas-mcp\\unit-spring.m3d",
             )
 
-    def test_workflow_with_compression_spring_is_preview_only(self) -> None:
+    def test_normalize_compression_spring_v1_backfills_per_end_contract(self) -> None:
+        normalized = normalize_compression_spring_params(
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "end_turns_per_side": 0.75,
+                "ground_turns_per_side": 0.5,
+            }
+        )
+        self.assertEqual(normalized["end_contract_mode"], "v1_symmetric")
+        self.assertEqual(normalized["end_projection_mode"], "projected_to_v1_symmetric")
+        self.assertEqual(normalized["start_end_turns"], 0.75)
+        self.assertEqual(normalized["finish_end_turns"], 0.75)
+        self.assertEqual(normalized["start_ground_turns"], 0.5)
+        self.assertEqual(normalized["finish_ground_turns"], 0.5)
+        self.assertEqual(normalized["start_end_kind"], "closed_ground")
+        self.assertEqual(normalized["finish_end_kind"], "closed_ground")
+
+    def test_normalize_compression_spring_accepts_symmetric_v2_projection(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.75,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.5,
+            },
+        )
+        self.assertEqual(preview["params"]["end_contract_mode"], "v2_per_end")
+        self.assertEqual(preview["params"]["end_projection_mode"], "projected_to_v1_symmetric")
+        self.assertEqual(preview["params"]["start_end_turns"], 0.75)
+        self.assertEqual(preview["params"]["finish_end_turns"], 0.75)
+        self.assertEqual(preview["params"]["start_ground_turns"], 0.5)
+        self.assertEqual(preview["params"]["finish_ground_turns"], 0.5)
+        self.assertEqual(preview["params"]["start_end_kind"], "closed_ground")
+        self.assertEqual(preview["params"]["finish_end_kind"], "closed_ground")
+        self.assertEqual(preview["summary"]["end_turns_per_side"], 0.75)
+        self.assertEqual(preview["summary"]["ground_turns_per_side"], 0.5)
+        self.assertEqual(
+            [
+                operation["role"]
+                for operation in preview["operations"]
+                if operation.get("operation") == "create_spiral_path"
+            ],
+            ["start_end", "working", "finish_end"],
+        )
+
+    def test_preview_compression_spring_rejects_mixed_v1_and_v2_end_fields(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"compression_spring cannot mix V1 per-side end fields with V2 per-end end fields",
+        ):
+            preview_part_scenario(
+                "compression_spring",
+                {
+                    "mean_diameter": 30,
+                    "wire_diameter": 4,
+                    "free_length": 54,
+                    "working_turns": 5.5,
+                    "end_turns_per_side": 0.75,
+                    "start_end_turns": 0.75,
+                },
+            )
+
+    def test_preview_compression_spring_rejects_start_ground_above_start_end(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"compression_spring start_ground_turns cannot exceed start_end_turns",
+        ):
+            preview_part_scenario(
+                "compression_spring",
+                {
+                    "mean_diameter": 30,
+                    "wire_diameter": 4,
+                    "free_length": 54,
+                    "working_turns": 5.5,
+                    "start_end_turns": 0.5,
+                    "finish_end_turns": 0.5,
+                    "start_ground_turns": 0.75,
+                    "finish_ground_turns": 0.5,
+                },
+            )
+
+    def test_preview_compression_spring_rejects_finish_ground_above_finish_end(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"compression_spring finish_ground_turns cannot exceed finish_end_turns",
+        ):
+            preview_part_scenario(
+                "compression_spring",
+                {
+                    "mean_diameter": 30,
+                    "wire_diameter": 4,
+                    "free_length": 54,
+                    "working_turns": 5.5,
+                    "start_end_turns": 0.5,
+                    "finish_end_turns": 0.5,
+                    "start_ground_turns": 0.5,
+                    "finish_ground_turns": 0.75,
+                },
+            )
+
+    def test_preview_compression_spring_v2_symmetric_summary_exposes_per_end_blocks(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.75,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.5,
+            },
+        )
+
+        summary = preview["summary"]
+        self.assertEqual(summary["end_contract_mode"], "v2_per_end")
+        self.assertEqual(summary["end_projection_mode"], "projected_to_v1_symmetric")
+        self.assertEqual(summary["start_end_summary"]["end_turns"], 0.75)
+        self.assertEqual(summary["finish_end_summary"]["end_turns"], 0.75)
+        self.assertEqual(summary["start_end_summary"]["ground_turns"], 0.5)
+        self.assertEqual(summary["finish_end_summary"]["ground_turns"], 0.5)
+        self.assertEqual(summary["start_end_summary"]["label"], "closed-ground")
+        self.assertEqual(summary["finish_end_summary"]["label"], "closed-ground")
+        self.assertEqual(summary["start_end_summary"]["segment_names"], ["spring_start_end_path"])
+        self.assertEqual(summary["finish_end_summary"]["segment_names"], ["spring_finish_end_path"])
+        self.assertEqual(summary["start_end_summary"]["support_selector_names"], ["start_support_point"])
+        self.assertEqual(summary["finish_end_summary"]["support_selector_names"], ["finish_support_point"])
+        self.assertFalse(summary["start_end_summary"]["grounded_geometry_signal"])
+        self.assertFalse(summary["finish_end_summary"]["grounded_geometry_signal"])
+
+    def test_preview_compression_spring_v2_symmetric_interface_exposes_distinct_per_end_variable_names(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.75,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.5,
+                "parameter_prefix": "spg01",
+            },
+        )
+
+        parameters = preview["interface"]["parameters"]
+        self.assertEqual(parameters["driving_end_turn_count_per_side"], "")
+        self.assertEqual(parameters["driving_ground_turn_count_per_side"], "")
+        self.assertEqual(parameters["driving_start_end_turn_count"], "SPG01_N21")
+        self.assertEqual(parameters["driving_finish_end_turn_count"], "SPG01_N22")
+        self.assertEqual(parameters["driving_start_ground_turn_count"], "SPG01_N31")
+        self.assertEqual(parameters["driving_finish_ground_turn_count"], "SPG01_N32")
+        self.assertEqual(preview["params"]["start_end_turns_expression"], "SPG01_N21")
+        self.assertEqual(preview["params"]["finish_end_turns_expression"], "SPG01_N22")
+        self.assertEqual(preview["params"]["start_ground_turns_expression"], "SPG01_N31")
+        self.assertEqual(preview["params"]["finish_ground_turns_expression"], "SPG01_N32")
+        self.assertIsNone(preview["params"]["end_turns_expression"])
+        self.assertIsNone(preview["params"]["ground_turns_expression"])
+
+        spiral_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        self.assertEqual(
+            spiral_operations[0]["operation_variable_bindings"][2]["expression"],
+            "SPG01_N21 * SPG01_WD1",
+        )
+        self.assertEqual(
+            spiral_operations[1]["start_offset_expression"],
+            "SPG01_N21 * SPG01_WD1",
+        )
+        self.assertEqual(
+            spiral_operations[1]["operation_variable_bindings"][2]["expression"],
+            "SPG01_H1 - ((SPG01_N21 * SPG01_WD1) + (SPG01_N22 * SPG01_WD1))",
+        )
+        self.assertEqual(
+            spiral_operations[2]["operation_variable_bindings"][2]["expression"],
+            "SPG01_N22 * SPG01_WD1",
+        )
+
+    def test_preview_compression_spring_v2_asymmetric_summary_reports_native_v2(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.0,
+                "start_ground_turns": 0.0,
+                "finish_ground_turns": 0.0,
+            },
+        )
+
+        summary = preview["summary"]
+        self.assertEqual(summary["end_contract_mode"], "v2_per_end")
+        self.assertEqual(summary["end_projection_mode"], "native_v2")
+        self.assertEqual(summary["start_end_summary"]["label"], "closed")
+        self.assertEqual(summary["finish_end_summary"]["label"], "open")
+        self.assertTrue(summary["start_end_summary"]["has_end_segment"])
+        self.assertFalse(summary["finish_end_summary"]["has_end_segment"])
+        self.assertEqual(
+            [
+                operation["role"]
+                for operation in preview["operations"]
+                if operation.get("operation") == "create_spiral_path"
+            ],
+            ["start_end", "working"],
+        )
+
+    def test_preview_compression_spring_v2_adds_unconditional_selector_points(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.0,
+                "finish_end_turns": 0.0,
+                "start_ground_turns": 0.0,
+                "finish_ground_turns": 0.0,
+            },
+        )
+
+        selector_keys = {
+            "start_tip_point",
+            "finish_tip_point",
+            "start_body_entry_point",
+            "finish_body_exit_point",
+        }
+        self.assertEqual(set(preview["selectors"].keys()), selector_keys)
+        self.assertEqual(
+            set(preview["interface"]["anchors"]["selector_points"].keys()),
+            selector_keys,
+        )
+
+    def test_preview_compression_spring_v2_support_points_are_conditional(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.0,
+                "start_ground_turns": 0.0,
+                "finish_ground_turns": 0.0,
+            },
+        )
+
+        self.assertIn("start_support_point", preview["selectors"])
+        self.assertNotIn("finish_support_point", preview["selectors"])
+        self.assertIn("start_support_point", preview["interface"]["anchors"]["selector_points"])
+        self.assertNotIn("finish_support_point", preview["interface"]["anchors"]["selector_points"])
+
+    def test_preview_compression_spring_v2_point_outputs_match_selector_names(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.0,
+                "start_ground_turns": 0.0,
+                "finish_ground_turns": 0.0,
+            },
+        )
+
+        for selector_name, origin in preview["selectors"].items():
+            self.assertIn(selector_name, preview["interface"]["outputs"])
+            output = preview["interface"]["outputs"][selector_name]
+            self.assertEqual(output["type"], "point")
+            self.assertEqual(output["name"], selector_name)
+            self.assertEqual(output["selector"], selector_name)
+            self.assertEqual(output["origin"], origin)
+
+    def test_preview_compression_spring_v2_ground_contact_outputs_stay_absent(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.75,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.5,
+            },
+        )
+
+        self.assertNotIn("start_ground_contact_point", preview["selectors"])
+        self.assertNotIn("finish_ground_contact_point", preview["selectors"])
+        self.assertNotIn("start_ground_contact_point", preview["interface"]["outputs"])
+        self.assertNotIn("finish_ground_contact_point", preview["interface"]["outputs"])
+        self.assertFalse(preview["summary"]["start_end_summary"]["grounded_geometry_signal"])
+        self.assertFalse(preview["summary"]["finish_end_summary"]["grounded_geometry_signal"])
+
+    def test_preview_compression_spring_v2_interface_outputs_keep_v1_baseline(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.0,
+                "start_ground_turns": 0.0,
+                "finish_ground_turns": 0.0,
+            },
+        )
+
+        self.assertIn("body", preview["interface"]["outputs"])
+        self.assertIn("axis", preview["interface"]["outputs"])
+        self.assertIn("spiral_path", preview["interface"]["outputs"])
+
+    def test_preview_compression_spring_rejects_interfering_pitch(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"compression_spring requires pitch greater than or equal to wire_diameter",
+        ):
+            preview_part_scenario(
+                "compression_spring",
+                {
+                    "mean_diameter": 30,
+                    "wire_diameter": 4,
+                    "free_length": 18,
+                    "working_turns": 4,
+                    "end_turns_per_side": 0.5,
+                },
+            )
+
+    def test_create_compression_spring_from_scenario_passes_normalized_params(self) -> None:
+        runner = FakeRunner()
+        adapter = KompasAdapter(runner=runner)
+        result = adapter.create_part_from_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "height": 48,
+                "turns": 6,
+            },
+            output_path=r"C:\\Temp\\kompas-mcp\\unit-spring.m3d",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(runner.calls[0][0], "create_part_from_scenario")
+        self.assertEqual(runner.calls[0][1]["scenario"], "compression_spring")
+        self.assertEqual(runner.calls[0][1]["params"]["pitch"], 8.0)
+        self.assertEqual(runner.calls[0][1]["params"]["total_turns"], 6.0)
+        self.assertEqual(runner.calls[0][1]["params"]["profile_sketch_target_state"], "fully_defined")
+        self.assertEqual(runner.calls[0][1]["params"]["mean_diameter_expression"], "(D1) - (WD1)")
+        self.assertEqual(
+            runner.calls[0][1]["params"]["profile_sketch_dimensions"][0]["expression"],
+            "((D1) - (WD1)) / 2",
+        )
+        self.assertEqual(
+            runner.calls[0][1]["params"]["profile_sketch_dimensions"][1],
+            {
+                "kind": "line_length",
+                "target": "profile_radius_ref",
+                "expression": "(WD1) / 2",
+                "driving": True,
+                "placement_index": 1,
+            },
+        )
+        self.assertEqual(result["preview"]["scenario"], "compression_spring")
+
+    def test_create_compression_spring_from_scenario_preserves_v2_per_end_variable_vocabulary(self) -> None:
+        runner = FakeRunner()
+        adapter = KompasAdapter(runner=runner)
+        result = adapter.create_part_from_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "free_length": 54,
+                "working_turns": 5.5,
+                "start_end_turns": 0.75,
+                "finish_end_turns": 0.75,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.5,
+                "parameter_prefix": "spg01",
+            },
+            output_path=r"C:\\Temp\\kompas-mcp\\unit-spring-v2.m3d",
+        )
+        self.assertTrue(result["ok"])
+        params = runner.calls[0][1]["params"]
+        variable_names = {
+            item["kind"]: item["name"]
+            for item in params["variable_plan"]
+        }
+        self.assertEqual(params["end_contract_mode"], "v2_per_end")
+        self.assertEqual(params["end_projection_mode"], "projected_to_v1_symmetric")
+        self.assertEqual(variable_names["driving_start_end_turn_count"], "SPG01_N21")
+        self.assertEqual(variable_names["driving_finish_end_turn_count"], "SPG01_N22")
+        self.assertEqual(variable_names["driving_start_ground_turn_count"], "SPG01_N31")
+        self.assertEqual(variable_names["driving_finish_ground_turn_count"], "SPG01_N32")
+        self.assertNotIn("driving_end_turn_count_per_side", variable_names)
+        self.assertNotIn("driving_ground_turn_count_per_side", variable_names)
+
+    def test_create_part_from_scenario_passes_partial_save_flags(self) -> None:
+        runner = FakeRunner()
+        adapter = KompasAdapter(runner=runner)
+
+        adapter.create_part_from_scenario(
+            "compression_spring",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "height": 48,
+                "turns": 6,
+            },
+            output_path=r"C:\\Temp\\kompas-mcp\\unit-spring-partial.m3d",
+            save_partial_on_error=True,
+            return_partial_result_on_error=True,
+        )
+
+        payload = runner.calls[0][1]
+        self.assertTrue(payload["params"]["save_partial_on_error"])
+        self.assertTrue(payload["params"]["return_partial_result_on_error"])
+
+    def test_workflow_with_compression_spring_is_live_supported(self) -> None:
         params = {
             "operations": [
                 {
@@ -3066,23 +4098,24 @@ class ParametricPartTests(unittest.TestCase):
                     "params": {
                         "mean_diameter": 30,
                         "wire_diameter": 4,
-                        "pitch": 8,
+                        "height": 48,
                         "turns": 6,
                     },
                 }
             ]
         }
         preview = preview_part_scenario("workflow", params)
-        self.assertFalse(preview["params"]["live_supported"])
-        self.assertEqual(preview["summary"]["creation_status"], "preview_only")
+        self.assertTrue(preview["params"]["live_supported"])
+        self.assertEqual(preview["summary"]["creation_status"], "available")
 
         adapter = KompasAdapter(runner=FakeRunner())
-        with self.assertRaisesRegex(ValueError, r"workflow live creation is not implemented yet"):
-            adapter.create_part_from_scenario(
-                "workflow",
-                params,
-                output_path=r"C:\\Temp\\kompas-mcp\\unit-spring-workflow.m3d",
-            )
+        result = adapter.create_part_from_scenario(
+            "workflow",
+            params,
+            output_path=r"C:\\Temp\\kompas-mcp\\unit-spring-workflow.m3d",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["preview"]["summary"]["creation_status"], "available")
 
     def test_preview_workflow_supports_external_conical_step_operation(self) -> None:
         preview = preview_part_scenario(

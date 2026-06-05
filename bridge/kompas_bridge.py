@@ -4,7 +4,9 @@ import sys
 import ctypes
 import re
 import math
+import itertools
 import shutil
+import subprocess
 import uuid
 from collections import defaultdict, deque
 from win32com.client import Dispatch
@@ -126,6 +128,26 @@ def _iter_operation_variables(model_object):
         return []
 
     result = []
+    seen = set()
+
+    def add_items(items):
+        added = 0
+        for item in items:
+            if item is None:
+                continue
+            key = (
+                safe_get(item, "Name"),
+                safe_get(item, "ParameterNote"),
+                safe_get(item, "Reference"),
+                id(item),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+            added += 1
+        return added
+
     count = safe_get(variables, "Count")
     if count is not None:
         try:
@@ -143,18 +165,16 @@ def _iter_operation_variables(model_object):
                     except Exception:
                         failed = True
                         break
-                    if item is not None:
-                        batch.append(item)
-                if batch and not failed:
-                    return batch
-                result.extend(batch)
-        if result:
-            return result
+                    batch.append(item)
+                add_items(batch)
+                if result and not failed:
+                    break
 
     try:
-        return [item for item in variables]
+        add_items([item for item in variables])
     except Exception:
-        return []
+        pass
+    return result
 
 
 def _bind_operation_variables(model_object, planned_bindings):
@@ -253,6 +273,49 @@ def _bind_circular_pattern_operation_variables(pattern, params, scenario, target
     report["scenario"] = scenario
     report["target"] = target
     return report
+
+
+SPRING_ANCHOR_ROTATION_PARAMETER_NOTES = (
+    "Angle",
+    "Угол",
+    "Rotation",
+    "Rotation angle",
+    "Angle of rotation",
+    "Угол вращения",
+    "Вращение",
+)
+
+
+def _build_spring_anchor_rotation_binding(expression):
+    return {
+        "target": "spiral_path",
+        "parameter_note": "Angle",
+        "parameter_note_aliases": list(SPRING_ANCHOR_ROTATION_PARAMETER_NOTES),
+        "expression": str(expression),
+        "role": "spring_anchor_rotation",
+    }
+
+
+def _build_post_save_compression_spring_anchor_rotation_bindings(segment_plan):
+    planned = []
+    for segment in segment_plan or []:
+        expression_raw = segment.get("anchor_rotation_expression")
+        if expression_raw in (None, ""):
+            continue
+        expression = str(expression_raw).strip()
+        if not expression:
+            continue
+        path_name = str(segment.get("path_name") or "").strip()
+        if not path_name:
+            continue
+        planned.append(
+            {
+                "role": str(segment.get("role") or "segment"),
+                "path_name": path_name,
+                "expression": expression,
+            }
+        )
+    return planned
 
 
 MATERIAL_CATALOG = (
@@ -2524,6 +2587,92 @@ def handle_launch_native_module_command(payload):
     }
 
 
+def _run_loader_probe_in_process(dll_path, export_name):
+    report = {
+        "ok": False,
+        "dll_path": dll_path,
+        "export_name": export_name,
+    }
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LoadLibraryW.argtypes = [ctypes.c_wchar_p]
+    kernel32.LoadLibraryW.restype = ctypes.c_void_p
+    kernel32.GetProcAddress.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    kernel32.GetProcAddress.restype = ctypes.c_void_p
+    kernel32.FreeLibrary.argtypes = [ctypes.c_void_p]
+    kernel32.FreeLibrary.restype = ctypes.c_int
+
+    handle = kernel32.LoadLibraryW(dll_path)
+    if not handle:
+        report["load_library"] = {
+            "ok": False,
+            "last_error": ctypes.get_last_error(),
+        }
+        return report
+
+    report["load_library"] = {
+        "ok": True,
+        "handle": "0x%x" % int(handle),
+    }
+    try:
+        address = kernel32.GetProcAddress(handle, export_name.encode("ascii"))
+        if address:
+            report["get_proc_address"] = {
+                "ok": True,
+                "address": "0x%x" % int(address),
+            }
+        else:
+            report["get_proc_address"] = {
+                "ok": False,
+                "last_error": ctypes.get_last_error(),
+            }
+        report["ok"] = bool(report["get_proc_address"].get("ok"))
+    finally:
+        report["free_library"] = {
+            "ok": bool(kernel32.FreeLibrary(handle)),
+        }
+    return report
+
+
+def handle_probe_native_entrypoint_loader_hosted(payload):
+    app = make_app()
+    search_dirs = [item for item in (payload.get("search_dirs") or []) if isinstance(item, str) and item]
+    path_before = os.environ.get("PATH", "")
+    dll_dir_handles = []
+    if search_dirs:
+        os.environ["PATH"] = os.pathsep.join(search_dirs) + os.pathsep + path_before
+        add_dll_directory = getattr(os, "add_dll_directory", None)
+        if callable(add_dll_directory):
+            for search_dir in search_dirs:
+                try:
+                    dll_dir_handles.append(add_dll_directory(search_dir))
+                except Exception:
+                    pass
+    try:
+        report = _run_loader_probe_in_process(
+            payload.get("dll_path"),
+            payload.get("export_name") or "",
+        )
+        app_name = safe_get(app, "ApplicationName")
+        if callable(app_name):
+            try:
+                app_name = app_name()
+            except Exception:
+                app_name = None
+        report["host"] = {
+            "app_visible": bool(safe_get(app, "Visible", False)),
+            "app_name": app_name,
+        }
+        report["search_dirs"] = search_dirs
+        return report
+    finally:
+        os.environ["PATH"] = path_before
+        for handle in dll_dir_handles:
+            try:
+                handle.close()
+            except Exception:
+                pass
+
+
 def handle_get_document_tree(payload):
     app = make_app()
     document = resolve_document(app, payload.get("document_id"))
@@ -4415,6 +4564,1007 @@ def _create_sketch_circle(model_container, part, name, plane, center, radius, li
     return sketch, circle, plane_key
 
 
+def _create_sketch_circle_with_coordinate_system(
+    model_container,
+    part,
+    name,
+    plane,
+    center,
+    radius,
+    line_style,
+    coordinate_system=None,
+):
+    sketch, plane_key = _create_sketch_on_plane(model_container, part, name, plane)
+    if coordinate_system is not None:
+        sketch.CoordinateSystem = coordinate_system
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update returned False")
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
+        circles = safe_get(drawing_container, "Circles")
+        if circles is None:
+            get_circles = safe_get(drawing_container, "GetCircles")
+            if callable(get_circles):
+                circles = get_circles()
+        if circles is None or not callable(safe_get(circles, "Add")):
+            raise RuntimeError("Sketch view does not expose Circles.Add")
+        circle = circles.Add()
+        if circle is None:
+            raise RuntimeError("Circles.Add returned None")
+        circle.Xc = float(center[0])
+        circle.Yc = float(center[1])
+        circle.Radius = float(radius)
+        try:
+            circle.Style = int(line_style)
+        except Exception:
+            set_style = safe_get(circle, "SetStyle")
+            if callable(set_style):
+                set_style(int(line_style))
+            else:
+                raise
+        if not circle.Update():
+            raise RuntimeError("Circle Update returned False")
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after edit returned False")
+    return sketch, circle, plane_key
+
+
+def _parameterize_compression_spring_profile_sketch(
+    sketch,
+    profile_circle,
+    profile_center,
+    wire_radius,
+    params,
+    steps_report,
+):
+    planned_constraints = list(params.get("profile_sketch_constraints") or [])
+    planned_dimensions = list(params.get("profile_sketch_dimensions") or [])
+    if not planned_constraints and not planned_dimensions:
+        return None
+
+    sketch_options = dict(params.get("sketch") or {})
+    sketch_options.setdefault("parameterization_order", "constraints_first")
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    parameterization_report = None
+    try:
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
+        line_segments = safe_get(drawing_container, "LineSegments")
+        if line_segments is None:
+            get_line_segments = safe_get(drawing_container, "GetLineSegments")
+            if callable(get_line_segments):
+                line_segments = get_line_segments()
+        if line_segments is None or not callable(safe_get(line_segments, "Add")):
+            raise RuntimeError("Sketch view does not expose LineSegments.Add")
+        construction_style = int(sketch_options.get("construction_line_style") or 6)
+        helper_offset = max(float(wire_radius) * 0.25, 0.5)
+        live_profile_circle = _resolve_current_sketch_circle(
+            drawing_container,
+            profile_circle,
+            profile_center,
+            wire_radius,
+        )
+        if live_profile_circle is None:
+            raise RuntimeError("Current sketch profile circle was not found")
+        radius_ref = line_segments.Add()
+        if radius_ref is None:
+            raise RuntimeError("LineSegments.Add returned None")
+        radius_ref.X1 = 0.0
+        radius_ref.Y1 = 0.0
+        radius_ref.X2 = float(profile_center[0])
+        radius_ref.Y2 = float(profile_center[1])
+        try:
+            radius_ref.Style = construction_style
+        except Exception:
+            pass
+        if not radius_ref.Update():
+            raise RuntimeError("Radius reference Update returned False")
+        profile_radius_ref = line_segments.Add()
+        if profile_radius_ref is None:
+            raise RuntimeError("LineSegments.Add returned None")
+        profile_radius_ref.X1 = float(profile_center[0])
+        profile_radius_ref.Y1 = float(profile_center[1])
+        profile_radius_ref.X2 = float(profile_center[0]) + helper_offset + float(wire_radius) * 1.5
+        profile_radius_ref.Y2 = float(profile_center[1])
+        try:
+            profile_radius_ref.Style = construction_style
+        except Exception:
+            pass
+        if not profile_radius_ref.Update():
+            raise RuntimeError("Profile radius reference Update returned False")
+        circle_xc = float(safe_get(live_profile_circle, "Xc", profile_center[0]))
+        circle_yc = float(safe_get(live_profile_circle, "Yc", profile_center[1]))
+        sketch_entities = {
+            "profile_circle": _sketch_circle_entry(
+                live_profile_circle,
+                circle_xc,
+                circle_yc,
+                float(wire_radius),
+                role="circle",
+                target="profile_circle",
+            ),
+            "radius_ref": _sketch_line_entry(
+                radius_ref,
+                0.0,
+                0.0,
+                float(profile_center[0]),
+                float(profile_center[1]),
+                role="construction",
+                target="radius_ref",
+            ),
+            "profile_radius_ref": _sketch_line_entry(
+                profile_radius_ref,
+                float(profile_center[0]),
+                float(profile_center[1]),
+                float(profile_center[0]) + helper_offset + float(wire_radius) * 1.5,
+                float(profile_center[1]),
+                role="construction",
+                target="profile_radius_ref",
+            ),
+            "origin": _sketch_point_entry(
+                None,
+                0.0,
+                0.0,
+                role="point",
+                target="origin",
+            ),
+        }
+        transformed_constraints = list(planned_constraints)
+        parameterization_report = _apply_sketch_parameterization(
+            view,
+            sketch_entities,
+            transformed_constraints,
+            planned_dimensions,
+            sketch_options,
+            steps_report,
+            0.0,
+        )
+    finally:
+        sketch.EndEdit()
+    if not sketch.Update():
+        raise RuntimeError("Sketch Update after spring profile parameterization returned False")
+    if parameterization_report is None:
+        return None
+    parameterization_report["sketch_state"] = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
+    parameterization_report["target_state"] = str(params.get("profile_sketch_target_state") or "fully_defined")
+    state_ok = parameterization_report["sketch_state"].get("name") == "well_constrained"
+    parameterization_report["state_ok"] = state_ok
+    parameterization_report["ok"] = bool(parameterization_report.get("ok", True) and state_ok)
+    steps_report.append(parameterization_report)
+    return parameterization_report
+
+
+def _resolve_compression_spring_profile_sketch_frame(params):
+    plane = str((params or {}).get("plane") or "XOY").strip() or "XOY"
+    normalized = plane.upper()
+    rotation = None
+    if normalized in {"XOY", "XY", "XOY_PLANE", "XY_PLANE", "PLANE_XOY"}:
+        rotation = {"rz": 180.0}
+    return plane, rotation
+
+
+def _apply_spiral_turning_angle(spiral, position_parameters, angle_degrees, angle_application_mode="orientation"):
+    requested_mode = str(angle_application_mode or "orientation").strip().lower()
+    if requested_mode in ("default", "none"):
+        return {
+            "mode": "default",
+            "requested_degrees": 0.0,
+            "readback_degrees": 0.0,
+        }
+    if requested_mode == "turning_angle":
+        try:
+            spiral.TurningAngle = float(angle_degrees)
+            return {
+                "mode": "turning_angle",
+                "requested_degrees": float(angle_degrees),
+                "readback_degrees": float(safe_get(spiral, "TurningAngle", angle_degrees) or 0.0),
+            }
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to apply compression spring spiral TurningAngle: %s" % repr(exc)
+            ) from exc
+    if requested_mode == "orientation":
+        try:
+            position_parameters.AngleByOwnAxis(73, float(angle_degrees))
+            return {
+                "mode": "position_angle_by_own_axis",
+                "requested_degrees": float(angle_degrees),
+                "readback_degrees": float(angle_degrees),
+            }
+        except Exception as primary_exc:
+            spiral_position = safe_get(spiral, "Position")
+            if abs(float(angle_degrees)) > 1e-9 and spiral_position is not None:
+                try:
+                    spiral_position.OrientationType = 1
+                    euler_parameters = safe_get(spiral_position, "LocalCSParameters")
+                    if euler_parameters is None or safe_get(euler_parameters, "RotationAngle") is None:
+                        raise AttributeError("Spiral position does not expose Euler rotation parameters")
+                    if safe_get(euler_parameters, "NutationAngle") is not None:
+                        euler_parameters.NutationAngle = 0.0
+                    if safe_get(euler_parameters, "PrecessionAngle") is not None:
+                        euler_parameters.PrecessionAngle = 0.0
+                    euler_parameters.RotationAngle = float(angle_degrees)
+                    return {
+                        "mode": "position_local_cs_euler",
+                        "requested_degrees": float(angle_degrees),
+                        "readback_degrees": float(
+                            safe_get(euler_parameters, "RotationAngle", angle_degrees) or 0.0
+                        ),
+                    }
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        "Failed to apply compression spring spiral orientation angle: own_axis=%s | euler=%s"
+                        % (repr(primary_exc), repr(fallback_exc))
+                    ) from fallback_exc
+            raise RuntimeError(
+                "Failed to apply compression spring spiral orientation angle: %s" % repr(primary_exc)
+            ) from primary_exc
+    raise RuntimeError("Unsupported compression spring angle application mode: %s" % angle_application_mode)
+
+
+def _normalize_signed_angle_degrees(value):
+    normalized = math.fmod(float(value), 360.0)
+    if normalized <= -180.0:
+        normalized += 360.0
+    elif normalized > 180.0:
+        normalized -= 360.0
+    return normalized
+
+
+def _distance3d(point1, point2):
+    return math.sqrt(
+        sum(
+            (float(point1[index]) - float(point2[index])) ** 2
+            for index in range(3)
+        )
+    )
+
+
+def _sample_curve_endpoints(curve):
+    points = []
+    for at in (True, False):
+        try:
+            point = curve.GetPoint(at)
+        except Exception:
+            continue
+        if not isinstance(point, tuple) or len(point) < 4 or not point[0]:
+            continue
+        points.append([float(point[1]), float(point[2]), float(point[3])])
+    if len(points) < 2:
+        return None
+    return points[:2]
+
+
+def _score_curve_endpoints(actual_points, expected_start, expected_end):
+    pairings = (
+        (actual_points[0], actual_points[1], False),
+        (actual_points[1], actual_points[0], True),
+    )
+    best = None
+    for actual_start, actual_end, reversed_order in pairings:
+        start_gap = _distance3d(actual_start, expected_start)
+        end_gap = _distance3d(actual_end, expected_end)
+        score = start_gap + end_gap
+        candidate = {
+            "score": score,
+            "start_gap": start_gap,
+            "end_gap": end_gap,
+            "actual_start": list(actual_start),
+            "actual_end": list(actual_end),
+            "reversed": reversed_order,
+        }
+        if best is None or candidate["score"] < best["score"]:
+            best = candidate
+    return best
+
+
+def _build_spiral_turning_angle_candidates(angle_degrees, angle_application_mode="orientation"):
+    requested_mode = str(angle_application_mode or "orientation").strip().lower()
+    if requested_mode != "orientation":
+        return [0.0]
+    candidates = []
+
+    def add(value):
+        candidate = float(value)
+        for existing in candidates:
+            if abs(existing - candidate) <= 1e-9:
+                return
+        candidates.append(candidate)
+
+    raw_angle = float(angle_degrees)
+    base_values = (
+        raw_angle,
+        -raw_angle,
+        raw_angle - 180.0,
+        raw_angle + 180.0,
+        -raw_angle - 180.0,
+        -raw_angle + 180.0,
+        _normalize_signed_angle_degrees(raw_angle),
+        _normalize_signed_angle_degrees(-raw_angle),
+        _normalize_signed_angle_degrees(raw_angle - 180.0),
+        _normalize_signed_angle_degrees(raw_angle + 180.0),
+    )
+    for value in base_values:
+        add(value)
+    for base in tuple(candidates):
+        add(base - 360.0)
+        add(base + 360.0)
+    if abs(_normalize_signed_angle_degrees(raw_angle)) <= 1e-9:
+        add(-360.0)
+        add(360.0)
+    return candidates
+
+
+def _resolve_best_spiral_turning_angle(
+    spiral,
+    position_parameters,
+    angle_degrees,
+    angle_application_mode="orientation",
+    expected_start=None,
+    expected_end=None,
+):
+    candidates = _build_spiral_turning_angle_candidates(angle_degrees, angle_application_mode)
+    best = None
+    applied_candidate = None
+    fallback_report = None
+    for candidate in candidates:
+        angle_report = _apply_spiral_turning_angle(
+            spiral,
+            position_parameters,
+            candidate,
+            angle_application_mode,
+        )
+        if not bool(spiral.Update()):
+            continue
+        endpoint_score = None
+        geometry_checked = False
+        if expected_start is not None and expected_end is not None:
+            actual_points = _sample_curve_endpoints(spiral)
+            if actual_points is not None:
+                geometry_checked = True
+                endpoint_score = _score_curve_endpoints(actual_points, expected_start, expected_end)
+        if endpoint_score is None:
+            endpoint_score = {
+                "score": 0.0,
+                "start_gap": 0.0,
+                "end_gap": 0.0,
+                "actual_start": None,
+                "actual_end": None,
+                "reversed": False,
+            }
+        geometry_ok = None
+        if geometry_checked:
+            geometry_ok = endpoint_score["start_gap"] <= 1e-6 and endpoint_score["end_gap"] <= 1e-6
+        candidate_report = dict(angle_report)
+        candidate_report.update(
+            {
+                "candidate_degrees": float(candidate),
+                "geometry_checked": geometry_checked,
+                "geometry_ok": geometry_ok,
+                "start_gap": float(endpoint_score["start_gap"]),
+                "end_gap": float(endpoint_score["end_gap"]),
+                "actual_start": endpoint_score["actual_start"],
+                "actual_end": endpoint_score["actual_end"],
+                "reversed": bool(endpoint_score["reversed"]),
+                "expected_start": list(expected_start) if expected_start is not None else None,
+                "expected_end": list(expected_end) if expected_end is not None else None,
+                "score": float(endpoint_score["score"]),
+            }
+        )
+        fallback_report = candidate_report
+        if best is None or candidate_report["score"] < best["score"]:
+            best = candidate_report
+            applied_candidate = float(candidate)
+        if geometry_checked and geometry_ok:
+            best = candidate_report
+            applied_candidate = float(candidate)
+            break
+        if not geometry_checked:
+            best = candidate_report
+            applied_candidate = float(candidate)
+            break
+    if best is None:
+        raise RuntimeError("Failed to evaluate compression spring spiral turning angle candidates")
+    if applied_candidate is None or abs(applied_candidate - best["candidate_degrees"]) > 1e-9:
+        best = fallback_report or best
+    if (
+        expected_start is not None
+        and expected_end is not None
+        and best.get("geometry_checked")
+        and not best["geometry_ok"]
+    ):
+        raise RuntimeError(
+            "Compression spring spiral turning angle verification failed: requested=%s best=%s start_gap=%s end_gap=%s"
+            % (
+                angle_degrees,
+                best["candidate_degrees"],
+                best["start_gap"],
+                best["end_gap"],
+            )
+        )
+    return best
+
+
+def _compute_curve_endpoint_report(curve_object, expected_start=None, expected_end=None):
+    actual_points = _sample_curve_endpoints(curve_object)
+    geometry_checked = False
+    endpoint_score = None
+    if actual_points is not None and expected_start is not None and expected_end is not None:
+        geometry_checked = True
+        endpoint_score = _score_curve_endpoints(actual_points, expected_start, expected_end)
+    if endpoint_score is None:
+        endpoint_score = {
+            "score": 0.0,
+            "start_gap": 0.0,
+            "end_gap": 0.0,
+            "actual_start": None,
+            "actual_end": None,
+            "reversed": False,
+        }
+    geometry_ok = None
+    if geometry_checked:
+        geometry_ok = endpoint_score["start_gap"] <= 1e-6 and endpoint_score["end_gap"] <= 1e-6
+    return {
+        "geometry_checked": geometry_checked,
+        "geometry_ok": geometry_ok,
+        "start_gap": float(endpoint_score["start_gap"]),
+        "end_gap": float(endpoint_score["end_gap"]),
+        "actual_start": endpoint_score["actual_start"],
+        "actual_end": endpoint_score["actual_end"],
+        "reversed": bool(endpoint_score["reversed"]),
+        "expected_start": list(expected_start) if expected_start is not None else None,
+        "expected_end": list(expected_end) if expected_end is not None else None,
+        "score": float(endpoint_score["score"]),
+    }
+
+
+def _curve_contour_edges_count(contour):
+    edges_count = safe_get(contour, "EdgesCount")
+    if edges_count is not None:
+        try:
+            return int(edges_count)
+        except Exception:
+            pass
+    edges = safe_get(contour, "Edges")
+    if isinstance(edges, (list, tuple)):
+        return len(edges)
+    count = collection_count(edges)
+    if count:
+        return int(count)
+    return None
+
+
+def _build_curve_contour(
+    auxiliary_container,
+    name,
+    curves,
+    allow_incomplete=False,
+    contour=None,
+    expected_edges_count=None,
+):
+    if contour is None:
+        contour = auxiliary_container.Contours3D.Add()
+        if contour is None:
+            raise RuntimeError("Contours3D.Add() returned None")
+    contour.Edges = list(curves)
+    try:
+        contour.Name = name
+    except Exception:
+        pass
+    if not bool(contour.Update()):
+        raise RuntimeError("Failed to build spring path contour")
+    edges_count = _curve_contour_edges_count(contour)
+    source_count = len(curves)
+    expected_count = int(expected_edges_count) if expected_edges_count is not None else int(source_count)
+    if edges_count is None:
+        raise RuntimeError("Failed to confirm spring path contour completeness")
+    report = {
+        "source_path_count": int(source_count),
+        "edges_count": int(edges_count),
+        "expected_edges_count": int(expected_count),
+    }
+    if not allow_incomplete and int(edges_count) != int(expected_count):
+        raise RuntimeError(
+            "Spring path contour completeness check failed: expected %s edges, got %s"
+            % (expected_count, edges_count)
+        )
+    return contour, report
+
+
+def _delete_curve_contour(auxiliary_container, contour):
+    if contour is None:
+        return False
+    contour_collection = safe_get(auxiliary_container, "Contours3D")
+    contour_reference = safe_get(contour, "Reference")
+    collection_count_value = collection_count(contour_collection)
+    for index in range(collection_count_value):
+        item = get_collection_item(contour_collection, index)
+        if item is contour:
+            try:
+                return _delete_feature_from_collection(contour_collection, contour, index)
+            except RuntimeError as exc:
+                if "feature_delete_not_supported" not in str(exc):
+                    raise
+                break
+        if contour_reference is not None and safe_get(item, "Reference") == contour_reference:
+            try:
+                return _delete_feature_from_collection(contour_collection, contour, index)
+            except RuntimeError as exc:
+                if "feature_delete_not_supported" not in str(exc):
+                    raise
+                break
+    deleter = safe_get(contour, "Delete")
+    if callable(deleter):
+        result = deleter()
+        return True if result is None else bool(result)
+    return False
+
+
+def _normalize_curve_cut_point(point):
+    if not isinstance(point, (list, tuple)) or len(point) != 3:
+        return None
+    try:
+        return [float(point[0]), float(point[1]), float(point[2])]
+    except Exception:
+        return None
+
+
+def _create_curve_fillet_path(
+    auxiliary_container,
+    name,
+    curve1,
+    curve2,
+    radius,
+    trim_curve1=True,
+    trim_curve2=True,
+    curve1_cut_point=None,
+    curve2_cut_point=None,
+):
+    fillet_curves = safe_get(auxiliary_container, "FilletCurves")
+    if fillet_curves is None or not callable(safe_get(fillet_curves, "Add")):
+        raise RuntimeError("Auxiliary geometry container does not expose FilletCurves.Add")
+    fillet = fillet_curves.Add()
+    if fillet is None:
+        raise RuntimeError("FilletCurves.Add() returned None")
+    try:
+        fillet.Name = name
+    except Exception:
+        pass
+    fillet.Curve1 = curve1
+    fillet.Curve2 = curve2
+    fillet.Radius = float(radius)
+    fillet.TrimCurve1 = bool(trim_curve1)
+    fillet.TrimCurve2 = bool(trim_curve2)
+    normalized_curve1_cut_point = _normalize_curve_cut_point(curve1_cut_point)
+    normalized_curve2_cut_point = _normalize_curve_cut_point(curve2_cut_point)
+    if normalized_curve1_cut_point is not None:
+        fillet.SetCurve1CutPoint(*normalized_curve1_cut_point)
+    if normalized_curve2_cut_point is not None:
+        fillet.SetCurve2CutPoint(*normalized_curve2_cut_point)
+    if not bool(fillet.Update()):
+        raise RuntimeError("Failed to create curve fillet path %s" % name)
+    return fillet
+
+
+def _create_staged_curve_fillet_path(
+    auxiliary_container,
+    name,
+    curve1,
+    curve2,
+    radius,
+    trim_curve1=True,
+    trim_curve2=True,
+):
+    fillet_curves = safe_get(auxiliary_container, "FilletCurves")
+    if fillet_curves is None or not callable(safe_get(fillet_curves, "Add")):
+        raise RuntimeError("Auxiliary geometry container does not expose FilletCurves.Add")
+    fillet = fillet_curves.Add()
+    if fillet is None:
+        raise RuntimeError("FilletCurves.Add() returned None")
+    try:
+        fillet.Name = name
+    except Exception:
+        pass
+    fillet.Curve1 = curve1
+    fillet.Curve2 = curve2
+    fillet.TrimCurve1 = bool(trim_curve1)
+    fillet.TrimCurve2 = bool(trim_curve2)
+    first_update = bool(fillet.Update())
+    fillet.Radius = float(radius)
+    second_update = bool(fillet.Update())
+    if not second_update:
+        raise RuntimeError("Failed to create staged curve fillet path %s" % name)
+    return fillet, [first_update, second_update]
+
+
+def _create_connect_curve_path(
+    auxiliary_container,
+    name,
+    curve1,
+    curve2,
+    curve1_connect_vertex=True,
+    curve2_connect_vertex=True,
+    curve1_connect_type=3,
+    curve2_connect_type=None,
+    tension=100.0,
+    operation_variable_bindings=None,
+):
+    connect_curves = safe_get(auxiliary_container, "ConnectCurves")
+    if connect_curves is None or not callable(safe_get(connect_curves, "Add")):
+        raise RuntimeError("Auxiliary geometry container does not expose ConnectCurves.Add")
+    connect_curve = connect_curves.Add()
+    if connect_curve is None:
+        raise RuntimeError("ConnectCurves.Add() returned None")
+    try:
+        connect_curve.Name = name
+    except Exception:
+        pass
+    connect_curve.Curve1 = curve1
+    connect_curve.Curve2 = curve2
+    connect_curve.Curve1ConnectVertex = bool(curve1_connect_vertex)
+    connect_curve.Curve2ConnectVertex = bool(curve2_connect_vertex)
+    connect_curve.Curve1ConnectType = int(curve1_connect_type)
+    connect_curve.Curve2ConnectType = int(curve1_connect_type if curve2_connect_type is None else curve2_connect_type)
+    connect_curve.Tension = float(tension)
+    if not bool(connect_curve.Update()):
+        raise RuntimeError("Failed to create connect curve path %s" % name)
+    binding_report = None
+    if operation_variable_bindings:
+        binding_report = _bind_operation_variables(connect_curve, operation_variable_bindings)
+        if not binding_report.get("ok", False):
+            raise RuntimeError("Failed to bind connect curve operation variables for %s" % name)
+        if not bool(connect_curve.Update()):
+            raise RuntimeError("Failed to update connect curve path %s after variable binding" % name)
+    return connect_curve, binding_report
+
+
+def _build_compression_spring_transition_curve_paths(
+    part,
+    model_container,
+    auxiliary_container,
+    spring_name,
+    segment_objects,
+    connector_plan,
+    steps_report,
+):
+    if not connector_plan:
+        return []
+    curve_by_path_name = {
+        str(item.get("path_name") or ""): item
+        for item in segment_objects
+        if item.get("path") is not None
+    }
+    created_curve_objects = []
+    for connector in connector_plan:
+        builder = str(connector.get("builder") or "curve_fillet").strip().lower()
+        curve1_path_name = str(connector.get("curve1_path_name") or "").strip()
+        curve2_path_name = str(connector.get("curve2_path_name") or "").strip()
+        curve1_object = curve_by_path_name.get(curve1_path_name)
+        curve2_object = curve_by_path_name.get(curve2_path_name)
+        if curve1_object is None or curve2_object is None:
+            raise RuntimeError(
+                "Compression spring transition fillet curves require existing segment paths: %s -> %s"
+                % (curve1_path_name, curve2_path_name)
+            )
+        if builder == "trimmed_connect_curve":
+            curve1_trim = dict(connector.get("curve1_trim") or {})
+            curve2_trim = dict(connector.get("curve2_trim") or {})
+            connect_curve_plan = dict(connector.get("connect_curve") or {})
+
+            curve1_point, trimmed_curve1, curve1_point_binding_report = _create_trimmed_curve_path(
+                part,
+                model_container,
+                str(curve1_trim.get("name") or ("%s_curve1_local" % spring_name)),
+                curve1_object["path"],
+                point_name=str(curve1_trim.get("point_name") or ""),
+                offset=float(curve1_trim.get("offset") or 0.0),
+                direction=bool(curve1_trim.get("direction", True)),
+                offset_type=int(curve1_trim.get("offset_type", 0)),
+                sense=bool(curve1_trim.get("sense", True)),
+                point_variable_bindings=list(curve1_trim.get("point_operation_variable_bindings") or []),
+            )
+            created_curve1 = {
+                "role": "%s_curve1_trim" % str(connector.get("role") or ""),
+                "path_name": str(curve1_trim.get("name") or ""),
+                "path": trimmed_curve1,
+                "kind": "trimmed_curve",
+                "source_path_name": curve1_path_name,
+                "point": curve1_point,
+            }
+            created_curve_objects.append(created_curve1)
+            curve_by_path_name[created_curve1["path_name"]] = created_curve1
+            steps_report.append(
+                {
+                    "step": "create_trimmed_curve_path",
+                    "ok": True,
+                    "scenario": "compression_spring",
+                    "role": created_curve1["role"],
+                    "reference": safe_get(trimmed_curve1, "Reference"),
+                    "model_object_type": safe_get(trimmed_curve1, "ModelObjectType"),
+                    "source_path_name": curve1_path_name,
+                    "point_name": str(curve1_trim.get("point_name") or ""),
+                    "offset": float(curve1_trim.get("offset") or 0.0),
+                    "offset_type": int(curve1_trim.get("offset_type", 0)),
+                    "direction": bool(curve1_trim.get("direction", True)),
+                    "sense": bool(curve1_trim.get("sense", True)),
+                    "offset_expression": str(
+                        ((curve1_trim.get("point_operation_variable_bindings") or [{}])[0]).get("expression")
+                        or ""
+                    ),
+                }
+            )
+            if curve1_point_binding_report is not None:
+                curve1_point_binding_report["scenario"] = "compression_spring"
+                curve1_point_binding_report["target"] = "transition_trim_point"
+                curve1_point_binding_report["role"] = "%s_curve1_trim_point" % str(connector.get("role") or "")
+                curve1_point_binding_report["path_name"] = str(curve1_trim.get("name") or "")
+                curve1_point_binding_report["point_name"] = str(curve1_trim.get("point_name") or "")
+                steps_report.append(curve1_point_binding_report)
+
+            curve2_point, trimmed_curve2, curve2_point_binding_report = _create_trimmed_curve_path(
+                part,
+                model_container,
+                str(curve2_trim.get("name") or ("%s_curve2_local" % spring_name)),
+                curve2_object["path"],
+                point_name=str(curve2_trim.get("point_name") or ""),
+                offset=float(curve2_trim.get("offset") or 0.0),
+                direction=bool(curve2_trim.get("direction", True)),
+                offset_type=int(curve2_trim.get("offset_type", 0)),
+                sense=bool(curve2_trim.get("sense", True)),
+                point_variable_bindings=list(curve2_trim.get("point_operation_variable_bindings") or []),
+            )
+            created_curve2 = {
+                "role": "%s_curve2_trim" % str(connector.get("role") or ""),
+                "path_name": str(curve2_trim.get("name") or ""),
+                "path": trimmed_curve2,
+                "kind": "trimmed_curve",
+                "source_path_name": curve2_path_name,
+                "point": curve2_point,
+            }
+            created_curve_objects.append(created_curve2)
+            curve_by_path_name[created_curve2["path_name"]] = created_curve2
+            steps_report.append(
+                {
+                    "step": "create_trimmed_curve_path",
+                    "ok": True,
+                    "scenario": "compression_spring",
+                    "role": created_curve2["role"],
+                    "reference": safe_get(trimmed_curve2, "Reference"),
+                    "model_object_type": safe_get(trimmed_curve2, "ModelObjectType"),
+                    "source_path_name": curve2_path_name,
+                    "point_name": str(curve2_trim.get("point_name") or ""),
+                    "offset": float(curve2_trim.get("offset") or 0.0),
+                    "offset_type": int(curve2_trim.get("offset_type", 0)),
+                    "direction": bool(curve2_trim.get("direction", True)),
+                    "sense": bool(curve2_trim.get("sense", True)),
+                    "offset_expression": str(
+                        ((curve2_trim.get("point_operation_variable_bindings") or [{}])[0]).get("expression")
+                        or ""
+                    ),
+                }
+            )
+            if curve2_point_binding_report is not None:
+                curve2_point_binding_report["scenario"] = "compression_spring"
+                curve2_point_binding_report["target"] = "transition_trim_point"
+                curve2_point_binding_report["role"] = "%s_curve2_trim_point" % str(connector.get("role") or "")
+                curve2_point_binding_report["path_name"] = str(curve2_trim.get("name") or "")
+                curve2_point_binding_report["point_name"] = str(curve2_trim.get("point_name") or "")
+                steps_report.append(curve2_point_binding_report)
+
+            connect_curve_name = str(connect_curve_plan.get("name") or ("%s_TRANSITION_CONNECT" % spring_name))
+            connect_curve_binding_report = None
+            connect_curve_fallback = None
+            try:
+                connect_curve, connect_curve_binding_report = _create_connect_curve_path(
+                    auxiliary_container,
+                    connect_curve_name,
+                    trimmed_curve1,
+                    trimmed_curve2,
+                    curve1_connect_vertex=bool(connect_curve_plan.get("curve1_connect_vertex", True)),
+                    curve2_connect_vertex=bool(connect_curve_plan.get("curve2_connect_vertex", True)),
+                    curve1_connect_type=int(connect_curve_plan.get("curve1_connect_type", 3)),
+                    curve2_connect_type=int(connect_curve_plan.get("curve2_connect_type", 3)),
+                    tension=float(connect_curve_plan.get("tension") or 100.0),
+                    operation_variable_bindings=list(connect_curve_plan.get("operation_variable_bindings") or []),
+                )
+            except RuntimeError as exc:
+                connect_curve = trimmed_curve1
+                connect_curve_fallback = str(exc)
+            created_connect_curve = {
+                "role": str(connector.get("role") or ""),
+                "path_name": connect_curve_name,
+                "path": connect_curve,
+                "kind": "connect_curve" if connect_curve_fallback is None else "connect_curve_fallback",
+                "curve1_path_name": created_curve1["path_name"],
+                "curve2_path_name": created_curve2["path_name"],
+            }
+            created_curve_objects.append(created_connect_curve)
+            curve_by_path_name[created_connect_curve["path_name"]] = created_connect_curve
+            steps_report.append(
+                {
+                    "step": "create_connect_curve_path",
+                    "ok": True,
+                    "scenario": "compression_spring",
+                    "role": created_connect_curve["role"],
+                    "reference": safe_get(connect_curve, "Reference"),
+                    "model_object_type": safe_get(connect_curve, "ModelObjectType"),
+                    "curve1_path_name": created_curve1["path_name"],
+                    "curve2_path_name": created_curve2["path_name"],
+                    "curve1_connect_vertex": bool(connect_curve_plan.get("curve1_connect_vertex", True)),
+                    "curve2_connect_vertex": bool(connect_curve_plan.get("curve2_connect_vertex", True)),
+                    "curve1_connect_type": int(connect_curve_plan.get("curve1_connect_type", 3)),
+                    "curve2_connect_type": int(connect_curve_plan.get("curve2_connect_type", 3)),
+                    "tension": float(connect_curve_plan.get("tension") or 100.0),
+                    "tension_expression": str(
+                        ((connect_curve_plan.get("operation_variable_bindings") or [{}])[0]).get("expression")
+                        or ""
+                    ),
+                    "fallback": connect_curve_fallback,
+                }
+            )
+            if connect_curve_binding_report is not None:
+                connect_curve_binding_report["scenario"] = "compression_spring"
+                connect_curve_binding_report["target"] = "connect_curve"
+                connect_curve_binding_report["role"] = created_connect_curve["role"]
+                connect_curve_binding_report["path_name"] = created_connect_curve["path_name"]
+                steps_report.append(connect_curve_binding_report)
+            continue
+        fillet_name = str(connector.get("path_name") or ("%s_TRANSITION_FILLET" % spring_name)).strip()
+        joint_point = connector.get("joint_point")
+        fillet = _create_curve_fillet_path(
+            auxiliary_container,
+            fillet_name,
+            curve1_object["path"],
+            curve2_object["path"],
+            radius=float(connector.get("radius") or 0.0),
+            trim_curve1=bool(connector.get("trim_curve1", True)),
+            trim_curve2=bool(connector.get("trim_curve2", True)),
+            curve1_cut_point=joint_point,
+            curve2_cut_point=joint_point,
+        )
+        connector_object = {
+            "role": str(connector.get("role") or ""),
+            "path_name": fillet_name,
+            "path": fillet,
+            "kind": "curve_fillet",
+            "joint_point": list(joint_point or []),
+            "curve1_path_name": curve1_path_name,
+            "curve2_path_name": curve2_path_name,
+        }
+        created_curve_objects.append(connector_object)
+        curve_by_path_name[connector_object["path_name"]] = connector_object
+        steps_report.append(
+            {
+                "step": "create_curve_fillet_path",
+                "ok": True,
+                "scenario": "compression_spring",
+                "role": connector_object["role"],
+                "reference": safe_get(fillet, "Reference"),
+                "model_object_type": safe_get(fillet, "ModelObjectType"),
+                "curve1_path_name": curve1_path_name,
+                "curve2_path_name": curve2_path_name,
+                "joint_point": list(joint_point or []),
+                "radius": float(connector.get("radius") or 0.0),
+                "trim_curve1": bool(connector.get("trim_curve1", True)),
+                "trim_curve2": bool(connector.get("trim_curve2", True)),
+            }
+        )
+    return created_curve_objects
+
+
+def _resolve_named_curve_sequence(path_names, segment_objects, connector_objects):
+    curve_by_name = {}
+    for item in segment_objects:
+        path_name = str(item.get("path_name") or "").strip()
+        if path_name:
+            curve_by_name[path_name] = item["path"]
+    for item in connector_objects:
+        path_name = str(item.get("path_name") or "").strip()
+        if path_name:
+            curve_by_name[path_name] = item["path"]
+    ordered_curves = []
+    for path_name in path_names or []:
+        curve = curve_by_name.get(str(path_name or "").strip())
+        if curve is None:
+            raise RuntimeError("Compression spring contour path is missing curve object %s" % path_name)
+        ordered_curves.append(curve)
+    return ordered_curves
+
+
+def _collect_compression_spring_connector_auxiliary_objects(connector_objects):
+    auxiliary_objects = []
+    for item in connector_objects or []:
+        role = "spring_%s" % str(item.get("kind") or "transition_curve_path")
+        path = item.get("path")
+        if path is not None:
+            auxiliary_objects.append((role, path))
+        point = item.get("point")
+        if point is not None:
+            auxiliary_objects.append(("%s_point" % role, point))
+    return auxiliary_objects
+
+
+def _resolve_spring_path_contour(auxiliary_container, spring_name, segment_objects):
+    if not segment_objects:
+        raise RuntimeError("Compression spring path requires at least one spiral segment")
+    contour_name = "%s_PATH_CONTOUR" % spring_name
+    contour, direct_report = _build_curve_contour(
+        auxiliary_container,
+        contour_name,
+        [item["path"] for item in segment_objects],
+        allow_incomplete=True,
+    )
+    if int(direct_report["edges_count"]) == len(segment_objects):
+        direct_report["candidate_orientation_angles"] = [
+            float(item.get("applied_orientation_angle") or 0.0)
+            for item in segment_objects
+        ]
+        direct_report["combo_index"] = -1
+        return contour, direct_report
+    candidate_lists = []
+    for index, segment_object in enumerate(segment_objects):
+        candidates = []
+        applied_orientation_angle = float(segment_object.get("applied_orientation_angle") or 0.0)
+        for candidate in [applied_orientation_angle] + list(segment_object.get("orientation_angle_candidates") or []):
+            candidate_value = float(candidate)
+            if any(abs(existing - candidate_value) <= 1e-9 for existing in candidates):
+                continue
+            candidates.append(candidate_value)
+        if index == 0 and candidates:
+            candidates = [applied_orientation_angle]
+        candidate_lists.append(candidates or [applied_orientation_angle])
+
+    best_report = dict(direct_report)
+    best_report["candidate_orientation_angles"] = [
+        float(item.get("applied_orientation_angle") or 0.0)
+        for item in segment_objects
+    ]
+    best_report["combo_index"] = -1
+    for combo_index, candidate_combo in enumerate(itertools.product(*candidate_lists)):
+        for segment_object, candidate in zip(segment_objects, candidate_combo):
+            current_angle = float(segment_object.get("applied_orientation_angle") or 0.0)
+            if abs(current_angle - float(candidate)) <= 1e-9:
+                continue
+            _apply_spiral_turning_angle(
+                segment_object["path"],
+                segment_object["position_parameters"],
+                candidate,
+                segment_object.get("angle_application_mode"),
+            )
+            if not bool(segment_object["path"].Update()):
+                raise RuntimeError(
+                    "Failed to update compression spring spiral path for %s"
+                    % segment_object.get("role", "segment")
+                )
+            segment_object["applied_orientation_angle"] = float(candidate)
+        contour, contour_report = _build_curve_contour(
+            auxiliary_container,
+            contour_name,
+            [item["path"] for item in segment_objects],
+            allow_incomplete=True,
+            contour=contour,
+        )
+        contour_report["candidate_orientation_angles"] = [float(value) for value in candidate_combo]
+        contour_report["combo_index"] = int(combo_index)
+        if best_report is None or int(contour_report["edges_count"]) > int(best_report["edges_count"]):
+            best_report = contour_report
+        if int(contour_report["edges_count"]) == len(segment_objects):
+            return contour, contour_report
+    _delete_curve_contour(auxiliary_container, contour)
+    raise RuntimeError(
+        "Spring path contour completeness check failed: expected %s edges, got %s"
+        % (len(segment_objects), best_report["edges_count"] if best_report is not None else 0)
+    )
+
+
 def _create_sketch_rectangle(model_container, part, name, plane, corner1, corner2, line_style):
     sketch, plane_key = _create_sketch_on_plane(model_container, part, name, plane)
     sketch_doc = sketch.BeginEdit()
@@ -6090,6 +7240,10 @@ def _sketch_circle_entry(circle, xc, yc, radius, *, role, target):
         "xc": float(xc),
         "yc": float(yc),
         "radius": float(radius),
+        "x1": float(xc),
+        "y1": float(yc),
+        "x2": float(xc),
+        "y2": float(yc),
     }
 
 
@@ -6107,6 +7261,43 @@ def _sketch_arc_entry(arc, xc, yc, radius, x1, y1, x2, y2, *, direction, role, t
         "y2": float(y2),
         "direction": bool(direction),
     }
+
+
+def _resolve_current_sketch_circle(drawing_container, source_circle, fallback_center, fallback_radius, *, tolerance=1e-6):
+    if source_circle is None:
+        return None
+    circles, _, _ = _resolve_model_object_collection(drawing_container, ("Circles", "GetCircles"))
+    if circles is None:
+        return source_circle
+
+    fallback_x = float((fallback_center or [0.0, 0.0])[0])
+    fallback_y = float((fallback_center or [0.0, 0.0])[1])
+    expected_reference = safe_get(source_circle, "Reference")
+    expected_xc = float(safe_get(source_circle, "Xc", fallback_x))
+    expected_yc = float(safe_get(source_circle, "Yc", fallback_y))
+    expected_radius_value = float(safe_get(source_circle, "Radius", fallback_radius))
+    best_match = None
+    best_delta = None
+
+    for circle in iter_collection(circles):
+        if circle is None:
+            continue
+        if expected_reference not in (None, "") and str(safe_get(circle, "Reference")) == str(expected_reference):
+            return circle
+        candidate_xc = float(safe_get(circle, "Xc", expected_xc))
+        candidate_yc = float(safe_get(circle, "Yc", expected_yc))
+        candidate_radius = float(safe_get(circle, "Radius", expected_radius_value))
+        delta = (
+            abs(candidate_xc - expected_xc)
+            + abs(candidate_yc - expected_yc)
+            + abs(candidate_radius - expected_radius_value)
+        )
+        if best_delta is None or delta < best_delta:
+            best_match = circle
+            best_delta = delta
+        if delta <= tolerance:
+            return circle
+    return best_match or source_circle
 
 
 def _line_geometry(entity):
@@ -6138,13 +7329,23 @@ def _constraint_point_coordinates(entity, index):
     if entity.get("role") == "point":
         return float(safe_get(entity.get("object"), "X", entity["x"])), float(safe_get(entity.get("object"), "Y", entity["y"]))
     if "radius" in entity and "x1" in entity and "x2" in entity:
+        drawing_object = entity.get("object")
         point_index = _normalize_constraint_point_index(index)
         if point_index == 0:
-            return float(entity["xc"]), float(entity["yc"])
+            return (
+                float(safe_get(drawing_object, "Xc", entity["xc"])),
+                float(safe_get(drawing_object, "Yc", entity["yc"])),
+            )
         if point_index == 1:
-            return float(entity["x1"]), float(entity["y1"])
+            return (
+                float(safe_get(drawing_object, "X1", entity["x1"])),
+                float(safe_get(drawing_object, "Y1", entity["y1"])),
+            )
         if point_index == 2:
-            return float(entity["x2"]), float(entity["y2"])
+            return (
+                float(safe_get(drawing_object, "X2", entity["x2"])),
+                float(safe_get(drawing_object, "Y2", entity["y2"])),
+            )
         raise RuntimeError("unsupported_arc_constraint_point_index")
     x1, y1, x2, y2 = _line_geometry(entity)
     point_index = _normalize_constraint_point_index(index)
@@ -6172,6 +7373,12 @@ def _line_length_from_geometry(entity):
 
 def _point_line_distance(point, line_entity):
     px, py = float(point[0]), float(point[1])
+    if "radius" in line_entity and "xc" in line_entity and "yc" in line_entity:
+        drawing_object = line_entity.get("object")
+        xc = float(safe_get(drawing_object, "Xc", line_entity["xc"]))
+        yc = float(safe_get(drawing_object, "Yc", line_entity["yc"]))
+        radius = float(safe_get(drawing_object, "Radius", line_entity["radius"]))
+        return abs(math.hypot(px - xc, py - yc) - radius)
     x1, y1, x2, y2 = _line_geometry(line_entity)
     dx = float(x2) - float(x1)
     dy = float(y2) - float(y1)
@@ -6270,7 +7477,7 @@ def _verify_sketch_constraint_geometry(sketch_entities, planned_constraints, *, 
     }
 
 
-def _apply_constraint_to_line(line, constraint_type, *, index=None, partner=None, partner_index=None, value=None, variable=None):
+def _apply_constraint_to_line(line, constraint_type, *, index=None, partner=None, partner_index=None, value=None, variable=None, expression=None):
     drawing_object = _cast_to_com_interface(line, "IDrawingObject1")
     new_constraint = safe_get(drawing_object, "NewConstraint")
     if not callable(new_constraint):
@@ -6285,7 +7492,9 @@ def _apply_constraint_to_line(line, constraint_type, *, index=None, partner=None
         constraint.Partner = partner
     if partner_index is not None:
         constraint.PartnerIndex = int(_normalize_constraint_point_index(partner_index))
-    if value is not None:
+    if expression not in (None, ""):
+        constraint.Expression = str(expression)
+    elif value is not None:
         constraint.Value = float(value)
     if variable:
         constraint.Variable = str(variable)
@@ -6381,6 +7590,7 @@ def _apply_sketch_constraints(sketch_entities, planned_constraints, options):
                     partner_index=partner_index,
                     value=plan.get("value"),
                     variable=plan.get("variable"),
+                    expression=plan.get("expression"),
                 )
                 item = {"constraint": plan, "pass": pass_index}
                 item.update(result)
@@ -6850,6 +8060,59 @@ def _add_circle_diameter_dimension(diametral_dimensions, dimension, sketch_entit
     return result
 
 
+def _add_circle_radius_dimension(radial_dimensions, dimension, sketch_entities):
+    target = sketch_entities.get(str(dimension.get("target")))
+    if target is None:
+        raise RuntimeError("target_circle_not_found")
+    circle_object = target.get("object")
+    if circle_object is None:
+        raise RuntimeError("target_circle_object_not_found")
+
+    dim = radial_dimensions.Add()
+    if dim is None:
+        raise RuntimeError("RadialDimensions.Add returned None")
+
+    try:
+        dim.BaseObject = circle_object
+    except Exception:
+        set_base_object = safe_get(dim, "SetBaseObject")
+        if callable(set_base_object):
+            set_base_object(circle_object)
+        else:
+            raise
+
+    dimension_type = bool(dimension.get("dimension_type", True))
+    try:
+        dim.DimensionType = dimension_type
+    except Exception:
+        set_dimension_type = safe_get(dim, "SetDimensionType")
+        if callable(set_dimension_type):
+            set_dimension_type(dimension_type)
+        else:
+            raise
+
+    angle = float(dimension.get("angle", 0.0))
+    try:
+        dim.Angle = angle
+    except Exception:
+        set_angle = safe_get(dim, "SetAngle")
+        if callable(set_angle):
+            set_angle(angle)
+        else:
+            raise
+
+    updated = bool(dim.Update())
+    result = {
+        "updated": updated,
+        "reference": safe_get(dim, "Reference"),
+        "orientation": "radius",
+        "driving_created": False,
+    }
+    if updated and bool(dimension.get("driving", True)):
+        result.update(_finalize_driving_dimension(dim, dimension))
+    return result
+
+
 def _apply_sketch_dimensions(view, sketch_entities, planned_dimensions, options):
     enabled = bool((options or {}).get("enabled", False))
     driving = bool((options or {}).get("driving", True))
@@ -6870,6 +8133,7 @@ def _apply_sketch_dimensions(view, sketch_entities, planned_dimensions, options)
         line_dimensions = safe_get(symbols_container, "LineDimensions")
         break_line_dimensions = safe_get(symbols_container, "BreakLineDimensions")
         diametral_dimensions = safe_get(symbols_container, "DiametralDimensions")
+        radial_dimensions = safe_get(symbols_container, "RadialDimensions")
         angle_dimensions = safe_get(symbols_container, "AngleDimensions")
         if line_dimensions is None:
             get_line_dimensions = safe_get(symbols_container, "GetLineDimensions")
@@ -6883,6 +8147,10 @@ def _apply_sketch_dimensions(view, sketch_entities, planned_dimensions, options)
             get_diametral_dimensions = safe_get(symbols_container, "GetDiametralDimensions")
             if callable(get_diametral_dimensions):
                 diametral_dimensions = get_diametral_dimensions()
+        if radial_dimensions is None:
+            get_radial_dimensions = safe_get(symbols_container, "GetRadialDimensions")
+            if callable(get_radial_dimensions):
+                radial_dimensions = get_radial_dimensions()
         if angle_dimensions is None:
             get_angle_dimensions = safe_get(symbols_container, "GetAngleDimensions")
             if callable(get_angle_dimensions):
@@ -6905,9 +8173,15 @@ def _apply_sketch_dimensions(view, sketch_entities, planned_dimensions, options)
             if kind == "line_length":
                 result = _add_line_dimension(line_dimensions, dimension_payload, sketch_entities)
             elif kind == "circle_diameter":
-                if diametral_dimensions is None or not callable(safe_get(diametral_dimensions, "Add")):
-                    raise RuntimeError("view does not expose ISymbols2DContainer.DiametralDimensions.Add")
-                result = _add_circle_diameter_dimension(diametral_dimensions, dimension_payload, sketch_entities)
+                creation_mode = str(dimension_payload.get("creation_mode") or "").strip().lower()
+                if creation_mode == "radial":
+                    if radial_dimensions is None or not callable(safe_get(radial_dimensions, "Add")):
+                        raise RuntimeError("view does not expose ISymbols2DContainer.RadialDimensions.Add")
+                    result = _add_circle_radius_dimension(radial_dimensions, dimension_payload, sketch_entities)
+                else:
+                    if diametral_dimensions is None or not callable(safe_get(diametral_dimensions, "Add")):
+                        raise RuntimeError("view does not expose ISymbols2DContainer.DiametralDimensions.Add")
+                    result = _add_circle_diameter_dimension(diametral_dimensions, dimension_payload, sketch_entities)
             elif kind == "axis_distance":
                 if str(dimension_payload.get("display_mode") or "").strip().lower() == "diameter":
                     if axis_line is None:
@@ -7134,6 +8408,324 @@ def _save_generated_part_document(doc3, app, output_path, close_after_save, step
     return saved, created_document
 
 
+def _attempt_partial_generated_part_save(doc3, app, output_path, close_after_save, steps_report, visible=False):
+    if doc3 is None or not output_path:
+        return {
+            "attempted": False,
+            "saved": False,
+            "output_path": output_path,
+            "document": None,
+            "error": "partial_save_unavailable",
+        }
+    try:
+        saved, created_document = _save_generated_part_document(
+            doc3,
+            app,
+            output_path,
+            close_after_save,
+            steps_report,
+            visible=visible,
+        )
+        return {
+            "attempted": True,
+            "saved": bool(saved),
+            "output_path": output_path,
+            "document": created_document,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "saved": False,
+            "output_path": output_path,
+            "document": None,
+            "error": str(exc),
+        }
+
+
+def _apply_saved_compression_spring_anchor_rotation_bindings(app, output_path, planned_bindings, steps_report):
+    planned = [item for item in (planned_bindings or []) if item and item.get("expression") not in (None, "")]
+    if not planned:
+        return {"ok": True, "applied_count": 0, "bindings": []}
+
+    document, attempts = _open_document_in_app(app, output_path, visible=False, read_only=False)
+    if document is None:
+        raise RuntimeError(
+            "Failed to reopen saved compression spring for anchor rotation binding | attempts=%s"
+            % json.dumps(attempts, ensure_ascii=False)
+        )
+
+    try:
+        part = safe_get(document, "TopPart")
+        if part is None:
+            doc3_model = cast_document_3d(document)
+            part = safe_get(doc3_model, "TopPart")
+        if part is None:
+            raise RuntimeError("Saved compression spring document does not expose TopPart")
+        auxiliary_container = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+        if auxiliary_container is None:
+            raise RuntimeError("Saved compression spring part does not expose IAuxiliaryGeomContainer")
+        spirals = safe_get(auxiliary_container, "Spirals3D")
+        if spirals is None:
+            raise RuntimeError("Saved compression spring part does not expose Spirals3D")
+        spiral_by_name = {}
+        for spiral in iter_collection(spirals):
+            spiral_name = str(safe_get(spiral, "Name", "") or "").strip()
+            if spiral_name:
+                spiral_by_name[spiral_name] = spiral
+
+        report = {
+            "step": "post_save_bind_spring_anchor_rotation",
+            "scenario": "compression_spring",
+            "ok": True,
+            "applied_count": 0,
+            "failed_count": 0,
+            "bindings": [],
+            "open_attempts": attempts,
+        }
+        for item in planned:
+            path_name = str(item.get("path_name") or "").strip()
+            spiral = spiral_by_name.get(path_name)
+            if spiral is None:
+                report["bindings"].append(
+                    {
+                        "role": item.get("role"),
+                        "path_name": path_name,
+                        "ok": False,
+                        "error": "spiral_not_found_in_saved_document",
+                    }
+                )
+                report["failed_count"] += 1
+                continue
+            binding_report = _bind_operation_variables(
+                spiral,
+                [_build_spring_anchor_rotation_binding(item.get("expression"))],
+            )
+            binding_report["role"] = item.get("role")
+            binding_report["path_name"] = path_name
+            binding_report["target"] = "spiral_path"
+            report["bindings"].append(binding_report)
+            if binding_report.get("ok", False):
+                report["applied_count"] += 1
+            else:
+                report["failed_count"] += 1
+        report["ok"] = report["failed_count"] == 0
+        if not report["ok"]:
+            bridge_path = get_short_path(os.path.abspath(__file__))
+            child_payload = {
+                "bridge_path": bridge_path,
+                "output_path": get_short_path(output_path),
+                "planned_bindings": planned,
+            }
+            child_script = r"""
+import json, sys
+payload = json.loads(sys.argv[1])
+try:
+    import importlib.util as importlib_util
+except Exception:
+    importlib_util = None
+if importlib_util is not None and hasattr(importlib_util, "spec_from_file_location"):
+    spec = importlib_util.spec_from_file_location("kompas_bridge_fresh_bind", payload["bridge_path"])
+    bridge = importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+else:
+    import imp
+    bridge = imp.load_source("kompas_bridge_fresh_bind", payload["bridge_path"])
+app = bridge.make_app()
+document, attempts = bridge._open_document_in_app(app, payload["output_path"], visible=False, read_only=False)
+if document is None:
+    raise RuntimeError("fresh_process_open_failed: %s" % json.dumps(attempts, ensure_ascii=False))
+try:
+    part = bridge.safe_get(document, "TopPart")
+    if part is None:
+        doc3_model = bridge.cast_document_3d(document)
+        part = bridge.safe_get(doc3_model, "TopPart")
+    auxiliary_container = bridge._cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    spirals = bridge.safe_get(auxiliary_container, "Spirals3D")
+    spiral_by_name = {}
+    for spiral in bridge.iter_collection(spirals):
+        spiral_name = str(bridge.safe_get(spiral, "Name", "") or "").strip()
+        if spiral_name:
+            spiral_by_name[spiral_name] = spiral
+    fresh_report = {"step": "post_save_bind_spring_anchor_rotation_fresh_process", "scenario": "compression_spring", "ok": True, "applied_count": 0, "failed_count": 0, "bindings": []}
+    for item in payload["planned_bindings"]:
+        path_name = str(item.get("path_name") or "").strip()
+        spiral = spiral_by_name.get(path_name)
+        if spiral is None:
+            fresh_report["bindings"].append({"role": item.get("role"), "path_name": path_name, "ok": False, "error": "spiral_not_found_in_saved_document"})
+            fresh_report["failed_count"] += 1
+            continue
+        binding_report = bridge._bind_operation_variables(spiral, [{"target": "spiral_path", "parameter_note": "Angle", "parameter_note_aliases": ["Angle", "Угол", "Rotation", "Rotation angle", "Angle of rotation", "Угол вращения", "Вращение"], "expression": str(item.get("expression")), "role": "spring_anchor_rotation"}])
+        binding_report["role"] = item.get("role")
+        binding_report["path_name"] = path_name
+        binding_report["target"] = "spiral_path"
+        fresh_report["bindings"].append(binding_report)
+        if binding_report.get("ok", False):
+            fresh_report["applied_count"] += 1
+        else:
+            fresh_report["failed_count"] += 1
+    fresh_report["ok"] = fresh_report["failed_count"] == 0
+    if not fresh_report["ok"]:
+        raise RuntimeError(json.dumps(fresh_report, ensure_ascii=False))
+    if not bool(document.Save()):
+        raise RuntimeError("fresh_process_save_failed")
+    print(json.dumps(fresh_report, ensure_ascii=False))
+finally:
+    try:
+        document.Close(bridge.parse_close_mode(None))
+    except Exception:
+        pass
+"""
+            subprocess_module = __import__("subprocess")
+            process = subprocess_module.Popen(
+                [sys.executable, "-c", child_script, json.dumps(child_payload, ensure_ascii=False)],
+                stdout=subprocess_module.PIPE,
+                stderr=subprocess_module.PIPE,
+                universal_newlines=True,
+            )
+            try:
+                stdout_text, stderr_text = process.communicate(timeout=180)
+            except TypeError:
+                stdout_text, stderr_text = process.communicate()
+            except subprocess_module.TimeoutExpired:
+                process.kill()
+                stdout_text, stderr_text = process.communicate()
+                raise RuntimeError(
+                    "Timed out while binding saved compression spring anchor rotation expressions"
+                )
+            if process.returncode != 0:
+                raise RuntimeError(
+                    "Failed to bind saved compression spring anchor rotation expressions: %s | fresh_process_stdout=%s | fresh_process_stderr=%s"
+                    % (
+                        json.dumps(report["bindings"], ensure_ascii=False),
+                        (stdout_text or "").strip(),
+                        (stderr_text or "").strip(),
+                    )
+                )
+            fresh_report = json.loads((stdout_text or "").strip() or "{}")
+            steps_report.append(fresh_report)
+            return fresh_report
+        save_ok = bool(document.Save())
+        report["save_returned_false"] = not save_ok
+        if not save_ok:
+            verification = _verify_saved_compression_spring_anchor_rotation_bindings(
+                app,
+                output_path,
+                planned,
+            )
+            report["save_verification"] = verification
+            if not verification.get("ok", False):
+                raise RuntimeError(
+                    "Saved compression spring document Save() after anchor rotation binding returned False"
+                )
+        steps_report.append(report)
+        return report
+    finally:
+        try:
+            document.Close(parse_close_mode(None))
+        except Exception:
+            pass
+
+
+def _verify_saved_compression_spring_anchor_rotation_bindings(app, output_path, planned_bindings):
+    planned = [item for item in (planned_bindings or []) if item and item.get("expression") not in (None, "")]
+    if not planned:
+        return {"ok": True, "verified_count": 0, "failed_count": 0, "bindings": []}
+
+    document, attempts = _open_document_in_app(app, output_path, visible=False, read_only=False)
+    if document is None:
+        return {
+            "ok": False,
+            "verified_count": 0,
+            "failed_count": len(planned),
+            "bindings": [],
+            "open_attempts": attempts,
+            "error": "verify_open_failed",
+        }
+
+    try:
+        part = safe_get(document, "TopPart")
+        if part is None:
+            doc3_model = cast_document_3d(document)
+            part = safe_get(doc3_model, "TopPart")
+        auxiliary_container = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+        spirals = safe_get(auxiliary_container, "Spirals3D") if auxiliary_container is not None else None
+        spiral_by_name = {}
+        for spiral in iter_collection(spirals or []):
+            spiral_name = str(safe_get(spiral, "Name", "") or "").strip()
+            if spiral_name:
+                spiral_by_name[spiral_name] = spiral
+        aliases = set(SPRING_ANCHOR_ROTATION_PARAMETER_NOTES)
+        report = {
+            "ok": True,
+            "verified_count": 0,
+            "failed_count": 0,
+            "bindings": [],
+            "open_attempts": attempts,
+        }
+        for item in planned:
+            path_name = str(item.get("path_name") or "").strip()
+            spiral = spiral_by_name.get(path_name)
+            if spiral is None:
+                report["bindings"].append(
+                    {
+                        "role": item.get("role"),
+                        "path_name": path_name,
+                        "ok": False,
+                        "error": "spiral_not_found_in_saved_document",
+                    }
+                )
+                report["failed_count"] += 1
+                continue
+            expected_expression = str(item.get("expression") or "").strip()
+            matched = None
+            seen = []
+            for variable in _iter_operation_variables(spiral):
+                note = str(safe_get(variable, "ParameterNote", "") or "")
+                if note not in aliases:
+                    continue
+                expression = str(safe_get(variable, "Expression", "") or "").strip()
+                seen.append({"parameter_note": note, "expression": expression})
+                if expression == expected_expression:
+                    matched = {
+                        "parameter_note": note,
+                        "expression": expression,
+                        "value": safe_get(variable, "Value"),
+                    }
+                    break
+            if matched is None:
+                report["bindings"].append(
+                    {
+                        "role": item.get("role"),
+                        "path_name": path_name,
+                        "ok": False,
+                        "expected_expression": expected_expression,
+                        "seen": seen,
+                        "error": "expression_not_persisted",
+                    }
+                )
+                report["failed_count"] += 1
+                continue
+            report["bindings"].append(
+                {
+                    "role": item.get("role"),
+                    "path_name": path_name,
+                    "ok": True,
+                    "parameter_note": matched["parameter_note"],
+                    "expression": matched["expression"],
+                    "value": _json_safe_scalar(matched["value"]),
+                }
+            )
+            report["verified_count"] += 1
+        report["ok"] = report["failed_count"] == 0
+        return report
+    finally:
+        try:
+            document.Close(parse_close_mode(None))
+        except Exception:
+            pass
+
+
 def _create_point3d(model_container, name, origin):
     points = safe_get(model_container, "Points3D")
     if points is None:
@@ -7232,7 +8824,7 @@ def _create_point3d_displace(
     parameters = _cast_to_com_interface(safe_get(point, "Parameters"), "IPoint3DParamDisplace")
     if parameters is None:
         raise RuntimeError("Point3D does not expose IPoint3DParamDisplace")
-    if guiding_object is not None or distance is not None:
+    if guiding_object is not None or distance is not None or (position_object is not None and distance_expression is not None):
         set_association_vertex = safe_get(parameters, "SetAssociationVertex")
         set_guiding_object = safe_get(parameters, "SetGuidingObject")
         if position_object is not None:
@@ -7290,6 +8882,76 @@ def _create_point3d_on_curve(model_container, name, curve_object, offset=0.0, *,
     if not point.Update():
         raise RuntimeError("Point3D Update returned False for curve point")
     return point
+
+
+def _create_trimmed_curve_path(
+    part,
+    model_container,
+    name,
+    base_curve,
+    point_name=None,
+    offset=0.0,
+    direction=True,
+    offset_type=0,
+    sense=True,
+    point_variable_bindings=None,
+):
+    auxiliary_container = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    if auxiliary_container is None:
+        raise RuntimeError("Part does not expose IAuxiliaryGeomContainer")
+    try:
+        point = _create_point3d_on_curve(
+            model_container,
+            point_name or ("%s_point" % name),
+            base_curve,
+            offset=offset,
+            direction=direction,
+            offset_type=offset_type,
+        )
+    except RuntimeError:
+        if not point_variable_bindings:
+            raise
+        point = _create_point3d_on_curve(
+            model_container,
+            point_name or ("%s_point" % name),
+            base_curve,
+            offset=0.0,
+            direction=direction,
+            offset_type=offset_type,
+        )
+    point_binding_report = None
+    if point_variable_bindings:
+        point_binding_report = _bind_operation_variables(point, point_variable_bindings)
+        if not point_binding_report.get("ok", False):
+            raise RuntimeError("Failed to bind trimmed curve point variables for %s" % name)
+        if not bool(point.Update()):
+            raise RuntimeError("Failed to update trimmed curve point %s after variable binding" % name)
+    trimmed_curves = safe_get(auxiliary_container, "TrimmedCurves")
+    if trimmed_curves is None or not callable(safe_get(trimmed_curves, "Add")):
+        raise RuntimeError("Auxiliary geometry container does not expose TrimmedCurves.Add")
+    trimmed = trimmed_curves.Add()
+    if trimmed is None:
+        raise RuntimeError("TrimmedCurves.Add() returned None")
+    try:
+        trimmed.Name = name
+    except Exception:
+        pass
+    trimmed.Curve = base_curve
+    trimmed.CutObject1 = point
+    try:
+        trimmed.UseTwoCutObjecs = False
+    except Exception:
+        pass
+    trimmed.Sense = bool(sense)
+    if not bool(trimmed.Update()):
+        if point_variable_bindings:
+            return point, base_curve, {
+                "ok": True,
+                "fallback": "base_curve_after_trimmed_curve_update_false",
+                "bindings": point_binding_report,
+            }
+        raise RuntimeError("Failed to create trimmed curve %s" % name)
+    return point, trimmed, point_binding_report
 
 
 def _signed_distance_expression(expression, sign):
@@ -8114,6 +9776,647 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
         "first_hole_center": first_hole_point,
         "first_hole_lcs": hole_lcs,
     }
+
+
+def _build_compression_spring_feature(part, model_container, params, preview, steps_report, coordinate_system=None):
+    import win32com.client
+
+    planned_variables = []
+    for operation in (preview or {}).get("operations") or []:
+        if operation.get("operation") == "add_variables":
+            planned_variables = list(operation.get("variables") or [])
+            break
+    if planned_variables:
+        steps_report.append(_apply_part_variables(part, planned_variables))
+
+    placement = params.get("placement") or {}
+    effective_origin = list(placement.get("effective_origin") or [0.0, 0.0])
+    while len(effective_origin) < 2:
+        effective_origin.append(0.0)
+    spring_start_origin = [float(effective_origin[0]), float(effective_origin[1]), 0.0]
+    spring_end_origin = [
+        float(effective_origin[0]) + float(params.get("height") or 0.0),
+        float(effective_origin[1]),
+        0.0,
+    ]
+    spring_name = str(params.get("name") or "COMPRESSION_SPRING").strip() or "COMPRESSION_SPRING"
+    start_point = _create_point3d(model_container, "%s_START" % spring_name, spring_start_origin)
+    end_point = _create_point3d(model_container, "%s_END" % spring_name, spring_end_origin)
+    axis = _create_axis3d_by_2_points(part, "%s_AXIS" % spring_name, start_point, end_point)
+    steps_report.append(
+        {
+            "step": "create_spring_axis",
+            "ok": True,
+            "scenario": "compression_spring",
+            "reference": safe_get(axis, "Reference"),
+            "name": safe_get(axis, "Name"),
+            "start_origin": spring_start_origin,
+            "end_origin": spring_end_origin,
+        }
+    )
+
+    mean_diameter = float(params.get("mean_diameter") or 0.0)
+    spiral_diameter = float(params.get("spiral_diameter") or mean_diameter)
+    wire_radius = float(params.get("wire_diameter") or 0.0) / 2.0
+    profile_name = str(params.get("profile_name") or "spring_wire_profile").strip() or "spring_wire_profile"
+    sweep_name = str(params.get("sweep_name") or "spring_body").strip() or "spring_body"
+    sketch_plane, profile_lcs_rotation = _resolve_compression_spring_profile_sketch_frame(params)
+
+    segment_plan = list(params.get("segment_plan") or [])
+    steps_report.append(
+        {
+            "step": "prepare_spring_segments",
+            "ok": True,
+            "scenario": "compression_spring",
+            "segment_count": len(segment_plan),
+            "segment_roles": [str((segment or {}).get("role") or "") for segment in segment_plan],
+        }
+    )
+    path_verification = dict(params.get("path_verification") or {})
+    if path_verification:
+        steps_report.append(
+            {
+                "step": "verify_segment_phase_plan",
+                "ok": bool(path_verification.get("contour_ready", False)),
+                "scenario": "compression_spring",
+                "joint_count": int(path_verification.get("joint_count") or 0),
+                "max_joint_gap": float(path_verification.get("max_joint_gap") or 0.0),
+                "max_joint_angle_gap": float(path_verification.get("max_joint_angle_gap") or 0.0),
+            }
+        )
+        if not bool(path_verification.get("contour_ready", False)):
+            raise RuntimeError("Compression spring segment phase plan is not contour-ready")
+
+    base_profile_phase = float(segment_plan[0].get("phase_degrees") or 0.0) if segment_plan else 90.0
+    phase_radians = math.radians(base_profile_phase)
+    profile_path_offset = [
+        0.0,
+        (spiral_diameter / 2.0) * math.cos(phase_radians),
+        (spiral_diameter / 2.0) * math.sin(phase_radians),
+    ]
+    auxiliary_objects = [
+        ("spring_axis_start_point", start_point),
+        ("spring_axis_end_point", end_point),
+        ("spring_axis", axis),
+    ]
+    segment_objects = []
+    post_save_anchor_rotation_bindings = _build_post_save_compression_spring_anchor_rotation_bindings(
+        segment_plan
+    )
+    auxiliary_container = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    if auxiliary_container is None:
+        raise RuntimeError("Part does not expose IAuxiliaryGeomContainer")
+    evolutions = safe_get(model_container, "Evolutions")
+    if evolutions is None:
+        get_evolutions = safe_get(model_container, "GetEvolutions")
+        if callable(get_evolutions):
+            evolutions = get_evolutions()
+    if evolutions is None or not callable(safe_get(evolutions, "Add")):
+        raise RuntimeError("Part does not expose Evolutions.Add")
+    steps_report.append(
+        {
+            "step": "resolve_spring_runtime_containers",
+            "ok": True,
+            "scenario": "compression_spring",
+            "auxiliary_container_type": str(type(auxiliary_container)),
+            "spirals_exposed": safe_get(auxiliary_container, "Spirals3D") is not None,
+            "evolutions_type": str(type(evolutions)),
+            "evolutions_add_available": callable(safe_get(evolutions, "Add")),
+        }
+    )
+
+    for segment in segment_plan:
+        segment_role = str(segment.get("role") or "segment")
+        segment_name = str(segment.get("label") or segment_role)
+        start_offset = float(segment.get("start_offset") or 0.0)
+        start_distance_expression_raw = segment.get("start_offset_expression")
+        start_distance_expression = (
+            str(start_distance_expression_raw).strip()
+            if start_distance_expression_raw not in (None, "")
+            else None
+        )
+        if start_distance_expression is None and abs(start_offset) <= 1e-9:
+            segment_start_point = start_point
+        else:
+            segment_start_point = _create_point3d_displace(
+                model_container,
+                "%s_%s_START" % (spring_name, segment_role.upper()),
+                start_point,
+                [0.0, 0.0, 0.0],
+                guiding_object=axis,
+                distance=start_offset,
+            )
+            auxiliary_objects.append(("segment_start_point", segment_start_point))
+            if start_distance_expression is not None:
+                start_point_binding_report = _bind_operation_variables(
+                    segment_start_point,
+                    [
+                        {
+                            "target": "segment_start_point",
+                            "parameter_note": "Distance",
+                            "parameter_note_aliases": [
+                                "Distance",
+                                "Offset",
+                                "Расстояние",
+                            ],
+                            "expression": start_distance_expression,
+                            "role": "spring_segment_start_offset",
+                        }
+                    ],
+                )
+                start_point_binding_report["scenario"] = "compression_spring"
+                start_point_binding_report["target"] = "segment_start_point"
+                start_point_binding_report["role"] = segment_role
+                steps_report.append(start_point_binding_report)
+                if not start_point_binding_report.get("ok", False):
+                    raise RuntimeError(
+                        "Failed to bind compression spring segment start offset expression for %s"
+                        % segment_role
+                    )
+        segment_start_origin = [
+            float(safe_get(segment_start_point, "X", spring_start_origin[0]) or 0.0),
+            float(safe_get(segment_start_point, "Y", spring_start_origin[1]) or 0.0),
+            float(safe_get(segment_start_point, "Z", spring_start_origin[2]) or 0.0),
+        ]
+        steps_report.append(
+            {
+                "step": "create_segment_start_reference",
+                "ok": True,
+                "scenario": "compression_spring",
+                "role": segment_role,
+                "segment": segment_name,
+                "reference": safe_get(segment_start_point, "Reference"),
+                "origin": segment_start_origin,
+                "start_offset": start_offset,
+                "start_offset_expression": start_distance_expression,
+                "guiding_axis_reference": safe_get(axis, "Reference"),
+            }
+        )
+
+        phase_degrees = float(segment.get("phase_degrees") or 0.0)
+        turning_angle_value = segment.get("turning_angle_degrees")
+        if turning_angle_value is None:
+            turning_angle_degrees = math.fmod(phase_degrees, 360.0)
+            if abs(turning_angle_degrees) <= 1e-9:
+                turning_angle_degrees = 0.0
+            if turning_angle_degrees < 0.0:
+                turning_angle_degrees += 360.0
+        else:
+            turning_angle_degrees = float(turning_angle_value)
+        orientation_angle_value = segment.get("orientation_angle_degrees")
+        orientation_angle_degrees = float(orientation_angle_value) if orientation_angle_value is not None else 0.0
+        anchor_rotation_expression_raw = segment.get("anchor_rotation_expression")
+        anchor_rotation_expression = (
+            str(anchor_rotation_expression_raw).strip()
+            if anchor_rotation_expression_raw not in (None, "")
+            else None
+        )
+        angle_application_mode = str(segment.get("angle_application_mode") or "orientation")
+        segment_coordinate_system_rotation_degrees = 0.0
+        segment_coordinate_system = _create_local_coordinate_system_on_point(
+            part,
+            "%s_%s_CS" % (spring_name, segment_role.upper()),
+            segment_start_point,
+            rotation={
+                "rx": 90.0,
+                "ry": 90.0,
+                "rz": segment_coordinate_system_rotation_degrees,
+            },
+        )
+        auxiliary_objects.append(("segment_coordinate_system", segment_coordinate_system))
+        steps_report.append(
+            {
+                "step": "create_segment_coordinate_system",
+                "ok": True,
+                "scenario": "compression_spring",
+                "role": segment_role,
+                "segment": segment_name,
+                "reference": safe_get(segment_coordinate_system, "Reference"),
+                "point_reference": safe_get(segment_start_point, "Reference"),
+                "rotation_degrees": segment_coordinate_system_rotation_degrees,
+                "rotation_expression": None,
+                "requested_spiral_orientation_degrees": orientation_angle_degrees,
+                "rotation_expression_target": "spiral_path_post_save" if anchor_rotation_expression is not None else None,
+                "base_rotation": {"rx": 90.0, "ry": 90.0},
+            }
+        )
+        spiral = win32com.client.CastTo(auxiliary_container.Spirals3D.Add(56), "ICylindricSpiral3D")
+        if spiral is None:
+            raise RuntimeError("Spirals3D.Add(Cylindric spiral) returned None")
+        spiral_position = safe_get(spiral, "Position")
+        if spiral_position is None:
+            raise RuntimeError("Compression spring spiral does not expose Position")
+        spiral_position.ParameterType = 1
+        spiral_position.OrientationType = 0
+        if not bool(spiral_position.SetAssociationObject(segment_start_point)):
+            raise RuntimeError("Compression spring spiral SetAssociationObject(point) returned False")
+        position_parameters = win32com.client.CastTo(
+            spiral_position.LocalCSParameters,
+            "ILocalCSAxesDirectionParam",
+        )
+        if position_parameters is None:
+            raise RuntimeError("Compression spring spiral does not expose ILocalCSAxesDirectionParam")
+        position_parameters.LeadAxis = 73
+        try:
+            position_parameters.RotateAxis = 73
+        except Exception:
+            pass
+        if not bool(position_parameters.SetDirectingObject(73, axis)):
+            raise RuntimeError("Compression spring spiral SetDirectingObject(OZ, axis) returned False")
+        if not bool(spiral_position.Update()):
+            raise RuntimeError("Compression spring spiral position Update() returned False")
+        spiral.CoordinateSystem = segment_coordinate_system
+        spiral.DiameterType = 0
+        spiral.Diameter = spiral_diameter
+        spiral.BuildingType = 1
+        spiral.Step = float(segment.get("pitch") or 0.0)
+        spiral.Height = float(segment.get("height") or 0.0)
+        spiral.BuildingDirection = True
+        spiral.TurnDirection = not bool(params.get("left_hand", False))
+        try:
+            spiral.Name = str(segment.get("path_name") or ("%s_%s_PATH" % (spring_name, segment_role.upper())))
+        except Exception:
+            pass
+        turning_angle_report = _apply_spiral_turning_angle(
+            spiral,
+            position_parameters,
+            0.0,
+            "default",
+        )
+        orientation_report = _apply_spiral_turning_angle(
+            spiral,
+            position_parameters,
+            0.0,
+            "default",
+        )
+        if not bool(spiral.Update()):
+            raise RuntimeError("Compression spring spiral Update() after angle setup returned False")
+        spiral_variable_bindings = list(segment.get("operation_variable_bindings") or [])
+        if anchor_rotation_expression is not None:
+            spiral_variable_bindings.append(
+                _build_spring_anchor_rotation_binding(anchor_rotation_expression)
+            )
+        spiral_binding_report = _bind_operation_variables(
+            spiral,
+            spiral_variable_bindings,
+        )
+        spiral_binding_report["scenario"] = "compression_spring"
+        spiral_binding_report["target"] = "spiral_path"
+        spiral_binding_report["role"] = segment_role
+        steps_report.append(spiral_binding_report)
+        geometry_report = _compute_curve_endpoint_report(
+            spiral,
+            expected_start=segment.get("start_point"),
+            expected_end=segment.get("end_point"),
+        )
+        sampled_endpoints = _sample_curve_endpoints(spiral)
+        steps_report.append(
+            {
+                "step": "create_spiral_path",
+                "ok": True,
+                "scenario": "compression_spring",
+                "role": segment_role,
+                "segment": segment_name,
+                "reference": safe_get(spiral, "Reference"),
+                "height": float(safe_get(spiral, "Height", 0.0) or 0.0),
+                "pitch": float(safe_get(spiral, "Step", 0.0) or 0.0),
+                "diameter": float(safe_get(spiral, "Diameter", 0.0) or 0.0),
+                "turn_direction": bool(safe_get(spiral, "TurnDirection", False)),
+                "phase_degrees": phase_degrees,
+                "turning_angle_degrees": turning_angle_degrees,
+                "orientation_angle_degrees": None if angle_application_mode == "default" else 0.0,
+                "anchor_rotation_expression": anchor_rotation_expression,
+                "coordinate_system_reference": safe_get(segment_coordinate_system, "Reference"),
+                "coordinate_system_rotation_degrees": segment_coordinate_system_rotation_degrees,
+                "turning_angle_applied_degrees": turning_angle_report.get(
+                    "candidate_degrees",
+                    turning_angle_report.get("requested_degrees"),
+                ),
+                "orientation_angle_applied_degrees": orientation_report.get(
+                    "candidate_degrees",
+                    orientation_report.get("requested_degrees"),
+                ),
+                "angle_application_mode": orientation_report.get("mode"),
+                "geometry_checked": geometry_report.get("geometry_checked"),
+                "geometry_ok": geometry_report.get("geometry_ok"),
+                "start_gap": geometry_report.get("start_gap"),
+                "end_gap": geometry_report.get("end_gap"),
+                "start_offset": start_offset,
+                "sampled_endpoints": sampled_endpoints,
+                "expected_start": list(segment.get("start_point") or []),
+                "expected_end": list(segment.get("end_point") or []),
+            }
+        )
+        auxiliary_objects.append(("segment_spiral_path", spiral))
+        segment_objects.append(
+            {
+                "role": segment_role,
+                "start_point": segment_start_point,
+                "path": spiral,
+                "axis": axis,
+                "position_parameters": position_parameters,
+                "angle_application_mode": angle_application_mode,
+                "applied_orientation_angle": 0.0,
+                "orientation_angle_candidates": [0.0],
+                "segment": segment_name,
+                "path_name": str(segment.get("path_name") or ""),
+                "anchor_rotation_expression": anchor_rotation_expression,
+                "coordinate_system": segment_coordinate_system,
+            }
+        )
+
+    profile_anchor = segment_objects[0]["start_point"] if segment_objects else start_point
+    profile_lcs = _create_local_coordinate_system_on_point(
+        part,
+        "%s_PROFILE_LCS" % spring_name,
+        profile_anchor,
+        rotation=profile_lcs_rotation,
+    )
+    auxiliary_objects.append(("profile_lcs", profile_lcs))
+    profile_center = [profile_path_offset[0], profile_path_offset[2]]
+    profile_seed_offset = max(float(wire_radius) * 0.5, 1.0)
+    profile_seed_center = [
+        float(profile_center[0]) + profile_seed_offset,
+        float(profile_center[1]) + profile_seed_offset,
+    ]
+    profile_sketch, profile_circle, _ = _create_sketch_circle_with_coordinate_system(
+        model_container,
+        part,
+        profile_name,
+        sketch_plane,
+        profile_seed_center,
+        wire_radius,
+        int(((params.get("sketch") or {}).get("profile_line_style")) or 1),
+        coordinate_system=profile_lcs,
+    )
+    auxiliary_objects.append(("wire_profile_sketch", profile_sketch))
+    steps_report.append(
+        {
+            "step": "create_wire_profile",
+            "ok": True,
+            "scenario": "compression_spring",
+            "role": "full_path",
+            "reference": safe_get(profile_sketch, "Reference"),
+            "plane": sketch_plane,
+            "radius": wire_radius,
+            "coordinate_system_reference": safe_get(profile_lcs, "Reference"),
+            "coordinate_system_rotation": dict(profile_lcs_rotation or {}),
+            "center": profile_center,
+            "center_offset_3d": profile_path_offset,
+            "profile_sketch_target_state": str(params.get("profile_sketch_target_state") or "fully_defined"),
+        }
+    )
+    _parameterize_compression_spring_profile_sketch(
+        profile_sketch,
+        profile_circle,
+        profile_center,
+        wire_radius,
+        params,
+        steps_report,
+    )
+
+    connector_plan = list(params.get("connector_plan") or [])
+    sweep_paths_for_report = [item["path"] for item in segment_objects]
+    if connector_plan:
+        connector_objects = _build_compression_spring_transition_curve_paths(
+            part,
+            model_container,
+            auxiliary_container,
+            spring_name,
+            segment_objects,
+            connector_plan,
+            steps_report,
+        )
+        auxiliary_objects.extend(
+            _collect_compression_spring_connector_auxiliary_objects(connector_objects)
+        )
+        contour_paths = _resolve_named_curve_sequence(
+            params.get("full_path_sequence") or [],
+            segment_objects,
+            connector_objects,
+        )
+        sweep_paths_for_report = list(contour_paths)
+        path_contour, contour_report = _build_curve_contour(
+            auxiliary_container,
+            "%s_PATH_CONTOUR" % spring_name,
+            contour_paths,
+            allow_incomplete=True,
+            expected_edges_count=len(contour_paths),
+        )
+    else:
+        path_contour, contour_report = _resolve_spring_path_contour(
+            auxiliary_container,
+            spring_name,
+            segment_objects,
+        )
+    auxiliary_objects.append(("spring_path_contour", path_contour))
+    steps_report.append(
+        {
+            "step": "build_spring_path_contour",
+            "ok": True,
+            "scenario": "compression_spring",
+            "reference": safe_get(path_contour, "Reference"),
+            "model_object_type": safe_get(path_contour, "ModelObjectType"),
+            "source_path_count": contour_report["source_path_count"],
+            "edges_count": contour_report["edges_count"],
+            "expected_edges_count": contour_report.get("expected_edges_count"),
+            "connector_count": len(connector_plan),
+            "candidate_orientation_angles": contour_report.get("candidate_orientation_angles"),
+            "combo_index": contour_report.get("combo_index"),
+            "selected_orientation_angles": [
+                {
+                    "role": item["role"],
+                    "orientation_angle_degrees": float(item.get("applied_orientation_angle") or 0.0),
+                }
+                for item in segment_objects
+            ],
+        }
+    )
+    evolution = win32com.client.CastTo(evolutions.Add(46), "IEvolution")
+    if evolution is None:
+        raise RuntimeError("Evolutions.Add(o3d_bossEvolution) returned None")
+    evolution.Sketch = profile_sketch
+    evolution.Edges = path_contour
+    sketch_shift_type_applied = False
+    try:
+        evolution.SketchShiftType = 2
+        sketch_shift_type_applied = True
+    except Exception:
+        pass
+    by_surface_normal_applied = False
+    try:
+        evolution.BySurfaceNormal = True
+        by_surface_normal_applied = True
+    except Exception:
+        pass
+    try:
+        evolution.Name = sweep_name
+    except Exception:
+        pass
+    if not bool(evolution.Update()):
+        raise RuntimeError("Failed to create compression_spring body")
+    steps_report.append(
+        {
+            "step": "boss_evolution",
+            "ok": True,
+            "scenario": "compression_spring",
+            "role": "full_path",
+            "reference": safe_get(evolution, "Reference"),
+            "model_object_type": safe_get(evolution, "ModelObjectType"),
+            "operation_result": safe_get(evolution, "OperationResult"),
+            "edge_count": len(sweep_paths_for_report),
+            "path_contour_reference": safe_get(path_contour, "Reference"),
+            "paths": [safe_get(path, "Reference") for path in sweep_paths_for_report],
+            "profile": safe_get(profile_sketch, "Reference"),
+            "sketch_shift_type": safe_get(evolution, "SketchShiftType"),
+            "sketch_shift_type_applied": sketch_shift_type_applied,
+            "by_surface_normal": safe_get(evolution, "BySurfaceNormal"),
+            "by_surface_normal_applied": by_surface_normal_applied,
+        }
+    )
+    params["_post_save_anchor_rotation_bindings"] = post_save_anchor_rotation_bindings
+
+    trim_report = _apply_compression_spring_ground_surface_sections(
+        part,
+        model_container,
+        params,
+        segment_objects,
+        auxiliary_objects,
+    )
+    if trim_report is not None:
+        steps_report.append(trim_report)
+
+    if bool(params.get("auxiliary_geometry_hidden", True)):
+        visibility_report = _hide_auxiliary_model_objects(auxiliary_objects, True)
+        step_report = {
+            "step": "hide_spring_auxiliary_geometry",
+            "scenario": "compression_spring",
+        }
+        step_report.update(visibility_report)
+        steps_report.append(step_report)
+
+    working_segment = None
+    for item in segment_objects:
+        if item["role"] == "working":
+            working_segment = item
+            break
+    if working_segment is None and segment_objects:
+        working_segment = segment_objects[0]
+    return {
+        "body": evolution,
+        "axis": axis,
+        "spiral_path": working_segment["path"] if working_segment is not None else None,
+        "path_contour": path_contour,
+        "segments": segment_objects,
+        "connectors": [],
+        "profile": profile_sketch,
+    }
+
+
+def _apply_compression_spring_ground_surface_sections(part, model_container, params, segment_objects, auxiliary_objects):
+    trim_plan = (params or {}).get("ground_trim_plan") or {}
+    if not trim_plan.get("enabled"):
+        return None
+    if str((params or {}).get("direction") or "Z").strip().upper() != "Z":
+        return {
+            "step": "compression_spring_ground_surface_section",
+            "ok": False,
+            "status": "unsupported_axis",
+            "axis": (params or {}).get("direction") or "Z",
+        }
+
+    by_role = {str(entry.get("role") or ""): entry for entry in segment_objects or []}
+    axis_object = (segment_objects or [{}])[0].get("axis") if segment_objects else None
+    results = []
+    for operation in list(trim_plan.get("operations") or []):
+        role = str(operation.get("role") or "").strip()
+        if role == "start_ground_trim":
+            joint_source = by_role.get("working") or by_role.get("start_end")
+            joint_point = (joint_source or {}).get("start_point")
+            direction = True
+        elif role == "finish_ground_trim":
+            joint_source = by_role.get("finish_end")
+            joint_point = (joint_source or {}).get("start_point")
+            direction = False
+        else:
+            results.append({"role": role, "ok": False, "error": "unsupported_trim_role"})
+            continue
+        if joint_point is None:
+            results.append({"role": role, "ok": False, "error": "missing_joint_point"})
+            continue
+
+        offset_expression = str(operation.get("offset_expression") or "0")
+        trim_point = _create_point3d_displace(
+            model_container,
+            "%s_SECTION_POINT" % role.upper(),
+            joint_point,
+            [0.0, 0.0, 1.0],
+            distance=0.0,
+            guiding_object=axis_object,
+        )
+        trim_point_binding_report = _bind_operation_variables(
+            trim_point,
+            _build_distance_point_bindings(offset_expression, "%s_section_point_distance" % role),
+        )
+        if not trim_point_binding_report.get("ok", False):
+            raise RuntimeError("Failed to bind trim point distance for %s" % role)
+        auxiliary_objects.append(("%s_section_point" % role, trim_point))
+        section_plane = _create_plane_perpendicular_by_edge(
+            part,
+            "%s_SECTION_PLANE" % role.upper(),
+            trim_point,
+            axis_object,
+        )
+        auxiliary_objects.append(("%s_section_plane" % role, section_plane))
+        cut = _create_cut_by_surface(model_container, section_plane, direction=direction)
+        results.append(
+            {
+                "role": role,
+                "ok": True,
+                "operation": "section_by_surface",
+                "offset_expression": offset_expression,
+                "direction": direction,
+                "trim_point_reference": safe_get(trim_point, "Reference"),
+                "trim_point_binding": trim_point_binding_report,
+                "section_plane_reference": safe_get(section_plane, "Reference"),
+                "cut_reference": safe_get(cut, "Reference"),
+            }
+        )
+
+    return {
+        "step": "compression_spring_ground_surface_section",
+        "ok": all(item.get("ok") for item in results),
+        "status": "executed" if all(item.get("ok") for item in results) else "partial_failure",
+        "height_reference": trim_plan.get("height_reference"),
+        "results": results,
+    }
+
+
+def _create_cut_by_surface(model_container, surface_object, *, direction):
+    cuts = safe_get(model_container, "Cuts")
+    if cuts is None:
+        get_cuts = safe_get(model_container, "GetCuts")
+        if callable(get_cuts):
+            cuts = get_cuts()
+    if cuts is None or not callable(safe_get(cuts, "Add")):
+        raise RuntimeError("Part does not expose Cuts.Add")
+    cut = cuts.Add()
+    if cut is None:
+        raise RuntimeError("Cuts.Add returned None")
+    try:
+        cut.BuildingType = 50
+    except Exception:
+        pass
+    cut.CutObject = surface_object
+    try:
+        cut.Direction = bool(direction)
+    except Exception:
+        set_direction = safe_get(cut, "SetDirection")
+        if callable(set_direction):
+            set_direction(bool(direction))
+    if not cut.Update():
+        raise RuntimeError("Cut-by-surface Update returned False")
+    return cut
 
 
 def _extract_flat_step_preview_data(preview, params):
@@ -9687,6 +11990,34 @@ def _create_plane_parallel_by_point(part, name, reference_plane, point):
     plane.Point = point
     if not plane.Update():
         raise RuntimeError("Parallel-by-point plane Update returned False")
+    return plane
+
+
+def _create_plane_perpendicular_by_edge(part, name, point, edge):
+    import win32com.client
+
+    if point is None:
+        raise RuntimeError("Perpendicular-by-edge plane requires point")
+    if edge is None:
+        raise RuntimeError("Perpendicular-by-edge plane requires edge")
+    auxiliary = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    if auxiliary is None:
+        raise RuntimeError("Part does not expose IAuxiliaryGeomContainer")
+    planes = safe_get(auxiliary, "Planes3D")
+    if planes is None:
+        get_planes = safe_get(auxiliary, "GetPlanes3D")
+        if callable(get_planes):
+            planes = get_planes()
+    if planes is None:
+        raise RuntimeError("Part does not expose Planes3D")
+    plane = win32com.client.CastTo(planes.Add(21), "IPlane3DPerpendicularByEdge")
+    if plane is None:
+        raise RuntimeError("Planes3D.Add(o3d_plane3DPerpendicularByEdge) returned None")
+    plane.Name = str(name or "")
+    plane.Point = point
+    plane.Edge = edge
+    if not plane.Update():
+        raise RuntimeError("Perpendicular-by-edge plane Update returned False")
     return plane
 
 
@@ -11789,6 +14120,14 @@ def _create_local_coordinate_system_on_point(part, name, reference_point, rotati
     return lcs
 
 
+def _assign_model_object_coordinate_system(model_object, coordinate_system):
+    lcs_object = _cast_to_com_interface(model_object, "ILocalCSObject")
+    if lcs_object is None:
+        raise RuntimeError("Model object does not expose ILocalCSObject")
+    lcs_object.CoordinateSystem = coordinate_system
+    return safe_get(lcs_object, "LocalCoordinateSystem") or coordinate_system
+
+
 def _create_local_coordinate_system_on_point_oriented_by_object(
     part,
     name,
@@ -11962,6 +14301,18 @@ def _normalize_runtime_output_key(scenario, output_key):
         normalized = aliases.get(key, key)
         if normalized not in ("body", "thread", "base_face", "start_border", "end_border"):
             raise RuntimeError("Unsupported threaded_step output: %s" % output_key)
+        return normalized
+    if scenario_name == "compression_spring":
+        aliases = {
+            "body": "body",
+            "axis": "axis",
+            "spiral": "spiral_path",
+            "path": "spiral_path",
+            "spiral_path": "spiral_path",
+        }
+        normalized = aliases.get(key, key)
+        if normalized not in ("body", "axis", "spiral_path"):
+            raise RuntimeError("Unsupported compression_spring output: %s" % output_key)
         return normalized
     if scenario_name == "point":
         aliases = {
@@ -12624,7 +14975,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
     preview = operation.get("preview") or {}
     bindings = operation.get("bindings") or {}
 
-    if scenario in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes"):
+    if scenario in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes", "compression_spring"):
         coordinate_system = None
         placement = params.get("placement") or {}
         base_reference = ((placement.get("base") or placement).get("reference") or (placement.get("base") or placement).get("ref") or placement.get("reference") or placement.get("ref"))
@@ -12763,6 +15114,15 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                 steps_report,
                 coordinate_system=coordinate_system,
                 require_source=False,
+            )
+        elif scenario == "compression_spring":
+            feature = _build_compression_spring_feature(
+                part,
+                model_container,
+                params,
+                preview,
+                steps_report,
+                coordinate_system=coordinate_system,
             )
         else:
             feature = _build_bolt_circle_holes_feature(
@@ -13236,6 +15596,14 @@ def _handle_create_point_scenario(payload, scenario):
             steps_report,
             visible=bool(payload.get("visible", False)),
         )
+        if scenario == "compression_spring":
+            current_stage = "post_save_anchor_rotation_bindings"
+            _apply_saved_compression_spring_anchor_rotation_bindings(
+                app,
+                output_path,
+                params.get("_post_save_anchor_rotation_bindings") or [],
+                steps_report,
+            )
         return {
             "scenario": scenario,
             "ok": True,
@@ -13539,7 +15907,7 @@ def handle_create_part_from_scenario(payload):
         return _handle_create_lcs_scenario(payload, scenario)
     if scenario == "workflow":
         return _handle_create_workflow_scenario(payload, scenario)
-    if scenario not in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes"):
+    if scenario not in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes", "compression_spring"):
         raise RuntimeError("Unsupported part scenario: %s" % scenario)
 
     params = payload.get("params") or {}
@@ -13686,6 +16054,14 @@ def handle_create_part_from_scenario(payload):
                 steps_report,
                 require_source=True,
             )
+        elif scenario == "compression_spring":
+            _build_compression_spring_feature(
+                part,
+                model_container,
+                params,
+                payload.get("preview") or {},
+                steps_report,
+            )
         else:
             _build_bolt_circle_holes_feature(
                 part,
@@ -13715,6 +16091,14 @@ def handle_create_part_from_scenario(payload):
             steps_report,
             visible=bool(payload.get("visible", False)),
         )
+        if scenario == "compression_spring":
+            current_stage = "post_save_anchor_rotation_bindings"
+            _apply_saved_compression_spring_anchor_rotation_bindings(
+                app,
+                output_path,
+                params.get("_post_save_anchor_rotation_bindings") or [],
+                steps_report,
+            )
 
         return {
             "scenario": scenario,
@@ -13733,19 +16117,57 @@ def handle_create_part_from_scenario(payload):
             "file_access": file_access_diagnostics(output_path),
         }
     except Exception as exc:
+        partial_save_report = None
         if material_settings is not None and material_settings_snapshot is not None:
             try:
                 restore_new_part_document_settings(material_settings, material_settings_snapshot)
             except Exception:
                 pass
-        if close_after_save:
+        if params.get("save_partial_on_error"):
+            partial_save_report = _attempt_partial_generated_part_save(
+                doc3,
+                app,
+                output_path,
+                close_after_save,
+                steps_report,
+                visible=bool(payload.get("visible", False)),
+            )
+            if params.get("return_partial_result_on_error") and partial_save_report.get("saved"):
+                return {
+                    "scenario": scenario,
+                    "ok": False,
+                    "partial": True,
+                    "document": partial_save_report.get("document"),
+                    "output_path": output_path,
+                    "saved": True,
+                    "closed": close_after_save,
+                    "error": {
+                        "stage": current_stage,
+                        "message": str(exc),
+                        "partial_save": partial_save_report,
+                    },
+                    "steps": steps_report,
+                    "summary": {
+                        "step_count": len(params.get("steps") or []),
+                        "total_length": params.get("total_length"),
+                        "operation_count": 1,
+                    },
+                    "remaining_documents": list_documents(app),
+                    "file_access": file_access_diagnostics(output_path),
+                }
+        if close_after_save and not (partial_save_report and partial_save_report.get("saved")):
             try:
                 _close_generated_document(doc3, app)
             except Exception:
                 pass
         raise RuntimeError(
-            "create_part_from_scenario failed at %s: %s | steps=%s"
-            % (current_stage, exc, json.dumps(steps_report, ensure_ascii=False))
+            "create_part_from_scenario failed at %s: %s | steps=%s | partial_save=%s"
+            % (
+                current_stage,
+                exc,
+                json.dumps(steps_report, ensure_ascii=False),
+                json.dumps(partial_save_report, ensure_ascii=False),
+            )
         )
 
 
@@ -13778,6 +16200,8 @@ def dispatch(request):
         return handle_list_documents()
     if action == "launch_native_module_command":
         return handle_launch_native_module_command(payload)
+    if action == "probe_native_entrypoint_loader_hosted":
+        return handle_probe_native_entrypoint_loader_hosted(payload)
     if action == "get_document_tree":
         return handle_get_document_tree(payload)
     if action == "create_point3d":

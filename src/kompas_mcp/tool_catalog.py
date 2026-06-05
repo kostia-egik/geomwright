@@ -73,6 +73,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "verify_document_readback_stability",
             "classify_runtime_error",
             "normalize_operation_result",
+            "preview_section_by_surface_operation",
             "create_point3d",
             "create_sketch_line_segment",
             "create_sketch_circle",
@@ -119,6 +120,12 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
         "stability": "experimental",
         "purpose": "Preview or create supported parametric part scenarios.",
         "tools": ["preview_part_scenario", "create_part_from_scenario"],
+    },
+    {
+        "name": "spring_generation",
+        "stability": "experimental",
+        "purpose": "Preview or create supported spring-family parametric scenarios.",
+        "tools": ["preview_compression_spring", "create_compression_spring"],
     },
     {
         "name": "composition_specification",
