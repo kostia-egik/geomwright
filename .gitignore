@@ -5,6 +5,7 @@ __pycache__/
 *.tmp
 .tmp_*.txt
 tmp_*.py
+tmp/
 sample/generated/
 *.egg-info/
 .pytest_cache/

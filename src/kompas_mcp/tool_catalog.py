@@ -7,11 +7,13 @@ from typing import Any
 TOOL_CATEGORIES: list[dict[str, Any]] = [
     {
         "name": "server_guidance",
+        "stability": "stable",
         "purpose": "Discover the MCP tool surface and choose the right workflow.",
         "tools": ["get_mcp_tool_catalog"],
     },
     {
         "name": "native_modules",
+        "stability": "research",
         "purpose": "Inspect installed native KOMPAS application modules and safely launch registered commands when explicitly allowed.",
         "tools": [
             "list_native_modules",
@@ -22,6 +24,8 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "inspect_native_module_entrypoints",
             "plan_native_entrypoint_validation",
             "inspect_native_entrypoint_static_abi",
+            "probe_native_entrypoint_loader",
+            "probe_native_entrypoint_loader_hosted",
             "launch_native_module_command",
             "start_native_module_result_probe",
             "capture_native_module_result",
@@ -30,6 +34,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "thread_catalog",
+        "stability": "stable",
         "purpose": "Inspect KOMPAS thread.db standards and resolve thread sizes.",
         "tools": [
             "list_thread_catalog_standards",
@@ -40,6 +45,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "session_lifecycle",
+        "stability": "stable",
         "purpose": "Check, open, close, save, and smoke-test KOMPAS documents.",
         "tools": [
             "get_session_state",
@@ -56,6 +62,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "low_level_runtime",
+        "stability": "experimental",
         "purpose": "Probe COM readback, classify runtime errors, and verify snapshot deltas.",
         "tools": [
             "preflight_document_context",
@@ -93,11 +100,13 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "list_sketch_entities",
             "inspect_sketch_entity",
             "probe_document_readback",
+            "probe_model_formulas",
             "probe_model_object_collections",
         ],
     },
     {
         "name": "batch_quality",
+        "stability": "stable",
         "purpose": "Scan model files and run batch lifecycle or quality checks.",
         "tools": [
             "scan_model_files",
@@ -107,11 +116,13 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "part_generation",
+        "stability": "experimental",
         "purpose": "Preview or create supported parametric part scenarios.",
         "tools": ["preview_part_scenario", "create_part_from_scenario"],
     },
     {
         "name": "composition_specification",
+        "stability": "stable",
         "purpose": "Read assembly composition and preview/create/update specifications.",
         "tools": [
             "get_file_composition",
@@ -131,11 +142,13 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "cleanup_export",
+        "stability": "stable",
         "purpose": "Apply cleanup rules and export a safe working copy.",
         "tools": ["cleanup_to_export"],
     },
     {
         "name": "relink",
+        "stability": "stable",
         "purpose": "Preview, plan, and apply assembly component path relinks.",
         "tools": [
             "preview_relink_paths",
@@ -158,6 +171,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "document_tree_items",
+        "stability": "stable",
         "purpose": "Read and edit model tree items and item properties.",
         "tools": [
             "get_document_tree",
@@ -170,6 +184,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "quality_changesets",
+        "stability": "stable",
         "purpose": "Analyze naming/spec issues and preview or apply prepared changesets.",
         "tools": [
             "analyze_naming_issues",
@@ -181,14 +196,21 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
 ]
 
 
-def get_mcp_tool_catalog(*, category: str | None = None) -> dict[str, Any]:
+def get_mcp_tool_catalog(
+    *,
+    category: str | None = None,
+    stability: str | None = None,
+) -> dict[str, Any]:
     categories = deepcopy(TOOL_CATEGORIES)
     if category is not None:
         categories = [item for item in categories if item["name"] == category]
+    if stability is not None:
+        categories = [item for item in categories if item["stability"] == stability]
     tool_count = sum(len(item["tools"]) for item in categories)
     return {
         "ok": bool(categories),
         "category": category,
+        "stability": stability,
         "category_count": len(categories),
         "tool_count": tool_count,
         "categories": categories,
