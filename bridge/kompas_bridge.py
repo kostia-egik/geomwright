@@ -29,6 +29,350 @@ def safe_get(obj, attr, default=None):
         return default
 
 
+def _assign_sketch_origin_point(sketch, point):
+    report = {
+        "ok": False,
+        "point_reference": safe_get(point, "Reference"),
+        "attempts": [],
+    }
+    if sketch is None or point is None:
+        report["reason"] = "missing_sketch_or_point"
+        return report
+    for attr in ("OriginPoint", "BasePoint", "Point"):
+        attempt = {"attr": attr, "ok": False}
+        try:
+            setattr(sketch, attr, point)
+            attempt["ok"] = True
+            report["ok"] = True
+            report["applied_attr"] = attr
+            report["attempts"].append(attempt)
+            return report
+        except Exception as exc:
+            attempt["error"] = str(exc)
+            report["attempts"].append(attempt)
+    report["reason"] = "origin_assignment_failed"
+    return report
+
+
+def _touch_com_dependency_chain(*items):
+    report = []
+    for label, obj in items:
+        entry = {"label": label, "attempts": []}
+        if obj is None:
+            entry["reason"] = "missing_object"
+            report.append(entry)
+            continue
+        for method_name in ("Update", "Rebuild", "Recalculate", "Refresh"):
+            method = safe_get(obj, method_name)
+            attempt = {"method": method_name, "ok": False}
+            if not callable(method):
+                attempt["reason"] = "not_callable"
+                entry["attempts"].append(attempt)
+                continue
+            try:
+                value = method()
+                attempt["ok"] = value is not False
+                attempt["result"] = value
+                entry["attempts"].append(attempt)
+                if attempt["ok"]:
+                    entry["applied_method"] = method_name
+                    break
+            except Exception as exc:
+                attempt["error"] = str(exc)
+                entry["attempts"].append(attempt)
+        report.append(entry)
+    return report
+
+
+def _touch_named_variable_same_value(owner, variable_name):
+    report = {"variable_name": variable_name, "ok": False, "attempts": []}
+    variables = _iter_operation_variables(owner)
+    if not variables:
+        report["reason"] = "variables_unavailable"
+        return report
+    matched = None
+    for variable in variables:
+        if str(safe_get(variable, "Name", "") or "") == variable_name:
+            matched = variable
+            break
+    if matched is None:
+        report["reason"] = "variable_not_found"
+        report["available"] = [safe_get(variable, "Name", "") for variable in variables]
+        return report
+    expression = safe_get(matched, "Expression", None)
+    value = safe_get(matched, "Value", None)
+    try:
+        if expression not in (None, ""):
+            matched.Expression = expression
+            report["touched"] = "Expression"
+            report["expression"] = expression
+        else:
+            matched.Value = value
+            report["touched"] = "Value"
+            report["value"] = value
+        update = safe_get(matched, "Update")
+        report["variable_update_ok"] = bool(update()) if callable(update) else True
+        owner_update = safe_get(owner, "Update")
+        report["owner_update_ok"] = bool(owner_update()) if callable(owner_update) else True
+        report["ok"] = bool(report["variable_update_ok"] and report["owner_update_ok"])
+    except Exception as exc:
+        report["error"] = str(exc)
+    return report
+
+
+def _touch_angle_plane_same_value(plane, angle_degrees, *, angle_expression=None):
+    report = {"ok": False, "angle_degrees": angle_degrees, "angle_expression": angle_expression, "attempts": []}
+    if plane is None:
+        report["reason"] = "missing_plane"
+        return report
+    for attr in ("Angle", "Value"):
+        attempt = {"attr": attr, "ok": False}
+        try:
+            if not hasattr(plane, attr):
+                attempt["reason"] = "missing_attr"
+                report["attempts"].append(attempt)
+                continue
+            property_report = _set_com_property_expression_or_value(plane, attr, angle_expression, float(angle_degrees))
+            attempt["property_report"] = property_report
+            update = safe_get(plane, "Update")
+            attempt["update_ok"] = bool(update()) if callable(update) else True
+            attempt["ok"] = bool(property_report.get("ok") and attempt["update_ok"])
+            report["attempts"].append(attempt)
+            if attempt["ok"]:
+                report["ok"] = True
+                report["applied_attr"] = attr
+                return report
+        except Exception as exc:
+            attempt["error"] = str(exc)
+            report["attempts"].append(attempt)
+    report["reason"] = "angle_plane_touch_failed"
+    return report
+
+
+def _apply_spiral_initial_angle(spiral, angle_expression):
+    report = {"requested": angle_expression, "ok": False, "attempts": []}
+    for attr in ("InitialAngle", "StartAngle"):
+        attempt = {"target": attr, "ok": False}
+        try:
+            setattr(spiral, attr, angle_expression)
+            attempt["ok"] = True
+            report["ok"] = True
+            report["applied_target"] = attr
+            report["attempts"].append(attempt)
+            return report
+        except Exception as exc:
+            attempt["error"] = str(exc)
+            report["attempts"].append(attempt)
+    parameter = safe_get(spiral, "Parameter")
+    if parameter is not None:
+        for attr in ("Angle", "InitialAngle", "StartAngle"):
+            attempt = {"target": "Parameter.%s" % attr, "ok": False}
+            try:
+                setattr(parameter, attr, angle_expression)
+                attempt["ok"] = True
+                report["ok"] = True
+                report["applied_target"] = "Parameter.%s" % attr
+                report["attempts"].append(attempt)
+                return report
+            except Exception as exc:
+                attempt["error"] = str(exc)
+                report["attempts"].append(attempt)
+    report["reason"] = "initial_angle_api_unavailable"
+    return report
+
+
+def _set_com_property_expression_or_value(obj, attr, expression, value):
+    report = {"property": attr, "expression": expression, "value": value, "mode": None, "ok": False, "attempts": []}
+    for mode, candidate in (("expression", expression), ("value", value)):
+        if candidate in (None, ""):
+            continue
+        attempt = {"mode": mode, "ok": False}
+        try:
+            setattr(obj, attr, candidate)
+            attempt["ok"] = True
+            report["ok"] = True
+            report["mode"] = mode
+            report["attempts"].append(attempt)
+            return report
+        except Exception as exc:
+            attempt["error"] = str(exc)
+            report["attempts"].append(attempt)
+    report["reason"] = "assignment_failed"
+    return report
+
+
+def _probe_projection_api(*items):
+    candidates = (
+        "Projections", "ProjectionObjects", "ProjectedObjects", "ProjectedCurves",
+        "ProjectObjects", "ProjectObject", "Project", "CreateProjection",
+        "AddProjection", "AddProjectedObject", "GetProjections", "GetProjectionObjects",
+    )
+    report = []
+    for label, obj in items:
+        entry = {"label": label, "available": []}
+        if obj is None:
+            entry["reason"] = "missing_object"
+            report.append(entry)
+            continue
+        for name in candidates:
+            try:
+                member = getattr(obj, name)
+                entry["available"].append({"name": name, "callable": callable(member), "type": str(type(member))})
+            except Exception:
+                pass
+        try:
+            dir_matches = [name for name in dir(obj) if "proj" in name.lower()]
+            if dir_matches:
+                entry["dir_matches"] = dir_matches[:40]
+        except Exception:
+            pass
+        report.append(entry)
+    return report
+
+
+def _project_point_to_sketch_xy(sketch, point):
+    report = {"ok": False, "attempts": []}
+    if sketch is None or point is None:
+        report["reason"] = "missing_sketch_or_point"
+        return report
+    add_projection = safe_get(sketch, "AddProjectionOf")
+    if callable(add_projection):
+        try:
+            projection = add_projection(point)
+            report["projection_reference"] = safe_get(projection, "Reference")
+            report["projection_created"] = projection is not None
+        except Exception as exc:
+            report["projection_error"] = str(exc)
+    get_projection = safe_get(sketch, "GetPointProjectionToXY")
+    if callable(get_projection):
+        coordinates = [safe_get(point, "X", 0.0), safe_get(point, "Y", 0.0), safe_get(point, "Z", 0.0)]
+        call_variants = (
+            ("point_object", (point,)),
+            ("xyz", tuple(coordinates)),
+            ("xyz_list", (coordinates,)),
+        )
+        for label, args in call_variants:
+            attempt = {"call": label, "ok": False}
+            try:
+                value = get_projection(*args)
+                xy = _coerce_xy(value)
+                attempt["raw"] = str(value)
+                attempt["xy"] = xy
+                attempt["ok"] = xy is not None
+                report["attempts"].append(attempt)
+                if xy is not None:
+                    report["ok"] = True
+                    report["xy"] = xy
+                    report["call"] = label
+                    return report
+            except Exception as exc:
+                attempt["error"] = str(exc)
+                report["attempts"].append(attempt)
+    if report.get("projection_created"):
+        report["reason"] = "projection_created_without_xy"
+    else:
+        report["reason"] = "projection_failed"
+    return report
+
+
+def _project_point_to_sketch_xy_with_object(sketch, point):
+    report = {"ok": False, "attempts": []}
+    projection = None
+    if sketch is None or point is None:
+        report["reason"] = "missing_sketch_or_point"
+        return report, projection
+    add_projection = safe_get(sketch, "AddProjectionOf")
+    if callable(add_projection):
+        try:
+            projection = add_projection(point)
+            report["projection_reference"] = safe_get(projection, "Reference")
+            report["projection_created"] = projection is not None
+        except Exception as exc:
+            report["projection_error"] = str(exc)
+    xy_report = _project_point_to_sketch_xy(sketch, point)
+    report.update(xy_report)
+    if projection is not None:
+        report["projection_created"] = True
+        report["projection_reference"] = safe_get(projection, "Reference")
+    return report, projection
+
+
+def _apply_center_axis_projection_constraints(center_axis_line, projected_point, *, length_expression=None, length_value=None):
+    report = {"enabled": projected_point is not None, "applied": [], "failed": []}
+    if center_axis_line is None:
+        report["failed"].append({"kind": "input", "error": "missing_center_axis_line"})
+        return report
+    try:
+        vertical = _apply_constraint_to_line(center_axis_line, SKETCH_CONSTRAINT_TYPES["vertical"])
+        vertical_entry = dict(vertical)
+        vertical_entry["kind"] = "vertical"
+        report["applied" if vertical.get("created") else "failed"].append(vertical_entry)
+    except Exception as exc:
+        report["failed"].append({"kind": "vertical", "error": str(exc)})
+    if projected_point is None:
+        report["failed"].append({"kind": "merge_points", "error": "missing_projected_point"})
+    else:
+        for partner_index in (0, None, 1):
+            try:
+                coincident = _apply_constraint_to_line(
+                    center_axis_line,
+                    SKETCH_CONSTRAINT_TYPES["merge_points"],
+                    index=0,
+                    partner=projected_point,
+                    partner_index=partner_index,
+                )
+                entry = dict(coincident)
+                entry["kind"] = "merge_points"
+                entry["partner_index"] = partner_index
+                report["applied" if coincident.get("created") else "failed"].append(entry)
+                if coincident.get("created"):
+                    break
+            except Exception as exc:
+                report["failed"].append({"kind": "merge_points", "partner_index": partner_index, "error": str(exc)})
+    try:
+        fixed_length = _apply_constraint_to_line(
+            center_axis_line,
+            SKETCH_CONSTRAINT_TYPES["fixed_length"],
+            expression=length_expression,
+            value=length_value,
+        )
+        fixed_length_entry = dict(fixed_length)
+        fixed_length_entry["kind"] = "fixed_length"
+        fixed_length_entry["expression"] = length_expression
+        fixed_length_entry["value"] = length_value
+        report["applied" if fixed_length.get("created") else "failed"].append(fixed_length_entry)
+    except Exception as exc:
+        report["failed"].append({"kind": "fixed_length", "expression": length_expression, "value": length_value, "error": str(exc)})
+    report["created_count"] = len([item for item in report["applied"] if item.get("created")])
+    return report
+
+
+def _coerce_xy(value):
+    if value is None:
+        return None
+    if isinstance(value, tuple) or isinstance(value, list):
+        if len(value) >= 3 and isinstance(value[0], bool):
+            if not value[0]:
+                return None
+            try:
+                return [float(value[1]), float(value[2])]
+            except Exception:
+                return None
+        if len(value) >= 2:
+            try:
+                return [float(value[0]), float(value[1])]
+            except Exception:
+                return None
+    x = safe_get(value, "X", None)
+    y = safe_get(value, "Y", None)
+    if x is not None and y is not None:
+        try:
+            return [float(x), float(y)]
+        except Exception:
+            return None
+    return None
+
+
 def _set_model_object_hidden(model_object, hidden=True, *, role=None):
     report = {
         "ok": False,
@@ -252,6 +596,45 @@ def _bind_operation_variables(model_object, planned_bindings):
     report["live_status"] = "applied" if report["ok"] else "partial"
     if report["applied_count"] == 0 and report["failed_count"] > 0:
         report["live_status"] = "failed"
+    return report
+
+
+def _set_operation_variable_value(model_object, *, parameter_note=None, parameter_note_aliases=None, value=None, role=None):
+    report = {"ok": False, "role": role, "parameter_note": parameter_note, "value": value, "attempts": []}
+    variables = _iter_operation_variables(model_object)
+    if not variables:
+        report["error"] = "operation_variables_unavailable"
+        return report
+    aliases = []
+    if parameter_note not in (None, ""):
+        aliases.append(str(parameter_note))
+    aliases.extend([str(item) for item in (parameter_note_aliases or []) if str(item or "").strip()])
+    for variable in variables:
+        note = str(safe_get(variable, "ParameterNote", "") or "")
+        name = str(safe_get(variable, "Name", "") or "")
+        if aliases and note not in aliases:
+            continue
+        attempt = {"name": name, "parameter_note": note, "expression_before": safe_get(variable, "Expression"), "value_before": safe_get(variable, "Value")}
+        try:
+            variable.Expression = ""
+            variable.Value = float(value)
+            update = safe_get(variable, "Update")
+            attempt["variable_update_ok"] = bool(update()) if callable(update) else True
+            object_update = safe_get(model_object, "Update")
+            attempt["object_update_ok"] = bool(object_update()) if callable(object_update) else True
+            attempt["expression_after"] = safe_get(variable, "Expression")
+            attempt["value_after"] = safe_get(variable, "Value")
+            attempt["ok"] = bool(attempt["variable_update_ok"] and attempt["object_update_ok"])
+            report["attempts"].append(attempt)
+            if attempt["ok"]:
+                report["ok"] = True
+                report["applied"] = attempt
+                return report
+        except Exception as exc:
+            attempt["ok"] = False
+            attempt["error"] = str(exc)
+            report["attempts"].append(attempt)
+    report["error"] = "operation_variable_not_found_or_update_failed"
     return report
 
 
@@ -877,6 +1260,7 @@ MODEL_OBJECT_SURFACE_COLLECTION_SPECS = [
             ("planes3d", ("Planes3D", "GetPlanes3D")),
             ("local_coordinate_systems", ("LocalCoordinateSystems", "GetLocalCoordinateSystems")),
             ("points3d", ("Points3D", "GetPoints3D")),
+            ("spirals3d", ("Spirals3D", "GetSpirals3D")),
         ),
     ),
 ]
@@ -2761,8 +3145,12 @@ def _normalize_sketch_plane(value):
 
 
 def _create_sketch_on_plane(model_container, part, name, plane):
-    plane_key = _normalize_sketch_plane(plane)
-    plane_object = _resolve_default_part_object(part, plane_key)
+    if isinstance(plane, str):
+        plane_key = _normalize_sketch_plane(plane)
+        plane_object = _resolve_default_part_object(part, plane_key)
+    else:
+        plane_key = str(safe_get(plane, "Name", "custom"))
+        plane_object = plane
     sketchs = _get_sketch_collection(model_container)
     if sketchs is None or not callable(safe_get(sketchs, "Add")):
         raise RuntimeError("Part does not expose Sketchs.Add")
@@ -2770,6 +3158,11 @@ def _create_sketch_on_plane(model_container, part, name, plane):
     if sketch is None:
         raise RuntimeError("Sketchs.Add returned None")
     sketch.Plane = plane_object
+    if not isinstance(plane, str):
+        try:
+            sketch.CoordinateSystem = plane_object
+        except Exception:
+            pass
     if name:
         try:
             sketch.Name = str(name)
@@ -3028,6 +3421,44 @@ def _add_sketch_point(drawing_container, point, line_style):
     if not created.Update():
         raise RuntimeError("Point Update returned False")
     return created
+
+
+def _get_sketch_edge(sketch, edge_index):
+    edges = sketch.Edges(edge_index)
+    if isinstance(edges, tuple) and edges:
+        return edges[0]
+    return edges
+
+
+def _get_sketch_edge_tuple(sketch, edge_index):
+    edges = sketch.Edges(edge_index)
+    if isinstance(edges, tuple):
+        return list(edges)
+    if edges is None:
+        return []
+    return [edges]
+
+
+def _get_first_sketch_edge_tuple(sketch, edge_indexes):
+    attempts = []
+    for edge_index in edge_indexes:
+        try:
+            edges = _get_sketch_edge_tuple(sketch, edge_index)
+        except Exception as exc:
+            attempts.append({"edge_index": edge_index, "ok": False, "error": str(exc)})
+            continue
+        attempts.append({"edge_index": edge_index, "ok": bool(edges), "count": len(edges)})
+        if edges:
+            return edges, edge_index, attempts
+    return [], None, attempts
+
+
+def _normalize_point(value):
+    if isinstance(value, (list, tuple)):
+        return [float(value[0]), float(value[1])]
+    if hasattr(value, "__getitem__"):
+        return [float(value[0]), float(value[1])]
+    return [0.0, 0.0]
 
 
 def _add_sketch_arc(drawing_container, center, radius, start, end, direction, line_style):
@@ -4637,15 +5068,30 @@ def _parameterize_compression_spring_profile_sketch(
     try:
         view = _get_sketch_system_view(sketch_doc)
         drawing_container = cast_drawing_container(view)
-        line_segments = safe_get(drawing_container, "LineSegments")
-        if line_segments is None:
-            get_line_segments = safe_get(drawing_container, "GetLineSegments")
-            if callable(get_line_segments):
-                line_segments = get_line_segments()
-        if line_segments is None or not callable(safe_get(line_segments, "Add")):
-            raise RuntimeError("Sketch view does not expose LineSegments.Add")
+
+        def references_target(value, target):
+            if isinstance(value, dict):
+                for key in ("target", "partner", "entity"):
+                    if value.get(key) == target:
+                        return True
+                return any(references_target(item, target) for item in value.values())
+            if isinstance(value, (list, tuple)):
+                return any(references_target(item, target) for item in value)
+            return False
+
+        needs_radius_ref = references_target(planned_constraints, "radius_ref") or references_target(planned_dimensions, "radius_ref")
+        needs_profile_radius_ref = references_target(planned_constraints, "profile_radius_ref") or references_target(planned_dimensions, "profile_radius_ref")
+        line_segments = None
         construction_style = int(sketch_options.get("construction_line_style") or 6)
         helper_offset = max(float(wire_radius) * 0.25, 0.5)
+        if needs_radius_ref or needs_profile_radius_ref:
+            line_segments = safe_get(drawing_container, "LineSegments")
+            if line_segments is None:
+                get_line_segments = safe_get(drawing_container, "GetLineSegments")
+                if callable(get_line_segments):
+                    line_segments = get_line_segments()
+            if line_segments is None or not callable(safe_get(line_segments, "Add")):
+                raise RuntimeError("Sketch view does not expose LineSegments.Add")
         live_profile_circle = _resolve_current_sketch_circle(
             drawing_container,
             profile_circle,
@@ -4654,32 +5100,6 @@ def _parameterize_compression_spring_profile_sketch(
         )
         if live_profile_circle is None:
             raise RuntimeError("Current sketch profile circle was not found")
-        radius_ref = line_segments.Add()
-        if radius_ref is None:
-            raise RuntimeError("LineSegments.Add returned None")
-        radius_ref.X1 = 0.0
-        radius_ref.Y1 = 0.0
-        radius_ref.X2 = float(profile_center[0])
-        radius_ref.Y2 = float(profile_center[1])
-        try:
-            radius_ref.Style = construction_style
-        except Exception:
-            pass
-        if not radius_ref.Update():
-            raise RuntimeError("Radius reference Update returned False")
-        profile_radius_ref = line_segments.Add()
-        if profile_radius_ref is None:
-            raise RuntimeError("LineSegments.Add returned None")
-        profile_radius_ref.X1 = float(profile_center[0])
-        profile_radius_ref.Y1 = float(profile_center[1])
-        profile_radius_ref.X2 = float(profile_center[0]) + helper_offset + float(wire_radius) * 1.5
-        profile_radius_ref.Y2 = float(profile_center[1])
-        try:
-            profile_radius_ref.Style = construction_style
-        except Exception:
-            pass
-        if not profile_radius_ref.Update():
-            raise RuntimeError("Profile radius reference Update returned False")
         circle_xc = float(safe_get(live_profile_circle, "Xc", profile_center[0]))
         circle_yc = float(safe_get(live_profile_circle, "Yc", profile_center[1]))
         sketch_entities = {
@@ -4691,24 +5111,6 @@ def _parameterize_compression_spring_profile_sketch(
                 role="circle",
                 target="profile_circle",
             ),
-            "radius_ref": _sketch_line_entry(
-                radius_ref,
-                0.0,
-                0.0,
-                float(profile_center[0]),
-                float(profile_center[1]),
-                role="construction",
-                target="radius_ref",
-            ),
-            "profile_radius_ref": _sketch_line_entry(
-                profile_radius_ref,
-                float(profile_center[0]),
-                float(profile_center[1]),
-                float(profile_center[0]) + helper_offset + float(wire_radius) * 1.5,
-                float(profile_center[1]),
-                role="construction",
-                target="profile_radius_ref",
-            ),
             "origin": _sketch_point_entry(
                 None,
                 0.0,
@@ -4717,6 +5119,56 @@ def _parameterize_compression_spring_profile_sketch(
                 target="origin",
             ),
         }
+        if needs_radius_ref:
+            radius_ref = line_segments.Add()
+            if radius_ref is None:
+                raise RuntimeError("LineSegments.Add returned None")
+            radius_ref.X1 = 0.0
+            radius_ref.Y1 = 0.0
+            if abs(float(profile_center[0])) <= 1e-9 and abs(float(profile_center[1])) <= 1e-9:
+                radius_ref.X2 = helper_offset
+                radius_ref.Y2 = 0.0
+            else:
+                radius_ref.X2 = float(profile_center[0])
+                radius_ref.Y2 = float(profile_center[1])
+            try:
+                radius_ref.Style = construction_style
+            except Exception:
+                pass
+            if not radius_ref.Update():
+                raise RuntimeError("Radius reference Update returned False")
+            sketch_entities["radius_ref"] = _sketch_line_entry(
+                radius_ref,
+                0.0,
+                0.0,
+                float(safe_get(radius_ref, "X2", profile_center[0]) or 0.0),
+                float(safe_get(radius_ref, "Y2", profile_center[1]) or 0.0),
+                role="construction",
+                target="radius_ref",
+            )
+        if needs_profile_radius_ref:
+            profile_radius_ref = line_segments.Add()
+            if profile_radius_ref is None:
+                raise RuntimeError("LineSegments.Add returned None")
+            profile_radius_ref.X1 = float(profile_center[0])
+            profile_radius_ref.Y1 = float(profile_center[1])
+            profile_radius_ref.X2 = float(profile_center[0]) + helper_offset + float(wire_radius) * 1.5
+            profile_radius_ref.Y2 = float(profile_center[1])
+            try:
+                profile_radius_ref.Style = construction_style
+            except Exception:
+                pass
+            if not profile_radius_ref.Update():
+                raise RuntimeError("Profile radius reference Update returned False")
+            sketch_entities["profile_radius_ref"] = _sketch_line_entry(
+                profile_radius_ref,
+                float(profile_center[0]),
+                float(profile_center[1]),
+                float(profile_center[0]) + helper_offset + float(wire_radius) * 1.5,
+                float(profile_center[1]),
+                role="construction",
+                target="profile_radius_ref",
+            )
         transformed_constraints = list(planned_constraints)
         parameterization_report = _apply_sketch_parameterization(
             view,
@@ -5490,6 +5942,77 @@ def _collect_compression_spring_connector_auxiliary_objects(connector_objects):
         if point is not None:
             auxiliary_objects.append(("%s_point" % role, point))
     return auxiliary_objects
+
+
+def _build_compression_spring_path_contour_with_connectors(
+    part,
+    model_container,
+    auxiliary_container,
+    spring_name,
+    params,
+    segment_objects,
+    auxiliary_objects,
+    steps_report,
+):
+    connector_plan = list(params.get("connector_plan") or [])
+    connector_objects = []
+    sweep_paths_for_report = [item["path"] for item in segment_objects]
+    if connector_plan:
+        connector_objects = _build_compression_spring_transition_curve_paths(
+            part,
+            model_container,
+            auxiliary_container,
+            spring_name,
+            segment_objects,
+            connector_plan,
+            steps_report,
+        )
+        auxiliary_objects.extend(
+            _collect_compression_spring_connector_auxiliary_objects(connector_objects)
+        )
+        contour_paths = _resolve_named_curve_sequence(
+            params.get("full_path_sequence") or [],
+            segment_objects,
+            connector_objects,
+        )
+        sweep_paths_for_report = list(contour_paths)
+        path_contour, contour_report = _build_curve_contour(
+            auxiliary_container,
+            "%s_PATH_CONTOUR" % spring_name,
+            contour_paths,
+            allow_incomplete=True,
+            expected_edges_count=len(contour_paths),
+        )
+    else:
+        path_contour, contour_report = _resolve_spring_path_contour(
+            auxiliary_container,
+            spring_name,
+            segment_objects,
+        )
+    auxiliary_objects.append(("spring_path_contour", path_contour))
+    steps_report.append(
+        {
+            "step": "build_spring_path_contour",
+            "ok": True,
+            "scenario": "compression_spring",
+            "reference": safe_get(path_contour, "Reference"),
+            "model_object_type": safe_get(path_contour, "ModelObjectType"),
+            "source_path_count": contour_report["source_path_count"],
+            "edges_count": contour_report["edges_count"],
+            "expected_edges_count": contour_report.get("expected_edges_count"),
+            "connector_count": len(connector_plan),
+            "candidate_orientation_angles": contour_report.get("candidate_orientation_angles"),
+            "combo_index": contour_report.get("combo_index"),
+            "selected_orientation_angles": [
+                {
+                    "role": item["role"],
+                    "orientation_angle_degrees": float(item.get("applied_orientation_angle") or 0.0),
+                }
+                for item in segment_objects
+            ],
+        }
+    )
+    return connector_plan, connector_objects, path_contour, contour_report, sweep_paths_for_report
 
 
 def _resolve_spring_path_contour(auxiliary_container, spring_name, segment_objects):
@@ -8182,6 +8705,10 @@ def _apply_sketch_dimensions(view, sketch_entities, planned_dimensions, options)
                     if diametral_dimensions is None or not callable(safe_get(diametral_dimensions, "Add")):
                         raise RuntimeError("view does not expose ISymbols2DContainer.DiametralDimensions.Add")
                     result = _add_circle_diameter_dimension(diametral_dimensions, dimension_payload, sketch_entities)
+            elif kind in {"circle_radius", "arc_radius"}:
+                if radial_dimensions is None or not callable(safe_get(radial_dimensions, "Add")):
+                    raise RuntimeError("view does not expose ISymbols2DContainer.RadialDimensions.Add")
+                result = _add_circle_radius_dimension(radial_dimensions, dimension_payload, sketch_entities)
             elif kind == "axis_distance":
                 if str(dimension_payload.get("display_mode") or "").strip().lower() == "diameter":
                     if axis_line is None:
@@ -8317,6 +8844,7 @@ def _apply_part_variables(part, planned_variables):
         report["live_status"] = "failed"
         return report
 
+    created_variables = []
     for variable in planned_variables:
         try:
             name = str(variable.get("name") or "").strip()
@@ -8324,11 +8852,18 @@ def _apply_part_variables(part, planned_variables):
                 raise RuntimeError("variable_name_required")
             value = variable.get("value")
             initial_value = float(value) if value not in (None, "") else 0.0
-            created = add_variable(name, initial_value, str(variable.get("note") or ""))
+            note = str(variable.get("note") or variable.get("comment") or variable.get("parameter_note") or "")
+            created = add_variable(name, initial_value, note)
             if created is None:
                 raise RuntimeError("AddVariable returned None")
             if variable.get("external") is not None:
                 created.External = bool(variable.get("external"))
+            created_variables.append((variable, created, name, initial_value, value, note))
+        except Exception as exc:
+            report["failed"].append({"variable": variable, "error": str(exc)})
+
+    for variable, created, name, initial_value, value, note in created_variables:
+        try:
             expression = variable.get("expression")
             if expression in (None, "") and value not in (None, ""):
                 expression = _format_dimension_expression(value)
@@ -8343,6 +8878,7 @@ def _apply_part_variables(part, planned_variables):
                 "name": safe_get(created, "Name", name),
                 "expression": safe_get(created, "Expression"),
                 "value": safe_get(created, "Value", initial_value),
+                "note": safe_get(created, "ParameterNote", note),
                 "update_ok": update_ok,
                 "reference": safe_get(created, "Reference"),
             }
@@ -8818,7 +9354,9 @@ def _create_point3d_displace(
     guiding_object=None,
     distance=None,
     distance_expression=None,
+    return_report=False,
 ):
+    report = {"distance_expression": distance_expression, "binding_report": None}
     point = _create_point3d(model_container, name, [0.0, 0.0, 0.0])
     point.ParameterType = 2
     parameters = _cast_to_com_interface(safe_get(point, "Parameters"), "IPoint3DParamDisplace")
@@ -8841,10 +9379,7 @@ def _create_point3d_displace(
                 raise RuntimeError("Point3D displacement parameters do not expose SetGuidingObject")
             if not bool(set_guiding_object(guiding_object)):
                 raise RuntimeError("Point3D displacement parameters SetGuidingObject returned False")
-        if distance_expression not in (None, ""):
-            parameters.Distance = str(distance_expression)
-        else:
-            parameters.Distance = float(distance if distance is not None else 0.0)
+        parameters.Distance = float(distance if distance is not None else 0.0)
     else:
         parameters.PositionObject = position_object
         expressions = list(offset_expressions or [])
@@ -8858,7 +9393,23 @@ def _create_point3d_displace(
         parameters.DZ = str(expressions[2]) if expressions[2] not in (None, "") else float(components[2])
     if not point.Update():
         raise RuntimeError("Point3D Update returned False for displacement point")
-    return point
+    if distance_expression not in (None, ""):
+        binding_report = _bind_operation_variables(
+            point,
+            [
+                {
+                    "parameter_note": "Distance",
+                    "parameter_note_aliases": ["Distance", "Offset", "Length", "Расстояние", "Смещение", "Длина"],
+                    "expression": str(distance_expression),
+                    "role": "point3d_displace_distance",
+                }
+            ],
+        )
+        report["binding_report"] = binding_report
+        if binding_report.get("ok"):
+            update = safe_get(point, "Update")
+            report["post_binding_update"] = bool(update()) if callable(update) else True
+    return (point, report) if return_report else point
 
 
 def _create_point3d_on_curve(model_container, name, curve_object, offset=0.0, *, direction=True, offset_type=0):
@@ -9651,6 +10202,8 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
         if operation.get("operation") == "add_variables":
             planned_variables = list(operation.get("variables") or [])
             break
+    if not planned_variables:
+        planned_variables = list(params.get("variable_plan") or [])
     if planned_variables:
         steps_report.append(_apply_part_variables(part, planned_variables))
 
@@ -9854,12 +10407,19 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
         (spiral_diameter / 2.0) * math.cos(phase_radians),
         (spiral_diameter / 2.0) * math.sin(phase_radians),
     ]
+    explicit_profile_path_offset = params.get("profile_path_offset")
+    if explicit_profile_path_offset not in (None, ""):
+        profile_path_offset = list(explicit_profile_path_offset)
+        while len(profile_path_offset) < 3:
+            profile_path_offset.append(0.0)
+        profile_path_offset = [float(value) for value in profile_path_offset[:3]]
     auxiliary_objects = [
         ("spring_axis_start_point", start_point),
         ("spring_axis_end_point", end_point),
         ("spring_axis", axis),
     ]
     segment_objects = []
+    deferred_bent_coil_segments = []
     post_save_anchor_rotation_bindings = _build_post_save_compression_spring_anchor_rotation_bindings(
         segment_plan
     )
@@ -9887,15 +10447,40 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
 
     for segment in segment_plan:
         segment_role = str(segment.get("role") or "segment")
+        if segment_role in {"bent_coil_left", "bent_coil_right"}:
+            deferred_bent_coil_segments.append(segment)
+            steps_report.append(
+                {
+                    "step": "defer_bent_coil_spiral_segment",
+                    "ok": True,
+                    "scenario": "compression_spring",
+                    "role": segment_role,
+                    "reason": "requires_bent_coil_center_point_from_auxiliary_construction",
+                }
+            )
+            continue
         segment_name = str(segment.get("label") or segment_role)
+        extra_sketch_edges = []
+        extra_sketch_edge_indices = []
+        extra_sketch_path_names = []
+        sketch_edge_points = []
         start_offset = float(segment.get("start_offset") or 0.0)
+        center_start_point = segment.get("center_start_point")
         start_distance_expression_raw = segment.get("start_offset_expression")
         start_distance_expression = (
             str(start_distance_expression_raw).strip()
             if start_distance_expression_raw not in (None, "")
             else None
         )
-        if start_distance_expression is None and abs(start_offset) <= 1e-9:
+        if center_start_point is not None:
+            center_start_coordinates = [float(center_start_point[0]), float(center_start_point[1]), float(center_start_point[2] if len(center_start_point) > 2 else 0.0)]
+            segment_start_point = _create_point3d(
+                model_container,
+                "%s_%s_START" % (spring_name, segment_role.upper()),
+                center_start_coordinates,
+            )
+            auxiliary_objects.append(("segment_start_point", segment_start_point))
+        elif start_distance_expression is None and abs(start_offset) <= 1e-9:
             segment_start_point = start_point
         else:
             segment_start_point = _create_point3d_displace(
@@ -9938,6 +10523,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             float(safe_get(segment_start_point, "Y", spring_start_origin[1]) or 0.0),
             float(safe_get(segment_start_point, "Z", spring_start_origin[2]) or 0.0),
         ]
+        segment_end_point = [float(value) for value in list(segment.get("end_point") or [])[:3]]
         steps_report.append(
             {
                 "step": "create_segment_start_reference",
@@ -9948,6 +10534,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 "reference": safe_get(segment_start_point, "Reference"),
                 "origin": segment_start_origin,
                 "start_offset": start_offset,
+                "center_start_point": center_start_point,
                 "start_offset_expression": start_distance_expression,
                 "guiding_axis_reference": safe_get(axis, "Reference"),
             }
@@ -9973,15 +10560,24 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
         )
         angle_application_mode = str(segment.get("angle_application_mode") or "orientation")
         segment_coordinate_system_rotation_degrees = 0.0
+        segment_coordinate_system_rotation = dict(segment.get("coordinate_system_rotation") or {})
+        if segment_coordinate_system_rotation:
+            segment_coordinate_system_rotation = {
+                "rx": float(segment_coordinate_system_rotation.get("rx", 90.0) or 0.0),
+                "ry": float(segment_coordinate_system_rotation.get("ry", 90.0) or 0.0),
+                "rz": float(segment_coordinate_system_rotation.get("rz", segment_coordinate_system_rotation_degrees) or 0.0),
+            }
+        else:
+            segment_coordinate_system_rotation = {
+                "rx": 90.0,
+                "ry": 90.0,
+                "rz": segment_coordinate_system_rotation_degrees,
+            }
         segment_coordinate_system = _create_local_coordinate_system_on_point(
             part,
             "%s_%s_CS" % (spring_name, segment_role.upper()),
             segment_start_point,
-            rotation={
-                "rx": 90.0,
-                "ry": 90.0,
-                "rz": segment_coordinate_system_rotation_degrees,
-            },
+            rotation=segment_coordinate_system_rotation,
         )
         auxiliary_objects.append(("segment_coordinate_system", segment_coordinate_system))
         steps_report.append(
@@ -9997,62 +10593,289 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 "rotation_expression": None,
                 "requested_spiral_orientation_degrees": orientation_angle_degrees,
                 "rotation_expression_target": "spiral_path_post_save" if anchor_rotation_expression is not None else None,
-                "base_rotation": {"rx": 90.0, "ry": 90.0},
+                "base_rotation": {"rx": segment_coordinate_system_rotation["rx"], "ry": segment_coordinate_system_rotation["ry"]},
+                "coordinate_system_rotation": segment_coordinate_system_rotation,
             }
         )
-        spiral = win32com.client.CastTo(auxiliary_container.Spirals3D.Add(56), "ICylindricSpiral3D")
+        segment_path_type = str(segment.get("path_type") or "cylindric_spiral").strip().lower()
+        position_parameters = None
+        if segment_path_type == "line_segment":
+            line_segments = safe_get(auxiliary_container, "LineSegments3D")
+            if line_segments is None:
+                raise RuntimeError("Auxiliary geometry container does not expose LineSegments3D")
+            spiral = win32com.client.CastTo(line_segments.Add(), "ILineSegment3D")
+            spiral_label = "LineSegment"
+            if spiral is None:
+                raise RuntimeError("LineSegments3D.Add() returned None")
+            try:
+                spiral.Name = str(segment.get("path_name") or ("%s_%s_PATH" % (spring_name, segment_role.upper())))
+            except Exception:
+                pass
+            line_start = list(segment.get("start_point") or [0.0, 0.0, 0.0])
+            line_end = list(segment.get("end_point") or [0.0, 0.0, 0.0])
+            if not bool(spiral.SetPoint(True, float(line_start[0]), float(line_start[1]), float(line_start[2]))):
+                raise RuntimeError("Line segment SetPoint(start) returned False")
+            if not bool(spiral.SetPoint(False, float(line_end[0]), float(line_end[1]), float(line_end[2]))):
+                raise RuntimeError("Line segment SetPoint(end) returned False")
+        elif segment_path_type == "sketch_path":
+            sketch_plan = dict(segment.get("sketch_path") or {})
+            dynamic_plane = sketch_plan.get("dynamic_plane") or {}
+            if dynamic_plane:
+                axis_role = str(dynamic_plane.get("axis_segment_role") or "")
+                point_role = str(dynamic_plane.get("point_segment_role") or "")
+                axis_obj = None
+                point_obj = None
+                for obj in segment_objects:
+                    if str(obj.get("role") or "") == axis_role:
+                        axis_obj = obj.get("axis")
+                    if str(obj.get("role") or "") == point_role:
+                        start_pt = obj.get("start_point")
+                        if dynamic_plane.get("anchor_point_vertex", "end") == "end":
+                            point_path = obj.get("path")
+                            if point_path is None:
+                                raise RuntimeError("dynamic_plane end anchor requires a path object for role %s" % point_role)
+                            point_obj = _create_point3d_on_curve(
+                                model_container,
+                                "%s_RIGHT_ANCHOR_POINT" % spring_name,
+                                point_path,
+                                offset=0.0,
+                                direction=False,
+                                offset_type=2,
+                            )
+                            auxiliary_objects.append(("right_anchor_point", point_obj))
+                        else:
+                            point_obj = start_pt
+                if axis_obj is None or point_obj is None:
+                    raise RuntimeError("dynamic_plane could not resolve axis/point for roles %s/%s" % (axis_role, point_role))
+                sketch_plane = _create_plane_by_edge_and_point(
+                    part,
+                    str(dynamic_plane.get("plane_name") or ("%s_RIGHT_HOOK_PLANE" % spring_name)),
+                    point_obj,
+                    axis_obj,
+                )
+                auxiliary_objects.append(("right_hook_plane", sketch_plane))
+            else:
+                sketch_plane = str(sketch_plan.get("plane") or "XOY")
+            sketch_name = str(segment.get("path_name") or ("%s_%s_SKETCH" % (spring_name, segment_role.upper())))
+            sketch, _ = _create_sketch_on_plane(model_container, part, sketch_name, sketch_plane)
+            if dynamic_plane and point_obj is not None and bool(dynamic_plane.get("assign_local_coordinate_system", True)):
+                sketch_cs = _create_local_coordinate_system_on_point(part, "%s_SKETCH_LCS" % sketch_name, point_obj)
+                auxiliary_objects.append(("sketch_cs", sketch_cs))
+                _assign_model_object_coordinate_system(sketch, sketch_cs)
+                sketch.Update()
+            sketch_doc = sketch.BeginEdit()
+            drawing_container = _get_sketch_drawing_container(sketch_doc)
+            view = _get_sketch_system_view(sketch_doc)
+            sketch_entities = {}
+            entity_index = 0
+            for entity_plan in list(sketch_plan.get("entities") or []):
+                entity_plan = dict(entity_plan)
+                entity_name = str(entity_plan.get("name") or ("entity_%d" % entity_index))
+                entity_kind = str(entity_plan.get("kind") or "")
+                entity_role = str(entity_plan.get("role") or entity_kind)
+                entity_index += 1
+                if entity_kind == "arc":
+                    center = _normalize_point(entity_plan.get("center", [0, 0]))
+                    radius = float(entity_plan.get("radius") or 1.0)
+                    start = _normalize_point(entity_plan.get("start", [0, 0]))
+                    end = _normalize_point(entity_plan.get("end", [0, 0]))
+                    arc_entity = _add_sketch_arc(
+                        drawing_container,
+                        center,
+                        radius,
+                        start,
+                        end,
+                        entity_plan.get("direction", True),
+                        int(entity_plan.get("style") or 1),
+                    )
+                    sketch_entities[entity_name] = _sketch_arc_entry(
+                        arc_entity,
+                        center[0], center[1], radius,
+                        start[0], start[1],
+                        end[0], end[1],
+                        direction=entity_plan.get("direction", True),
+                        role=entity_role,
+                        target=entity_name,
+                    )
+                elif entity_kind in ("line", "segment"):
+                    start = _normalize_point(entity_plan.get("start", [0, 0]))
+                    end = _normalize_point(entity_plan.get("end", [0, 0]))
+                    line_entity = _add_sketch_line_segment(
+                        drawing_container,
+                        start,
+                        end,
+                        int(entity_plan.get("style") or 1),
+                    )
+                    sketch_entities[entity_name] = _sketch_line_entry(
+                        line_entity,
+                        start[0], start[1],
+                        end[0], end[1],
+                        role=entity_role,
+                        target=entity_name,
+                    )
+                else:
+                    raise RuntimeError("Unknown sketch entity kind: %s" % entity_kind)
+            sketch_param_plan = sketch_plan.get("parameterization") or {}
+            if sketch_param_plan:
+                sketch_param_report = _apply_sketch_parameterization(
+                    view,
+                    sketch_entities,
+                    sketch_param_plan.get("constraints") or [],
+                    sketch_param_plan.get("dimensions") or [],
+                    sketch_param_plan.get("options") or {},
+                    [],
+                    0.0,
+                )
+                steps_report.append(sketch_param_report)
+            sketch.EndEdit()
+            if not bool(sketch.Update()):
+                raise RuntimeError("Sketch %s Update() returned False" % sketch_name)
+            edge_indices = [int(sketch_plan.get("edge_index", 1) or 1)]
+            if sketch_plan.get("edge_indices"):
+                edge_indices = [int(edge_index) for edge_index in list(sketch_plan.get("edge_indices") or [])]
+            if sketch_plan.get("edge_tuple_indices"):
+                tuple_edges = _get_sketch_edge_tuple(sketch, edge_indices[0])
+                tuple_indices = [int(edge_index) for edge_index in list(sketch_plan.get("edge_tuple_indices") or [])]
+                sketch_edges = [tuple_edges[tuple_index] if 0 <= tuple_index < len(tuple_edges) else None for tuple_index in tuple_indices]
+                edge_indices = [edge_indices[0]] + [edge_indices[0]] * (len(sketch_edges) - 1)
+            else:
+                sketch_edges = [_get_sketch_edge(sketch, edge_index) for edge_index in edge_indices]
+            spiral = sketch_edges[0]
+            spiral_label = "SketchEdge"
+            for edge_index, sketch_edge in zip(edge_indices, sketch_edges):
+                if sketch_edge is None:
+                    raise RuntimeError("Sketch %s Edges(%d) returned None" % (sketch_name, edge_index))
+            extra_sketch_edges = sketch_edges[1:]
+            extra_sketch_edge_indices = edge_indices[1:]
+            extra_sketch_path_names = list(sketch_plan.get("path_names") or [])
+            sketch_edge_points = list(sketch_plan.get("edge_points") or [])
+            auxiliary_objects.append(("sketch_base", sketch))
+        elif segment_path_type == "arc3d":
+            arcs = safe_get(auxiliary_container, "Arcs3D")
+            if arcs is None:
+                raise RuntimeError("Auxiliary geometry container does not expose Arcs3D")
+            spiral = win32com.client.CastTo(arcs.Add(), "IArc3D")
+            spiral_label = "Arc3D"
+            if spiral is None:
+                raise RuntimeError("Arcs3D.Add() returned None")
+            try:
+                spiral.Name = str(segment.get("path_name") or ("%s_%s_PATH" % (spring_name, segment_role.upper())))
+            except Exception:
+                pass
+            try:
+                spiral.BuildingType = int(segment.get("building_type", 0) or 0)
+            except Exception:
+                pass
+            arc_points = list(segment.get("points") or [])
+            if len(arc_points) < 3:
+                raise RuntimeError("arc3d segment requires three points")
+            for point_index, point in enumerate(arc_points[:3], start=1):
+                if not bool(spiral.SetPoint(point_index, float(point[0]), float(point[1]), float(point[2]))):
+                    raise RuntimeError("Arc3D SetPoint(%d) returned False" % point_index)
+            if "direction" in segment:
+                spiral.Direction = bool(segment.get("direction"))
+        elif segment_path_type == "law_curve":
+            curve_plan = dict(segment.get("law_curve") or {})
+            curve_laws = safe_get(auxiliary_container, "CurveByLaws")
+            if curve_laws is None:
+                raise RuntimeError("Auxiliary geometry container does not expose CurveByLaws")
+            spiral = win32com.client.CastTo(curve_laws.Add(), "ICurveByLaw")
+            spiral_label = "CurveByLaw"
+            if spiral is None:
+                raise RuntimeError("CurveByLaws.Add() returned None")
+            try:
+                spiral.Name = str(segment.get("path_name") or ("%s_%s_PATH" % (spring_name, segment_role.upper())))
+            except Exception:
+                pass
+            law_expressions = [
+                str(curve_plan.get("expression_x") or "0"),
+                str(curve_plan.get("expression_y") or "0"),
+                str(curve_plan.get("expression_z") or "0"),
+            ]
+            for expression_index, expression in enumerate(law_expressions):
+                spiral.SetLawType(expression_index, 3)
+                spiral.SetExpression(expression_index, expression)
+            interval_expression = str(curve_plan.get("interval_expression") or "[0; 0]")
+            for expression_index in range(3):
+                spiral.SetIntervalExpression(expression_index, interval_expression)
+        elif segment_path_type in ("conic_spiral", "conical_spiral"):
+            spiral = win32com.client.CastTo(auxiliary_container.Spirals3D.Add(54), "IConicSpiral3D")
+            spiral_label = "Conic"
+        else:
+            spiral = win32com.client.CastTo(auxiliary_container.Spirals3D.Add(56), "ICylindricSpiral3D")
+            spiral_label = "Cylindric"
         if spiral is None:
-            raise RuntimeError("Spirals3D.Add(Cylindric spiral) returned None")
-        spiral_position = safe_get(spiral, "Position")
-        if spiral_position is None:
-            raise RuntimeError("Compression spring spiral does not expose Position")
-        spiral_position.ParameterType = 1
-        spiral_position.OrientationType = 0
-        if not bool(spiral_position.SetAssociationObject(segment_start_point)):
-            raise RuntimeError("Compression spring spiral SetAssociationObject(point) returned False")
-        position_parameters = win32com.client.CastTo(
-            spiral_position.LocalCSParameters,
-            "ILocalCSAxesDirectionParam",
-        )
-        if position_parameters is None:
-            raise RuntimeError("Compression spring spiral does not expose ILocalCSAxesDirectionParam")
-        position_parameters.LeadAxis = 73
-        try:
-            position_parameters.RotateAxis = 73
-        except Exception:
-            pass
-        if not bool(position_parameters.SetDirectingObject(73, axis)):
-            raise RuntimeError("Compression spring spiral SetDirectingObject(OZ, axis) returned False")
-        if not bool(spiral_position.Update()):
-            raise RuntimeError("Compression spring spiral position Update() returned False")
-        spiral.CoordinateSystem = segment_coordinate_system
-        spiral.DiameterType = 0
-        spiral.Diameter = spiral_diameter
-        spiral.BuildingType = 1
-        spiral.Step = float(segment.get("pitch") or 0.0)
-        spiral.Height = float(segment.get("height") or 0.0)
-        spiral.BuildingDirection = True
-        spiral.TurnDirection = not bool(params.get("left_hand", False))
+            raise RuntimeError("Spirals3D.Add(%s spiral) returned None" % spiral_label)
+        if segment_path_type not in ("law_curve", "line_segment", "arc3d", "sketch_path"):
+            spiral_position = safe_get(spiral, "Position")
+            if spiral_position is None:
+                raise RuntimeError("Compression spring %s spiral does not expose Position" % spiral_label)
+            spiral_position.ParameterType = 1
+            spiral_position.OrientationType = 0
+            if not bool(spiral_position.SetAssociationObject(segment_start_point)):
+                raise RuntimeError("Compression spring spiral SetAssociationObject(point) returned False")
+            position_parameters = win32com.client.CastTo(
+                spiral_position.LocalCSParameters,
+                "ILocalCSAxesDirectionParam",
+            )
+            if position_parameters is None:
+                raise RuntimeError("Compression spring spiral does not expose ILocalCSAxesDirectionParam")
+            position_parameters.LeadAxis = 73
+            try:
+                position_parameters.RotateAxis = 73
+            except Exception:
+                pass
+            if not bool(position_parameters.SetDirectingObject(73, axis)):
+                raise RuntimeError("Compression spring spiral SetDirectingObject(OZ, axis) returned False")
+            if not bool(spiral_position.Update()):
+                raise RuntimeError("Compression spring spiral position Update() returned False")
+            spiral.CoordinateSystem = segment_coordinate_system
+        if segment_path_type in ("conic_spiral", "conical_spiral"):
+            start_diameter = float(segment.get("start_diameter") or spiral_diameter)
+            end_diameter = float(segment.get("end_diameter") or spiral_diameter)
+            spiral.DiameterType1 = 0
+            spiral.Diameter1 = start_diameter
+            spiral.DiameterType2 = 0
+            spiral.Diameter2 = end_diameter
+            try:
+                segment_height = float(segment.get("height") or 0.0)
+                if abs(segment_height) > 1e-9:
+                    spiral.GeneratrixTiltAngle = math.degrees(math.atan(((end_diameter - start_diameter) / 2.0) / segment_height))
+            except Exception:
+                pass
+        elif segment_path_type not in ("law_curve", "line_segment", "arc3d", "sketch_path"):
+            spiral.DiameterType = 0
+            spiral.Diameter = spiral_diameter
+        if segment_path_type not in ("law_curve", "line_segment", "arc3d", "sketch_path"):
+            spiral.BuildingType = 1
+            spiral.Step = float(segment.get("pitch") or 0.0)
+            spiral.Height = float(segment.get("height") or 0.0)
+            spiral.BuildingDirection = True
+            spiral.TurnDirection = not bool(params.get("left_hand", False))
         try:
             spiral.Name = str(segment.get("path_name") or ("%s_%s_PATH" % (spring_name, segment_role.upper())))
         except Exception:
             pass
-        turning_angle_report = _apply_spiral_turning_angle(
-            spiral,
-            position_parameters,
-            0.0,
-            "default",
-        )
-        orientation_report = _apply_spiral_turning_angle(
-            spiral,
-            position_parameters,
-            0.0,
-            "default",
-        )
+        if segment_path_type in ("law_curve", "line_segment", "arc3d", "sketch_path"):
+            turning_angle_report = {"mode": segment_path_type, "requested_degrees": None, "candidate_degrees": None}
+            orientation_report = {"mode": segment_path_type, "requested_degrees": None, "candidate_degrees": None}
+        else:
+            turning_angle_report = _apply_spiral_turning_angle(
+                spiral,
+                position_parameters,
+                0.0,
+                "default",
+            )
+            orientation_report = _apply_spiral_turning_angle(
+                spiral,
+                position_parameters,
+                0.0,
+                "default",
+            )
         if not bool(spiral.Update()):
             raise RuntimeError("Compression spring spiral Update() after angle setup returned False")
         spiral_variable_bindings = list(segment.get("operation_variable_bindings") or [])
-        if anchor_rotation_expression is not None:
+        if anchor_rotation_expression is not None and segment_path_type not in ("law_curve", "line_segment", "arc3d"):
             spiral_variable_bindings.append(
                 _build_spring_anchor_rotation_binding(anchor_rotation_expression)
             )
@@ -10063,6 +10886,11 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
         spiral_binding_report["scenario"] = "compression_spring"
         spiral_binding_report["target"] = "spiral_path"
         spiral_binding_report["role"] = segment_role
+        try:
+            spiral_binding_report["post_binding_update"] = bool(spiral.Update())
+        except Exception as exc:
+            spiral_binding_report["post_binding_update"] = False
+            spiral_binding_report["post_binding_update_error"] = str(exc)
         steps_report.append(spiral_binding_report)
         geometry_report = _compute_curve_endpoint_report(
             spiral,
@@ -10081,6 +10909,9 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 "height": float(safe_get(spiral, "Height", 0.0) or 0.0),
                 "pitch": float(safe_get(spiral, "Step", 0.0) or 0.0),
                 "diameter": float(safe_get(spiral, "Diameter", 0.0) or 0.0),
+                "direction": None if segment_path_type != "arc3d" else bool(safe_get(spiral, "Direction", False)),
+                "angle1": None if segment_path_type != "arc3d" else float(safe_get(spiral, "Angle1", 0.0) or 0.0),
+                "angle2": None if segment_path_type != "arc3d" else float(safe_get(spiral, "Angle2", 0.0) or 0.0),
                 "turn_direction": bool(safe_get(spiral, "TurnDirection", False)),
                 "phase_degrees": phase_degrees,
                 "turning_angle_degrees": turning_angle_degrees,
@@ -10088,6 +10919,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 "anchor_rotation_expression": anchor_rotation_expression,
                 "coordinate_system_reference": safe_get(segment_coordinate_system, "Reference"),
                 "coordinate_system_rotation_degrees": segment_coordinate_system_rotation_degrees,
+                "coordinate_system_rotation": segment_coordinate_system_rotation,
                 "turning_angle_applied_degrees": turning_angle_report.get(
                     "candidate_degrees",
                     turning_angle_report.get("requested_degrees"),
@@ -10108,10 +10940,16 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             }
         )
         auxiliary_objects.append(("segment_spiral_path", spiral))
+        primary_edge_points = sketch_edge_points[0] if segment_path_type == "sketch_path" and sketch_edge_points else None
+        primary_logical_start_point = list((primary_edge_points or {}).get("start") or segment.get("start_point") or [])
+        primary_logical_end_point = list((primary_edge_points or {}).get("end") or segment.get("end_point") or [])
         segment_objects.append(
             {
                 "role": segment_role,
                 "start_point": segment_start_point,
+                "end_point": segment_end_point,
+                "logical_start_point": primary_logical_start_point,
+                "logical_end_point": primary_logical_end_point,
                 "path": spiral,
                 "axis": axis,
                 "position_parameters": position_parameters,
@@ -10124,31 +10962,905 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 "coordinate_system": segment_coordinate_system,
             }
         )
+        for extra_edge_position, extra_spiral in enumerate(extra_sketch_edges, start=1):
+            extra_edge_index = extra_sketch_edge_indices[extra_edge_position - 1]
+            extra_edge_points = sketch_edge_points[extra_edge_position] if extra_edge_position < len(sketch_edge_points) else {}
+            if extra_edge_position < len(extra_sketch_path_names):
+                extra_path_name = str(extra_sketch_path_names[extra_edge_position] or "")
+            else:
+                base_path_name = str(segment.get("path_name") or segment_name or segment_role or "sketch_path")
+                extra_path_name = "%s_edge_%d" % (base_path_name, extra_edge_index)
+            segment_objects.append(
+                {
+                    "role": segment_role,
+                    "start_point": segment_start_point,
+                    "end_point": segment_end_point,
+                    "logical_start_point": list(extra_edge_points.get("start") or segment.get("start_point") or []),
+                    "logical_end_point": list(extra_edge_points.get("end") or segment.get("end_point") or []),
+                    "path": extra_spiral,
+                    "axis": axis,
+                    "position_parameters": dict(position_parameters or {}, sketch_edge_index=extra_edge_index),
+                    "angle_application_mode": angle_application_mode,
+                    "applied_orientation_angle": 0.0,
+                    "orientation_angle_candidates": [0.0],
+                    "segment": segment_name,
+                    "path_name": extra_path_name,
+                    "anchor_rotation_expression": anchor_rotation_expression,
+                    "coordinate_system": segment_coordinate_system,
+                }
+            )
 
-    profile_anchor = segment_objects[0]["start_point"] if segment_objects else start_point
-    profile_lcs = _create_local_coordinate_system_on_point(
-        part,
-        "%s_PROFILE_LCS" % spring_name,
-        profile_anchor,
-        rotation=profile_lcs_rotation,
-    )
-    auxiliary_objects.append(("profile_lcs", profile_lcs))
-    profile_center = [profile_path_offset[0], profile_path_offset[2]]
-    profile_seed_offset = max(float(wire_radius) * 0.5, 1.0)
-    profile_seed_center = [
-        float(profile_center[0]) + profile_seed_offset,
-        float(profile_center[1]) + profile_seed_offset,
-    ]
+    if bool(params.get("bent_coil_auxiliary_construction")):
+        try:
+            body_segment = next((item for item in segment_objects if item.get("role") == "body"), None)
+            if body_segment is None:
+                raise RuntimeError("Body segment is required for bent-coil auxiliary construction")
+            bent_coil_plan = next(
+                (item for item in list(params.get("segment_plan") or []) if isinstance(item, dict) and str(item.get("role") or "") == "bent_coil_left"),
+                {},
+            )
+            body_start_point = _create_point3d_on_curve(
+                model_container,
+                "%s_BENT_COIL_BODY_START_POINT" % spring_name,
+                body_segment["path"],
+                direction=True,
+                offset=0.0,
+                offset_type=2,
+            )
+            auxiliary_objects.append(("bent_coil_body_start_point", body_start_point))
+            auxiliary_objects.append(("bent_coil_left_base_point", body_start_point))
+            body_start_plane = _create_plane_perpendicular_by_edge(
+                auxiliary_container,
+                "%s_BENT_COIL_BODY_START_PLANE" % spring_name,
+                body_start_point,
+                axis,
+            )
+            auxiliary_objects.append(("bent_coil_body_start_plane", body_start_plane))
+            auxiliary_objects.append(("bent_coil_left_base_plane", body_start_plane))
+            radius_value = float(params.get("mean_diameter", 0.0) or 0.0) / 2.0
+            if radius_value <= 0.0:
+                outer_value = float(params.get("outer_diameter", params.get("diameter", 0.0)) or 0.0)
+                wire_value = float(params.get("wire_diameter", 0.0) or 0.0)
+                radius_value = (outer_value - wire_value) / 2.0 if outer_value > 0.0 else 0.0
+            bent_coil_radius_expression = str(bent_coil_plan.get("radius_expression") or "(D1 - WD1) / 2")
+            sketchs = safe_get(model_container, "Sketchs")
+            if sketchs is None:
+                get_sketchs = safe_get(model_container, "GetSketchs")
+                if callable(get_sketchs):
+                    sketchs = get_sketchs()
+            if sketchs is None or not callable(safe_get(sketchs, "Add")):
+                raise RuntimeError("Part does not expose Sketchs.Add for bent-coil tangent sketch")
+            tangent_sketch = sketchs.Add()
+            tangent_sketch.Plane = body_start_plane
+            tangent_sketch.CoordinateSystem = body_start_plane
+            tangent_sketch.Name = "%s_BENT_COIL_TANGENT_SKETCH" % spring_name
+            if not tangent_sketch.Update():
+                raise RuntimeError("Bent-coil tangent sketch Update returned False")
+            sketch_doc = tangent_sketch.BeginEdit()
+            if sketch_doc is None:
+                raise RuntimeError("Bent-coil tangent sketch BeginEdit returned None")
+            tangent_line_entity = None
+            try:
+                views_manager = safe_get(sketch_doc, "ViewsAndLayersManager")
+                if views_manager is None:
+                    get_views_manager = safe_get(sketch_doc, "GetViewsAndLayersManager")
+                    if callable(get_views_manager):
+                        views_manager = get_views_manager()
+                views = safe_get(views_manager, "Views") if views_manager is not None else None
+                view = None
+                if views is not None:
+                    for accessor_name, accessor_arg in (("View", 0), ("Item", 0), ("View", 1), ("Item", 1)):
+                        accessor = safe_get(views, accessor_name)
+                        if callable(accessor):
+                            try:
+                                view = accessor(accessor_arg)
+                                if view is not None:
+                                    break
+                            except Exception:
+                                pass
+                if view is None:
+                    raise RuntimeError("Bent-coil tangent sketch view not found")
+                drawing_container = cast_drawing_container(view)
+                line_segments = safe_get(drawing_container, "LineSegments")
+                if line_segments is None:
+                    get_line_segments = safe_get(drawing_container, "GetLineSegments")
+                    if callable(get_line_segments):
+                        line_segments = get_line_segments()
+                if line_segments is None or not callable(safe_get(line_segments, "Add")):
+                    raise RuntimeError("Bent-coil tangent sketch LineSegments.Add unavailable")
+                tangent_axis_flip = bool(params.get("bent_coil_tangent_axis_flip", False))
+                tangent_line = line_segments.Add()
+                tangent_line.X1 = 0.0
+                tangent_line.Y1 = 0.0
+                tangent_line.X2 = 0.0
+                tangent_line.Y2 = -radius_value if tangent_axis_flip else radius_value
+                tangent_line.Style = 3
+                tangent_line.Update()
+                tangent_line_entity = tangent_line
+                tangent_axis_projection_constraints_report = _apply_center_axis_projection_constraints(
+                    tangent_line_entity,
+                    None,
+                    length_expression=bent_coil_radius_expression,
+                    length_value=radius_value,
+                )
+                try:
+                    fixed_origin = _apply_constraint_to_line(tangent_line_entity, SKETCH_CONSTRAINT_TYPES["fixed_point"], index=0)
+                    fixed_origin = dict(fixed_origin)
+                    fixed_origin["kind"] = "fixed_point"
+                    fixed_origin["index"] = 0
+                    tangent_axis_projection_constraints_report["applied" if fixed_origin.get("created") else "failed"].append(fixed_origin)
+                    tangent_axis_projection_constraints_report["created_count"] = len([item for item in tangent_axis_projection_constraints_report["applied"] if item.get("created")])
+                except Exception as exc:
+                    tangent_axis_projection_constraints_report["failed"].append({"kind": "fixed_point", "index": 0, "error": str(exc)})
+                tangent_axis_projection_constraints_report["created_during_initial_edit"] = True
+            finally:
+                tangent_sketch.EndEdit()
+            if not tangent_sketch.Update():
+                raise RuntimeError("Bent-coil tangent sketch final Update returned False")
+            tangent_point_projection_report, tangent_projected_point = _project_point_to_sketch_xy_with_object(tangent_sketch, body_start_point)
+            if tangent_projected_point is not None:
+                tangent_axis_projection_constraints_report["merge_after_projection"] = _apply_center_axis_projection_constraints(
+                    tangent_line_entity,
+                    tangent_projected_point,
+                )
+            if not tangent_axis_projection_constraints_report.get("created_count"):
+                try:
+                    tangent_sketch.BeginEdit()
+                    tangent_axis_projection_constraints_report = _apply_center_axis_projection_constraints(
+                        tangent_line_entity,
+                        tangent_projected_point,
+                        length_expression=bent_coil_radius_expression,
+                        length_value=radius_value,
+                    )
+                    tangent_axis_projection_constraints_report["edit_retry"] = True
+                finally:
+                    tangent_sketch.EndEdit()
+                    tangent_sketch.Update()
+            auxiliary_objects.append(("bent_coil_tangent_sketch", tangent_sketch))
+            if tangent_line_entity is None:
+                raise RuntimeError("Bent-coil tangent sketch did not expose tangent line entity")
+            tangent_axis_edges, tangent_axis_edge_index, tangent_axis_edge_attempts = _get_first_sketch_edge_tuple(tangent_sketch, (1, 2, 0))
+            if not tangent_axis_edges:
+                raise RuntimeError("Bent-coil tangent sketch did not expose axis edge; attempts=%s" % tangent_axis_edge_attempts)
+            tangent_axis_edge = tangent_axis_edges[0]
+            angle_axis_object = tangent_axis_edge
+            angle_axis_report = {"source": "sketch_edge", "ok": True}
+            if str(params.get("bent_coil_angle_axis_source", "sketch_edge") or "sketch_edge") == "axis_2points":
+                try:
+                    axis_2p_point = _create_point3d_displace(
+                        model_container,
+                        "%s_BENT_COIL_AXIS_2P_POINT" % spring_name,
+                        body_start_point,
+                        [0.0, 0.0, 0.0],
+                        guiding_object=tangent_axis_edge,
+                        distance=radius_value,
+                    )
+                    angle_axis_object = _create_axis3d_by_2_points(
+                        part,
+                        "%s_BENT_COIL_AXIS_2P" % spring_name,
+                        body_start_point,
+                        axis_2p_point,
+                    )
+                    auxiliary_objects.append(("bent_coil_axis_2p_point", axis_2p_point))
+                    auxiliary_objects.append(("bent_coil_axis_2p", angle_axis_object))
+                    angle_axis_report = {
+                        "source": "axis_2points",
+                        "ok": True,
+                        "point_reference": safe_get(axis_2p_point, "Reference"),
+                        "axis_reference": safe_get(angle_axis_object, "Reference"),
+                    }
+                except Exception as exc:
+                    angle_axis_report = {"source": "axis_2points", "ok": False, "error": str(exc)}
+            tangent_axis_touch_report = _touch_com_dependency_chain(
+                ("tangent_sketch", tangent_sketch),
+                ("tangent_axis_edge", tangent_axis_edge),
+                ("angle_axis_object", angle_axis_object),
+                ("body_start_plane", body_start_plane),
+                ("part", part),
+            )
+            bent_coil_angle_variable_touch_report = _touch_named_variable_same_value(part, "BA1")
+            bent_coil_angle_plane = None
+            bent_coil_angle_plane_report = None
+            bent_coil_angle_degrees_value = float(params.get("bent_coil_angle_degrees", 0.0) or 0.0)
+            bent_coil_angle_expression = str(bent_coil_plan.get("angle_expression") or "BA1")
+            try:
+                bent_coil_angle_plane, bent_coil_angle_plane_report = _create_plane_by_angle(
+                    part,
+                    "%s_BENT_COIL_ANGLE_PLANE" % spring_name,
+                    body_start_plane,
+                    angle_axis_object,
+                    bent_coil_angle_degrees_value,
+                    direction=bool(params.get("bent_coil_angle_direction", False)),
+                    axis_binding=str(params.get("bent_coil_angle_axis_binding", "all") or "all"),
+                    angle_expression=bent_coil_angle_expression,
+                )
+                bent_coil_angle_plane_touch_report = _touch_angle_plane_same_value(
+                    bent_coil_angle_plane,
+                    bent_coil_angle_degrees_value,
+                    angle_expression=bent_coil_angle_expression,
+                )
+                bent_coil_angle_plane_binding_report = _bind_operation_variables(
+                    bent_coil_angle_plane,
+                    [
+                        {
+                            "parameter_note": "Angle",
+                            "parameter_note_aliases": ["Angle", "Угол", "BA1"],
+                            "expression": bent_coil_angle_expression,
+                            "role": "bent_coil_angle_plane_angle",
+                        }
+                    ],
+                )
+                auxiliary_objects.append(("bent_coil_angle_plane", bent_coil_angle_plane))
+                auxiliary_objects.append(("bent_coil_left_angle_plane", bent_coil_angle_plane))
+            except Exception as exc:
+                bent_coil_angle_plane_report = {"ok": False, "error": str(exc)}
+                bent_coil_angle_plane_touch_report = None
+                bent_coil_angle_plane_binding_report = None
+            bent_coil_center_sketch = None
+            bent_coil_center_axis_edge = None
+            bent_coil_center_point3d = None
+            projection_api_probe = None
+            center_point_projection_report = None
+            center_axis_projection_constraints_report = None
+            if bent_coil_angle_plane is not None:
+                center_sketch = sketchs.Add()
+                center_sketch.Plane = bent_coil_angle_plane
+                center_sketch.CoordinateSystem = bent_coil_angle_plane
+                # Backup: without this explicit origin, KOMPAS may place the sketch at the angle plane origin.
+                # Hypothesis 1 anchors the center sketch at the spring body start point.
+                center_sketch_origin_report = _assign_sketch_origin_point(center_sketch, body_start_point)
+                center_sketch.Name = "%s_BENT_COIL_CENTER_SKETCH" % spring_name
+                if not center_sketch.Update():
+                    raise RuntimeError("Bent-coil center sketch Update returned False")
+                center_doc = center_sketch.BeginEdit()
+                if center_doc is None:
+                    raise RuntimeError("Bent-coil center sketch BeginEdit returned None")
+                try:
+                    center_views_manager = safe_get(center_doc, "ViewsAndLayersManager")
+                    if center_views_manager is None:
+                        get_center_views_manager = safe_get(center_doc, "GetViewsAndLayersManager")
+                        if callable(get_center_views_manager):
+                            center_views_manager = get_center_views_manager()
+                    center_views = safe_get(center_views_manager, "Views") if center_views_manager is not None else None
+                    center_view = None
+                    if center_views is not None:
+                        for accessor_name, accessor_arg in (("View", 0), ("Item", 0), ("View", 1), ("Item", 1)):
+                            accessor = safe_get(center_views, accessor_name)
+                            if callable(accessor):
+                                try:
+                                    center_view = accessor(accessor_arg)
+                                    if center_view is not None:
+                                        break
+                                except Exception:
+                                    pass
+                    if center_view is None:
+                        raise RuntimeError("Bent-coil center sketch view not found")
+                    center_drawing_container = cast_drawing_container(center_view)
+                    projection_api_probe = _probe_projection_api(
+                        ("center_sketch", center_sketch),
+                        ("center_doc", center_doc),
+                        ("center_view", center_view),
+                        ("center_drawing_container", center_drawing_container),
+                    )
+                    center_point_projection_report, center_projected_point = _project_point_to_sketch_xy_with_object(center_sketch, body_start_point)
+                    projected_xy = center_point_projection_report.get("xy") if center_point_projection_report else None
+                    center_axis_x = float(projected_xy[0]) if projected_xy else 0.0
+                    center_axis_y = float(projected_xy[1]) if projected_xy else 0.0
+                    center_line_segments = safe_get(center_drawing_container, "LineSegments")
+                    if center_line_segments is None:
+                        get_center_line_segments = safe_get(center_drawing_container, "GetLineSegments")
+                        if callable(get_center_line_segments):
+                            center_line_segments = get_center_line_segments()
+                    if center_line_segments is None or not callable(safe_get(center_line_segments, "Add")):
+                        raise RuntimeError("Bent-coil center sketch LineSegments.Add unavailable")
+                    center_axis_line = center_line_segments.Add()
+                    center_axis_line.X1 = center_axis_x
+                    center_axis_line.Y1 = center_axis_y
+                    center_axis_line.X2 = center_axis_x
+                    center_axis_line.Y2 = center_axis_y + radius_value
+                    center_axis_line.Style = 3
+                    center_axis_line.Update()
+                    center_axis_projection_constraints_report = _apply_center_axis_projection_constraints(
+                        center_axis_line,
+                        center_projected_point,
+                        length_expression=bent_coil_radius_expression,
+                        length_value=radius_value,
+                    )
+                finally:
+                    center_sketch.EndEdit()
+                if not center_sketch.Update():
+                    raise RuntimeError("Bent-coil center sketch final Update returned False")
+                bent_coil_center_sketch = center_sketch
+                auxiliary_objects.append(("bent_coil_center_sketch", bent_coil_center_sketch))
+                center_axis_edges = _get_sketch_edge_tuple(center_sketch, 2)
+                if not center_axis_edges:
+                    raise RuntimeError("Bent-coil center sketch did not expose center axis edge at Edges(2)")
+                bent_coil_center_axis_edge = center_axis_edges[0]
+                bent_coil_center_point3d, bent_coil_center_point3d_report = _create_point3d_displace(
+                    model_container,
+                    "%s_BENT_COIL_CENTER_POINT" % spring_name,
+                    body_start_point,
+                    [0.0, 0.0, 0.0],
+                    guiding_object=bent_coil_center_axis_edge,
+                    distance=radius_value,
+                    distance_expression=bent_coil_radius_expression,
+                    return_report=True,
+                )
+                auxiliary_objects.append(("bent_coil_center_point3d", bent_coil_center_point3d))
+                auxiliary_objects.append(("bent_coil_left_center_point3d", bent_coil_center_point3d))
+            steps_report.append(
+                {
+                    "step": "create_bent_coil_auxiliary_construction",
+                    "ok": True,
+                    "body_start_point_reference": safe_get(body_start_point, "Reference"),
+                    "body_start_plane_reference": safe_get(body_start_plane, "Reference"),
+                    "tangent_sketch_reference": safe_get(tangent_sketch, "Reference"),
+                    "tangent_sketch_coordinate_system": {
+                        "assigned": True,
+                        "reference": safe_get(body_start_plane, "Reference"),
+                    },
+                    "tangent_axis_line_2d": {
+                        "x1": 0.0,
+                        "y1": 0.0,
+                        "x2": 0.0,
+                        "y2": -radius_value if tangent_axis_flip else radius_value,
+                        "edge_index": tangent_axis_edge_index,
+                        "edge_attempts": tangent_axis_edge_attempts,
+                        "construction_radial_line": False,
+                        "local_axis": "Y",
+                        "axis_flip": tangent_axis_flip,
+                    },
+                    "tangent_point_projection": tangent_point_projection_report,
+                    "tangent_axis_projection_constraints": tangent_axis_projection_constraints_report,
+                    "tangent_axis_touch_report": tangent_axis_touch_report,
+                    "bent_coil_angle_variable_touch_report": bent_coil_angle_variable_touch_report,
+                    "angle_axis_report": angle_axis_report,
+                    "tangent_axis_edge_reference": safe_get(tangent_axis_edge, "Reference"),
+                    "angle_plane_reference": safe_get(bent_coil_angle_plane, "Reference") if bent_coil_angle_plane is not None else None,
+                    "angle_plane": bent_coil_angle_plane_report,
+                    "angle_plane_touch_report": bent_coil_angle_plane_touch_report,
+                    "angle_plane_binding_report": bent_coil_angle_plane_binding_report,
+                    "center_sketch_reference": safe_get(bent_coil_center_sketch, "Reference") if bent_coil_center_sketch is not None else None,
+                    "center_axis_edge_reference": safe_get(bent_coil_center_axis_edge, "Reference") if bent_coil_center_axis_edge is not None else None,
+                    "center_point3d_reference": safe_get(bent_coil_center_point3d, "Reference") if bent_coil_center_point3d is not None else None,
+                    "center_point3d_coordinates": [safe_get(bent_coil_center_point3d, "X"), safe_get(bent_coil_center_point3d, "Y"), safe_get(bent_coil_center_point3d, "Z")] if bent_coil_center_point3d is not None else None,
+                    "center_point3d_report": bent_coil_center_point3d_report if bent_coil_center_point3d is not None else None,
+                    "center_sketch_origin": center_sketch_origin_report if bent_coil_angle_plane is not None else None,
+                    "projection_api_probe": projection_api_probe,
+                    "center_point_projection": center_point_projection_report,
+                    "center_axis_projection_constraints": center_axis_projection_constraints_report,
+                    "center_axis_line_2d": {
+                        "x1": center_axis_x if center_point_projection_report else None,
+                        "y1": center_axis_y if center_point_projection_report else None,
+                        "x2": center_axis_x if center_point_projection_report else None,
+                        "y2": center_axis_y + radius_value if center_point_projection_report else None,
+                        "anchored_to_projected_body_start": bool(center_point_projection_report and center_point_projection_report.get("ok")),
+                        "length_expression": bent_coil_radius_expression,
+                    },
+                }
+            )
+        except Exception as exc:
+            steps_report.append(
+                {
+                    "step": "create_bent_coil_auxiliary_construction",
+                    "ok": False,
+                    "error": str(exc),
+                }
+            )
+
+        if any(str(item.get("role") or "") == "bent_coil_right" for item in deferred_bent_coil_segments):
+            try:
+                body_segment = next((item for item in segment_objects if item.get("role") == "body"), None)
+                if body_segment is None:
+                    raise RuntimeError("Body segment is required for right bent-coil auxiliary construction")
+                right_plan = next(
+                    (item for item in list(params.get("segment_plan") or []) if isinstance(item, dict) and str(item.get("role") or "") == "bent_coil_right"),
+                    {},
+                )
+                right_radius_expression = str(right_plan.get("radius_expression") or "(D1 - WD1) / 2")
+                right_angle_expression = str(right_plan.get("angle_expression") or "BA1")
+                right_radius_value = float(params.get("mean_diameter", 0.0) or 0.0) / 2.0
+                if right_radius_value <= 0.0:
+                    outer_value = float(params.get("outer_diameter", params.get("diameter", 0.0)) or 0.0)
+                    wire_value = float(params.get("wire_diameter", 0.0) or 0.0)
+                    right_radius_value = (outer_value - wire_value) / 2.0 if outer_value > 0.0 else 0.0
+                right_base_point = _create_point3d_on_curve(
+                    model_container,
+                    "%s_BENT_COIL_RIGHT_BODY_END_POINT" % spring_name,
+                    body_segment["path"],
+                    direction=False,
+                    offset=0.0,
+                    offset_type=2,
+                )
+                auxiliary_objects.append(("bent_coil_right_base_point", right_base_point))
+                right_base_plane = _create_plane_perpendicular_by_edge(
+                    auxiliary_container,
+                    "%s_BENT_COIL_RIGHT_BODY_END_PLANE" % spring_name,
+                    right_base_point,
+                    axis,
+                )
+                auxiliary_objects.append(("bent_coil_right_base_plane", right_base_plane))
+                sketchs = safe_get(model_container, "Sketchs")
+                if sketchs is None:
+                    get_sketchs = safe_get(model_container, "GetSketchs")
+                    if callable(get_sketchs):
+                        sketchs = get_sketchs()
+                if sketchs is None or not callable(safe_get(sketchs, "Add")):
+                    raise RuntimeError("Part does not expose Sketchs.Add for right bent-coil tangent sketch")
+                right_tangent_sketch = sketchs.Add()
+                right_tangent_sketch.Plane = right_base_plane
+                right_tangent_sketch.CoordinateSystem = right_base_plane
+                right_tangent_sketch.Name = "%s_BENT_COIL_RIGHT_TANGENT_SKETCH" % spring_name
+                if not right_tangent_sketch.Update():
+                    raise RuntimeError("Right bent-coil tangent sketch Update returned False")
+                right_sketch_doc = right_tangent_sketch.BeginEdit()
+                if right_sketch_doc is None:
+                    raise RuntimeError("Right bent-coil tangent sketch BeginEdit returned None")
+                right_tangent_line_entity = None
+                try:
+                    views_manager = safe_get(right_sketch_doc, "ViewsAndLayersManager")
+                    if views_manager is None:
+                        get_views_manager = safe_get(right_sketch_doc, "GetViewsAndLayersManager")
+                        if callable(get_views_manager):
+                            views_manager = get_views_manager()
+                    views = safe_get(views_manager, "Views") if views_manager is not None else None
+                    view = None
+                    if views is not None:
+                        for accessor_name, accessor_arg in (("View", 0), ("Item", 0), ("View", 1), ("Item", 1)):
+                            accessor = safe_get(views, accessor_name)
+                            if callable(accessor):
+                                try:
+                                    view = accessor(accessor_arg)
+                                    if view is not None:
+                                        break
+                                except Exception:
+                                    pass
+                    if view is None:
+                        raise RuntimeError("Right bent-coil tangent sketch view not found")
+                    drawing_container = cast_drawing_container(view)
+                    line_segments = safe_get(drawing_container, "LineSegments")
+                    if line_segments is None:
+                        get_line_segments = safe_get(drawing_container, "GetLineSegments")
+                        if callable(get_line_segments):
+                            line_segments = get_line_segments()
+                    if line_segments is None or not callable(safe_get(line_segments, "Add")):
+                        raise RuntimeError("Right bent-coil tangent sketch LineSegments.Add unavailable")
+                    right_tangent_axis_flip = bool(params.get("bent_coil_right_tangent_axis_flip", params.get("bent_coil_tangent_axis_flip", False)))
+                    right_tangent_line = line_segments.Add()
+                    right_tangent_line.X1 = 0.0
+                    right_tangent_line.Y1 = 0.0
+                    right_tangent_line.X2 = 0.0
+                    right_tangent_line.Y2 = -right_radius_value if right_tangent_axis_flip else right_radius_value
+                    right_tangent_line.Style = 3
+                    right_tangent_line.Update()
+                    right_tangent_line_entity = right_tangent_line
+                    right_tangent_constraints_report = _apply_center_axis_projection_constraints(
+                        right_tangent_line_entity,
+                        None,
+                        length_expression=right_radius_expression,
+                        length_value=right_radius_value,
+                    )
+                    try:
+                        fixed_origin = _apply_constraint_to_line(right_tangent_line_entity, SKETCH_CONSTRAINT_TYPES["fixed_point"], index=0)
+                        fixed_origin = dict(fixed_origin)
+                        fixed_origin["kind"] = "fixed_point"
+                        fixed_origin["index"] = 0
+                        right_tangent_constraints_report["applied" if fixed_origin.get("created") else "failed"].append(fixed_origin)
+                        right_tangent_constraints_report["created_count"] = len([item for item in right_tangent_constraints_report["applied"] if item.get("created")])
+                    except Exception as exc:
+                        right_tangent_constraints_report["failed"].append({"kind": "fixed_point", "index": 0, "error": str(exc)})
+                    right_tangent_constraints_report["created_during_initial_edit"] = True
+                finally:
+                    right_tangent_sketch.EndEdit()
+                if not right_tangent_sketch.Update():
+                    raise RuntimeError("Right bent-coil tangent sketch final Update returned False")
+                auxiliary_objects.append(("bent_coil_right_tangent_sketch", right_tangent_sketch))
+                right_tangent_edges = _get_sketch_edge_tuple(right_tangent_sketch, 2)
+                if not right_tangent_edges:
+                    raise RuntimeError("Right bent-coil tangent sketch did not expose tangent edge at Edges(2)")
+                right_tangent_axis_edge = right_tangent_edges[0]
+                right_angle_direction_param = str(right_plan.get("angle_direction_param") or "bent_coil_right_angle_direction")
+                right_angle_plane, right_angle_plane_report = _create_plane_by_angle(
+                    model_container,
+                    "%s_BENT_COIL_RIGHT_ANGLE_PLANE" % spring_name,
+                    right_tangent_sketch,
+                    right_tangent_axis_edge,
+                    float(params.get("bent_coil_angle_degrees", 0.0) or 0.0),
+                    direction=bool(params.get(right_angle_direction_param, True)),
+                    axis_binding=str(params.get("bent_coil_angle_axis_binding", "all") or "all"),
+                    angle_expression=right_angle_expression,
+                )
+                right_angle_plane_touch_report = _touch_angle_plane_same_value(
+                    right_angle_plane,
+                    float(params.get("bent_coil_angle_degrees", 0.0) or 0.0),
+                    angle_expression=right_angle_expression,
+                )
+                right_angle_plane_binding_report = _bind_operation_variables(
+                    right_angle_plane,
+                    [{"parameter_note": "Angle", "parameter_note_aliases": ["Angle", "Угол", "BA1"], "expression": right_angle_expression, "role": "bent_coil_right_angle_plane_angle"}],
+                )
+                auxiliary_objects.append(("bent_coil_right_angle_plane", right_angle_plane))
+                right_center_sketch = sketchs.Add()
+                right_center_sketch.Plane = right_angle_plane
+                right_center_sketch.CoordinateSystem = right_angle_plane
+                right_center_sketch.Name = "%s_BENT_COIL_RIGHT_CENTER_SKETCH" % spring_name
+                if not right_center_sketch.Update():
+                    raise RuntimeError("Right bent-coil center sketch Update returned False")
+                right_center_projection_report, right_center_projected_point = _project_point_to_sketch_xy_with_object(right_center_sketch, right_base_point)
+                right_center_projection_retry_report = None
+                right_center_xy = (right_center_projection_report.get("point_xy") or right_center_projection_report.get("xy")) if isinstance(right_center_projection_report, dict) else None
+                if right_center_xy is None:
+                    right_center_xy = [0.0, 0.0]
+                right_center_x = float(right_center_xy[0])
+                right_center_y = float(right_center_xy[1])
+                right_center_doc = right_center_sketch.BeginEdit()
+                if right_center_doc is None:
+                    raise RuntimeError("Right bent-coil center sketch BeginEdit returned None")
+                try:
+                    if right_center_projected_point is None:
+                        right_center_projection_retry_report, right_center_projected_point = _project_point_to_sketch_xy_with_object(right_center_sketch, right_base_point)
+                        retry_xy = (right_center_projection_retry_report.get("point_xy") or right_center_projection_retry_report.get("xy")) if isinstance(right_center_projection_retry_report, dict) else None
+                        if retry_xy is not None:
+                            right_center_x = float(retry_xy[0])
+                            right_center_y = float(retry_xy[1])
+                    views_manager = safe_get(right_center_doc, "ViewsAndLayersManager")
+                    if views_manager is None:
+                        get_views_manager = safe_get(right_center_doc, "GetViewsAndLayersManager")
+                        if callable(get_views_manager):
+                            views_manager = get_views_manager()
+                    views = safe_get(views_manager, "Views") if views_manager is not None else None
+                    view = None
+                    if views is not None:
+                        for accessor_name, accessor_arg in (("View", 0), ("Item", 0), ("View", 1), ("Item", 1)):
+                            accessor = safe_get(views, accessor_name)
+                            if callable(accessor):
+                                try:
+                                    view = accessor(accessor_arg)
+                                    if view is not None:
+                                        break
+                                except Exception:
+                                    pass
+                    if view is None:
+                        raise RuntimeError("Right bent-coil center sketch view not found")
+                    drawing_container = cast_drawing_container(view)
+                    line_segments = safe_get(drawing_container, "LineSegments")
+                    if line_segments is None:
+                        get_line_segments = safe_get(drawing_container, "GetLineSegments")
+                        if callable(get_line_segments):
+                            line_segments = get_line_segments()
+                    if line_segments is None or not callable(safe_get(line_segments, "Add")):
+                        raise RuntimeError("Right bent-coil center sketch LineSegments.Add unavailable")
+                    right_center_axis_line = line_segments.Add()
+                    right_center_axis_line.X1 = right_center_x
+                    right_center_axis_line.Y1 = right_center_y
+                    right_center_axis_line.X2 = right_center_x
+                    right_center_axis_line.Y2 = right_center_y + right_radius_value
+                    right_center_axis_line.Style = 3
+                    right_center_axis_line.Update()
+                    right_center_axis_constraints_report = _apply_center_axis_projection_constraints(
+                        right_center_axis_line,
+                        right_center_projected_point,
+                        length_expression=right_radius_expression,
+                        length_value=right_radius_value,
+                    )
+                finally:
+                    right_center_sketch.EndEdit()
+                if not right_center_sketch.Update():
+                    raise RuntimeError("Right bent-coil center sketch final Update returned False")
+                auxiliary_objects.append(("bent_coil_right_center_sketch", right_center_sketch))
+                right_center_edges = _get_sketch_edge_tuple(right_center_sketch, 2)
+                if not right_center_edges:
+                    raise RuntimeError("Right bent-coil center sketch did not expose center edge at Edges(2)")
+                right_center_axis_edge = right_center_edges[0]
+                right_center_point3d, right_center_point3d_report = _create_point3d_displace(
+                    model_container,
+                    "%s_BENT_COIL_RIGHT_CENTER_POINT" % spring_name,
+                    right_base_point,
+                    [0.0, 0.0, 0.0],
+                    guiding_object=right_center_axis_edge,
+                    distance=right_radius_value,
+                    distance_expression=right_radius_expression,
+                    return_report=True,
+                )
+                auxiliary_objects.append(("bent_coil_right_center_point3d", right_center_point3d))
+                steps_report.append(
+                    {
+                        "step": "create_bent_coil_auxiliary_construction",
+                        "role": "bent_coil_right",
+                        "ok": True,
+                        "base_point_reference": safe_get(right_base_point, "Reference"),
+                        "base_plane_reference": safe_get(right_base_plane, "Reference"),
+                        "tangent_constraints": right_tangent_constraints_report,
+                        "angle_plane": right_angle_plane_report,
+                        "angle_plane_touch_report": right_angle_plane_touch_report,
+                        "angle_plane_binding_report": right_angle_plane_binding_report,
+                        "center_point_projection": right_center_projection_report,
+                        "center_point_projection_retry": right_center_projection_retry_report,
+                        "center_axis_projection_constraints": right_center_axis_constraints_report,
+                        "center_point3d_reference": safe_get(right_center_point3d, "Reference"),
+                        "center_point3d_report": right_center_point3d_report,
+                    }
+                )
+            except Exception as exc:
+                steps_report.append({"step": "create_bent_coil_auxiliary_construction", "role": "bent_coil_right", "ok": False, "error": str(exc)})
+
+    for segment in deferred_bent_coil_segments:
+        segment_role = str(segment.get("role") or "bent_coil_left")
+        segment_side = "right" if segment_role == "bent_coil_right" else "left"
+        segment_center_point3d = next(
+            (obj for role, obj in auxiliary_objects if role == "bent_coil_%s_center_point3d" % segment_side),
+            bent_coil_center_point3d if segment_side == "left" else None,
+        )
+        segment_center_axis_edge = next(
+            (obj for role, obj in auxiliary_objects if role == "bent_coil_%s_center_axis_edge" % segment_side),
+            bent_coil_center_axis_edge if segment_side == "left" else None,
+        )
+        segment_angle_plane = next(
+            (obj for role, obj in auxiliary_objects if role == "bent_coil_%s_angle_plane" % segment_side),
+            bent_coil_angle_plane if segment_side == "left" else None,
+        )
+        try:
+            if segment_center_point3d is None or segment_angle_plane is None:
+                raise RuntimeError("Bent-coil auxiliary center point/angle plane is not available")
+            spiral = win32com.client.CastTo(auxiliary_container.Spirals3D.Add(56), "ICylindricSpiral3D")
+            if spiral is None:
+                raise RuntimeError("Bent-coil Spirals3D.Add(56) returned None")
+            spiral.Name = str(segment.get("path_name") or "%s_BENT_COIL_LEFT_PATH" % spring_name)
+            spiral_position = safe_get(spiral, "Position")
+            if spiral_position is None:
+                raise RuntimeError("Bent-coil spiral does not expose Position")
+            spiral_position.ParameterType = 1
+            spiral_position.OrientationType = 0
+            if not bool(spiral_position.SetAssociationObject(segment_center_point3d)):
+                raise RuntimeError("Bent-coil spiral SetAssociationObject(center point) returned False")
+            position_parameters = win32com.client.CastTo(spiral_position.LocalCSParameters, "ILocalCSAxesDirectionParam")
+            if position_parameters is None:
+                raise RuntimeError("Bent-coil spiral does not expose ILocalCSAxesDirectionParam")
+            position_parameters.LeadAxis = 73
+            if segment_angle_plane is None:
+                raise RuntimeError("Bent-coil angle plane is not available for spiral OZ direction")
+            if not bool(position_parameters.SetDirectingObject(73, segment_angle_plane)):
+                raise RuntimeError("Bent-coil spiral SetDirectingObject(OZ, angle plane) returned False")
+            if not bool(spiral_position.Update()):
+                raise RuntimeError("Bent-coil spiral position Update() returned False")
+            spiral.DiameterType = 0
+            diameter_report = _set_com_property_expression_or_value(
+                spiral,
+                "Diameter",
+                str(segment.get("diameter_expression") or "D1 - WD1"),
+                float(segment.get("diameter") or outer_diameter),
+            )
+            spiral.BuildingType = 1
+            step_report = _set_com_property_expression_or_value(
+                spiral,
+                "Step",
+                str(segment.get("pitch_expression") or "P1"),
+                float(segment.get("pitch") or pitch),
+            )
+            height_report = _set_com_property_expression_or_value(
+                spiral,
+                "Height",
+                str(segment.get("height_expression") or "BH1"),
+                float(segment.get("height") or 0.0),
+            )
+            turns_report = None
+            for turns_attr in ("TurnCount", "Turns", "NumberOfTurns"):
+                turns_report = _set_com_property_expression_or_value(
+                    spiral,
+                    turns_attr,
+                    str(segment.get("turns_expression") or "BT1"),
+                    float(segment.get("turns") or 0.0),
+                )
+                if turns_report.get("ok"):
+                    break
+            building_direction_param = str(segment.get("building_direction_param") or "bent_coil_building_direction")
+            spiral.BuildingDirection = bool(params.get(building_direction_param, params.get("bent_coil_building_direction", False)))
+            spiral.TurnDirection = not bool(params.get("left_hand", False))
+            if not bool(spiral.Update()):
+                raise RuntimeError("Bent-coil spiral Update() returned False")
+            binding_report = _bind_operation_variables(spiral, list(segment.get("operation_variable_bindings") or []))
+            binding_report["scenario"] = "compression_spring"
+            binding_report["target"] = "bent_coil_spiral_path"
+            binding_report["role"] = segment_role
+            steps_report.append(binding_report)
+            initial_angle_report = _set_operation_variable_value(
+                spiral,
+                parameter_note="Angle",
+                parameter_note_aliases=["Angle", "Initial angle", "Start angle", "Угол", "BA1"],
+                value=float(segment.get("initial_angle_degrees", 90.0)),
+                role="bent_coil_initial_angle_fixed_value",
+            )
+            post_binding_update_report = _touch_com_dependency_chain(
+                ("bent_coil_spiral", spiral),
+                ("part", part),
+            )
+            steps_report.append(
+                {
+                    "step": "create_bent_coil_spiral_segment",
+                    "ok": True,
+                    "scenario": "compression_spring",
+                    "role": segment_role,
+                    "reference": safe_get(spiral, "Reference"),
+                    "center_point_reference": safe_get(segment_center_point3d, "Reference"),
+                    "center_axis_edge_reference": safe_get(segment_center_axis_edge, "Reference"),
+                    "direction_object": "bent_coil_%s_angle_plane" % segment_side,
+                    "height": float(safe_get(spiral, "Height", 0.0) or 0.0),
+                    "pitch": float(safe_get(spiral, "Step", 0.0) or 0.0),
+                    "diameter": float(safe_get(spiral, "Diameter", 0.0) or 0.0),
+                    "building_direction": bool(safe_get(spiral, "BuildingDirection", False)),
+                    "turn_direction": bool(safe_get(spiral, "TurnDirection", False)),
+                    "positioning": {"lead_axis": str(safe_get(position_parameters, "LeadAxis"))},
+                    "parameterization": {
+                        "diameter": diameter_report,
+                        "step": step_report,
+                        "height": height_report,
+                        "turns": turns_report,
+                        "initial_angle": {
+                            "mode": "fixed_value",
+                            "value": float(segment.get("initial_angle_degrees", 90.0)),
+                            "property_report": initial_angle_report,
+                        },
+                    },
+                    "post_binding_update_report": post_binding_update_report,
+                    "operation_variable_snapshot": [
+                        {
+                            "name": safe_get(variable, "Name"),
+                            "parameter_note": safe_get(variable, "ParameterNote", ""),
+                            "expression": safe_get(variable, "Expression", ""),
+                            "value": safe_get(variable, "Value", None),
+                        }
+                        for variable in _iter_operation_variables(spiral)
+                    ],
+                    "coordinate_system_reference": safe_get(bent_coil_angle_plane, "Reference") if bent_coil_angle_plane is not None else None,
+                    "built_after_auxiliary": True,
+                }
+            )
+            auxiliary_objects.append(("bent_coil_spiral_path", spiral))
+            segment_objects.append(
+                {
+                    "role": segment_role,
+                    "start_point": bent_coil_center_point3d,
+                    "end_point": bent_coil_center_point3d,
+                    "logical_start_point": list(segment.get("start_point") or []),
+                    "logical_end_point": list(segment.get("end_point") or []),
+                    "path": spiral,
+                    "axis": bent_coil_center_axis_edge,
+                    "direction_object": bent_coil_angle_plane,
+                    "position_parameters": position_parameters,
+                    "angle_application_mode": "initial_angle",
+                    "applied_orientation_angle": 0.0,
+                    "orientation_angle_candidates": [0.0],
+                    "segment": str(segment.get("label") or segment_role),
+                    "path_name": str(segment.get("path_name") or ""),
+                    "coordinate_system": bent_coil_angle_plane,
+                }
+            )
+        except Exception as exc:
+            steps_report.append(
+                {
+                    "step": "create_bent_coil_spiral_segment",
+                    "ok": False,
+                    "scenario": "compression_spring",
+                    "role": segment_role,
+                    "error": str(exc),
+                }
+            )
+
+    if bool(params.get("construction_only")):
+        steps_report.append(
+            {
+                "step": "construction_only_stop",
+                "ok": True,
+                "scenario": "compression_spring",
+                "segment_count": len(segment_objects),
+                "paths": [safe_get(item.get("path"), "Reference") for item in segment_objects],
+            }
+        )
+        return {
+            "body": None,
+            "axis": axis,
+            "spiral_path": segment_objects[0]["path"] if segment_objects else None,
+            "path_contour": None,
+            "segments": segment_objects,
+            "connectors": [],
+            "profile": None,
+        }
+
+    profile_anchor_plane = params.get("profile_anchor_plane") or {}
+    profile_lcs = None
+    profile_plane_object = sketch_plane
+    profile_anchor_report = None
+    if profile_anchor_plane:
+        anchor_path_name = str(profile_anchor_plane.get("path_name") or "")
+        anchor_segment = None
+        for segment_object in list(segment_objects):
+            if str(segment_object.get("path_name") or "") == anchor_path_name:
+                anchor_segment = segment_object
+                break
+        if anchor_segment is None:
+            raise RuntimeError("profile_anchor_plane path not found: %s" % anchor_path_name)
+        anchor_vertex = str(profile_anchor_plane.get("vertex") or "start").lower()
+        if anchor_vertex not in ("start", "end"):
+            raise RuntimeError("profile_anchor_plane vertex must be start or end")
+        profile_anchor_direction = anchor_vertex == "start"
+        profile_anchor = _create_point3d_on_curve(
+            model_container,
+            "%s_PROFILE_ANCHOR_POINT" % spring_name,
+            anchor_segment["path"],
+            offset=0.0,
+            direction=profile_anchor_direction,
+            offset_type=2,
+        )
+        auxiliary_objects.append(("profile_anchor_point", profile_anchor))
+        use_perpendicular_profile_plane = bool(profile_anchor_plane.get("use_perpendicular_plane", True))
+        if use_perpendicular_profile_plane:
+            profile_plane_object = _create_plane_perpendicular_by_edge(
+                auxiliary_container,
+                "%s_PROFILE_ANCHOR_PLANE" % spring_name,
+                profile_anchor,
+                anchor_segment["path"],
+            )
+            auxiliary_objects.append(("profile_anchor_plane", profile_plane_object))
+        else:
+            profile_lcs = _create_local_coordinate_system_on_point(
+                part,
+                "%s_PROFILE_LCS" % spring_name,
+                profile_anchor,
+                rotation=profile_lcs_rotation,
+            )
+            auxiliary_objects.append(("profile_lcs", profile_lcs))
+        profile_anchor_report = {
+            "path_name": anchor_path_name,
+            "vertex": anchor_vertex,
+            "point": [safe_get(profile_anchor, "X"), safe_get(profile_anchor, "Y"), safe_get(profile_anchor, "Z")],
+            "plane_reference": safe_get(profile_plane_object, "Reference"),
+            "use_perpendicular_plane": use_perpendicular_profile_plane,
+        }
+    else:
+        profile_anchor = segment_objects[0]["start_point"] if segment_objects else start_point
+        profile_lcs = _create_local_coordinate_system_on_point(
+            part,
+            "%s_PROFILE_LCS" % spring_name,
+            profile_anchor,
+            rotation=profile_lcs_rotation,
+        )
+        auxiliary_objects.append(("profile_lcs", profile_lcs))
+    profile_sketch_center = params.get("profile_sketch_center")
+    if profile_sketch_center is None:
+        profile_center = [profile_path_offset[0], profile_path_offset[2]]
+    else:
+        profile_center = [float(profile_sketch_center[0]), float(profile_sketch_center[1])]
+    if profile_anchor_plane:
+        profile_seed_center = [float(profile_center[0]), float(profile_center[1])]
+    else:
+        profile_seed_offset = max(float(wire_radius) * 0.5, 1.0)
+        profile_seed_center = [
+            float(profile_center[0]) + profile_seed_offset,
+            float(profile_center[1]) + profile_seed_offset,
+        ]
     profile_sketch, profile_circle, _ = _create_sketch_circle_with_coordinate_system(
         model_container,
         part,
         profile_name,
-        sketch_plane,
+        profile_plane_object,
         profile_seed_center,
         wire_radius,
         int(((params.get("sketch") or {}).get("profile_line_style")) or 1),
         coordinate_system=profile_lcs,
     )
+    profile_circle_bindings = list(params.get("profile_circle_variable_bindings") or [])
+    if profile_circle_bindings:
+        profile_circle_binding_report = _bind_operation_variables(profile_circle, profile_circle_bindings)
+        profile_circle_binding_report["step"] = "bind_operation_variables"
+        profile_circle_binding_report["scenario"] = "compression_spring"
+        profile_circle_binding_report["target"] = "profile_circle"
+        try:
+            profile_circle_binding_report["post_binding_update"] = bool(profile_circle.Update())
+            profile_circle_binding_report["sketch_update_ok"] = bool(profile_sketch.Update())
+        except Exception as exc:
+            profile_circle_binding_report["post_binding_update"] = False
+            profile_circle_binding_report["post_binding_update_error"] = str(exc)
+        steps_report.append(profile_circle_binding_report)
     auxiliary_objects.append(("wire_profile_sketch", profile_sketch))
     steps_report.append(
         {
@@ -10157,9 +11869,10 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             "scenario": "compression_spring",
             "role": "full_path",
             "reference": safe_get(profile_sketch, "Reference"),
-            "plane": sketch_plane,
+            "plane": sketch_plane if not profile_anchor_plane else safe_get(profile_plane_object, "Name", "profile_anchor_plane"),
+            "profile_anchor_plane": profile_anchor_report,
             "radius": wire_radius,
-            "coordinate_system_reference": safe_get(profile_lcs, "Reference"),
+            "coordinate_system_reference": safe_get(profile_lcs, "Reference") if profile_lcs is not None else None,
             "coordinate_system_rotation": dict(profile_lcs_rotation or {}),
             "center": profile_center,
             "center_offset_3d": profile_path_offset,
@@ -10174,81 +11887,56 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
         params,
         steps_report,
     )
+    profile_lcs_bindings = list(params.get("profile_lcs_variable_bindings") or [])
+    if profile_lcs_bindings:
+        if profile_lcs is None:
+            raise RuntimeError("profile_lcs_variable_bindings require a profile local coordinate system")
+        profile_lcs_binding_report = _bind_operation_variables(profile_lcs, profile_lcs_bindings)
+        profile_lcs_binding_report["step"] = "bind_operation_variables"
+        profile_lcs_binding_report["scenario"] = "compression_spring"
+        profile_lcs_binding_report["target"] = "profile_lcs"
+        try:
+            profile_lcs_binding_report["post_binding_update"] = bool(profile_lcs.Update())
+            profile_lcs_binding_report["sketch_update_ok"] = bool(profile_sketch.Update())
+        except Exception as exc:
+            profile_lcs_binding_report["post_binding_update"] = False
+            profile_lcs_binding_report["post_binding_update_error"] = str(exc)
+        steps_report.append(profile_lcs_binding_report)
 
-    connector_plan = list(params.get("connector_plan") or [])
-    sweep_paths_for_report = [item["path"] for item in segment_objects]
-    if connector_plan:
-        connector_objects = _build_compression_spring_transition_curve_paths(
+    connector_plan, connector_objects, path_contour, contour_report, sweep_paths_for_report = (
+        _build_compression_spring_path_contour_with_connectors(
             part,
             model_container,
             auxiliary_container,
             spring_name,
+            params,
             segment_objects,
-            connector_plan,
+            auxiliary_objects,
             steps_report,
         )
-        auxiliary_objects.extend(
-            _collect_compression_spring_connector_auxiliary_objects(connector_objects)
-        )
-        contour_paths = _resolve_named_curve_sequence(
-            params.get("full_path_sequence") or [],
-            segment_objects,
-            connector_objects,
-        )
-        sweep_paths_for_report = list(contour_paths)
-        path_contour, contour_report = _build_curve_contour(
-            auxiliary_container,
-            "%s_PATH_CONTOUR" % spring_name,
-            contour_paths,
-            allow_incomplete=True,
-            expected_edges_count=len(contour_paths),
-        )
-    else:
-        path_contour, contour_report = _resolve_spring_path_contour(
-            auxiliary_container,
-            spring_name,
-            segment_objects,
-        )
-    auxiliary_objects.append(("spring_path_contour", path_contour))
-    steps_report.append(
-        {
-            "step": "build_spring_path_contour",
-            "ok": True,
-            "scenario": "compression_spring",
-            "reference": safe_get(path_contour, "Reference"),
-            "model_object_type": safe_get(path_contour, "ModelObjectType"),
-            "source_path_count": contour_report["source_path_count"],
-            "edges_count": contour_report["edges_count"],
-            "expected_edges_count": contour_report.get("expected_edges_count"),
-            "connector_count": len(connector_plan),
-            "candidate_orientation_angles": contour_report.get("candidate_orientation_angles"),
-            "combo_index": contour_report.get("combo_index"),
-            "selected_orientation_angles": [
-                {
-                    "role": item["role"],
-                    "orientation_angle_degrees": float(item.get("applied_orientation_angle") or 0.0),
-                }
-                for item in segment_objects
-            ],
-        }
     )
+
     evolution = win32com.client.CastTo(evolutions.Add(46), "IEvolution")
     if evolution is None:
         raise RuntimeError("Evolutions.Add(o3d_bossEvolution) returned None")
     evolution.Sketch = profile_sketch
     evolution.Edges = path_contour
     sketch_shift_type_applied = False
-    try:
-        evolution.SketchShiftType = 2
-        sketch_shift_type_applied = True
-    except Exception:
-        pass
+    sketch_shift_type = params.get("evolution_sketch_shift_type", 2)
+    if sketch_shift_type is not None:
+        try:
+            evolution.SketchShiftType = int(sketch_shift_type)
+            sketch_shift_type_applied = True
+        except Exception:
+            pass
     by_surface_normal_applied = False
-    try:
-        evolution.BySurfaceNormal = True
-        by_surface_normal_applied = True
-    except Exception:
-        pass
+    by_surface_normal = params.get("evolution_by_surface_normal", True)
+    if by_surface_normal is not None:
+        try:
+            evolution.BySurfaceNormal = bool(by_surface_normal)
+            by_surface_normal_applied = True
+        except Exception:
+            pass
     try:
         evolution.Name = sweep_name
     except Exception:
@@ -10297,7 +11985,8 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
 
     working_segment = None
     for item in segment_objects:
-        if item["role"] == "working":
+        role = str(item.get("role") or "")
+        if role == "working" or role.startswith("working_"):
             working_segment = item
             break
     if working_segment is None and segment_objects:
@@ -10326,12 +12015,18 @@ def _apply_compression_spring_ground_surface_sections(part, model_container, par
         }
 
     by_role = {str(entry.get("role") or ""): entry for entry in segment_objects or []}
+    working_segments = [
+        entry
+        for entry in segment_objects or []
+        if str(entry.get("role") or "") == "working"
+        or str(entry.get("role") or "").startswith("working_")
+    ]
     axis_object = (segment_objects or [{}])[0].get("axis") if segment_objects else None
     results = []
     for operation in list(trim_plan.get("operations") or []):
         role = str(operation.get("role") or "").strip()
         if role == "start_ground_trim":
-            joint_source = by_role.get("working") or by_role.get("start_end")
+            joint_source = working_segments[0] if working_segments else by_role.get("start_end")
             joint_point = (joint_source or {}).get("start_point")
             direction = True
         elif role == "finish_ground_trim":
@@ -11996,10 +13691,70 @@ def _create_plane_parallel_by_point(part, name, reference_plane, point):
 def _create_plane_perpendicular_by_edge(part, name, point, edge):
     import win32com.client
 
+    planes = safe_get(part, "Planes3D") or getattr(part, "Planes3D", None) or safe_get(part, "Planes") or getattr(part, "Planes", None)
+    if planes is None:
+        aux = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+        if aux is not None:
+            planes = safe_get(aux, "Planes3D") or getattr(aux, "Planes3D", None) or safe_get(aux, "Planes") or getattr(aux, "Planes", None)
+            if planes is None:
+                get_planes = safe_get(aux, "GetPlanes3D")
+                if callable(get_planes):
+                    planes = get_planes()
+    if planes is None:
+        get_planes = safe_get(part, "GetPlanes3D")
+        if callable(get_planes):
+            planes = get_planes()
+    if planes is None:
+        try:
+            aux_direct = win32com.client.CastTo(part, "IAuxiliaryGeomContainer")
+            planes = safe_get(aux_direct, "Planes3D") or getattr(aux_direct, "Planes3D", None)
+        except Exception:
+            planes = None
+    if planes is None:
+        raise RuntimeError("Part does not expose Planes3D helper")
+    plane = planes.Add(21)
+    if plane is None:
+        raise RuntimeError("Planes3D.Add(21) returned None")
+    plane = win32com.client.CastTo(plane, "IPlane3DPerpendicularByEdge")
+    if name:
+        plane.Name = str(name)
+    plane.Point = point
+    plane.Edge = edge
+    if not plane.Update():
+        raise RuntimeError("IPlane3DPerpendicularByEdge Update returned False")
+    return plane
+
+
+def _create_plane_by_edge_and_point(container, name, point, edge):
+    import win32com.client
+
     if point is None:
-        raise RuntimeError("Perpendicular-by-edge plane requires point")
+        raise RuntimeError("Plane by edge and point requires point")
     if edge is None:
-        raise RuntimeError("Perpendicular-by-edge plane requires edge")
+        raise RuntimeError("Plane by edge and point requires edge")
+    planes = safe_get(container, "Planes3D") or getattr(container, "Planes3D", None)
+    if planes is None or not callable(getattr(planes, "Add", None)):
+        aux = _cast_to_com_interface(container, "IAuxiliaryGeomContainer")
+        if aux is not None:
+            planes = safe_get(aux, "Planes3D") or getattr(aux, "Planes3D", None)
+    if planes is None:
+        raise RuntimeError("container does not expose Planes3D or Planes")
+    plane = planes.Add(19)
+    if plane is None:
+        raise RuntimeError("Planes3D.Add(19) returned None")
+    plane = win32com.client.CastTo(plane, "IPlane3DByEdgeAndPoint")
+    if name:
+        plane.Name = str(name)
+    plane.Point = point
+    plane.Edge = edge
+    if not plane.Update():
+        raise RuntimeError("IPlane3DByEdgeAndPoint Update returned False")
+    return plane
+
+
+def _create_plane_by_angle(part, name, base_plane, axis_edge, angle_degrees, direction=False, axis_binding="all", angle_expression=None):
+    import win32com.client
+
     auxiliary = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
     if auxiliary is None:
         raise RuntimeError("Part does not expose IAuxiliaryGeomContainer")
@@ -12009,16 +13764,96 @@ def _create_plane_perpendicular_by_edge(part, name, point, edge):
         if callable(get_planes):
             planes = get_planes()
     if planes is None:
-        raise RuntimeError("Part does not expose Planes3D")
-    plane = win32com.client.CastTo(planes.Add(21), "IPlane3DPerpendicularByEdge")
-    if plane is None:
-        raise RuntimeError("Planes3D.Add(o3d_plane3DPerpendicularByEdge) returned None")
-    plane.Name = str(name or "")
-    plane.Point = point
-    plane.Edge = edge
-    if not plane.Update():
-        raise RuntimeError("Perpendicular-by-edge plane Update returned False")
-    return plane
+        raise RuntimeError("Part does not expose Planes3D for angle plane")
+    errors = []
+    for code in (15, 17, 22, 23, 24, 18, 16):
+        try:
+            raw_plane = planes.Add(code)
+        except Exception as exc:
+            errors.append("Add(%s): %s" % (code, exc))
+            continue
+        for interface_name in (
+            "IPlane3DByAngle",
+            "IPlane3DAngle",
+            "IPlane3DByAngleToPlane",
+            "IPlane3DByAngleAndAxis",
+            "IPlane3DByRotation",
+        ):
+            try:
+                plane = win32com.client.CastTo(raw_plane, interface_name)
+            except Exception as exc:
+                errors.append("Add(%s) CastTo(%s): %s" % (code, interface_name, exc))
+                continue
+            try:
+                if hasattr(plane, "Name"):
+                    plane.Name = str(name or "")
+                if callable(safe_get(plane, "SetPlane")):
+                    plane.SetPlane(base_plane)
+                elif hasattr(plane, "Plane"):
+                    plane.Plane = base_plane
+                elif hasattr(plane, "BasePlane"):
+                    plane.BasePlane = base_plane
+                elif callable(safe_get(plane, "SetBasePlane")):
+                    plane.SetBasePlane(base_plane)
+                axis_report = {"binding": axis_binding, "assigned": []}
+                if axis_binding in ("all", "baseline_only") and hasattr(plane, "BaseLine"):
+                    plane.BaseLine = axis_edge
+                    axis_report["assigned"].append("BaseLine")
+                if axis_binding in ("all", "no_baseline", "axis_only", "setaxis_only") and callable(safe_get(plane, "SetAxis")):
+                    plane.SetAxis(axis_edge)
+                    axis_report["assigned"].append("SetAxis")
+                elif axis_binding in ("all", "no_baseline", "axis_only") and hasattr(plane, "Axis"):
+                    plane.Axis = axis_edge
+                    axis_report["assigned"].append("Axis")
+                elif axis_binding in ("all", "no_baseline", "edge_only", "setedge_only") and callable(safe_get(plane, "SetEdge")):
+                    plane.SetEdge(axis_edge)
+                    axis_report["assigned"].append("SetEdge")
+                elif axis_binding in ("all", "no_baseline", "edge_only") and hasattr(plane, "Edge"):
+                    plane.Edge = axis_edge
+                    axis_report["assigned"].append("Edge")
+                if hasattr(plane, "Direction"):
+                    plane.Direction = bool(direction)
+                angle_report = {"ok": False, "attribute": None}
+                if hasattr(plane, "Angle"):
+                    angle_report = _set_com_property_expression_or_value(plane, "Angle", None, float(angle_degrees))
+                elif hasattr(plane, "Value"):
+                    angle_report = _set_com_property_expression_or_value(plane, "Value", None, float(angle_degrees))
+                if plane.Update():
+                    return plane, {
+                        "code": code,
+                        "interface": interface_name,
+                        "angle_degrees": float(angle_degrees),
+                        "angle_expression": angle_expression,
+                        "angle_report": angle_report,
+                        "direction": bool(direction),
+                        "axis": axis_report,
+                    }
+                errors.append("Add(%s) CastTo(%s): Update returned False" % (code, interface_name))
+            except Exception as exc:
+                errors.append("Add(%s) CastTo(%s): %s" % (code, interface_name, exc))
+    raise RuntimeError("Could not create angle plane: " + "; ".join(errors[-10:]))
+
+
+def _create_axis_by_two_planes(part, name, plane1, plane2):
+    import win32com.client
+
+    auxiliary = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    if auxiliary is None:
+        raise RuntimeError("Part does not expose IAuxiliaryGeomContainer")
+    axes = safe_get(auxiliary, "Axes3D")
+    if axes is None:
+        get_axes = safe_get(auxiliary, "GetAxes3D")
+        if callable(get_axes):
+            axes = get_axes()
+    if axes is None or not callable(safe_get(axes, "Add")):
+        raise RuntimeError("Part does not expose Axes3D.Add")
+    axis = win32com.client.CastTo(axes.Add(9), "IAxis3DBy2Planes")
+    axis.Plane1 = plane1
+    axis.Plane2 = plane2
+    axis.Name = name
+    if not axis.Update():
+        raise RuntimeError("IAxis3DBy2Planes Update returned False")
+    return axis
 
 
 def _build_helical_thread_feature(part, model_container, params, preview, steps_report, *, scenario):
@@ -14975,7 +16810,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
     preview = operation.get("preview") or {}
     bindings = operation.get("bindings") or {}
 
-    if scenario in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes", "compression_spring"):
+    if scenario in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes", "compression_spring", "conical_compression_spring", "torsion_spring", "extension_spring"):
         coordinate_system = None
         placement = params.get("placement") or {}
         base_reference = ((placement.get("base") or placement).get("reference") or (placement.get("base") or placement).get("ref") or placement.get("reference") or placement.get("ref"))
@@ -15115,7 +16950,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                 coordinate_system=coordinate_system,
                 require_source=False,
             )
-        elif scenario == "compression_spring":
+        elif scenario in ("compression_spring", "compression_spring_variable_pitch", "conical_compression_spring", "torsion_spring", "extension_spring"):
             feature = _build_compression_spring_feature(
                 part,
                 model_container,
@@ -15907,7 +17742,7 @@ def handle_create_part_from_scenario(payload):
         return _handle_create_lcs_scenario(payload, scenario)
     if scenario == "workflow":
         return _handle_create_workflow_scenario(payload, scenario)
-    if scenario not in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes", "compression_spring"):
+    if scenario not in ("stepped_shaft", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes", "compression_spring", "compression_spring_variable_pitch", "conical_compression_spring", "torsion_spring", "extension_spring"):
         raise RuntimeError("Unsupported part scenario: %s" % scenario)
 
     params = payload.get("params") or {}
@@ -16054,7 +17889,7 @@ def handle_create_part_from_scenario(payload):
                 steps_report,
                 require_source=True,
             )
-        elif scenario == "compression_spring":
+        elif scenario in ("compression_spring", "compression_spring_variable_pitch", "conical_compression_spring", "torsion_spring", "extension_spring"):
             _build_compression_spring_feature(
                 part,
                 model_container,
@@ -16144,6 +17979,7 @@ def handle_create_part_from_scenario(payload):
                     "error": {
                         "stage": current_stage,
                         "message": str(exc),
+                        "traceback": __import__("traceback").format_exc(),
                         "partial_save": partial_save_report,
                     },
                     "steps": steps_report,

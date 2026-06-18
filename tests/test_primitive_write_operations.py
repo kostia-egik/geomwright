@@ -1065,6 +1065,145 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual([point.X, point.Y, point.Z], [1.0, 2.0, 3.0])
         self.assertTrue(point.updated)
 
+    def test_bridge_create_point3d_displace_prefers_distance_expression(self) -> None:
+        bridge = _load_bridge_module()
+        parameters = types.SimpleNamespace(
+            PositionObject=None,
+            Distance=None,
+            association_vertex=None,
+            guiding_object=None,
+        )
+        parameters.SetAssociationVertex = lambda obj: setattr(parameters, "association_vertex", obj) or True
+        parameters.SetGuidingObject = lambda obj: setattr(parameters, "guiding_object", obj) or True
+        point = types.SimpleNamespace(ParameterType=None, Parameters=parameters, Update=lambda: True)
+        position_object = object()
+        guiding_object = object()
+
+        original_create_point3d = bridge._create_point3d
+        original_cast = bridge._cast_to_com_interface
+        original_bind = bridge._bind_operation_variables
+        self.addCleanup(setattr, bridge, "_create_point3d", original_create_point3d)
+        self.addCleanup(setattr, bridge, "_cast_to_com_interface", original_cast)
+        self.addCleanup(setattr, bridge, "_bind_operation_variables", original_bind)
+        bridge._create_point3d = lambda model_container, name, origin: point
+        bridge._cast_to_com_interface = lambda obj, interface_name: obj
+        binding_calls = []
+        bridge._bind_operation_variables = lambda obj, bindings: binding_calls.append((obj, bindings)) or {"ok": True}
+
+        result = bridge._create_point3d_displace(
+            object(),
+            "PT_EXPR",
+            position_object,
+            [0.0, 0.0, 0.0],
+            guiding_object=guiding_object,
+            distance=3.0,
+            distance_expression="SPG01_N21 * SPG01_WD1",
+        )
+
+        self.assertIs(result, point)
+        self.assertEqual(point.ParameterType, 2)
+        self.assertIs(parameters.association_vertex, position_object)
+        self.assertIs(parameters.guiding_object, guiding_object)
+        self.assertEqual(parameters.Distance, 3.0)
+        self.assertEqual(binding_calls[0][0], point)
+        self.assertEqual(binding_calls[0][1][0]["expression"], "SPG01_N21 * SPG01_WD1")
+
+    def test_bridge_bind_operation_variables_uses_iter_fallback_for_hidden_variables(self) -> None:
+        bridge = _load_bridge_module()
+
+        class _FakeVariable:
+            def __init__(self, name: str, note: str, expression: str = "") -> None:
+                self.Name = name
+                self.ParameterNote = note
+                self.Expression = expression
+
+            def Update(self) -> bool:
+                return True
+
+        class _FakeVariables:
+            def __init__(self, indexed: list[Any], iterated: list[Any]) -> None:
+                self._indexed = list(indexed)
+                self._iterated = list(iterated)
+                self.Count = len(self._indexed)
+
+            def Item(self, index: int) -> Any:
+                if index < 0 or index >= len(self._indexed):
+                    raise IndexError(index)
+                return self._indexed[index]
+
+            def __iter__(self):
+                return iter(self._iterated)
+
+        indexed = [
+            _FakeVariable("v82", "Диаметр 1"),
+            _FakeVariable("v77", "Шаг"),
+            _FakeVariable("v80", "Высота"),
+        ]
+        hidden_rotation = _FakeVariable("v1244", "Вращение")
+        model = types.SimpleNamespace(
+            Variables=_FakeVariables(indexed=indexed, iterated=indexed + [hidden_rotation]),
+            Update=lambda: True,
+        )
+
+        report = bridge._bind_operation_variables(
+            model,
+            [
+                {
+                    "parameter_note": "Rotation",
+                    "parameter_note_aliases": ["Rotation", "Вращение"],
+                    "expression": "360 * (N21)",
+                    "role": "spring_anchor_rotation",
+                }
+            ],
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["applied_count"], 1)
+        self.assertEqual(report["applied"][0]["parameter_note"], "Вращение")
+        self.assertEqual(hidden_rotation.Expression, "360 * (N21)")
+
+    def test_bridge_apply_part_variables_uses_comment_as_parameter_note(self) -> None:
+        bridge = _load_bridge_module()
+
+        class _FakeCreatedVariable:
+            def __init__(self, name: str, value: float, note: str) -> None:
+                self.Name = name
+                self.Value = value
+                self.ParameterNote = note
+                self.Expression = ""
+                self.External = False
+                self.Reference = 12
+
+            def Update(self) -> bool:
+                return True
+
+        class _FakePart:
+            def __init__(self) -> None:
+                self.created: list[_FakeCreatedVariable] = []
+
+            def AddVariable(self, name: str, value: float, note: str) -> _FakeCreatedVariable:
+                variable = _FakeCreatedVariable(name, value, note)
+                self.created.append(variable)
+                return variable
+
+        part = _FakePart()
+
+        report = bridge._apply_part_variables(
+            part,
+            [
+                {
+                    "name": "G1",
+                    "value": 0.01,
+                    "external": True,
+                    "comment": "G1: axial gap between adjacent body coils",
+                }
+            ],
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(part.created[0].ParameterNote, "G1: axial gap between adjacent body coils")
+        self.assertEqual(report["applied"][0]["note"], "G1: axial gap between adjacent body coils")
+
     def test_bridge_collection_resolver_does_not_call_callable_collection_property(self) -> None:
         bridge = _load_bridge_module()
         point = _FakePoint3D()
@@ -1623,6 +1762,300 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(captured["entities"]["base"]["x2"], 10.0)
         self.assertEqual(report["constraints"]["applied_count"], 1)
         self.assertTrue(sketch.ended)
+
+    def test_bridge_parameterize_compression_spring_profile_sketch_requires_fully_defined_state(self) -> None:
+        bridge = _load_bridge_module()
+        profile_circle = _FakeSketchEntity(999)
+        profile_circle.Xc = 0.0
+        profile_circle.Yc = 15.0
+        profile_circle.Radius = 2.0
+        live_profile_circle = _FakeSketchEntity(201)
+        live_profile_circle.Xc = 0.0
+        live_profile_circle.Yc = 15.0
+        live_profile_circle.Radius = 2.0
+        radius_ref = _FakeSketchEntity(202)
+        profile_radius_ref = _FakeSketchEntity(203)
+        profile_center_ref = _FakeSketchEntity(204)
+        profile_circle_point_ref = _FakeSketchEntity(205)
+        view = types.SimpleNamespace(
+            LineSegments=_FakeAddCollection([radius_ref, profile_radius_ref]),
+            Circles=_FakeCollection([live_profile_circle]),
+            Points=_FakeAddCollection([profile_center_ref, profile_circle_point_ref]),
+        )
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SPRING_PROFILE", 100, sketch_doc)
+        sketch.ConstraintsState = 1
+        captured: dict[str, Any] = {}
+
+        original_apply = bridge._apply_sketch_parameterization
+        self.addCleanup(setattr, bridge, "_apply_sketch_parameterization", original_apply)
+
+        def apply_parameterization(view_arg: Any, sketch_entities: dict[str, Any], constraints: list[dict[str, Any]], dimensions: list[dict[str, Any]], options: dict[str, Any], steps: list[Any], total_length: float) -> dict[str, Any]:
+            captured["entities"] = sketch_entities
+            captured["constraints"] = constraints
+            captured["dimensions"] = dimensions
+            captured["options"] = options
+            return {
+                "step": "sketch_parameterization",
+                "ok": True,
+                "constraints": {"live_status": "applied", "applied_count": len(constraints)},
+                "dimensions": {"live_status": "applied", "applied_count": len(dimensions)},
+                "geometry_checks": {"ok": True},
+            }
+
+        bridge._apply_sketch_parameterization = apply_parameterization
+
+        report = bridge._parameterize_compression_spring_profile_sketch(
+            sketch,
+            profile_circle,
+            [0.0, 15.0],
+            2.0,
+            {
+                "sketch": {"construction_line_style": 6, "parameterization_order": "staged"},
+                "profile_sketch_constraints": [
+                    {"kind": "vertical", "target": "radius_ref"},
+                    {"kind": "merge_points", "target": "profile_circle", "index": 0, "partner": "radius_ref", "partner_index": 1},
+                    {"kind": "point_on_curve", "target": "profile_radius_ref", "index": 1, "partner": "profile_circle"},
+                ],
+                "profile_sketch_dimensions": [
+                    {
+                        "kind": "line_length",
+                        "target": "profile_radius_ref",
+                        "expression": "(SPRING_WD1) / 2",
+                        "driving": True,
+                        "placement_index": 1,
+                    }
+                ],
+                "profile_sketch_target_state": "fully_defined",
+            },
+            [],
+        )
+
+        self.assertIs(captured["entities"]["profile_circle"]["object"], live_profile_circle)
+        self.assertIs(captured["entities"]["radius_ref"]["object"], radius_ref)
+        self.assertIs(captured["entities"]["profile_radius_ref"]["object"], profile_radius_ref)
+        self.assertEqual(captured["entities"]["radius_ref"]["y2"], 15.0)
+        self.assertEqual(captured["entities"]["profile_radius_ref"]["x1"], 0.0)
+        self.assertEqual(captured["entities"]["profile_radius_ref"]["y1"], 15.0)
+        self.assertIn(
+            {"kind": "merge_points", "target": "profile_circle", "index": 0, "partner": "radius_ref", "partner_index": 1},
+            captured["constraints"],
+        )
+        self.assertIn(
+            {"kind": "point_on_curve", "target": "profile_radius_ref", "index": 1, "partner": "profile_circle"},
+            captured["constraints"],
+        )
+        self.assertEqual(
+            captured["dimensions"],
+            [
+                {
+                    "kind": "line_length",
+                    "target": "profile_radius_ref",
+                    "expression": "(SPRING_WD1) / 2",
+                    "driving": True,
+                    "placement_index": 1,
+                }
+            ],
+        )
+        self.assertEqual(captured["options"]["parameterization_order"], "staged")
+        self.assertEqual(report["sketch_state"]["label"], "fully_defined")
+        self.assertEqual(report["target_state"], "fully_defined")
+        self.assertTrue(sketch.ended)
+        self.assertTrue(sketch.updated)
+
+    def test_bridge_parameterize_compression_spring_profile_sketch_reports_underdefined_state(self) -> None:
+        bridge = _load_bridge_module()
+        profile_circle = _FakeSketchEntity(301)
+        radius_ref = _FakeSketchEntity(302)
+        profile_radius_ref = _FakeSketchEntity(303)
+        profile_center_ref = _FakeSketchEntity(304)
+        profile_circle_point_ref = _FakeSketchEntity(305)
+        view = types.SimpleNamespace(
+            LineSegments=_FakeAddCollection([radius_ref, profile_radius_ref]),
+            Points=_FakeAddCollection([profile_center_ref, profile_circle_point_ref]),
+        )
+        sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
+        sketch = _FakeSketch("SPRING_PROFILE", 101, sketch_doc)
+        sketch.ConstraintsState = 2
+
+        original_apply = bridge._apply_sketch_parameterization
+        self.addCleanup(setattr, bridge, "_apply_sketch_parameterization", original_apply)
+        bridge._apply_sketch_parameterization = lambda *args, **kwargs: {
+            "step": "sketch_parameterization",
+            "ok": True,
+            "constraints": {"live_status": "applied", "applied_count": 1},
+            "dimensions": {"live_status": "applied", "applied_count": 1},
+            "geometry_checks": {"ok": True},
+        }
+
+        report = bridge._parameterize_compression_spring_profile_sketch(
+            sketch,
+            profile_circle,
+            [0.0, 15.0],
+            2.0,
+            {
+                "profile_sketch_constraints": [{"kind": "vertical", "target": "radius_ref"}],
+                "profile_sketch_dimensions": [
+                    {
+                        "kind": "line_length",
+                        "target": "profile_radius_ref",
+                        "expression": "(SPRING_WD1) / 2",
+                        "driving": True,
+                        "placement_index": 1,
+                    }
+                ],
+            },
+            [],
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["state_ok"])
+        self.assertEqual(report["sketch_state"]["name"], "under_constrained")
+
+    def test_bridge_resolve_compression_spring_profile_sketch_frame_defaults_to_xoy_with_half_turn(self) -> None:
+        bridge = _load_bridge_module()
+
+        plane, rotation = bridge._resolve_compression_spring_profile_sketch_frame({})
+
+        self.assertEqual(plane, "XOY")
+        self.assertEqual(rotation, {"rz": 180.0})
+
+    def test_bridge_resolve_compression_spring_profile_sketch_frame_keeps_explicit_non_xoy_plane(self) -> None:
+        bridge = _load_bridge_module()
+
+        plane, rotation = bridge._resolve_compression_spring_profile_sketch_frame({"plane": "XOZ"})
+
+        self.assertEqual(plane, "XOZ")
+        self.assertIsNone(rotation)
+
+    def test_bridge_apply_sketch_parameterization_runs_constraints_before_dimensions_for_constraints_first(self) -> None:
+        bridge = _load_bridge_module()
+        call_order: list[tuple[str, list[dict[str, Any]]]] = []
+
+        original_constraints = bridge._apply_sketch_constraints
+        original_dimensions = bridge._apply_sketch_dimensions
+        self.addCleanup(setattr, bridge, "_apply_sketch_constraints", original_constraints)
+        self.addCleanup(setattr, bridge, "_apply_sketch_dimensions", original_dimensions)
+
+        def apply_constraints(sketch_entities: dict[str, Any], planned: list[dict[str, Any]], options: dict[str, Any]) -> dict[str, Any]:
+            call_order.append(("constraints", planned))
+            return {"live_status": "applied", "planned_count": len(planned), "applied_count": len(planned), "failed_count": 0}
+
+        def apply_dimensions(view: Any, sketch_entities: dict[str, Any], planned: list[dict[str, Any]], options: dict[str, Any]) -> dict[str, Any]:
+            call_order.append(("dimensions", planned))
+            return {"live_status": "applied", "planned_count": len(planned), "applied_count": len(planned), "failed_count": 0}
+
+        bridge._apply_sketch_constraints = apply_constraints
+        bridge._apply_sketch_dimensions = apply_dimensions
+
+        report = bridge._apply_sketch_parameterization(
+            None,
+            {},
+            [{"kind": "merge_points", "target": "profile_circle", "partner": "radius_ref"}],
+            [{"kind": "circle_diameter", "target": "profile_circle", "expression": "WD1"}],
+            {
+                "constraints": {"enabled": True},
+                "dimensions": {"enabled": True},
+                "parameterization_order": "constraints_first",
+            },
+            [],
+            0.0,
+        )
+
+        self.assertEqual([item[0] for item in call_order], ["constraints", "dimensions", "dimensions"])
+        self.assertEqual(report["parameterization_order"], "constraints_first")
+
+    def test_bridge_add_circle_diameter_dimension_uses_circle_as_base_object(self) -> None:
+        bridge = _load_bridge_module()
+        circle_object = types.SimpleNamespace(Reference=501)
+        dimension_object = types.SimpleNamespace(
+            BaseObject=None,
+            DimensionType=None,
+            Angle=None,
+            Reference=601,
+        )
+        dimension_object.Update = lambda: True
+        diametral_dimensions = _FakeAddCollection([dimension_object])
+
+        result = bridge._add_circle_diameter_dimension(
+            diametral_dimensions,
+            {
+                "target": "profile_circle",
+                "dimension_type": False,
+                "angle": 45.0,
+                "driving": False,
+            },
+            {"profile_circle": {"object": circle_object}},
+        )
+
+        self.assertIs(dimension_object.BaseObject, circle_object)
+        self.assertFalse(dimension_object.DimensionType)
+        self.assertEqual(dimension_object.Angle, 45.0)
+        self.assertTrue(result["updated"])
+
+    def test_bridge_add_circle_radius_dimension_uses_circle_as_base_object(self) -> None:
+        bridge = _load_bridge_module()
+        circle_object = types.SimpleNamespace(Reference=701)
+        dimension_object = types.SimpleNamespace(
+            BaseObject=None,
+            DimensionType=None,
+            Angle=None,
+            Reference=801,
+        )
+        dimension_object.Update = lambda: True
+        radial_dimensions = _FakeAddCollection([dimension_object])
+
+        result = bridge._add_circle_radius_dimension(
+            radial_dimensions,
+            {
+                "target": "profile_circle",
+                "dimension_type": True,
+                "angle": 0.0,
+                "driving": False,
+            },
+            {"profile_circle": {"object": circle_object}},
+        )
+
+        self.assertIs(dimension_object.BaseObject, circle_object)
+        self.assertTrue(dimension_object.DimensionType)
+        self.assertEqual(dimension_object.Angle, 0.0)
+        self.assertTrue(result["updated"])
+
+    def test_bridge_apply_sketch_dimensions_supports_circle_diameter_via_radial_dimension(self) -> None:
+        bridge = _load_bridge_module()
+        radial_dimension = types.SimpleNamespace(
+            BaseObject=None,
+            DimensionType=None,
+            Angle=None,
+            Reference=901,
+        )
+        radial_dimension.Update = lambda: True
+        view = types.SimpleNamespace(
+            LineDimensions=_FakeAddCollection([_FakeSketchEntity(1)]),
+            RadialDimensions=_FakeAddCollection([radial_dimension]),
+        )
+
+        report = bridge._apply_sketch_dimensions(
+            view,
+            {"profile_circle": {"object": types.SimpleNamespace(Reference=902)}},
+            [
+                {
+                    "kind": "circle_diameter",
+                    "target": "profile_circle",
+                    "creation_mode": "radial",
+                    "dimension_type": True,
+                    "angle": 0.0,
+                    "driving": False,
+                }
+            ],
+            {"enabled": True, "driving": False},
+        )
+
+        self.assertEqual(report["applied_count"], 1)
+        self.assertEqual(report["failed_count"], 0)
+        self.assertEqual(report["live_status"], "applied")
+        self.assertTrue(radial_dimension.DimensionType)
+        self.assertEqual(radial_dimension.Angle, 0.0)
 
     def test_bridge_list_sketch_entities_returns_selectors(self) -> None:
         bridge = _load_bridge_module()
@@ -2248,6 +2681,251 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(item["geometry"]["end"], [10.0, 0.0])
         self.assertIn("segment|201", item["fingerprint"])
         self.assertTrue(sketch.ended)
+
+    def test_bridge_resolve_spring_path_contour_reuses_single_contour(self) -> None:
+        bridge = _load_bridge_module()
+
+        class _FakePositionParameters:
+            def __init__(self, path: Any) -> None:
+                self._path = path
+
+            def AngleByOwnAxis(self, _axis: int, angle: float) -> None:
+                self._path.orientation_angle = float(angle)
+
+        class _FakeSpiralPath:
+            def __init__(self, reference: int, angle: float = 0.0) -> None:
+                self.Reference = reference
+                self.orientation_angle = float(angle)
+                self.updated = False
+
+            def Update(self) -> bool:
+                self.updated = True
+                return True
+
+        class _FakeContour:
+            def __init__(self, collection: Any, expected_angles: list[float]) -> None:
+                self._collection = collection
+                self._expected_angles = list(expected_angles)
+                self.Reference = len(collection._items) + 1000
+                self.Name = ""
+                self.Edges: list[Any] = []
+                self.EdgesCount = 0
+                self.update_calls = 0
+
+            def Update(self) -> bool:
+                self.update_calls += 1
+                actual_angles = [float(getattr(edge, "orientation_angle", 0.0)) for edge in self.Edges]
+                if actual_angles == self._expected_angles:
+                    self.EdgesCount = len(self.Edges)
+                else:
+                    self.EdgesCount = max(0, len(self.Edges) - 1)
+                return True
+
+        class _FakeContours3D:
+            def __init__(self, expected_angles: list[float]) -> None:
+                self._expected_angles = list(expected_angles)
+                self._items: list[Any] = []
+                self.Count = 0
+
+            def Add(self) -> Any:
+                contour = _FakeContour(self, self._expected_angles)
+                self._items.append(contour)
+                self.Count = len(self._items)
+                return contour
+
+            def Item(self, index: int) -> Any:
+                return self._items[index]
+
+            def Delete(self, index: int) -> bool:
+                self._items.pop(index)
+                self.Count = len(self._items)
+                return True
+
+        auxiliary_container = types.SimpleNamespace(Contours3D=_FakeContours3D([0.0, 180.0]))
+        start_path = _FakeSpiralPath(101, 0.0)
+        work_path = _FakeSpiralPath(102, 0.0)
+
+        contour, report = bridge._resolve_spring_path_contour(
+            auxiliary_container,
+            "SPRING_A",
+            [
+                {
+                    "role": "start_end",
+                    "path": start_path,
+                    "position_parameters": _FakePositionParameters(start_path),
+                    "applied_orientation_angle": 0.0,
+                    "orientation_angle_candidates": [0.0],
+                    "angle_application_mode": "default",
+                },
+                {
+                    "role": "working",
+                    "path": work_path,
+                    "position_parameters": _FakePositionParameters(work_path),
+                    "applied_orientation_angle": 0.0,
+                    "orientation_angle_candidates": [180.0],
+                    "angle_application_mode": "orientation",
+                },
+            ],
+        )
+
+        self.assertEqual(report["edges_count"], 2)
+        self.assertEqual(report["combo_index"], 1)
+        self.assertEqual(report["candidate_orientation_angles"], [0.0, 180.0])
+        self.assertEqual(auxiliary_container.Contours3D.Count, 1)
+        self.assertIs(auxiliary_container.Contours3D._items[0], contour)
+        self.assertEqual(contour.Name, "SPRING_A_PATH_CONTOUR")
+        self.assertEqual(contour.update_calls, 3)
+
+    def test_apply_spiral_turning_angle_prefers_own_axis_for_orientation_mode(self) -> None:
+        bridge = _load_bridge_module()
+
+        class _FakeEulerParameters:
+            def __init__(self) -> None:
+                self.NutationAngle = 11.0
+                self.PrecessionAngle = 22.0
+                self.RotationAngle = 33.0
+
+        class _FakePosition:
+            def __init__(self) -> None:
+                self.OrientationType = 0
+                self.LocalCSParameters = _FakeEulerParameters()
+
+        class _FakePositionParameters:
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, float]] = []
+
+            def AngleByOwnAxis(self, axis: int, angle: float) -> None:
+                self.calls.append((int(axis), float(angle)))
+
+        class _FakeSpiral:
+            def __init__(self) -> None:
+                self.Position = _FakePosition()
+
+        spiral = _FakeSpiral()
+        position_parameters = _FakePositionParameters()
+
+        report = bridge._apply_spiral_turning_angle(
+            spiral,
+            position_parameters,
+            2250.0,
+            "orientation",
+        )
+
+        self.assertEqual(report["mode"], "position_angle_by_own_axis")
+        self.assertEqual(position_parameters.calls, [(73, 2250.0)])
+        self.assertEqual(spiral.Position.OrientationType, 0)
+        self.assertEqual(spiral.Position.LocalCSParameters.RotationAngle, 33.0)
+
+    def test_bridge_resolve_spring_path_contour_deletes_failed_contour(self) -> None:
+        bridge = _load_bridge_module()
+
+        class _FakePositionParameters:
+            def __init__(self, path: Any) -> None:
+                self._path = path
+
+            def AngleByOwnAxis(self, _axis: int, angle: float) -> None:
+                self._path.orientation_angle = float(angle)
+
+        class _FakeSpiralPath:
+            def __init__(self, reference: int, angle: float = 0.0) -> None:
+                self.Reference = reference
+                self.orientation_angle = float(angle)
+
+            def Update(self) -> bool:
+                return True
+
+        class _FakeContour:
+            def __init__(self, collection: Any) -> None:
+                self._collection = collection
+                self.Reference = len(collection._items) + 2000
+                self.Name = ""
+                self.Edges: list[Any] = []
+                self.EdgesCount = 1
+
+            def Update(self) -> bool:
+                self.EdgesCount = 1
+                return True
+
+        class _FakeContours3D:
+            def __init__(self) -> None:
+                self._items: list[Any] = []
+                self.Count = 0
+
+            def Add(self) -> Any:
+                contour = _FakeContour(self)
+                self._items.append(contour)
+                self.Count = len(self._items)
+                return contour
+
+            def Item(self, index: int) -> Any:
+                return self._items[index]
+
+            def Delete(self, index: int) -> bool:
+                self._items.pop(index)
+                self.Count = len(self._items)
+                return True
+
+        auxiliary_container = types.SimpleNamespace(Contours3D=_FakeContours3D())
+        start_path = _FakeSpiralPath(201, 0.0)
+        work_path = _FakeSpiralPath(202, 0.0)
+
+        with self.assertRaises(RuntimeError):
+            bridge._resolve_spring_path_contour(
+                auxiliary_container,
+                "SPRING_FAIL",
+                [
+                    {
+                        "role": "start_end",
+                        "path": start_path,
+                        "position_parameters": _FakePositionParameters(start_path),
+                        "applied_orientation_angle": 0.0,
+                        "orientation_angle_candidates": [0.0],
+                        "angle_application_mode": "default",
+                    },
+                    {
+                        "role": "working",
+                        "path": work_path,
+                        "position_parameters": _FakePositionParameters(work_path),
+                        "applied_orientation_angle": 0.0,
+                        "orientation_angle_candidates": [180.0],
+                        "angle_application_mode": "orientation",
+                    },
+                ],
+            )
+
+        self.assertEqual(auxiliary_container.Contours3D.Count, 0)
+
+    def test_bridge_delete_curve_contour_falls_back_to_object_delete(self) -> None:
+        bridge = _load_bridge_module()
+
+        class _FakeContour:
+            def __init__(self) -> None:
+                self.Reference = 3001
+                self.deleted = False
+
+            def Delete(self) -> bool:
+                self.deleted = True
+                return True
+
+        class _FakeContours3D:
+            def __init__(self, contour: Any) -> None:
+                self._items = [contour]
+                self.Count = 1
+
+            def Item(self, index: int) -> Any:
+                return self._items[index]
+
+        contour = _FakeContour()
+        auxiliary_container = types.SimpleNamespace(Contours3D=_FakeContours3D(contour))
+
+        original_delete = bridge._delete_feature_from_collection
+        self.addCleanup(setattr, bridge, "_delete_feature_from_collection", original_delete)
+        bridge._delete_feature_from_collection = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("feature_delete_not_supported"))
+
+        deleted = bridge._delete_curve_contour(auxiliary_container, contour)
+
+        self.assertTrue(deleted)
+        self.assertTrue(contour.deleted)
 
 
 class _FakeRunner:

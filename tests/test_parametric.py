@@ -3092,14 +3092,23 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["interface"]["parameters"]["driving_mean_diameter"], "SPG01_D1")
         self.assertEqual(preview["interface"]["parameters"]["driving_wire_diameter"], "SPG01_WD1")
         self.assertEqual(preview["interface"]["parameters"]["driving_pitch"], "SPG01_P1")
-        self.assertEqual(preview["interface"]["parameters"]["driving_height"], "SPG01_H1")
-        self.assertEqual(preview["interface"]["parameters"]["driving_turn_count"], "SPG01_N1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_standard_length"], "SPG01_L1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_height"], "")
+        self.assertEqual(preview["interface"]["parameters"]["derived_centerline_height"], "SPG01_H1")
+        self.assertEqual(preview["interface"]["parameters"]["driving_turn_count"], "")
         self.assertEqual(preview["interface"]["parameters"]["driving_end_turn_count_per_side"], "SPG01_N21")
         self.assertEqual(preview["interface"]["parameters"]["driving_ground_turn_count_per_side"], "SPG01_N31")
         self.assertEqual(preview["interface"]["parameters"]["driving_start_end_turn_count"], "")
         self.assertEqual(preview["interface"]["parameters"]["driving_finish_end_turn_count"], "")
         self.assertEqual(preview["interface"]["parameters"]["driving_start_ground_turn_count"], "")
         self.assertEqual(preview["interface"]["parameters"]["driving_finish_ground_turn_count"], "")
+        variable_plan = {variable["name"]: variable for variable in preview["params"]["variable_plan"]}
+        self.assertEqual(variable_plan["SPG01_L1"]["kind"], "driving_standard_length")
+        self.assertEqual(variable_plan["SPG01_H1"]["expression"], "SPG01_L1 - SPG01_WD1")
+        self.assertEqual(
+            variable_plan["SPG01_N1"]["expression"],
+            "(SPG01_H1 - 2 * (SPG01_N21 * SPG01_WD1)) / (SPG01_P1)",
+        )
 
     def test_preview_compression_spring_supports_segmented_end_turns(self) -> None:
         preview = preview_part_scenario(
@@ -3602,6 +3611,919 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["params"]["height"], 48)
         self.assertEqual(preview["params"]["length_model"]["centerline_height_expression"], "L1 - WD1")
 
+    def test_preview_variable_pitch_compression_spring_builds_two_working_zones(self) -> None:
+        preview = preview_part_scenario(
+            "compression_spring_variable_pitch",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "working_turns_1": 3.0,
+                "pitch_1": 6.0,
+                "working_turns_2": 2.5,
+                "pitch_2": 10.0,
+                "start_end_turns": 1.0,
+                "finish_end_turns": 1.0,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.5,
+            },
+        )
+
+        params = preview["params"]
+        self.assertEqual(params["pitch_mode"], "two_zone")
+        self.assertEqual(params["height"], 51.0)
+        self.assertEqual(params["active_height"], 43.0)
+        self.assertEqual([segment["role"] for segment in params["segment_plan"]], [
+            "start_end",
+            "working_1",
+            "working_2",
+            "finish_end",
+        ])
+        self.assertEqual([segment["pitch_expression"] for segment in params["segment_plan"]], [
+            "WD1",
+            "P11",
+            "P12",
+            "WD1",
+        ])
+        self.assertEqual([segment["height_expression"] for segment in params["segment_plan"]], [
+            "N21 * WD1",
+            "H11",
+            "H12",
+            "N22 * WD1",
+        ])
+        self.assertIn(
+            "(N21) + ((H11) / (P11))",
+            params["segment_plan"][2]["anchor_rotation_expression"],
+        )
+        self.assertIn(
+            "((N21) + ((H11) / (P11))) + ((H12) / (P12))",
+            params["segment_plan"][3]["anchor_rotation_expression"],
+        )
+        self.assertEqual(
+            preview["selectors"]["working_start_point"],
+            params["segment_plan"][1]["start_point"],
+        )
+        self.assertNotEqual(
+            preview["selectors"]["working_start_point"],
+            params["segment_plan"][0]["start_point"],
+        )
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(variable_plan["L1"]["kind"], "driving_standard_length")
+        self.assertEqual(variable_plan["L1"]["value"], 51.0)
+        self.assertEqual(variable_plan["H1"]["expression"], "L1 - WD1 + ((N31 + N32) * WD1)")
+        self.assertEqual(variable_plan["H11"]["expression"], "N11 * P11")
+        self.assertEqual(variable_plan["H12"]["expression"], "H1 - ((N21 * WD1) + (H11) + (N22 * WD1))")
+        self.assertEqual(variable_plan["N12"]["expression"], "(H12) / (P12)")
+        self.assertEqual(variable_plan["N12"]["kind"], "derived_second_working_zone_turn_count")
+        self.assertEqual(len(params["connector_plan"]), 3)
+
+    def test_preview_variable_pitch_compression_spring_rejects_inconsistent_length(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"working_turns_1 \* pitch_1"):
+            preview_part_scenario(
+                "compression_spring_variable_pitch",
+                {
+                    "mean_diameter": 30,
+                    "wire_diameter": 4,
+                    "L": 52,
+                    "working_turns_1": 3.0,
+                    "pitch_1": 6.0,
+                    "working_turns_2": 2.5,
+                    "pitch_2": 10.0,
+                    "start_end_turns": 1.0,
+                    "finish_end_turns": 1.0,
+                },
+            )
+
+    def test_preview_conical_compression_spring_builds_constant_pitch_conic_segments(self) -> None:
+        preview = preview_part_scenario(
+            "conical_compression_spring",
+            {
+                "large_mean_diameter": 40,
+                "small_mean_diameter": 20,
+                "wire_diameter": 4,
+                "pitch": 8,
+                "working_turns": 4,
+                "L": 44,
+                "start_end_turns": 1,
+                "finish_end_turns": 1,
+                "start_ground_turns": 0.5,
+                "finish_ground_turns": 0.5,
+            },
+        )
+
+        params = preview["params"]
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(preview["scenario"], "conical_compression_spring")
+        self.assertEqual(params["path_family"], "conical")
+        self.assertEqual(params["pitch_mode"], "constant_pitch")
+        self.assertEqual(variable_plan["D1"]["kind"], "driving_large_mean_diameter")
+        self.assertEqual(variable_plan["D2"]["kind"], "driving_small_mean_diameter")
+        self.assertEqual(variable_plan["H1"]["expression"], "L1 - WD1 + ((N31 + N32) * WD1)")
+        self.assertEqual([segment["role"] for segment in params["segment_plan"]], [
+            "start_end",
+            "working",
+            "finish_end",
+        ])
+        self.assertEqual([segment["path_type"] for segment in params["segment_plan"]], [
+            "conic_spiral",
+            "conic_spiral",
+            "conic_spiral",
+        ])
+        self.assertEqual(params["segment_plan"][0]["start_diameter_expression"], "D1")
+        self.assertIn("D2 - D1", params["segment_plan"][1]["end_diameter_expression"])
+        self.assertLess(params["path_verification"]["max_joint_gap"], 1e-9)
+        spiral_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        self.assertEqual([operation["path_type"] for operation in spiral_operations], [
+            "conic_spiral",
+            "conic_spiral",
+            "conic_spiral",
+        ])
+        self.assertEqual(
+            preview["selectors"]["working_start_point"],
+            params["segment_plan"][1]["start_point"],
+        )
+
+    def test_preview_conical_compression_spring_constant_angle_uses_law_curve_for_working_segment(self) -> None:
+        preview = preview_part_scenario(
+            "conical_compression_spring",
+            {
+                "large_mean_diameter": 40,
+                "small_mean_diameter": 20,
+                "wire_diameter": 4,
+                "pitch": 8,
+                "working_turns": 4,
+                "L": 44,
+                "start_end_turns": 1,
+                "finish_end_turns": 1,
+                "pitch_mode": "constant_angle",
+            },
+        )
+
+        params = preview["params"]
+        self.assertEqual(params["pitch_mode"], "constant_angle")
+        self.assertEqual([segment["path_type"] for segment in params["segment_plan"]], [
+            "conic_spiral",
+            "law_curve",
+            "conic_spiral",
+        ])
+        law_curve = params["segment_plan"][1]["law_curve"]
+        self.assertIn("M_E^", law_curve["radius_expression"])
+        self.assertIn("ln(", law_curve["m_expression"])
+        self.assertEqual(law_curve["interval_expression"], "[0; 1]")
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(variable_plan["tn"]["expression"], "M_PI2 * (N1)")
+        self.assertIn("cos(", law_curve["expression_y"])
+        self.assertIn("sin(", law_curve["expression_z"])
+        self.assertIn("t * ((tn) - (t0))", law_curve["expression_y"])
+        self.assertIn("M_PI2 *", law_curve["expression_y"])
+        self.assertIn("360 * (N21)", law_curve["expression_y"])
+        spiral_operations = [
+            operation
+            for operation in preview["operations"]
+            if operation.get("operation") == "create_spiral_path"
+        ]
+        self.assertEqual([operation["path_type"] for operation in spiral_operations], [
+            "conic_spiral",
+            "law_curve",
+            "conic_spiral",
+        ])
+        self.assertTrue(spiral_operations[1]["law_curve"])
+
+    def test_preview_torsion_spring_tangent_legs_builds_single_contour_plan(self) -> None:
+        preview = preview_part_scenario(
+            "torsion_spring",
+            {
+                "outer_diameter": 31,
+                "wire_diameter": 3,
+                "turns": 4,
+                "gap": 0.2,
+                "left_leg_length": 18,
+                "right_leg_length": 22,
+                "turn_direction": "right",
+            },
+        )
+
+        params = preview["params"]
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(preview["scenario"], "torsion_spring")
+        self.assertEqual(params["end_type"], "tangent_legs")
+        self.assertEqual([segment["role"] for segment in params["segment_plan"]], [
+            "left_leg",
+            "body",
+            "right_leg",
+        ])
+        self.assertEqual([segment["path_type"] for segment in params["segment_plan"]], [
+            "line_segment",
+            "cylindric_spiral",
+            "line_segment",
+        ])
+        self.assertEqual(variable_plan["P1"]["expression"], "WD1 + G1")
+        self.assertEqual(variable_plan["N1"]["expression"], "N0 + (A1 / 360)")
+        self.assertEqual(variable_plan["H1"]["expression"], "P1 * N1")
+        self.assertEqual(params["profile_path_offset"], [0.0, 0.0, -14.0])
+        self.assertEqual(params["sketch"]["parameterization_order"], "staged")
+        self.assertTrue(params["sketch"]["constraints"]["enabled"])
+        self.assertEqual(len(params["profile_sketch_constraints"]), 6)
+        self.assertEqual(params["profile_sketch_dimensions"][0]["expression"], "((D1 - WD1) / 2)")
+        self.assertEqual(params["profile_sketch_dimensions"][1]["expression"], "WD1 / 2")
+        self.assertEqual(params["segment_plan"][0]["operation_variable_bindings"][1]["expression"], "LY1")
+        self.assertEqual(variable_plan["D1"]["kind"], "driving_outer_diameter")
+        self.assertEqual(variable_plan["LY1"]["expression"], "((D1 - WD1) / 2)")
+        self.assertEqual(variable_plan["LZ1"]["expression"], "-(1) * LL1")
+        self.assertEqual(params["full_path_sequence"], [
+            "TORSION_SPRING_LEFT_LEG_PATH",
+            "TORSION_SPRING_BODY_PATH",
+            "TORSION_SPRING_RIGHT_LEG_PATH",
+        ])
+        self.assertEqual(preview["operations"][-1]["source_path_count"], 3)
+
+    def test_preview_torsion_spring_radial_and_axial_legs_use_connect_curves(self) -> None:
+        for end_type in ("radial_legs", "axial_transition_legs"):
+            with self.subTest(end_type=end_type):
+                preview = preview_part_scenario(
+                    "torsion_spring",
+                    {
+                        "outer_diameter": 31,
+                        "wire_diameter": 3,
+                        "turns": 4,
+                        "gap": 0.2,
+                        "left_leg_length": 18,
+                        "right_leg_length": 22,
+                        "turn_direction": "right",
+                        "end_type": end_type,
+                    },
+                )
+
+                params = preview["params"]
+                self.assertEqual(params["end_type"], end_type)
+                self.assertEqual([segment["path_type"] for segment in params["segment_plan"]], [
+                    "line_segment",
+                    "cylindric_spiral",
+                    "line_segment",
+                ])
+                self.assertEqual(len(params["connector_plan"]), 2)
+                self.assertEqual([connector["builder"] for connector in params["connector_plan"]], [
+                    "trimmed_connect_curve",
+                    "trimmed_connect_curve",
+                ])
+                self.assertEqual(
+                    params["connector_plan"][1]["curve1_path_name"],
+                    params["connector_plan"][0]["sequence_curve2_path_name"],
+                )
+                self.assertTrue(params["connector_plan"][1]["curve1_source_is_chained_trim"])
+                self.assertEqual(len(params["full_path_sequence"]), 5)
+                self.assertIn("connect_path", params["full_path_sequence"][1])
+                self.assertIn("connect_path", params["full_path_sequence"][3])
+                variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+                self.assertEqual(variable_plan["TL1"]["kind"], "driving_transition_trim_length")
+                self.assertEqual(variable_plan["TN1"]["kind"], "driving_transition_tension")
+
+    def test_preview_extension_spring_machine_hooks_builds_law_hook_contour(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30,
+                "wire_diameter": 3,
+                "turns": 6,
+                "gap": 0,
+                "hook_type": "machine_hooks",
+            },
+        )
+
+        params = preview["params"]
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(preview["scenario"], "extension_spring")
+        self.assertEqual(params["hook_type"], "machine_hooks")
+        self.assertEqual([segment["path_type"] for segment in params["segment_plan"]], [
+            "sketch_path",
+            "cylindric_spiral",
+            "sketch_path",
+        ])
+        left_hook_sketch = params["segment_plan"][0]["sketch_path"]
+        left_hook_entities = {entity.get("name"): entity for entity in left_hook_sketch["entities"]}
+        self.assertIn("hook_radius_ref", left_hook_entities)
+        self.assertIn("hook_radial_to_end", left_hook_entities)
+        self.assertIn("hook_end_offset_ref", left_hook_entities)
+        self.assertIn("hook_end_drop_ref", left_hook_entities)
+        self.assertIn("hook_arc", left_hook_entities)
+        hook_arc = left_hook_entities["hook_arc"]
+        self.assertEqual(hook_arc["center"], [0.0, 0.0])
+        self.assertAlmostEqual(hook_arc["radius"], 13.5, places=6)
+        self.assertFalse(hook_arc["direction"])
+        self.assertLess(hook_arc["end"][0], 0.0)
+        self.assertLess(hook_arc["end"][1], 0.0)
+        dims = left_hook_sketch["parameterization"]["dimensions"]
+        self.assertEqual(dims[0]["expression"], "RH1")
+        self.assertEqual(dims[1]["kind"], "line_length")
+        self.assertEqual(dims[1]["target"], "hook_end_offset_ref")
+        self.assertEqual(dims[1]["expression"], "HO1")
+        left_constraints = left_hook_sketch["parameterization"]["constraints"]
+        self.assertIn({"kind": "fixed_point", "target": "hook_radius_ref", "index": 0}, left_constraints)
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 0},
+            left_constraints,
+        )
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_end_drop_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+            left_constraints,
+        )
+        self.assertNotEqual(left_hook_sketch["parameterization"]["options"].get("parameterization_order"), "dimensions_first")
+        right_hook_sketch = params["segment_plan"][2]["sketch_path"]
+        right_hook_entities = {entity.get("name"): entity for entity in right_hook_sketch["entities"]}
+        self.assertIn("hook_radius_ref", right_hook_entities)
+        self.assertIn("hook_radial_to_end", right_hook_entities)
+        self.assertIn("hook_end_offset_ref", right_hook_entities)
+        self.assertIn("hook_end_drop_ref", right_hook_entities)
+        self.assertIn("hook_arc", right_hook_entities)
+        self.assertIn("dynamic_plane", right_hook_sketch)
+        self.assertFalse(right_hook_sketch["dynamic_plane"]["assign_local_coordinate_system"])
+        right_radius_ref = right_hook_entities["hook_radius_ref"]
+        self.assertEqual(right_radius_ref["start"], [0.0, 0.0])
+        self.assertEqual(right_radius_ref["end"], [0.0, -13.5])
+        right_arc = right_hook_entities["hook_arc"]
+        self.assertAlmostEqual(right_arc["center"][0], 0.0, places=1)
+        self.assertAlmostEqual(right_arc["center"][1], -13.5, places=1)
+        self.assertAlmostEqual(right_arc["radius"], 13.5, places=6)
+        self.assertEqual(right_arc["start"], [0.0, 0.0])
+        self.assertGreater(right_arc["end"][0], 0.0)
+        self.assertLess(right_arc["end"][1], 0.0)
+        self.assertTrue(right_arc["direction"])
+        right_constraints = right_hook_sketch["parameterization"]["constraints"]
+        self.assertIn({"kind": "fixed_point", "target": "hook_radius_ref", "index": 0}, right_constraints)
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 1},
+            right_constraints,
+        )
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_radius_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+            right_constraints,
+        )
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_radius_ref", "index": 1, "partner": "hook_radial_to_end", "partner_index": 0},
+            right_constraints,
+        )
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_radius_ref", "index": 0, "partner": "hook_end_offset_ref", "partner_index": 0},
+            right_constraints,
+        )
+        self.assertIn({"kind": "horizontal", "target": "hook_end_offset_ref"}, right_constraints)
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_end_offset_ref", "index": 1, "partner": "hook_end_drop_ref", "partner_index": 0},
+            right_constraints,
+        )
+        self.assertIn({"kind": "vertical", "target": "hook_end_drop_ref"}, right_constraints)
+        self.assertIn(
+            {"kind": "merge_points", "target": "hook_end_drop_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+            right_constraints,
+        )
+        right_dims = right_hook_sketch["parameterization"]["dimensions"]
+        self.assertEqual(right_dims[0]["expression"], "RH1")
+        self.assertEqual(right_dims[1]["kind"], "line_length")
+        self.assertEqual(right_dims[1]["target"], "hook_end_offset_ref")
+        self.assertEqual(right_dims[1]["expression"], "HO1")
+        self.assertNotEqual(right_hook_sketch["parameterization"]["options"].get("parameterization_order"), "dimensions_first")
+        self.assertEqual(len(params["connector_plan"]), 2)
+        self.assertEqual(params["connector_plan"][1]["curve1_path_name"], params["connector_plan"][0]["sequence_curve2_path_name"])
+        self.assertTrue(params["connector_plan"][1]["curve1_source_is_chained_trim"])
+        self.assertEqual(len(params["full_path_sequence"]), 5)
+        self.assertEqual(params["requested_gap"], 0.0)
+        self.assertEqual(params["minimum_gap"], 0.01)
+        self.assertEqual(params["gap"], 0.01)
+        self.assertEqual(params["deprecated_inputs"], [])
+        self.assertEqual(variable_plan["G1"]["value"], 0.01)
+        self.assertEqual(variable_plan["RH1"]["expression"], "((D1 - WD1) / 2)")
+        self.assertNotIn("HA1", variable_plan)
+        self.assertEqual(variable_plan["HG1"]["value"], 0.75)
+        self.assertEqual(variable_plan["HO1"]["expression"], "P1 + HG1")
+        self.assertEqual(variable_plan["H1"]["expression"], "P1 * N1")
+        for variable in params["variable_plan"]:
+            self.assertTrue(variable["comment"].startswith(f"{variable['name']}:"))
+        self.assertEqual(params["profile_sketch_center"], [0.0, 0.0])
+        self.assertEqual(
+            params["profile_anchor_plane"],
+            {"path_name": "EXTENSION_SPRING_LEFT_HOOK_PATH", "vertex": "end"},
+        )
+        self.assertEqual(params["profile_sketch_dimensions"][0]["kind"], "circle_diameter")
+        self.assertEqual(params["profile_sketch_dimensions"][0]["expression"], "WD1")
+
+    def test_extension_spring_reports_deprecated_hook_angle_input(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "hook_angle_degrees": 170.0,
+            },
+        )
+
+        deprecated_inputs = preview["params"]["deprecated_inputs"]
+        self.assertEqual(len(deprecated_inputs), 1)
+        deprecated = deprecated_inputs[0]
+        self.assertEqual(deprecated["name"], "hook_angle_degrees")
+        self.assertFalse(deprecated["applied"])
+        self.assertEqual(deprecated["replacement"], "hook_clearance")
+        self.assertIn("HO1 = P1 + HG1", deprecated["note"])
+
+    def test_preview_extension_spring_v_hooks_builds_left_hook_as_single_sketch_contour(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "gap": 0.0,
+                "hook_type": "v_hooks",
+                "v_hook_height": 9.5,
+                "v_hook_fillet_radius": 3.0,
+            },
+        )
+
+        params = preview["params"]
+        self.assertEqual(params["hook_type"], "v_hooks")
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(params["v_hook_height"], 9.5)
+        self.assertAlmostEqual(params["v_hook_length"], 12.0162674339414)
+        self.assertEqual(variable_plan["VH1"]["value"], 9.5)
+        self.assertEqual(variable_plan["VT1"]["expression"], "VH1 + WD1 / 2")
+        self.assertEqual(variable_plan["VQ1"]["expression"], "VT1 - VR1")
+        self.assertEqual(variable_plan["VK1"]["expression"], "VR1 / RH1")
+        self.assertEqual(variable_plan["VL1"]["expression"], "(VQ1 + sqrt(VK1^2 * VQ1^2 + (1 - VK1^2) * VR1^2)) / (1 - VK1^2)")
+        self.assertFalse(variable_plan["VL1"]["external"])
+        self.assertEqual(variable_plan["VR1"]["value"], 3.0)
+        self.assertIn("VE1", variable_plan)
+        self.assertEqual([segment.get("label", segment["role"]) for segment in params["segment_plan"]], [
+            "left_v_hook",
+            "body",
+            "right_v_hook",
+        ])
+        self.assertEqual(params["segment_plan"][0]["path_name"], params["connector_plan"][0]["curve1_path_name"])
+        self.assertEqual(params["segment_plan"][2]["path_name"], params["connector_plan"][1]["curve2_path_name"])
+        self.assertEqual(len(params["full_path_sequence"]), 9)
+        left_hook = params["segment_plan"][0]["sketch_path"]
+        right_hook = params["segment_plan"][2]["sketch_path"]
+        self.assertEqual(left_hook["edge_tuple_indices"], [0, 1, 2])
+        self.assertEqual(right_hook["edge_tuple_indices"], [0, 1, 2])
+        self.assertEqual(left_hook["path_names"][0], params["connector_plan"][0]["curve1_path_name"])
+        self.assertEqual(right_hook["path_names"][0], params["connector_plan"][1]["curve2_path_name"])
+        left_entities = {entity["name"]: entity for entity in left_hook["entities"]}
+        self.assertIn("hook_start_guide", left_entities)
+        self.assertIn("hook_end_guide", left_entities)
+        self.assertIn("hook_start_radius_ref", left_entities)
+        self.assertIn("hook_opposite_radius_ref", left_entities)
+        self.assertIn("hook_end_offset_ref", left_entities)
+        self.assertIn("hook_end_projection_ref", left_entities)
+        self.assertIn("hook_start_leg", left_entities)
+        self.assertIn("hook_fillet", left_entities)
+        self.assertIn("hook_end_leg", left_entities)
+        left_constraints = left_hook["parameterization"]["constraints"]
+        self.assertIn({"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_fillet", "partner_index": 1}, left_constraints)
+        self.assertIn({"kind": "merge_points", "target": "hook_fillet", "index": 2, "partner": "hook_end_leg", "partner_index": 0}, left_constraints)
+        self.assertIn({"kind": "tangent", "target": "hook_start_leg", "partner": "hook_fillet"}, left_constraints)
+        self.assertIn({"kind": "tangent", "target": "hook_end_leg", "partner": "hook_fillet"}, left_constraints)
+        self.assertIn({"kind": "point_on_curve", "target": "hook_end_leg", "index": 1, "partner": "hook_end_guide"}, left_constraints)
+        self.assertIn({"kind": "merge_points", "target": "hook_end_projection_ref", "index": 1, "partner": "hook_end_leg", "partner_index": 1}, left_constraints)
+        left_dimensions = left_hook["parameterization"]["dimensions"]
+        self.assertEqual(left_dimensions[0]["expression"], "VL1")
+        self.assertEqual(left_dimensions[0]["target"], "hook_axis_ref")
+        self.assertEqual(left_dimensions[1]["expression"], "RH1")
+        self.assertEqual(left_dimensions[2]["expression"], "RH1")
+        self.assertEqual(left_dimensions[3]["expression"], "VR1")
+        self.assertEqual(left_dimensions[3]["kind"], "arc_radius")
+        self.assertEqual(left_dimensions[4]["expression"], "VE1")
+        self.assertEqual(left_dimensions[4]["target"], "hook_end_offset_ref")
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_V_END_LEG_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["vertex"], "end")
+        right_entities = {entity["name"]: entity for entity in right_hook["entities"]}
+        self.assertIn("hook_axis_radius_ref", right_entities)
+        self.assertIn("hook_opposite_radius_ref", right_entities)
+        self.assertIn("hook_start_leg", right_entities)
+        self.assertIn("hook_fillet", right_entities)
+        self.assertIn("hook_end_leg", right_entities)
+        right_dimensions = right_hook["parameterization"]["dimensions"]
+        self.assertEqual(right_dimensions[0]["expression"], "RH1")
+        self.assertEqual(right_dimensions[1]["expression"], "RH1")
+        self.assertEqual(right_dimensions[2]["expression"], "VL1")
+        self.assertEqual(right_dimensions[3]["kind"], "arc_radius")
+        self.assertEqual(right_dimensions[3]["expression"], "VR1")
+        self.assertEqual(right_dimensions[4]["expression"], "VE1")
+        self.assertTrue(all(
+            dimension["kind"] != "angle_between_lines"
+            for segment in params["segment_plan"]
+            if "sketch_path" in segment
+            for dimension in segment["sketch_path"]["parameterization"].get("dimensions", [])
+        ))
+        self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
+
+    def test_preview_extension_spring_v_hooks_reports_deprecated_length_input(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "hook_type": "v_hooks",
+                "v_hook_length": 14.0,
+                "v_hook_fillet_radius": 3.0,
+            },
+        )
+
+        params = preview["params"]
+        self.assertAlmostEqual(params["v_hook_height"], 11.1780777024941)
+        deprecated = [item for item in params["deprecated_inputs"] if item["name"] == "v_hook_length"]
+        self.assertEqual(len(deprecated), 1)
+        self.assertTrue(deprecated[0]["applied"])
+        self.assertEqual(deprecated[0]["replacement"], "v_hook_height")
+
+    def test_preview_extension_spring_u_hooks_builds_parallel_leg_contours(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "gap": 0.0,
+                "hook_type": "u_hooks",
+                "u_hook_height": 20.0,
+                "u_hook_end_offset": 3.5,
+            },
+        )
+
+        params = preview["params"]
+        self.assertEqual(params["hook_type"], "u_hooks")
+        self.assertEqual(params["u_hook_height"], 20.0)
+        self.assertEqual(params["u_hook_length"], 8.0)
+        self.assertEqual(params["u_hook_end_offset"], 3.5)
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(variable_plan["UH1"]["value"], 20.0)
+        self.assertEqual(variable_plan["UL1"]["expression"], "UH1 - RH1 + WD1 / 2")
+        self.assertEqual(variable_plan["UE1"]["value"], 3.5)
+        self.assertEqual([segment.get("label", segment["role"]) for segment in params["segment_plan"]], [
+            "left_u_hook",
+            "body",
+            "right_u_hook",
+        ])
+        self.assertEqual(len(params["full_path_sequence"]), 9)
+        left_hook = params["segment_plan"][0]["sketch_path"]
+        right_hook = params["segment_plan"][2]["sketch_path"]
+        self.assertEqual(left_hook["edge_tuple_indices"], [0, 1, 2])
+        self.assertEqual(right_hook["edge_tuple_indices"], [0, 1, 2])
+        self.assertEqual(left_hook["path_names"][0], params["connector_plan"][0]["curve1_path_name"])
+        self.assertEqual(right_hook["path_names"][0], params["connector_plan"][1]["curve2_path_name"])
+        left_entities = {entity["name"]: entity for entity in left_hook["entities"]}
+        self.assertIn("hook_start_leg", left_entities)
+        self.assertIn("hook_arc", left_entities)
+        self.assertIn("hook_end_leg", left_entities)
+        self.assertIn("hook_end_offset_ref", left_entities)
+        self.assertIn("hook_end_projection_ref", left_entities)
+        left_dimensions = left_hook["parameterization"]["dimensions"]
+        self.assertEqual(left_dimensions[0]["expression"], "UL1")
+        self.assertEqual(left_dimensions[3]["kind"], "arc_radius")
+        self.assertEqual(left_dimensions[3]["expression"], "RH1")
+        self.assertEqual(left_dimensions[4]["expression"], "UE1")
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_U_END_LEG_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["vertex"], "end")
+        self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
+        self.assertTrue(all(
+            dimension["kind"] != "angle_between_lines"
+            for segment in params["segment_plan"]
+            if "sketch_path" in segment
+            for dimension in segment["sketch_path"]["parameterization"].get("dimensions", [])
+        ))
+
+    def test_preview_extension_spring_open_loop_hooks_builds_line_arc_contours(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "gap": 0.0,
+                "hook_type": "open_loop_hooks",
+                "open_loop_height": 20.0,
+                "open_loop_offset": 9.0,
+            },
+        )
+
+        params = preview["params"]
+        self.assertEqual(params["hook_type"], "open_loop_hooks")
+        self.assertEqual(params["open_loop_height"], 20.0)
+        self.assertEqual(params["open_loop_length"], 8.0)
+        self.assertEqual(params["open_loop_offset"], 9.0)
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(variable_plan["OH1"]["value"], 20.0)
+        self.assertEqual(variable_plan["OL1"]["expression"], "OH1 - RH1 + WD1 / 2")
+        self.assertEqual(variable_plan["OC1"]["value"], 9.0)
+        self.assertEqual([segment.get("label", segment["role"]) for segment in params["segment_plan"]], [
+            "left_open_loop_hook",
+            "body",
+            "right_open_loop_hook",
+        ])
+        self.assertEqual(len(params["full_path_sequence"]), 7)
+        left_hook = params["segment_plan"][0]["sketch_path"]
+        right_hook = params["segment_plan"][2]["sketch_path"]
+        self.assertEqual(left_hook["edge_tuple_indices"], [1, 0])
+        self.assertEqual(right_hook["edge_tuple_indices"], [0, 1])
+        left_entities = {entity["name"]: entity for entity in left_hook["entities"]}
+        self.assertIn("hook_start_leg", left_entities)
+        self.assertIn("hook_arc", left_entities)
+        self.assertIn("hook_opening_ref", left_entities)
+        self.assertIn("hook_opening_projection_ref", left_entities)
+        left_dimensions = left_hook["parameterization"]["dimensions"]
+        self.assertEqual(left_dimensions[0]["expression"], "OL1")
+        self.assertEqual(left_dimensions[3]["kind"], "arc_radius")
+        self.assertEqual(left_dimensions[3]["expression"], "RH1")
+        self.assertEqual(left_dimensions[4]["expression"], "OC1")
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_OPEN_ARC_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["vertex"], "end")
+        self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
+        self.assertTrue(all(
+            dimension["kind"] != "angle_between_lines"
+            for segment in params["segment_plan"]
+            if "sketch_path" in segment
+            for dimension in segment["sketch_path"]["parameterization"].get("dimensions", [])
+        ))
+
+    def test_preview_extension_spring_center_loop_hooks_builds_center_axis_ring_contours(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "gap": 0.0,
+                "hook_type": "center_loop_hooks",
+                "center_loop_radius": 10.0,
+                "center_loop_offset": 11.0,
+            },
+        )
+
+        params = preview["params"]
+        self.assertEqual(params["hook_type"], "center_loop_hooks")
+        self.assertEqual(params["center_loop_radius"], 10.0)
+        self.assertEqual(params["center_loop_offset"], 11.0)
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(variable_plan["CR1"]["value"], 10.0)
+        self.assertEqual(variable_plan["CC1"]["value"], 11.0)
+        self.assertEqual([segment.get("label", segment["role"]) for segment in params["segment_plan"]], [
+            "left_center_loop_hook",
+            "body",
+            "right_center_loop_hook",
+        ])
+        self.assertEqual(len(params["full_path_sequence"]), 7)
+        left_hook = params["segment_plan"][0]["sketch_path"]
+        right_hook = params["segment_plan"][2]["sketch_path"]
+        self.assertEqual(left_hook["edge_tuple_indices"], [1, 0])
+        self.assertEqual(right_hook["edge_tuple_indices"], [0, 1])
+        left_entities = {entity["name"]: entity for entity in left_hook["entities"]}
+        self.assertIn("hook_start_leg", left_entities)
+        self.assertIn("hook_arc", left_entities)
+        self.assertIn("hook_center_radius_ref", left_entities)
+        self.assertIn("hook_opening_projection_ref", left_entities)
+        left_dimensions = left_hook["parameterization"]["dimensions"]
+        self.assertEqual(left_dimensions[0]["expression"], "RH1")
+        self.assertEqual(left_dimensions[1]["kind"], "arc_radius")
+        self.assertEqual(left_dimensions[1]["expression"], "CR1")
+        self.assertEqual(left_dimensions[2]["expression"], "CC1")
+        self.assertEqual(sum(1 for dimension in left_dimensions if dimension["expression"] == "CR1"), 1)
+        left_constraints = left_hook["parameterization"]["constraints"]
+        self.assertIn(
+            {"kind": "point_on_curve", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_arc"},
+            left_constraints,
+        )
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_CENTER_LOOP_ARC_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["vertex"], "start")
+        self.assertEqual(params["full_path_sequence"][:3], [
+            "EXTENSION_SPRING_LEFT_CENTER_LOOP_ARC_PATH",
+            "left_hook_to_body_curve1_local_path",
+            "left_hook_to_body_connect_path",
+        ])
+        left_connector = params["connector_plan"][0]
+        self.assertEqual(left_connector["role"], "left_hook_to_body")
+        self.assertEqual(left_connector["curve1_path_name"], "EXTENSION_SPRING_LEFT_CENTER_LOOP_LEG_PATH")
+        self.assertEqual(left_connector["curve1_trim"]["direction"], False)
+        self.assertEqual(left_connector["curve1_trim"]["sense"], True)
+        self.assertEqual(left_connector["sequence_curve1_path_name"], "left_hook_to_body_curve1_local_path")
+        self.assertEqual(left_connector["connect_curve"]["curve1_connect_vertex"], False)
+        self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
+        self.assertTrue(all(
+            dimension["kind"] != "angle_between_lines"
+            for segment in params["segment_plan"]
+            if "sketch_path" in segment
+            for dimension in segment["sketch_path"]["parameterization"].get("dimensions", [])
+        ))
+
+    def test_preview_extension_spring_extended_center_loop_hooks_builds_offset_ring_contours(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 4.0,
+                "turns": 8.0,
+                "gap": 0.0,
+                "hook_type": "extended_center_loop_hooks",
+                "hook_radius": 10.0,
+                "center_loop_radius": 8.0,
+                "center_loop_offset": 9.0,
+                "extended_center_loop_extension": 12.0,
+                "extended_center_loop_fillet_radius": 3.0,
+            },
+        )
+
+        params = preview["params"]
+        self.assertEqual(params["hook_type"], "extended_center_loop_hooks")
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        expected_height = 12.0 + 3.0 + 8.0 + math.sqrt(8.0 * 8.0 + 2.0 * 8.0 * 3.0)
+        self.assertEqual(variable_plan["CR1"]["value"], 8.0)
+        self.assertEqual(variable_plan["CC1"]["value"], 9.0)
+        self.assertAlmostEqual(variable_plan["CH1"]["value"], expected_height)
+        self.assertAlmostEqual(variable_plan["CE1"]["value"], 12.0)
+        self.assertFalse(variable_plan["CE1"]["external"])
+        self.assertEqual(variable_plan["CE1"]["expression"], "CH1 - CF1 - CR1 - sqrt(CR1^2 + 2 * CR1 * CF1)")
+        self.assertEqual(variable_plan["CF1"]["value"], 3.0)
+        self.assertEqual(params["extended_center_loop_height"], expected_height)
+        self.assertEqual([segment.get("label", segment["role"]) for segment in params["segment_plan"]], [
+            "left_extended_center_loop_hook",
+            "body",
+            "right_extended_center_loop_hook",
+        ])
+        left_hook = params["segment_plan"][0]["sketch_path"]
+        right_hook = params["segment_plan"][2]["sketch_path"]
+        self.assertEqual(left_hook["edge_tuple_indices"], [4, 3, 2, 1, 0])
+        self.assertEqual(right_hook["edge_tuple_indices"], [0, 1, 2, 3, 4])
+        self.assertEqual([entity["name"] for entity in left_hook["entities"][:5]], [
+            "hook_body_leg",
+            "hook_first_fillet",
+            "hook_axis_leg",
+            "hook_second_fillet",
+            "hook_arc",
+        ])
+        self.assertEqual([entity["name"] for entity in left_hook["entities"][5:]], [
+            "hook_body_plane_ref",
+            "hook_spring_axis_ref",
+            "hook_far_radius_ref",
+            "hook_opening_ref",
+            "hook_opening_projection_ref",
+        ])
+        self.assertEqual(left_hook["entities"][1]["direction"], False)
+        self.assertEqual(left_hook["entities"][3]["direction"], True)
+        self.assertEqual(left_hook["entities"][4]["direction"], False)
+        self.assertEqual(right_hook["entities"][1]["direction"], False)
+        self.assertEqual(right_hook["entities"][3]["direction"], True)
+        self.assertEqual(right_hook["entities"][4]["direction"], False)
+        left_dimensions = left_hook["parameterization"]["dimensions"]
+        self.assertEqual([dimension["expression"] for dimension in left_dimensions], ["RH1", "RH1-CF1", "CF1", "CE1", "CF1", "CR1", "CC1"])
+        left_constraints = left_hook["parameterization"]["constraints"]
+        self.assertIn({"kind": "fixed_point", "target": "hook_body_plane_ref", "index": 0}, left_constraints)
+        self.assertIn({"kind": "merge_points", "target": "hook_spring_axis_ref", "index": 1, "partner": "hook_arc", "partner_index": 0}, left_constraints)
+        self.assertIn({"kind": "point_on_curve", "target": "hook_axis_leg", "index": 0, "partner": "hook_spring_axis_ref"}, left_constraints)
+        self.assertIn({"kind": "point_on_curve", "target": "hook_axis_leg", "index": 1, "partner": "hook_spring_axis_ref"}, left_constraints)
+        self.assertIn({"kind": "merge_points", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_opening_ref", "partner_index": 0}, left_constraints)
+        self.assertIn({"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0}, left_constraints)
+        self.assertIn({"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 1}, left_constraints)
+        self.assertIn({"kind": "tangent", "target": "hook_body_leg", "partner": "hook_first_fillet"}, left_constraints)
+        self.assertIn({"kind": "tangent", "target": "hook_second_fillet", "partner": "hook_arc"}, left_constraints)
+        self.assertEqual(params["profile_anchor_plane"], {
+            "path_name": "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH",
+            "vertex": "start",
+        })
+        self.assertEqual(params["full_path_sequence"][:6], [
+            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH",
+            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_SECOND_FILLET_PATH",
+            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_AXIS_PATH",
+            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_FIRST_FILLET_PATH",
+            "left_hook_to_body_curve1_local_path",
+            "left_hook_to_body_connect_path",
+        ])
+        left_connector = params["connector_plan"][0]
+        self.assertEqual(left_connector["curve1_path_name"], "EXTENSION_SPRING_LEFT_HOOK_PATH")
+        self.assertEqual(left_connector["curve1_trim"]["direction"], False)
+        self.assertEqual(left_connector["curve1_trim"]["sense"], True)
+        self.assertEqual(left_connector["connect_curve"]["curve1_connect_vertex"], False)
+        self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
+
+    def test_preview_extension_spring_extended_center_loop_height_drives_axial_leg(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 4.0,
+                "turns": 8.0,
+                "gap": 0.0,
+                "hook_type": "extended_center_loop_hooks",
+                "hook_radius": 10.0,
+                "center_loop_radius": 8.0,
+                "center_loop_offset": 9.0,
+                "extended_center_loop_height": 35.0,
+                "extended_center_loop_fillet_radius": 3.0,
+            },
+        )
+
+        params = preview["params"]
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        expected_extension = 35.0 - 3.0 - 8.0 - math.sqrt(8.0 * 8.0 + 2.0 * 8.0 * 3.0)
+        self.assertEqual(params["extended_center_loop_height"], 35.0)
+        self.assertAlmostEqual(params["extended_center_loop_extension"], expected_extension)
+        self.assertEqual(variable_plan["CH1"]["value"], 35.0)
+        self.assertAlmostEqual(variable_plan["CE1"]["value"], expected_extension)
+        self.assertEqual(variable_plan["CE1"]["expression"], "CH1 - CF1 - CR1 - sqrt(CR1^2 + 2 * CR1 * CF1)")
+        self.assertFalse(variable_plan["CE1"]["external"])
+
+    def test_preview_extension_spring_bent_coil_left_spike_builds_v2_auxiliary_spiral(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "gap": 0.0,
+                "hook_type": "bent_coil_left_spike",
+                "bent_coil_turns": 1.0,
+                "bent_coil_angle_degrees": 0.0,
+            },
+        )
+
+        params = preview["params"]
+        variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
+        self.assertEqual(params["hook_type"], "bent_coil_left_spike")
+        self.assertFalse(params["construction_only"])
+        self.assertTrue(params["bent_coil_auxiliary_construction"])
+        self.assertFalse(params["bent_coil_building_direction"])
+        self.assertTrue(params["bent_coil_right_building_direction"])
+        self.assertEqual(params["connector_plan"], [])
+        self.assertEqual(params["full_path_sequence"], [
+            "EXTENSION_SPRING_BODY_PATH",
+            "EXTENSION_SPRING_BENT_COIL_LEFT_SPIKE_PATH",
+            "EXTENSION_SPRING_RIGHT_BENT_COIL_PATH",
+        ])
+        self.assertEqual([segment["role"] for segment in params["segment_plan"]], ["body", "bent_coil_left", "bent_coil_right"])
+        body_segment = params["segment_plan"][0]
+        bent_segment = params["segment_plan"][1]
+        right_bent_segment = params["segment_plan"][2]
+        self.assertEqual(body_segment["path_type"], "cylindric_spiral")
+        self.assertEqual(body_segment["path_name"], "EXTENSION_SPRING_BODY_PATH")
+        self.assertEqual(bent_segment["path_type"], "cylindric_spiral")
+        self.assertEqual(bent_segment["path_name"], "EXTENSION_SPRING_BENT_COIL_LEFT_SPIKE_PATH")
+        self.assertEqual(bent_segment["base_vertex"], "start")
+        self.assertTrue(bent_segment["construction_only"])
+        self.assertEqual(bent_segment["turns_variable"], "BT1")
+        self.assertEqual(bent_segment["height_variable"], "BH1")
+        self.assertEqual(bent_segment["angle_variable"], "BA1")
+        self.assertEqual(bent_segment["angle_expression"], "BA1")
+        self.assertEqual(bent_segment["initial_angle_degrees"], 90.0)
+        self.assertEqual(bent_segment["radius_expression"], "(D1 - WD1) / 2")
+        self.assertEqual(bent_segment["pitch_variable"], "P1")
+        binding_roles = {binding["role"] for binding in bent_segment["operation_variable_bindings"]}
+        self.assertNotIn("bent_coil_initial_angle", binding_roles)
+        self.assertEqual(right_bent_segment["path_type"], "cylindric_spiral")
+        self.assertEqual(right_bent_segment["path_name"], "EXTENSION_SPRING_RIGHT_BENT_COIL_PATH")
+        self.assertEqual(right_bent_segment["base_vertex"], "end")
+        self.assertEqual(right_bent_segment["side"], "right")
+        self.assertEqual(right_bent_segment["orientation"], "right")
+        self.assertEqual(right_bent_segment["diameter_expression"], "D1 - WD1")
+        self.assertEqual(right_bent_segment["radius_expression"], "(D1 - WD1) / 2")
+        self.assertEqual(right_bent_segment["angle_expression"], "BA1")
+        self.assertEqual(right_bent_segment["initial_angle_degrees"], 90.0)
+        self.assertEqual(params["profile_anchor_plane"], {
+            "path_name": "EXTENSION_SPRING_RIGHT_BENT_COIL_PATH",
+            "vertex": "end",
+            "use_perpendicular_plane": True,
+        })
+        self.assertEqual(variable_plan["BT1"]["value"], 1.0)
+        self.assertEqual(variable_plan["BH1"]["expression"], "P1 * BT1")
+        self.assertEqual(variable_plan["BA1"]["value"], 0.0)
+        self.assertEqual(variable_plan["BA1"]["kind"], "driving_bent_coil_angle_degrees")
+        add_variables = next(operation for operation in preview["operations"] if operation.get("operation") == "add_variables")
+        operation_variables = {variable["name"]: variable for variable in add_variables["variables"]}
+        self.assertEqual(operation_variables["BA1"]["value"], 0.0)
+
+    def test_preview_extension_spring_bent_coil_variable_override_updates_operations(self) -> None:
+        preview = preview_part_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30.0,
+                "wire_diameter": 3.0,
+                "turns": 6.0,
+                "gap": 0.0,
+                "hook_type": "bent_coil_left_spike",
+                "bent_coil_turns": 1.0,
+                "bent_coil_angle_degrees": 35.0,
+                "variable_plan": [{"name": "BA1", "value": 12.0, "external": True}],
+            },
+        )
+
+        params_variables = {variable["name"]: variable for variable in preview["params"]["variable_plan"]}
+        add_variables = next(operation for operation in preview["operations"] if operation.get("operation") == "add_variables")
+        operation_variables = {variable["name"]: variable for variable in add_variables["variables"]}
+        self.assertEqual(params_variables["BA1"]["value"], 12.0)
+        self.assertEqual(operation_variables["BA1"]["value"], 12.0)
+        self.assertIn("D1", operation_variables)
+        self.assertIn("WD1", operation_variables)
+        self.assertIn("P1", operation_variables)
+
     def test_preview_compression_spring_left_hand_segment_anchor_rotation_flips_direction(self) -> None:
         preview = preview_part_scenario(
             "compression_spring",
@@ -3892,11 +4814,21 @@ class ParametricPartTests(unittest.TestCase):
             "finish_tip_point",
             "start_body_entry_point",
             "finish_body_exit_point",
+            "working_start_point",
+            "working_finish_point",
         }
         self.assertEqual(set(preview["selectors"].keys()), selector_keys)
         self.assertEqual(
             set(preview["interface"]["anchors"]["selector_points"].keys()),
             selector_keys,
+        )
+        self.assertEqual(
+            preview["selectors"]["working_start_point"],
+            preview["selectors"]["start_body_entry_point"],
+        )
+        self.assertEqual(
+            preview["selectors"]["working_finish_point"],
+            preview["selectors"]["finish_body_exit_point"],
         )
 
     def test_preview_compression_spring_v2_support_points_are_conditional(self) -> None:
@@ -4034,6 +4966,129 @@ class ParametricPartTests(unittest.TestCase):
             },
         )
         self.assertEqual(result["preview"]["scenario"], "compression_spring")
+
+    def test_create_variable_pitch_compression_spring_from_scenario_passes_normalized_params(self) -> None:
+        runner = FakeRunner()
+        adapter = KompasAdapter(runner=runner)
+        result = adapter.create_part_from_scenario(
+            "compression_spring_variable_pitch",
+            {
+                "mean_diameter": 30,
+                "wire_diameter": 4,
+                "working_turns_1": 3.0,
+                "pitch_1": 6.0,
+                "working_turns_2": 2.5,
+                "pitch_2": 10.0,
+                "start_end_turns": 1.0,
+                "finish_end_turns": 1.0,
+            },
+            output_path=r"C:\Temp\kompas-mcp\unit-spring-variable-pitch.m3d",
+        )
+
+        self.assertTrue(result["ok"])
+        call = runner.calls[0][1]
+        self.assertEqual(call["scenario"], "compression_spring")
+        self.assertEqual(call["params"]["pitch_mode"], "two_zone")
+        self.assertEqual(call["params"]["height"], 51.0)
+        self.assertEqual([segment["role"] for segment in call["params"]["segment_plan"]], [
+            "start_end",
+            "working_1",
+            "working_2",
+            "finish_end",
+        ])
+        self.assertEqual(result["preview"]["scenario"], "compression_spring")
+
+    def test_create_conical_compression_spring_from_scenario_passes_conic_segments(self) -> None:
+        runner = FakeRunner()
+        adapter = KompasAdapter(runner=runner)
+        result = adapter.create_part_from_scenario(
+            "conical_compression_spring",
+            {
+                "large_mean_diameter": 40,
+                "small_mean_diameter": 20,
+                "wire_diameter": 4,
+                "pitch": 8,
+                "working_turns": 4,
+                "L": 44,
+                "start_end_turns": 1,
+                "finish_end_turns": 1,
+            },
+            output_path=r"C:\Temp\kompas-mcp\unit-conical-spring.m3d",
+        )
+
+        self.assertTrue(result["ok"])
+        call = runner.calls[0][1]
+        self.assertEqual(call["scenario"], "conical_compression_spring")
+        self.assertEqual(call["params"]["pitch_mode"], "constant_pitch")
+        self.assertEqual(call["params"]["large_mean_diameter"], 40.0)
+        self.assertEqual(call["params"]["small_mean_diameter"], 20.0)
+        self.assertEqual([segment["path_type"] for segment in call["params"]["segment_plan"]], [
+            "conic_spiral",
+            "conic_spiral",
+            "conic_spiral",
+        ])
+        self.assertEqual(result["preview"]["scenario"], "conical_compression_spring")
+
+    def test_create_torsion_spring_from_scenario_passes_tangent_contour_segments(self) -> None:
+        runner = FakeRunner()
+        adapter = KompasAdapter(runner=runner)
+        result = adapter.create_part_from_scenario(
+            "torsion_spring",
+            {
+                "outer_diameter": 31,
+                "wire_diameter": 3,
+                "turns": 4,
+                "gap": 0.2,
+                "left_leg_length": 18,
+                "right_leg_length": 22,
+            },
+            output_path=r"C:\Temp\kompas-mcp\unit-torsion-spring.m3d",
+        )
+
+        self.assertTrue(result["ok"])
+        call = runner.calls[0][1]
+        self.assertEqual(call["scenario"], "torsion_spring")
+        self.assertEqual(call["params"]["end_type"], "tangent_legs")
+        self.assertEqual(call["params"]["outer_diameter"], 31.0)
+        self.assertEqual(call["params"]["mean_diameter"], 28.0)
+        self.assertEqual([segment["path_type"] for segment in call["params"]["segment_plan"]], [
+            "line_segment",
+            "cylindric_spiral",
+            "line_segment",
+        ])
+        self.assertEqual(call["params"]["full_path_sequence"], [
+            "TORSION_SPRING_LEFT_LEG_PATH",
+            "TORSION_SPRING_BODY_PATH",
+            "TORSION_SPRING_RIGHT_LEG_PATH",
+        ])
+        self.assertEqual(result["preview"]["scenario"], "torsion_spring")
+
+    def test_create_extension_spring_from_scenario_passes_machine_hook_segments(self) -> None:
+        runner = FakeRunner()
+        adapter = KompasAdapter(runner=runner)
+        result = adapter.create_part_from_scenario(
+            "extension_spring",
+            {
+                "outer_diameter": 30,
+                "wire_diameter": 3,
+                "turns": 6,
+                "gap": 0,
+            },
+            output_path=r"C:\Temp\kompas-mcp\unit-extension-spring.m3d",
+        )
+
+        self.assertTrue(result["ok"])
+        call = runner.calls[0][1]
+        self.assertEqual(call["scenario"], "extension_spring")
+        self.assertEqual(call["params"]["hook_type"], "machine_hooks")
+        self.assertEqual([segment["path_type"] for segment in call["params"]["segment_plan"]], [
+            "sketch_path",
+            "cylindric_spiral",
+            "sketch_path",
+        ])
+        self.assertEqual(len(call["params"]["connector_plan"]), 2)
+        self.assertEqual(call["params"]["full_path_sequence"][1], "left_hook_to_body_connect_path")
+        self.assertEqual(result["preview"]["scenario"], "extension_spring")
 
     def test_create_compression_spring_from_scenario_preserves_v2_per_end_variable_vocabulary(self) -> None:
         runner = FakeRunner()

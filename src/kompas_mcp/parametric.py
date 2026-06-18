@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import importlib.machinery
+import importlib.util
 import math
 from pathlib import Path
 import re
@@ -56,6 +58,7 @@ SUPPORTED_PART_SCENARIOS = (
     "face_ring_groove",
     "bolt_circle_holes",
     "compression_spring",
+    "extension_spring",
     "point",
     "lcs",
     "workflow",
@@ -4241,14 +4244,199 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
     if normalized_scenario == "bolt_circle_holes":
         return preview_bolt_circle_holes(params)
     if normalized_scenario == "compression_spring":
-        return preview_compression_spring(params)
+        return _preview_part_scenario_legacy("compression_spring", params, scenario)
+    if normalized_scenario == "extension_spring":
+        return preview_extension_spring(params)
     if normalized_scenario == "point":
         return preview_point(params)
     if normalized_scenario == "lcs":
         return preview_lcs(params)
     if normalized_scenario == "workflow":
         return preview_workflow(params)
-    raise ValueError(f"Unsupported part scenario: {scenario}")
+    return _preview_part_scenario_legacy(normalized_scenario, params, scenario)
+
+
+def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
+    result = _preview_part_scenario_legacy("extension_spring", params, "extension_spring")
+    result_params = result.get("params")
+    if isinstance(result_params, dict):
+        for key in ("bent_coil_tangent_axis_flip", "bent_coil_angle_direction", "bent_coil_angle_axis_binding", "bent_coil_angle_axis_source", "bent_coil_building_direction"):
+            if key in params:
+                result_params[key] = params[key]
+        if params.get("variable_plan"):
+            existing_variables = result_params.setdefault("variable_plan", [])
+            by_name = {variable.get("name"): variable for variable in existing_variables if isinstance(variable, dict)}
+            for variable in params.get("variable_plan") or []:
+                if isinstance(variable, dict) and variable.get("name"):
+                    by_name[variable["name"]] = copy.deepcopy(variable)
+            result_params["variable_plan"] = list(by_name.values())
+    return _normalize_bent_coil_left_spike_v2(result)
+
+
+def _preview_part_scenario_legacy(normalized_scenario: str, params: dict[str, Any], original_scenario: str) -> dict[str, Any]:
+    legacy = _load_extension_spring_legacy_module()
+    return legacy.preview_part_scenario(normalized_scenario, params)
+
+
+def _load_extension_spring_legacy_module():
+    backup_path = Path(__file__).with_name("parametric.py.agent_backup")
+    if not backup_path.exists():
+        raise ValueError("extension_spring preview is unavailable: missing parametric.py.agent_backup")
+    loader = importlib.machinery.SourceFileLoader("kompas_mcp._parametric_extension_legacy", str(backup_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None or spec.loader is None:
+        raise ValueError("extension_spring preview is unavailable: cannot load legacy implementation")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _normalize_bent_coil_left_spike_v2(result: dict[str, Any]) -> dict[str, Any]:
+    params = result.get("params") if isinstance(result, dict) else None
+    if not isinstance(params, dict) or params.get("hook_type") != "bent_coil_left_spike":
+        return result
+
+    spring_name = str(params.get("name") or "EXTENSION_SPRING")
+    pitch = float(params.get("pitch", 0.0) or 0.0)
+    outer_diameter = float(params.get("outer_diameter", params.get("diameter", 0.0)) or 0.0)
+    bent_turns = float(params.get("bent_coil_turns", 1.0) or 1.0)
+    bent_angle = float(params.get("bent_coil_angle_degrees", 0.0) or 0.0)
+    body_path_name = f"{spring_name}_BODY_PATH"
+    bent_path_name = f"{spring_name}_BENT_COIL_LEFT_SPIKE_PATH"
+    right_bent_path_name = f"{spring_name}_RIGHT_BENT_COIL_PATH"
+
+    body_segment = next(
+        (copy.deepcopy(segment) for segment in params.get("segment_plan", []) if segment.get("role") == "body"),
+        {
+            "role": "body",
+            "path_role": "body",
+            "path_type": "cylindric_spiral",
+            "path_name": body_path_name,
+        },
+    )
+    body_segment["path_name"] = body_path_name
+    body_segment.setdefault("path_type", "cylindric_spiral")
+    body_segment.setdefault("construction_only", False)
+
+    bent_segment = {
+        "role": "bent_coil_left",
+        "side": "left",
+        "base_vertex": "start",
+        "path_role": "bent_coil_left",
+        "path_type": "cylindric_spiral",
+        "path_name": bent_path_name,
+        "path_label": "Bent coil left spike spiral",
+        "turns": bent_turns,
+        "turns_variable": "BT1",
+        "turns_expression": "BT1",
+        "height": pitch * bent_turns,
+        "height_variable": "BH1",
+        "height_expression": "BH1",
+        "pitch": pitch,
+        "pitch_variable": "P1",
+        "pitch_expression": "P1",
+        "diameter": outer_diameter,
+        "diameter_variable": "D1",
+        "diameter_expression": "D1 - WD1",
+        "radius_expression": "(D1 - WD1) / 2",
+        "angle_degrees": bent_angle,
+        "angle_variable": "BA1",
+        "angle_expression": "BA1",
+        "initial_angle_degrees": 90.0,
+        "orientation": "left",
+        "construction_only": True,
+        "operation_variable_bindings": [
+            {
+                "target": "bent_coil_spiral_path",
+                "parameter_note": "Diameter",
+                "parameter_note_aliases": ["Diameter", "Diameter 1", "Диаметр", "Диаметр 1", "D", "D1"],
+                "expression": "D1 - WD1",
+                "role": "bent_coil_diameter",
+            },
+            {
+                "target": "bent_coil_spiral_path",
+                "parameter_note": "Pitch",
+                "parameter_note_aliases": ["Pitch", "Step", "Шаг", "P", "P1"],
+                "expression": "P1",
+                "role": "bent_coil_pitch",
+            },
+            {
+                "target": "bent_coil_spiral_path",
+                "parameter_note": "Height",
+                "parameter_note_aliases": ["Height", "Высота", "H", "BH1"],
+                "expression": "BH1",
+                "role": "bent_coil_height",
+            },
+        ],
+    }
+
+    right_bent_segment = copy.deepcopy(bent_segment)
+    right_bent_segment.update(
+        {
+            "role": "bent_coil_right",
+            "side": "right",
+            "base_vertex": "end",
+            "path_role": "bent_coil_right",
+            "path_name": right_bent_path_name,
+            "path_label": "Bent coil right spike spiral",
+            "orientation": "right",
+            "angle_direction_param": "bent_coil_right_angle_direction",
+            "building_direction_param": "bent_coil_right_building_direction",
+            "initial_angle_degrees": float(params.get("bent_coil_right_initial_angle_degrees", 90.0) or 90.0),
+        }
+    )
+
+    params["segment_plan"] = [body_segment, bent_segment, right_bent_segment]
+    params["connector_plan"] = []
+    params["full_path_sequence"] = [body_path_name, bent_path_name, right_bent_path_name]
+    params["profile_anchor_plane"] = {
+        "path_name": right_bent_path_name,
+        "vertex": "end",
+        "use_perpendicular_plane": True,
+    }
+    params["construction_only"] = False
+    params["bent_coil_auxiliary_construction"] = True
+    params.setdefault("bent_coil_building_direction", False)
+    params.setdefault("bent_coil_right_building_direction", True)
+    _ensure_bent_coil_v2_variables(params, pitch, bent_turns, bent_angle)
+    _sync_add_variables_operation(result, params["variable_plan"])
+    return result
+
+
+def _ensure_bent_coil_v2_variables(params: dict[str, Any], pitch: float, turns: float, angle: float) -> None:
+    variable_plan = params.setdefault("variable_plan", [])
+    by_name = {variable.get("name"): variable for variable in variable_plan if isinstance(variable, dict)}
+    by_name.setdefault("BT1", {"name": "BT1", "value": turns, "kind": "driving_bent_coil_turn_count", "external": True})
+    by_name.setdefault("BH1", {"name": "BH1", "expression": "P1 * BT1", "kind": "derived_bent_coil_height", "external": False})
+    by_name.setdefault(
+        "BA1",
+        {
+            "name": "BA1",
+            "value": angle,
+            "kind": "driving_bent_coil_angle_degrees",
+            "external": True,
+            "comment": "BA1: bent-coil angle plane angle in degrees",
+        },
+    )
+    by_name["BT1"].setdefault("value", turns)
+    by_name["BH1"]["expression"] = "P1 * BT1"
+    by_name["BA1"].setdefault("value", angle)
+    by_name["BA1"]["kind"] = "driving_bent_coil_angle_degrees"
+    by_name["BA1"]["comment"] = "BA1: bent-coil angle plane angle in degrees"
+    params["variable_plan"] = list(by_name.values())
+
+
+def _sync_add_variables_operation(result: dict[str, Any], variable_plan: list[dict[str, Any]]) -> None:
+    operations = result.get("operations")
+    if not isinstance(operations, list):
+        return
+    variables = [copy.deepcopy(variable) for variable in variable_plan if isinstance(variable, dict)]
+    for operation in operations:
+        if isinstance(operation, dict) and operation.get("operation") == "add_variables":
+            operation["variables"] = variables
+            return
+    if variables:
+        operations.insert(0, {"operation": "add_variables", "variables": variables})
 
 
 def _normalize_scenario(scenario: str) -> str:
@@ -4272,6 +4460,7 @@ def _normalize_scenario(scenario: str) -> str:
     aliases.update(FACE_RING_GROOVE_SCENARIO_ALIASES)
     aliases.update(BOLT_CIRCLE_HOLES_SCENARIO_ALIASES)
     aliases.update(COMPRESSION_SPRING_SCENARIO_ALIASES)
+    aliases.update({"extension_spring": "extension_spring", "tension_spring": "extension_spring"})
     aliases.update(POINT_SCENARIO_ALIASES)
     aliases.update(LCS_SCENARIO_ALIASES)
     aliases.update(WORKFLOW_SCENARIO_ALIASES)
