@@ -13793,6 +13793,12 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
     sketch_plane, profile_lcs_rotation = _resolve_compression_spring_profile_sketch_frame(params)
 
     segment_plan = list(params.get("segment_plan") or [])
+    if params.get("requires_side_specific_hook_builders"):
+        hook_selection = dict(params.get("hook_selection") or {})
+        raise RuntimeError(
+            "Extension spring mixed hook types require side-specific hook builders: left=%s right=%s"
+            % (hook_selection.get("left_hook_type") or params.get("left_hook_type"), hook_selection.get("right_hook_type") or params.get("right_hook_type"))
+        )
     steps_report.append(
         {
             "step": "prepare_spring_segments",

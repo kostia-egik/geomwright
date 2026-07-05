@@ -4268,6 +4268,8 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
         result_params["hook_selection"] = copy.deepcopy(hook_selection)
         result_params["left_hook_type"] = hook_selection["left_hook_type"]
         result_params["right_hook_type"] = hook_selection["right_hook_type"]
+        result_params["mixed_hook_types"] = hook_selection["left_hook_type"] != hook_selection["right_hook_type"]
+        result_params["requires_side_specific_hook_builders"] = bool(result_params["mixed_hook_types"])
         if use_self_wrapping_hooks:
             result_params["hook_type"] = "self_wrapping_hooks"
             result_params["base_hook_type"] = "v_hooks"
@@ -4302,6 +4304,8 @@ def _resolve_extension_hook_selection(params: dict[str, Any]) -> dict[str, Any]:
         "base_hook_type": base_hook_type,
         "left_hook_type": left_hook_type,
         "right_hook_type": right_hook_type,
+        "mixed_hook_types": left_hook_type != right_hook_type,
+        "requires_side_specific_hook_builders": left_hook_type != right_hook_type,
         "left_source": _extension_hook_selection_source(params, ("left_hook_type", "start_hook_type", "left_end_type"), "hook_type"),
         "right_source": _extension_hook_selection_source(params, ("right_hook_type", "finish_hook_type", "right_end_type"), "hook_type"),
     }
