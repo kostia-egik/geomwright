@@ -275,6 +275,19 @@ def _project_point_to_sketch_xy(sketch, point):
     return report
 
 
+def _coerce_projection_object(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in reversed(value):
+            if item is not None and not isinstance(item, (bool, int, float, str)):
+                return item
+        return None
+    if isinstance(value, (bool, int, float, str)):
+        return None
+    return value
+
+
 def _project_point_to_sketch_xy_with_object(sketch, point):
     report = {"ok": False, "attempts": []}
     projection = None
@@ -284,13 +297,37 @@ def _project_point_to_sketch_xy_with_object(sketch, point):
     add_projection = safe_get(sketch, "AddProjectionOf")
     if callable(add_projection):
         try:
-            projection = add_projection(point)
+            raw_projection = add_projection(point)
+            projection = _coerce_projection_object(raw_projection)
+            report["projection_raw"] = str(raw_projection)
             report["projection_reference"] = safe_get(projection, "Reference")
             report["projection_created"] = projection is not None
         except Exception as exc:
             report["projection_error"] = str(exc)
+        if projection is None:
+            try:
+                sketch.BeginEdit()
+                raw_projection = add_projection(point)
+                sketch.EndEdit()
+                projection = _coerce_projection_object(raw_projection)
+                report["projection_begin_edit_raw"] = str(raw_projection)
+                report["projection_reference"] = safe_get(projection, "Reference")
+                report["projection_created"] = projection is not None
+            except Exception as exc:
+                try:
+                    sketch.EndEdit()
+                except Exception:
+                    pass
+                report["projection_begin_edit_error"] = str(exc)
     xy_report = _project_point_to_sketch_xy(sketch, point)
+    initial_projection_created = bool(report.get("projection_created"))
+    initial_projection_reference = report.get("projection_reference")
+    initial_projection_raw = report.get("projection_raw")
     report.update(xy_report)
+    if initial_projection_created:
+        report["projection_created"] = True
+        report["projection_reference"] = initial_projection_reference
+        report["projection_raw"] = initial_projection_raw
     if projection is not None:
         report["projection_created"] = True
         report["projection_reference"] = safe_get(projection, "Reference")
@@ -414,6 +451,20 @@ def _set_model_object_hidden(model_object, hidden=True, *, role=None):
         report["hidden_after"] = bool(applied_hidden) if applied_hidden is not None else None
         report["ok"] = applied_hidden is not None and bool(applied_hidden) == bool(hidden) and update_ok
         if not report["ok"]:
+            current_visible = safe_get(model_object, "Visible")
+            if update_ok and current_visible is not None:
+                report["visible_fallback_before"] = bool(current_visible)
+                try:
+                    model_object.Visible = not bool(hidden)
+                    visible_update_ok = commit_visibility_update()
+                    applied_visible = safe_get(model_object, "Visible")
+                    report["visible_fallback_after"] = bool(applied_visible) if applied_visible is not None else None
+                    report["ok"] = applied_visible is not None and bool(applied_visible) == (not bool(hidden)) and visible_update_ok
+                    if report["ok"]:
+                        report["reason"] = "hidden_property_ignored_visible_fallback_applied"
+                        return report
+                except Exception as exc:
+                    report["visible_fallback_error"] = str(exc)
             if not update_ok:
                 report["reason"] = "visibility_update_failed"
             else:
@@ -1159,6 +1210,1275 @@ def _sketch_entity_geometry(entity_kind, entity):
             "angle": _json_safe_scalar(safe_get(entity, "Angle")),
         }
     return {}
+
+
+def _sketch_full_scalar(value):
+    if value is None or callable(value):
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return float(value)
+    except Exception:
+        return str(value)
+
+
+def _sketch_full_json_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(key): _sketch_full_json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sketch_full_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sketch_full_json_safe(item) for item in value]
+    if isinstance(value, set):
+        return [_sketch_full_json_safe(item) for item in value]
+    scalar = _sketch_full_scalar(value)
+    if scalar is not None:
+        return scalar
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
+def _describe_sketch_reference_object(obj):
+    if obj is None:
+        return None
+    data = {"type": type(obj).__name__}
+    for attr in ("Name", "Reference", "Type", "UniqueNumber", "UniqueMetaObjectKey"):
+        value = safe_get(obj, attr)
+        if value is not None:
+            data[attr[:1].lower() + attr[1:]] = _sketch_full_json_safe(value)
+    parameters = safe_get(obj, "LocalCSParameters")
+    if parameters is not None:
+        param_data = {"type": type(parameters).__name__}
+        for attr in (
+            "X", "Y", "Z", "Angle", "RotateAngle", "AngleX", "AngleY", "AngleZ",
+            "EulerAngleX", "EulerAngleY", "EulerAngleZ", "Ox", "Oy", "Oz",
+            "Direction", "DirectionX", "DirectionY", "DirectionZ", "ReverseZ", "AxisZDirection",
+        ):
+            value = safe_get(parameters, attr)
+            if value is not None:
+                param_data[attr] = _sketch_full_json_safe(value)
+        data["localCSParameters"] = param_data
+    return data
+
+
+def _read_sketch_placement_diagnostics(sketch):
+    result = {}
+    for attr in (
+        "Name", "Reference", "Status", "State", "X", "Y", "Z", "Angle", "RotateAngle",
+        "OffsetX", "OffsetY", "OffsetZ", "Direction", "DirectionX", "DirectionY", "DirectionZ",
+        "ReverseZ", "AxisZDirection", "ConstructionMethod", "BuildMethod", "PlacementMode",
+    ):
+        value = safe_get(sketch, attr)
+        if value is not None:
+            result[attr] = _sketch_full_json_safe(value)
+    result["plane"] = _describe_sketch_reference_object(safe_get(sketch, "Plane"))
+    result["coordinateSystem"] = _describe_sketch_reference_object(safe_get(sketch, "CoordinateSystem"))
+    prop_map = getattr(sketch, "_prop_map_get_", None)
+    if isinstance(prop_map, dict):
+        result["availableProperties"] = sorted(str(name) for name in prop_map.keys())[:200]
+    return result
+
+
+def _read_sketch_full_properties(entity, names):
+    data = {}
+    for name in names:
+        try:
+            value = safe_get(entity, name)
+            if value is None or callable(value):
+                continue
+            data[name] = _sketch_full_json_safe(value)
+        except Exception as exc:
+            data[name] = {"error": str(exc)}
+    return data
+
+
+def _read_sketch_full_methods(entity, names):
+    data = {}
+    for name in names:
+        method = safe_get(entity, name)
+        if not callable(method):
+            continue
+        try:
+            value = method()
+            if value is not None:
+                data[name] = _sketch_full_json_safe(value)
+        except Exception as exc:
+            data[name] = {"error": str(exc)}
+    return data
+
+
+def _describe_sketch_full_related_object(obj):
+    if obj is None or callable(obj):
+        return None
+    data = {
+        "com_type": obj.__class__.__name__,
+        "reference": _sketch_full_json_safe(safe_get(obj, "Reference")),
+        "type": _sketch_full_json_safe(safe_get(obj, "Type", safe_get(obj, "ObjType"))),
+        "name": _sketch_full_json_safe(safe_get(obj, "Name")),
+    }
+    return {key: value for key, value in data.items() if value not in (None, "")}
+
+
+def _read_sketch_full_object_details(obj, property_names=None, method_names=None, related_names=None):
+    if obj is None:
+        return None
+    data = {"com_type": obj.__class__.__name__}
+    available_properties = sorted(
+        set(getattr(obj, "_prop_map_get_", {}) or {}).union(set(getattr(obj, "_prop_map_put_", {}) or {}))
+    )
+    if available_properties:
+        data["available_properties"] = available_properties
+    available_methods = [str(item) for item in (getattr(obj, "_methods_", []) or [])]
+    if available_methods:
+        data["available_methods"] = available_methods
+    properties = _read_sketch_full_properties(obj, property_names or ())
+    if properties:
+        data["properties"] = properties
+    methods = _read_sketch_full_methods(obj, method_names or ())
+    if methods:
+        data["methods"] = methods
+    related = {}
+    for name in related_names or ():
+        value = safe_get(obj, name)
+        if value is None or callable(value):
+            continue
+        related_value = _describe_sketch_full_related_object(value)
+        if related_value is not None:
+            related[name] = related_value
+    if related:
+        data["related"] = related
+    return data
+
+
+_SKETCH_COMMON_PROPERTY_NAMES = (
+    "Name",
+    "Reference",
+    "Type",
+    "ObjType",
+    "Layer",
+    "Style",
+    "Color",
+    "Visible",
+    "Hidden",
+    "Fixed",
+    "Construction",
+    "Auxiliary",
+    "Deletable",
+    "Changed",
+    "X",
+    "Y",
+    "X1",
+    "Y1",
+    "X2",
+    "Y2",
+    "Xc",
+    "Yc",
+    "Radius",
+    "Angle",
+    "Direction",
+)
+
+
+_SKETCH_DIMENSION_PROPERTY_NAMES = (
+    "Name",
+    "Reference",
+    "Type",
+    "DimensionType",
+    "ObjType",
+    "Value",
+    "NominalValue",
+    "Text",
+    "Expression",
+    "ExpressionText",
+    "Formula",
+    "Variable",
+    "VariableName",
+    "VariableExpression",
+    "ValueExpression",
+    "Prefix",
+    "Suffix",
+    "Tolerance",
+    "IsReference",
+    "Driving",
+    "Driven",
+    "Hidden",
+    "Visible",
+)
+
+
+_SKETCH_NESTED_PARAMETER_NAMES = (
+    "Name",
+    "Text",
+    "Value",
+    "Expression",
+    "ExpressionText",
+    "Formula",
+    "Variable",
+    "VariableName",
+    "VariableExpression",
+    "Prefix",
+    "Suffix",
+)
+
+
+_SKETCH_CONSTRAINT_PROPERTY_NAMES = (
+    "Name",
+    "Reference",
+    "Type",
+    "Kind",
+    "ConstraintType",
+    "Value",
+    "Expression",
+    "Formula",
+    "Variable",
+    "VariableName",
+    "Fixed",
+    "Solved",
+    "Enabled",
+    "Suppressed",
+    "Driving",
+    "Driven",
+)
+
+
+_SKETCH_RELATED_OBJECT_NAMES = (
+    "Object",
+    "FirstObject",
+    "SecondObject",
+    "Object1",
+    "Object2",
+    "Entity",
+    "FirstEntity",
+    "SecondEntity",
+    "Curve",
+    "Point",
+    "Point1",
+    "Point2",
+)
+
+
+_API5_LIBID = "{0422828C-F174-495E-AC5D-D31014DBBE87}"
+_API5_KO_CONSTRAINT_PARAM = 89
+_API5_KO_ARC_BY_ANGLE_PARAM = 12
+_API5_KO_ARC_BY_POINT_PARAM = 13
+_API5_CONSTRAINT_TYPE_NAMES = {
+    0: "unknown",
+    1: "fixed_point",
+    2: "point_on_curve",
+    3: "horizontal",
+    4: "vertical",
+    5: "parallel",
+    6: "perpendicular",
+    7: "equal_length",
+    8: "equal_radius",
+    9: "horizontal_align_points",
+    10: "vertical_align_points",
+    11: "merge_points",
+    12: "association",
+    13: "dimension_with_variable",
+    14: "fixed_dimension",
+    15: "tangent_two_curves",
+    16: "symmetry_two_points",
+    17: "collinear",
+    18: "fixed_angle",
+    19: "fixed_length",
+    20: "point_on_curve_middle",
+    21: "bisector",
+    22: "concentricity",
+}
+
+
+def _get_api5_kompas_object():
+    try:
+        import win32com.client
+        import win32com.client.gencache
+
+        api5_module = win32com.client.gencache.EnsureModule(_API5_LIBID, 0, 1, 0)
+        raw_app = win32com.client.Dispatch("KOMPAS.Application.5")
+        app5 = api5_module.KompasObject(raw_app._oleobj_)
+        return app5, api5_module, {"ok": True, "class": app5.__class__.__name__}
+    except Exception as exc:
+        return None, None, {"ok": False, "error": str(exc)}
+
+
+def _get_api5_document2d():
+    app5, api5_module, status = _get_api5_kompas_object()
+    if app5 is None:
+        return None, status
+    try:
+        raw_doc2d = app5.ActiveDocument2D()
+        if raw_doc2d is None:
+            return None, {"ok": False, "error": "ActiveDocument2D returned None"}
+        doc2d = api5_module.ksDocument2D(raw_doc2d._oleobj_)
+        return doc2d, {"ok": True, "class": doc2d.__class__.__name__}
+    except Exception as exc:
+        return None, {"ok": False, "error": str(exc)}
+
+
+def _read_api5_dynamic_array(array, max_items=20, item_struct_type=None):
+    if array is None:
+        return None
+    data = {"class": array.__class__.__name__}
+    count_method = safe_get(array, "ksGetArrayCount")
+    if callable(count_method):
+        try:
+            count = count_method()
+            data["count"] = _sketch_full_json_safe(count)
+        except Exception as exc:
+            data["count_error"] = str(exc)
+            count = 0
+    else:
+        count = collection_count(array)
+        if count:
+            data["count"] = count
+    get_item = safe_get(array, "ksGetArrayItem")
+    array_type = None
+    get_array_type = safe_get(array, "ksGetArrayType")
+    if callable(get_array_type):
+        try:
+            array_type = get_array_type()
+            data["array_type"] = _sketch_full_json_safe(array_type)
+        except Exception as exc:
+            data["array_type_error"] = str(exc)
+    if callable(get_item) and isinstance(count, int) and count > 0:
+        app5, _api5_module, app5_status = _get_api5_kompas_object()
+        data["param_factory"] = app5_status
+        data["items"] = []
+        for index in range(min(count, max_items)):
+            try:
+                struct_type = item_struct_type if item_struct_type not in (None, "") else array_type
+                param = app5.GetParamStruct(struct_type) if app5 is not None and struct_type not in (None, "") else None
+                init = safe_get(param, "Init")
+                if callable(init):
+                    try:
+                        init()
+                    except Exception:
+                        pass
+                value = get_item(index, param)
+                properties = _read_sketch_full_properties(param, ("constrType", "index", "partner", "partnerIndex")) if param is not None else {}
+                if "constrType" in properties:
+                    properties["constraint_kind"] = _API5_CONSTRAINT_TYPE_NAMES.get(properties.get("constrType"), "unknown")
+                data["items"].append({
+                    "index": index,
+                    "return_code": _sketch_full_json_safe(value),
+                    "class": None if param is None else param.__class__.__name__,
+                    "struct_type": _sketch_full_json_safe(struct_type),
+                    "properties": properties,
+                    "details": _read_sketch_full_object_details(param) if param is not None else None,
+                })
+            except Exception as exc:
+                data["items"].append({"index": index, "error": str(exc)})
+        data["truncated"] = count > max_items
+    return data
+
+
+def _read_api5_dimension_diagnostics(api5_doc2d, dimension_ref):
+    if api5_doc2d is None or dimension_ref in (None, ""):
+        return None
+    data = {"dimension_ref": _sketch_full_json_safe(dimension_ref)}
+    get_name = safe_get(api5_doc2d, "ksGetDimensionVariableName")
+    if callable(get_name):
+        try:
+            data["dimension_variable_name"] = _sketch_full_json_safe(get_name(dimension_ref))
+        except Exception as exc:
+            data["dimension_variable_name_error"] = str(exc)
+    get_constraints = safe_get(api5_doc2d, "ksGetObjConstraints")
+    if callable(get_constraints):
+        try:
+            data["constraints"] = _read_api5_dynamic_array(get_constraints(dimension_ref), item_struct_type=_API5_KO_CONSTRAINT_PARAM)
+        except Exception as exc:
+            data["constraints_error"] = str(exc)
+    return data
+
+
+def _read_api5_object_diagnostics(api5_doc2d, object_ref):
+    if api5_doc2d is None or object_ref in (None, ""):
+        return None
+    data = {"object_ref": _sketch_full_json_safe(object_ref)}
+    get_constraints = safe_get(api5_doc2d, "ksGetObjConstraints")
+    if callable(get_constraints):
+        try:
+            data["constraints"] = _read_api5_dynamic_array(get_constraints(object_ref), item_struct_type=_API5_KO_CONSTRAINT_PARAM)
+        except Exception as exc:
+            data["constraints_error"] = str(exc)
+    return data
+
+
+def _api5_arc_geometry_from_param(param):
+    if param is None:
+        return None
+    props = _read_sketch_full_properties(param, ("xc", "yc", "rad", "x1", "y1", "x2", "y2", "ang1", "ang2", "dir", "style"))
+    if not props:
+        return None
+    geometry = {"center": [props.get("xc"), props.get("yc")], "radius": props.get("rad"), "direction": props.get("dir")}
+    if props.get("x1") is not None or props.get("y1") is not None:
+        geometry["start"] = [props.get("x1"), props.get("y1")]
+    if props.get("x2") is not None or props.get("y2") is not None:
+        geometry["end"] = [props.get("x2"), props.get("y2")]
+    if props.get("ang1") is not None or props.get("ang2") is not None:
+        geometry["angles"] = [props.get("ang1"), props.get("ang2")]
+    return {key: value for key, value in geometry.items() if value is not None}
+
+
+def _read_api5_arc_diagnostics(api5_doc2d, arc_ref):
+    if api5_doc2d is None or arc_ref in (None, ""):
+        return None
+    app5, _api5_module, app5_status = _get_api5_kompas_object()
+    data = {"object_ref": _sketch_full_json_safe(arc_ref), "param_factory": app5_status, "attempts": []}
+    if app5 is None:
+        return data
+    for label, struct_type in (("arc_by_point", _API5_KO_ARC_BY_POINT_PARAM), ("arc_by_angle", _API5_KO_ARC_BY_ANGLE_PARAM)):
+        attempt = {"label": label, "struct_type": struct_type}
+        try:
+            param = app5.GetParamStruct(struct_type)
+            init = safe_get(param, "Init")
+            if callable(init):
+                init()
+            ok = api5_doc2d.ksGetObjParam(arc_ref, param, struct_type)
+            attempt["ok"] = _sketch_full_json_safe(ok)
+            attempt["properties"] = _read_sketch_full_properties(param, ("xc", "yc", "rad", "x1", "y1", "x2", "y2", "ang1", "ang2", "dir", "style"))
+            attempt["geometry"] = _api5_arc_geometry_from_param(param)
+            attempt["details"] = _read_sketch_full_object_details(param)
+            if ok and attempt.get("geometry"):
+                data["geometry"] = attempt["geometry"]
+                data["param_kind"] = label
+        except Exception as exc:
+            attempt["error"] = str(exc)
+        data["attempts"].append(attempt)
+    return data
+
+
+def _collect_variable_definitions_from_surface_report(surface_report):
+    definitions = {}
+
+    def add_item(item):
+        if not isinstance(item, dict):
+            return
+        props = item.get("properties") or {}
+        name = props.get("Name")
+        if name not in (None, ""):
+            definitions[str(name)] = item
+
+    def walk(value):
+        if isinstance(value, dict):
+            for item in value.get("items") or ():
+                add_item(item)
+            for item in value.get("iter_operation_variables") or ():
+                add_item(item)
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(surface_report)
+    return definitions
+
+
+def _link_dimension_variables_from_diagnostics(result):
+    diagnostics = result.get("diagnostics") or {}
+    definitions = _collect_variable_definitions_from_surface_report(diagnostics.get("variable_surfaces") or {})
+    if not definitions:
+        return
+    linked = 0
+    for item in ((result.get("dimensions") or {}).get("items") or ()):
+        api5 = item.get("api5") if isinstance(item, dict) else None
+        if not isinstance(api5, dict):
+            continue
+        name = api5.get("dimension_variable_name")
+        if name not in (None, "") and str(name) in definitions:
+            api5["dimension_variable"] = definitions[str(name)]
+            linked += 1
+    if linked:
+        result.setdefault("summary", {})["dimension_variables_linked"] = linked
+
+
+def _build_sketch_entity_reference_index(entities):
+    index = {}
+    for entity in entities or ():
+        if not isinstance(entity, dict):
+            continue
+        reference = entity.get("reference")
+        if reference not in (None, ""):
+            index[str(reference)] = entity
+    return index
+
+
+def _build_sketch_dimension_reference_index(dimensions):
+    index = {}
+    for dimension in dimensions or ():
+        if not isinstance(dimension, dict):
+            continue
+        api5 = dimension.get("api5") if isinstance(dimension.get("api5"), dict) else {}
+        for reference in (dimension.get("dimension_ref"), api5.get("dimension_ref")):
+            if reference not in (None, ""):
+                index[str(reference)] = dimension
+    return index
+
+
+def _sketch_object_link(item, object_kind=None):
+    if not isinstance(item, dict):
+        return None
+    if object_kind == "dimension" or item.get("dimension_type") is not None or item.get("dimension_ref") is not None:
+        api5 = item.get("api5") if isinstance(item.get("api5"), dict) else {}
+        return {
+            "kind": "dimension",
+            "index": item.get("index"),
+            "dimension_type": item.get("dimension_type"),
+            "dimension_ref": item.get("dimension_ref") or api5.get("dimension_ref"),
+            "variable_name": api5.get("dimension_variable_name"),
+            "variable_value": api5.get("dimension_variable_value"),
+            "value": item.get("value"),
+        }
+    return {
+        "kind": item.get("kind"),
+        "collection_name": item.get("collection_name"),
+        "index": item.get("index"),
+        "reference": item.get("reference"),
+        "fingerprint": item.get("fingerprint"),
+        "name": item.get("name"),
+        "geometry": item.get("geometry"),
+    }
+
+
+def _sketch_entity_link(entity):
+    return _sketch_object_link(entity)
+
+
+def _resolve_sketch_object_link(entity_index, dimension_index, reference):
+    if reference in (None, ""):
+        return None
+    key = str(reference)
+    if key in entity_index:
+        return _sketch_object_link(entity_index.get(key))
+    if key in dimension_index:
+        return _sketch_object_link(dimension_index.get(key), object_kind="dimension")
+    return None
+
+
+def _resolve_sketch_entity_link(entity_index, reference):
+    return _resolve_sketch_object_link(entity_index, {}, reference)
+
+
+def _enrich_dimension_api5_constraint_partners(dimensions, entities):
+    entity_index = _build_sketch_entity_reference_index(entities)
+    dimension_index = _build_sketch_dimension_reference_index(dimensions)
+    for dimension in dimensions or ():
+        constraints = (((dimension.get("api5") or {}).get("constraints") or {}).get("items") or ()) if isinstance(dimension, dict) else ()
+        for constraint in constraints:
+            properties = constraint.get("properties") if isinstance(constraint, dict) else None
+            if not isinstance(properties, dict):
+                continue
+            partner = properties.get("partner")
+            partner_object = _resolve_sketch_object_link(entity_index, dimension_index, partner)
+            if partner_object:
+                constraint["partner_object"] = partner_object
+
+
+def _collect_api5_constraints_from_entities(entities, dimensions=None):
+    items = []
+    seen = set()
+    entity_index = _build_sketch_entity_reference_index(entities)
+    dimension_index = _build_sketch_dimension_reference_index(dimensions)
+    for entity in entities or ():
+        if not isinstance(entity, dict):
+            continue
+        constraints = (((entity.get("api5") or {}).get("constraints") or {}).get("items") or ())
+        owner = {
+            "kind": entity.get("kind"),
+            "collection_name": entity.get("collection_name"),
+            "index": entity.get("index"),
+            "reference": entity.get("reference"),
+            "fingerprint": entity.get("fingerprint"),
+        }
+        for constraint in constraints:
+            properties = constraint.get("properties") if isinstance(constraint, dict) else None
+            if not isinstance(properties, dict):
+                continue
+            key = (
+                owner.get("reference"),
+                properties.get("constrType"),
+                properties.get("index"),
+                properties.get("partner"),
+                properties.get("partnerIndex"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({
+                "source": "api5.ksGetObjConstraints",
+                "owner": owner,
+                "index": constraint.get("index"),
+                "return_code": constraint.get("return_code"),
+                "struct_type": constraint.get("struct_type"),
+                "constraint_type": properties.get("constrType"),
+                "kind": properties.get("constraint_kind"),
+                "point_index": properties.get("index"),
+                "partner_reference": properties.get("partner"),
+                "partner_index": properties.get("partnerIndex"),
+                "properties": properties,
+            })
+            current = items[-1]
+            owner_object = _sketch_entity_link(entity)
+            partner_object = _resolve_sketch_object_link(entity_index, dimension_index, properties.get("partner"))
+            if owner_object:
+                constraint["owner_object"] = owner_object
+                current["owner_object"] = owner_object
+            if partner_object:
+                constraint["partner_object"] = partner_object
+                current["partner_object"] = partner_object
+    return items
+
+
+def _projection_classification(entity):
+    projection = entity.get("projection") if isinstance(entity, dict) else None
+    classification = projection.get("classification") if isinstance(projection, dict) else None
+    return classification if isinstance(classification, dict) else {}
+
+
+def _classify_projection_links(result):
+    entities = result.get("entities") or []
+    entity_index = _build_sketch_entity_reference_index(entities)
+    projected_objects = []
+    projection_items = []
+
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        classification = _projection_classification(entity)
+        if not classification.get("is_projected_candidate"):
+            continue
+        style = classification.get("style")
+        parent_type = classification.get("parent_type")
+        if parent_type == 10031 and style == 6:
+            classification["projection_role"] = "projection_reference_geometry_candidate"
+        elif parent_type == 10031:
+            classification["projection_role"] = "projected_object_candidate"
+            link = {
+                "source": "heuristic.parent_type_10031_style_not_6",
+                "ui_name": "проекционная связь",
+                "kind": "projection_link_candidate",
+                "owner_object": _sketch_entity_link(entity),
+                "parent_reference": classification.get("parent_reference"),
+            }
+            entity.setdefault("projection", {}).setdefault("ui_constraints", []).append(link)
+            projected_objects.append(entity)
+            projection_items.append(link)
+
+    for constraint in (((result.get("constraints") or {}).get("all_items")) or []):
+        if not isinstance(constraint, dict):
+            continue
+        owner_ref = (constraint.get("owner") or {}).get("reference")
+        owner = entity_index.get(str(owner_ref)) if owner_ref not in (None, "") else None
+        partner_ref = constraint.get("partner_reference")
+        partner = entity_index.get(str(partner_ref)) if partner_ref not in (None, "") else None
+        owner_classification = _projection_classification(owner or {})
+        partner_classification = _projection_classification(partner or {})
+        if (
+            owner_classification.get("projection_role") == "projected_object_candidate"
+            and constraint.get("kind") == "point_on_curve"
+            and partner_classification.get("projection_role") == "projection_reference_geometry_candidate"
+        ):
+            constraint["projection_constraint_role"] = "endpoint_projection_candidate"
+            constraint["ui_name"] = "проекция конечной точки"
+            projection_items.append(constraint)
+
+    if projection_items:
+        result.setdefault("constraints", {})["projection_items"] = projection_items
+        result.setdefault("constraints", {}).setdefault("summary", {})["projection_constraint_count"] = len(projection_items)
+        result.setdefault("summary", {})["projection_constraint_count"] = len(projection_items)
+    if projected_objects:
+        result.setdefault("summary", {})["projected_object_count"] = len(projected_objects)
+
+
+_SKETCH_VARIABLE_PROPERTY_NAMES = (
+    "Name",
+    "ParameterNote",
+    "Note",
+    "Expression",
+    "Value",
+    "External",
+    "ReadOnly",
+    "Type",
+    "Reference",
+)
+
+
+def _read_sketch_variable_item(variable):
+    if variable is None:
+        return None
+    return {
+        "class": variable.__class__.__name__,
+        "properties": _read_sketch_full_properties(variable, _SKETCH_VARIABLE_PROPERTY_NAMES),
+        "details": _read_sketch_full_object_details(variable, _SKETCH_VARIABLE_PROPERTY_NAMES),
+    }
+
+
+def _append_sketch_variable_items(target, variables, max_items):
+    if isinstance(variables, (list, tuple)):
+        target["count"] = len(variables)
+        for index, variable in enumerate(variables[:max_items]):
+            item = _read_sketch_variable_item(variable)
+            if item is not None:
+                item["index"] = index
+                target["items"].append(item)
+        target["truncated"] = len(variables) > max_items
+        return True
+    count = collection_count(variables)
+    if count:
+        target["count"] = count
+        for index in range(min(count, max_items)):
+            item = _read_sketch_variable_item(get_collection_item(variables, index))
+            if item is not None:
+                item["index"] = index
+                target["items"].append(item)
+        target["truncated"] = count > max_items
+        return True
+    item = _read_sketch_variable_item(variables)
+    if item is not None:
+        target["items"].append(item)
+        target["count"] = 1
+        return True
+    return False
+
+
+def _resolve_variables_surface(obj):
+    variables = safe_get(obj, "Variables")
+    attempts = []
+    if callable(variables):
+        for args in ((False, False), (True, True), (False,), (True,), tuple()):
+            try:
+                value = variables(*args)
+                attempts.append({"args": list(args), "ok": True, "class": None if value is None else value.__class__.__name__})
+                if value is not None:
+                    return value, attempts
+            except Exception as exc:
+                attempts.append({"args": list(args), "ok": False, "error": str(exc)})
+        return None, attempts
+    return variables, attempts
+
+
+def _read_sketch_variable_surfaces(obj, max_items=50):
+    if obj is None or callable(obj):
+        return None
+    surfaces = []
+    seen = set()
+    candidates = [
+        ("self", obj),
+        ("owner", safe_get(obj, "Owner")),
+        ("owner_owner", safe_get(safe_get(obj, "Owner"), "Owner")),
+    ]
+    for label, candidate in candidates:
+        if candidate is None or callable(candidate):
+            continue
+        identity = id(candidate)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        variables, attempts = _resolve_variables_surface(candidate)
+        surface = {
+            "label": label,
+            "object_class": candidate.__class__.__name__,
+            "variables_class": None if variables is None else variables.__class__.__name__,
+            "variables_call_attempts": attempts,
+            "variables_properties": _read_sketch_full_properties(variables, ("Count", "Length", "Name", "ParameterNote", "Expression", "Value", "Type", "Reference")) if variables is not None else {},
+            "items": [],
+        }
+        _append_sketch_variable_items(surface, variables, max_items)
+        surfaces.append(surface)
+    iter_items = []
+    try:
+        for index, variable in enumerate(_iter_operation_variables(obj)):
+            if index >= max_items:
+                iter_items.append({"truncated": True, "max_items": max_items})
+                break
+            item = _read_sketch_variable_item(variable)
+            if item is not None:
+                item["index"] = index
+                iter_items.append(item)
+    except Exception as exc:
+        iter_items.append({"error": str(exc)})
+    return {"object_class": obj.__class__.__name__, "surfaces": surfaces, "iter_operation_variables": iter_items}
+
+
+def _read_sketch_api5_surface_diagnostics(app7, edit_doc):
+    diagnostics = {"available": False, "attempts": []}
+    app5 = _APP5
+    if app5 is None:
+        return diagnostics
+    diagnostics["available"] = True
+    for name in ("ActiveDocument", "ActiveDocument2D", "ActiveDocument3D", "Document2D", "Document3D"):
+        value = safe_get(app5, name)
+        entry = {"target": "app5", "name": name, "callable": callable(value)}
+        if callable(value):
+            for args in (tuple(), (0,), (1,), (-1,)):
+                try:
+                    result = value(*args)
+                    entry.setdefault("calls", []).append({"args": list(args), "ok": True, "class": None if result is None else result.__class__.__name__, "value": _sketch_full_json_safe(result)})
+                    if result is not None:
+                        break
+                except Exception as exc:
+                    entry.setdefault("calls", []).append({"args": list(args), "ok": False, "error": str(exc)})
+        else:
+            entry["value"] = _sketch_full_json_safe(value)
+            entry["class"] = None if value is None else value.__class__.__name__
+        diagnostics["attempts"].append(entry)
+    if edit_doc is not None:
+        diagnostics["edit_doc"] = _read_sketch_full_object_details(edit_doc, ("DocumentType", "Active", "Name", "Path"), ("ksGetDocument2D", "GetDocument2D", "Document2D"))
+    active = safe_get(app7, "ActiveDocument") if app7 is not None else None
+    diagnostics["api7_active_document"] = describe_document(active, app7) if active is not None else None
+    return diagnostics
+
+
+def _read_sketch_full_point(entity, names):
+    for name in names:
+        point = safe_get(entity, name)
+        if point is None or callable(point):
+            continue
+        x = safe_get(point, "X")
+        y = safe_get(point, "Y")
+        if x is not None or y is not None:
+            return {"source": name, "x": _sketch_full_scalar(x), "y": _sketch_full_scalar(y)}
+    return None
+
+
+def _extract_sketch_ref(payload):
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    return target.get("sketch_ref", payload.get("sketch_ref"))
+
+
+def _inspect_sketch_full_entity(entity, *, entity_kind, collection_name, index):
+    interface_name = {
+        "segment": "ILineSegment",
+        "arc": "IArc",
+        "circle": "ICircle",
+        "point": "IPoint",
+        "ellipse": "IEllipse",
+    }.get(entity_kind)
+    if interface_name:
+        try:
+            entity = _cast_to_com_interface(entity, interface_name)
+        except Exception:
+            pass
+    raw_properties = _read_sketch_full_properties(entity, _SKETCH_COMMON_PROPERTY_NAMES)
+    geometry = _sketch_entity_geometry(entity_kind, entity)
+    item = {
+        "kind": entity_kind,
+        "collection_name": collection_name,
+        "index": index,
+        "reference": _sketch_full_scalar(safe_get(entity, "Reference")),
+        "name": _sketch_full_scalar(safe_get(entity, "Name", "")),
+        "constraints_state": _describe_constraints_state(safe_get(entity, "ConstraintsState")),
+        "geometry": geometry,
+        "raw_properties": raw_properties,
+        "points": {},
+    }
+    projection = _read_sketch_entity_projection_link(entity)
+    if projection:
+        item["projection"] = projection
+    item["fingerprint"] = _sketch_entity_fingerprint(entity_kind, geometry or {}, item.get("reference"))
+    for label, names in {
+        "start": ("StartPoint", "Point1", "P1", "BeginPoint"),
+        "end": ("EndPoint", "Point2", "P2", "FinishPoint"),
+        "center": ("Center", "CenterPoint", "ArcCenter"),
+    }.items():
+        point = _read_sketch_full_point(entity, names)
+        if point is not None:
+            item["points"][label] = point
+    return item
+
+
+def _attach_sketch_constraints_to_entities(entities, constraints):
+    by_fingerprint = {}
+    by_reference = {}
+    for entity in entities:
+        fingerprint = entity.get("fingerprint")
+        reference = entity.get("reference")
+        if fingerprint not in (None, ""):
+            by_fingerprint[str(fingerprint)] = entity
+        if reference not in (None, ""):
+            by_reference[str(reference)] = entity
+    for constraint in constraints:
+        owner = constraint.get("owner") if isinstance(constraint, dict) else {}
+        entity = None
+        owner_fingerprint = owner.get("fingerprint") if isinstance(owner, dict) else None
+        owner_reference = owner.get("reference") if isinstance(owner, dict) else None
+        if owner_fingerprint not in (None, ""):
+            entity = by_fingerprint.get(str(owner_fingerprint))
+        if entity is None and owner_reference not in (None, ""):
+            entity = by_reference.get(str(owner_reference))
+        if entity is not None:
+            entity.setdefault("constraints", []).append(constraint)
+    for entity in entities:
+        entity["constraint_count"] = len(entity.get("constraints") or [])
+
+
+def _inspect_sketch_full_collection(drawing_container, collection_name, accessors, entity_kind, *, max_items):
+    collection, accessor_used, accessor_attempts = _resolve_model_object_collection(drawing_container, accessors)
+    count = collection_count(collection)
+    result = {
+        "collection_name": collection_name,
+        "kind": entity_kind,
+        "accessor_used": accessor_used,
+        "accessor_attempts": accessor_attempts,
+        "count": count,
+        "items": [],
+        "errors": [],
+    }
+    for index in range(min(count, max_items)):
+        try:
+            entity = get_collection_item(collection, index)
+            if entity is None:
+                result["errors"].append({"index": index, "error": "item_not_found"})
+                continue
+            result["items"].append(_inspect_sketch_full_entity(entity, entity_kind=entity_kind, collection_name=collection_name, index=index))
+        except Exception as exc:
+            result["errors"].append({"index": index, "error": str(exc)})
+    return result
+
+
+def _sketch_projection_object_payload(obj):
+    if obj is None:
+        return None
+    payload = {
+        "class": obj.__class__.__name__,
+        "properties": _read_sketch_full_properties(
+            obj,
+            (
+                "Name", "Reference", "Type", "ObjType", "FeatureType", "ModelObjectType",
+                "IsSketchEdge", "IsLineSeg", "IsArc", "IsCircle", "IsStraight", "IsPlanar",
+                "Hidden", "Valid",
+            ),
+        ),
+    }
+    related = {}
+    for name in ("Owner", "Parent", "Part", "Body", "AssociationObject"):
+        value = safe_get(obj, name)
+        if value is not None:
+            related[name] = {
+                "class": value.__class__.__name__,
+                "properties": _read_sketch_full_properties(value, ("Name", "Reference", "Type", "ObjType", "FeatureType", "ModelObjectType")),
+            }
+    if related:
+        payload["related"] = related
+    methods = {}
+    for name in ("GetAssociation", "GetSource", "GetSourceObject", "GetProjection", "GetProjectionSource", "GetReferenceObject", "GetObject"):
+        method = safe_get(obj, name)
+        if not callable(method):
+            continue
+        attempts = []
+        for args in (tuple(), (0,), (1,), (False,), (True,)):
+            try:
+                value = method(*args)
+                attempts.append({
+                    "args": list(args),
+                    "ok": True,
+                    "class": None if value is None else value.__class__.__name__,
+                    "properties": _read_sketch_full_properties(value, ("Name", "Reference", "Type", "ObjType", "FeatureType", "ModelObjectType")) if value is not None else {},
+                })
+                if value is not None:
+                    break
+            except Exception as exc:
+                attempts.append({"args": list(args), "ok": False, "error": str(exc)})
+        methods[name] = attempts
+    if methods:
+        payload["methods"] = methods
+    payload["details"] = _read_sketch_full_object_details(
+        obj,
+        ("Name", "Reference", "Type", "ObjType", "FeatureType", "ModelObjectType", "Hidden", "Valid"),
+        related_names=("Owner", "Parent", "Part", "Body", "AssociationObject"),
+    )
+    return payload
+
+
+def _sketch_projection_value_payload(value, max_items=50):
+    if isinstance(value, (list, tuple)):
+        return {
+            "kind": "sequence",
+            "count": len(value),
+            "items": [_sketch_projection_object_payload(item) for item in value[:max_items]],
+            "truncated": len(value) > max_items,
+        }
+    count = collection_count(value)
+    if count:
+        return {
+            "kind": "collection",
+            "class": value.__class__.__name__,
+            "count": count,
+            "items": [_sketch_projection_object_payload(get_collection_item(value, index)) for index in range(min(count, max_items))],
+            "truncated": count > max_items,
+        }
+    object_payload = _sketch_projection_object_payload(value)
+    if object_payload is not None:
+        return object_payload
+    return {"value": _sketch_full_json_safe(value), "class": None if value is None else value.__class__.__name__}
+
+
+def _read_sketch_projection_diagnostics(sketch, max_items=50):
+    diagnostics = {
+        "sketch": _sketch_projection_object_payload(sketch),
+        "association_object": _sketch_projection_value_payload(safe_get(sketch, "AssociationObject"), max_items),
+        "edges": [],
+        "directing_objects": [],
+    }
+    edges = safe_get(sketch, "Edges")
+    if callable(edges):
+        for edge_type in range(-1, 10):
+            try:
+                value = edges(edge_type)
+                payload = _sketch_projection_value_payload(value, max_items)
+                if payload.get("value") is not None or payload.get("count") or payload.get("items"):
+                    diagnostics["edges"].append({"edge_type": edge_type, "result": payload})
+            except Exception as exc:
+                diagnostics["edges"].append({"edge_type": edge_type, "error": str(exc)})
+    directing = safe_get(sketch, "DirectingObject")
+    if callable(directing):
+        for index in range(0, 10):
+            try:
+                value = directing(index)
+                payload = _sketch_projection_value_payload(value, max_items)
+                if payload.get("value") is not None or payload.get("count") or payload.get("items"):
+                    diagnostics["directing_objects"].append({"index": index, "result": payload})
+            except Exception as exc:
+                diagnostics["directing_objects"].append({"index": index, "error": str(exc)})
+    for name in ("GetLocation", "GetLoftPoint"):
+        method = safe_get(sketch, name)
+        if callable(method):
+            try:
+                diagnostics[name] = _sketch_full_json_safe(method())
+            except Exception as exc:
+                diagnostics[name] = {"error": str(exc)}
+    return diagnostics
+
+
+def _read_sketch_entity_projection_link(entity, max_items=10):
+    data = {"properties": {}, "methods": {}}
+    drawing1 = _cast_to_com_interface(entity, "IDrawingObject1")
+    if drawing1 is not None:
+        data["drawing_object1"] = {
+            "class": drawing1.__class__.__name__,
+            "properties": _read_sketch_full_properties(
+                drawing1,
+                (
+                    "Id", "IsInAssociationView", "IsVisibleInAssociationView", "IsGeometryObject",
+                    "IsAnnotativeObject", "IsCurve", "ConstraintsState",
+                ),
+            ),
+        }
+        associate = safe_get(drawing1, "Associate")
+        if callable(associate):
+            try:
+                data["drawing_object1"]["associate_result"] = _sketch_full_json_safe(associate())
+            except Exception as exc:
+                data["drawing_object1"]["associate_error"] = str(exc)
+    for name in (
+        "Association", "Associative", "Associated", "Source", "SourceObject",
+        "Projection", "ProjectionSource", "ReferenceObject", "External", "Owner", "Parent",
+    ):
+        value = safe_get(entity, name)
+        if value is not None and not callable(value):
+            data["properties"][name] = _sketch_projection_value_payload(value, max_items)
+    for name in (
+        "GetAssociation", "GetSource", "GetSourceObject", "GetProjection",
+        "GetProjectionSource", "GetReferenceObject", "GetObject", "GetParent", "GetOwner",
+    ):
+        method = safe_get(entity, name)
+        if not callable(method):
+            continue
+        attempts = []
+        for args in (tuple(), (0,), (1,), (False,), (True,)):
+            try:
+                value = method(*args)
+                attempts.append({"args": list(args), "ok": True, "result": _sketch_projection_value_payload(value, max_items)})
+                if value is not None:
+                    break
+            except Exception as exc:
+                attempts.append({"args": list(args), "ok": False, "error": str(exc)})
+        data["methods"][name] = attempts
+    parent = safe_get(entity, "Parent")
+    parent_parent = safe_get(parent, "Parent") if parent is not None else None
+    style = _sketch_full_json_safe(safe_get(entity, "Style"))
+    parent_type = _sketch_full_json_safe(safe_get(parent, "Type")) if parent is not None else None
+    parent_reference = _sketch_full_json_safe(safe_get(parent, "Reference")) if parent is not None else None
+    parent_parent_type = _sketch_full_json_safe(safe_get(parent_parent, "Type")) if parent_parent is not None else None
+    reasons = []
+    if style == 6:
+        reasons.append("style_6")
+    if parent_type == 10031:
+        reasons.append("parent_type_10031")
+    if parent_parent_type == 10022:
+        reasons.append("parent_parent_type_10022")
+    if reasons:
+        data["classification"] = {
+            "is_projected_candidate": True,
+            "reasons": reasons,
+            "style": style,
+            "parent_type": parent_type,
+            "parent_reference": parent_reference,
+            "parent_parent_type": parent_parent_type,
+        }
+    if not data["properties"] and not data["methods"] and "classification" not in data and "drawing_object1" not in data:
+        return None
+    return data
+
+
+def _inspect_sketch_full(model_container, payload):
+    sketch_ref = _extract_sketch_ref(payload)
+    if sketch_ref in (None, ""):
+        raise RuntimeError("sketch_ref is required")
+    max_items = int(payload.get("max_items") or 200)
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    if sketch is None:
+        raise RuntimeError("Sketch not found: %s" % sketch_ref)
+    begin_edit = safe_get(sketch, "BeginEdit")
+    end_edit = safe_get(sketch, "EndEdit")
+    if not callable(begin_edit):
+        result = {
+            "sketch_ref": str(sketch_ref),
+            "sketch_name": _sketch_full_scalar(safe_get(sketch, "Name", "")),
+            "reference": _sketch_full_scalar(safe_get(sketch, "Reference")),
+            "placement": _read_sketch_placement_diagnostics(sketch),
+            "entities": [],
+            "collections": [],
+            "summary": {"begin_edit_available": False, "begin_edit_error": "Sketch does not expose BeginEdit"},
+            "projection_diagnostics": _read_sketch_projection_diagnostics(sketch, max_items=min(max_items, 50)),
+        }
+        return _sketch_full_json_safe(result)
+    sketch_doc = None
+    result = {
+        "sketch_ref": str(sketch_ref),
+        "sketch_name": _sketch_full_scalar(safe_get(sketch, "Name", "")),
+        "reference": _sketch_full_scalar(safe_get(sketch, "Reference")),
+        "status": _sketch_full_scalar(safe_get(sketch, "Status", safe_get(sketch, "State"))),
+        "placement": _read_sketch_placement_diagnostics(sketch),
+        "constraints_state": _describe_constraints_state(safe_get(sketch, "ConstraintsState")),
+        "entities": [],
+        "collections": [],
+        "summary": {},
+    }
+    try:
+        sketch_doc = begin_edit()
+        if sketch_doc is None:
+            result["summary"] = {"begin_edit_available": False, "begin_edit_error": "BeginEdit returned None"}
+            result["projection_diagnostics"] = _read_sketch_projection_diagnostics(sketch, max_items=min(max_items, 50))
+            return _sketch_full_json_safe(result)
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        symbols_container = None
+        api5_doc2d, api5_doc2d_status = _get_api5_document2d()
+        for collection_name, accessors, entity_kind in (
+            ("segments", ("LineSegments", "GetLineSegments"), "segment"),
+            ("arcs", ("Arcs", "GetArcs"), "arc"),
+            ("circles", ("Circles", "GetCircles"), "circle"),
+            ("points", ("Points", "GetPoints"), "point"),
+            ("ellipses", ("Ellipses", "GetEllipses"), "ellipse"),
+        ):
+            collection_result = _inspect_sketch_full_collection(drawing_container, collection_name, accessors, entity_kind, max_items=max_items)
+            result["collections"].append(collection_result)
+            result["entities"].extend(collection_result.get("items", []))
+        for entity_item in result["entities"]:
+            api5_entity = _read_api5_object_diagnostics(api5_doc2d, entity_item.get("reference"))
+            if api5_entity:
+                entity_item["api5"] = api5_entity
+            if entity_item.get("kind") == "arc":
+                api5_arc = _read_api5_arc_diagnostics(api5_doc2d, entity_item.get("reference"))
+                if api5_arc:
+                    entity_item.setdefault("api5", {})["arc"] = api5_arc
+                    if api5_arc.get("geometry"):
+                        geometry = entity_item.get("geometry") or {}
+                        if not geometry or all(value is None or value == [None, None] for value in geometry.values()):
+                            entity_item["geometry"] = api5_arc["geometry"]
+        target = {
+            "mode": "existing_sketch",
+            "name": _sketch_full_scalar(safe_get(sketch, "Name", "")),
+            "sketch_ref": _sketch_full_scalar(safe_get(sketch, "Reference", sketch_ref)),
+        }
+        if bool(payload.get("include_dimensions", True)):
+            try:
+                symbols_container = _get_sketch_symbols_container(drawing_container)
+                kinds = payload.get("dimension_kinds") or payload.get("kinds") or ["line", "break_line", "diametral", "angle"]
+                dimension_items, dimension_summary = _collect_existing_sketch_dimensions(
+                    symbols_container,
+                    kinds,
+                    max_items,
+                    safe_get(sketch, "Reference", sketch_ref),
+                    api5_doc2d,
+                )
+                dimension_summary["api5_document2d"] = api5_doc2d_status
+                _enrich_dimension_api5_constraint_partners(dimension_items, result["entities"])
+                result["dimensions"] = {"target": target, "items": dimension_items, "summary": dimension_summary}
+            except Exception as exc:
+                result["dimensions"] = {"ok": False, "error": str(exc)}
+        if bool(payload.get("include_constraints", True)):
+            try:
+                raw_kinds = payload.get("constraint_kinds")
+                if raw_kinds in (None, ""):
+                    constraint_kinds = set()
+                elif isinstance(raw_kinds, (list, tuple)):
+                    constraint_kinds = {str(item or "").strip().lower() for item in raw_kinds}
+                else:
+                    constraint_kinds = {str(raw_kinds or "").strip().lower()}
+                constraint_items, constraint_summary = _scan_existing_sketch_constraints(
+                    drawing_container,
+                    safe_get(sketch, "Reference", sketch_ref),
+                    constraint_kinds,
+                    max_items,
+                )
+                _attach_sketch_constraints_to_entities(result["entities"], constraint_items)
+                result["constraints"] = {"target": target, "items": constraint_items, "summary": constraint_summary}
+            except Exception as exc:
+                result["constraints"] = {"ok": False, "error": str(exc)}
+            api5_constraints = _collect_api5_constraints_from_entities(result["entities"], result.get("dimensions", {}).get("items"))
+            if isinstance(result.get("constraints"), dict):
+                result["constraints"]["api5_items"] = api5_constraints
+                result["constraints"].setdefault("summary", {})["api5_constraint_count"] = len(api5_constraints)
+                result["constraints"]["all_items"] = (result["constraints"].get("items") or []) + api5_constraints
+                result["constraints"]["summary"]["all_constraint_count"] = len(result["constraints"]["all_items"])
+                _classify_projection_links(result)
+        if bool(payload.get("include_diagnostics", True)):
+            if symbols_container is None:
+                try:
+                    symbols_container = _get_sketch_symbols_container(drawing_container)
+                except Exception:
+                    symbols_container = None
+            diagnostics = {"variable_surfaces": {}}
+            for label, obj in (
+                ("model_container", model_container),
+                ("sketch", sketch),
+                ("edit_doc", sketch_doc),
+                ("drawing_container", drawing_container),
+                ("symbols_container", symbols_container),
+            ):
+                if obj is not None:
+                    diagnostics["variable_surfaces"][label] = _read_sketch_variable_surfaces(obj, max_items=min(max_items, 50))
+            app7_for_diag = None
+            app7_for_diag = safe_get(sketch_doc, "Application")
+            diagnostics["api5_surface"] = _read_sketch_api5_surface_diagnostics(app7_for_diag, sketch_doc)
+            result["diagnostics"] = diagnostics
+    finally:
+        if callable(end_edit) and sketch_doc is not None:
+            try:
+                end_edit()
+            except Exception:
+                pass
+    result["summary"] = {item["collection_name"]: item["count"] for item in result["collections"]}
+    result["summary"]["entity_count"] = len(result["entities"])
+    if "dimensions" in result and isinstance(result["dimensions"], dict):
+        result["summary"]["dimension_count"] = result["dimensions"].get("summary", {}).get("dimension_count")
+    if "constraints" in result and isinstance(result["constraints"], dict):
+        result["summary"]["constraint_count"] = result["constraints"].get("summary", {}).get("constraint_count")
+        result["summary"]["api5_constraint_count"] = result["constraints"].get("summary", {}).get("api5_constraint_count")
+        result["summary"]["all_constraint_count"] = result["constraints"].get("summary", {}).get("all_constraint_count")
+        result["summary"]["projection_constraint_count"] = result["constraints"].get("summary", {}).get("projection_constraint_count")
+    projected_object_count = sum(1 for entity in result.get("entities", []) if _projection_classification(entity).get("projection_role") == "projected_object_candidate")
+    if projected_object_count:
+        result["summary"]["projected_object_count"] = projected_object_count
+    _link_dimension_variables_from_diagnostics(result)
+    return _sketch_full_json_safe(result)
 
 
 def _sketch_entity_fingerprint(entity_kind, geometry, reference):
@@ -2537,7 +3857,14 @@ def list_documents(app):
 def resolve_document(app, document_id):
     active_document = safe_get(app, "ActiveDocument")
     if not document_id:
-        return cast_document_3d(active_document)
+        if active_document is not None:
+            return cast_document_3d(active_document)
+        documents = list(iter_collection(safe_get(app, "Documents")))
+        for document in reversed(documents):
+            casted = cast_document_3d(document)
+            if casted is not None:
+                return casted
+        return None
 
     if active_document is not None:
         active_description = describe_document(active_document, app)
@@ -2548,6 +3875,15 @@ def resolve_document(app, document_id):
         description = describe_document(document, app)
         if document_id in (description["id"], description["path"], description["name"]):
             return cast_document_3d(document)
+    if active_document is not None:
+        casted = cast_document_3d(active_document)
+        if casted is not None:
+            return casted
+    documents = list(iter_collection(safe_get(app, "Documents")))
+    for document in reversed(documents):
+        casted = cast_document_3d(document)
+        if casted is not None:
+            return casted
     return None
 
 
@@ -3144,10 +4480,22 @@ def _normalize_sketch_plane(value):
     return resolved
 
 
-def _create_sketch_on_plane(model_container, part, name, plane):
+def _create_sketch_on_plane(model_container, part, name, plane, assign_coordinate_system=True, coordinate_system_before_plane=True):
     if isinstance(plane, str):
-        plane_key = _normalize_sketch_plane(plane)
-        plane_object = _resolve_default_part_object(part, plane_key)
+        try:
+            plane_key = _normalize_sketch_plane(plane)
+            plane_object = _resolve_default_part_object(part, plane_key)
+        except Exception:
+            planes = _get_planes3d_container(part)
+            plane_object = None
+            for index in range(collection_count(planes)):
+                candidate = get_collection_item(planes, index)
+                if str(safe_get(candidate, "Name") or "") == str(plane):
+                    plane_object = candidate
+                    break
+            if plane_object is None:
+                raise RuntimeError("Unsupported sketch plane or plane name: %s" % plane)
+            plane_key = str(safe_get(plane_object, "Name", "custom"))
     else:
         plane_key = str(safe_get(plane, "Name", "custom"))
         plane_object = plane
@@ -3157,8 +4505,13 @@ def _create_sketch_on_plane(model_container, part, name, plane):
     sketch = sketchs.Add()
     if sketch is None:
         raise RuntimeError("Sketchs.Add returned None")
+    if assign_coordinate_system and coordinate_system_before_plane and not isinstance(plane, str):
+        try:
+            sketch.CoordinateSystem = plane_object
+        except Exception:
+            pass
     sketch.Plane = plane_object
-    if not isinstance(plane, str):
+    if assign_coordinate_system and not coordinate_system_before_plane and not isinstance(plane, str):
         try:
             sketch.CoordinateSystem = plane_object
         except Exception:
@@ -3853,7 +5206,27 @@ def _dimension_text_payload(dimension):
     return payload
 
 
-def _sketch_dimension_list_item(dimension, kind, collection_name, index, sketch_ref):
+def _cast_sketch_dimension_object(dimension, kind):
+    import win32com.client
+
+    interfaces = {
+        "line": ("ILineDimension", "IDimension", "IDrawingObject"),
+        "break_line": ("IBreakLineDimension", "ILineDimension", "IDimension", "IDrawingObject"),
+        "diametral": ("IDiametralDimension", "IDimension", "IDrawingObject"),
+        "angle": ("IAngleDimension", "IDimension", "IDrawingObject"),
+    }.get(str(kind or "").strip().lower(), ("IDimension", "IDrawingObject"))
+    for interface_name in interfaces:
+        try:
+            casted = win32com.client.CastTo(dimension, interface_name)
+            if casted is not None:
+                return casted
+        except Exception:
+            continue
+    return dimension
+
+
+def _sketch_dimension_list_item(dimension, kind, collection_name, index, sketch_ref, api5_doc2d=None):
+    dimension = _cast_sketch_dimension_object(dimension, kind)
     reference = safe_get(dimension, "Reference")
     geometry = _sketch_dimension_geometry(dimension)
     fingerprint = _sketch_dimension_fingerprint(kind, geometry, reference)
@@ -3868,14 +5241,61 @@ def _sketch_dimension_list_item(dimension, kind, collection_name, index, sketch_
         "geometry": geometry,
         "name": safe_get(dimension, "Name", ""),
         "value": _json_safe_scalar(safe_get(dimension, "Value")),
-        "variable": safe_get(dimension, "Variable"),
-        "expression": safe_get(dimension, "Expression"),
+        "variable": _sketch_full_json_safe(safe_get(dimension, "Variable")),
+        "expression": _sketch_full_json_safe(safe_get(dimension, "Expression")),
         "valid": _json_safe_scalar(safe_get(dimension, "Valid")),
     }
     text = _dimension_text_payload(dimension)
     if text:
         item["text"] = text
+    details = _read_sketch_full_object_details(
+        dimension,
+        _SKETCH_DIMENSION_PROPERTY_NAMES,
+        ("GetText", "GetExpression", "GetVariable", "GetValue"),
+    )
+    nested = {}
+    for name in ("Text", "DimensionText", "Variable", "Expression", "Parameter", "Param", "Params"):
+        value = safe_get(dimension, name)
+        value_details = _read_sketch_full_object_details(value, _SKETCH_NESTED_PARAMETER_NAMES)
+        if value_details:
+            nested[name] = value_details
+    if nested:
+        details = details or {"com_type": dimension.__class__.__name__}
+        details["nested"] = nested
+    if details:
+        item["details"] = details
+    variable_surfaces = _read_sketch_variable_surfaces(dimension, 25)
+    if variable_surfaces:
+        item["variable_surfaces"] = variable_surfaces
+    api5 = _read_api5_dimension_diagnostics(api5_doc2d, reference)
+    if api5:
+        item["api5"] = api5
     return item
+
+
+def _collect_existing_sketch_dimensions(symbols_container, kinds, max_items, sketch_ref, api5_doc2d=None):
+    items = []
+    counts = {}
+    truncated = False
+    for kind in kinds:
+        collection, collection_name = _collection_for_sketch_dimension_kind(symbols_container, kind)
+        count = collection_count(collection)
+        counts[collection_name] = count
+        for index in range(count):
+            if len(items) >= max_items:
+                truncated = True
+                break
+            dimension = get_collection_item(collection, index)
+            if dimension is not None:
+                items.append(_sketch_dimension_list_item(dimension, kind, collection_name, index, sketch_ref, api5_doc2d))
+        if truncated:
+            break
+    return items, {
+        "dimension_count": len(items),
+        "counts": counts,
+        "truncated": truncated,
+        "max_items": max_items,
+    }
 
 
 def _list_existing_sketch_dimensions(model_container, payload):
@@ -3902,37 +5322,25 @@ def _list_existing_sketch_dimensions(model_container, payload):
     sketch_doc = sketch.BeginEdit()
     if sketch_doc is None:
         raise RuntimeError("BeginEdit returned None")
-    items = []
-    counts = {}
-    truncated = False
     try:
         view = _get_sketch_drawing_container(sketch_doc)
+        api5_doc2d, api5_doc2d_status = _get_api5_document2d()
         symbols_container = _get_sketch_symbols_container(view)
-        for kind in kinds:
-            collection, collection_name = _collection_for_sketch_dimension_kind(symbols_container, kind)
-            count = collection_count(collection)
-            counts[collection_name] = count
-            for index in range(count):
-                if len(items) >= max_items:
-                    truncated = True
-                    break
-                dimension = get_collection_item(collection, index)
-                if dimension is not None:
-                    items.append(_sketch_dimension_list_item(dimension, kind, collection_name, index, safe_get(sketch, "Reference", sketch_ref)))
-            if truncated:
-                break
+        items, summary = _collect_existing_sketch_dimensions(
+            symbols_container,
+            kinds,
+            max_items,
+            safe_get(sketch, "Reference", sketch_ref),
+            api5_doc2d,
+        )
+        summary["api5_document2d"] = api5_doc2d_status
     finally:
         sketch.EndEdit()
     return sketch, {
         "mode": "existing_sketch",
         "name": safe_get(sketch, "Name", ""),
         "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
-    }, items, {
-        "dimension_count": len(items),
-        "counts": counts,
-        "truncated": truncated,
-        "max_items": max_items,
-    }
+    }, items, summary
 
 
 def _select_existing_sketch_dimension(symbols_container, spec):
@@ -4051,6 +5459,7 @@ def _sketch_constraint_fingerprint(kind, reference, owner, constraint_index, pay
         str(kind or ""),
         str(reference if reference not in (None, "") else ""),
         str(owner.get("reference") if isinstance(owner, dict) else ""),
+        str(owner.get("fingerprint") if isinstance(owner, dict) else ""),
         str(constraint_index),
     ]
     for key in ("constraint_type", "index", "partner_index", "value", "variable", "expression", "valid"):
@@ -4060,6 +5469,7 @@ def _sketch_constraint_fingerprint(kind, reference, owner, constraint_index, pay
 
 
 def _sketch_constraint_list_item(constraint, owner_item, constraint_index, scan_index):
+    constraint = _cast_parametric_constraint_object(constraint)
     constraint_type = safe_get(constraint, "ConstraintType", safe_get(constraint, "Type"))
     kind = _constraint_kind_from_type(constraint_type)
     reference = safe_get(constraint, "Reference")
@@ -4072,8 +5482,8 @@ def _sketch_constraint_list_item(constraint, owner_item, constraint_index, scan_
         "reference": reference,
         "valid": _json_safe_scalar(safe_get(constraint, "Valid")),
         "value": _json_safe_scalar(safe_get(constraint, "Value")),
-        "variable": safe_get(constraint, "Variable"),
-        "expression": safe_get(constraint, "Expression"),
+        "variable": _sketch_full_json_safe(safe_get(constraint, "Variable")),
+        "expression": _sketch_full_json_safe(safe_get(constraint, "Expression")),
         "point_index": _json_safe_scalar(safe_get(constraint, "Index")),
         "partner_index": _json_safe_scalar(safe_get(constraint, "PartnerIndex")),
         "owner": {
@@ -4088,8 +5498,39 @@ def _sketch_constraint_list_item(constraint, owner_item, constraint_index, scan_
     partner_reference = safe_get(partner, "Reference") if partner is not None else None
     if partner_reference not in (None, ""):
         payload["partner_reference"] = partner_reference
+    details = _read_sketch_full_object_details(
+        constraint,
+        _SKETCH_CONSTRAINT_PROPERTY_NAMES,
+        ("GetObject", "GetFirstObject", "GetSecondObject", "GetPartner"),
+        _SKETCH_RELATED_OBJECT_NAMES,
+    )
+    nested = {}
+    for name in ("Variable", "Expression", "Parameter", "Param", "Params"):
+        value = safe_get(constraint, name)
+        value_details = _read_sketch_full_object_details(value, _SKETCH_NESTED_PARAMETER_NAMES)
+        if value_details:
+            nested[name] = value_details
+    if nested:
+        details = details or {"com_type": constraint.__class__.__name__}
+        details["nested"] = nested
+    if details:
+        payload["details"] = details
     payload["fingerprint"] = _sketch_constraint_fingerprint(kind, reference, payload["owner"], constraint_index, payload)
     return payload
+
+
+def _cast_parametric_constraint_object(constraint):
+    if constraint is None:
+        return None
+    try:
+        import win32com.client
+
+        casted = win32com.client.CastTo(constraint, "IParametriticConstraint")
+        if casted is not None:
+            return casted
+    except Exception:
+        pass
+    return constraint
 
 
 def _scan_existing_sketch_constraints(drawing_container, sketch_ref, kinds, max_items):
@@ -5295,6 +6736,31 @@ def _sample_curve_endpoints(curve):
     return points[:2]
 
 
+def _fillet_cut_points_near_shared_endpoint(curve1, curve2, curve1_ratio=0.05, curve2_ratio=0.03):
+    curve1_points = _sample_curve_endpoints(curve1)
+    curve2_points = _sample_curve_endpoints(curve2)
+    if not curve1_points or not curve2_points:
+        return None, None
+    best = None
+    for index1, point1 in enumerate(curve1_points):
+        for index2, point2 in enumerate(curve2_points):
+            distance = _distance3d(point1, point2)
+            if best is None or distance < best[0]:
+                best = (distance, index1, index2)
+    if best is None:
+        return None, None
+    _, index1, index2 = best
+    shared1 = curve1_points[index1]
+    shared2 = curve2_points[index2]
+    other1 = curve1_points[1 - index1]
+    other2 = curve2_points[1 - index2]
+
+    def inward(shared, other, ratio):
+        return [float(shared[i]) + (float(other[i]) - float(shared[i])) * float(ratio) for i in range(3)]
+
+    return inward(shared1, other1, curve1_ratio), inward(shared2, other2, curve2_ratio)
+
+
 def _score_curve_endpoints(actual_points, expected_start, expected_end):
     pairings = (
         (actual_points[0], actual_points[1], False),
@@ -5882,6 +7348,13 @@ def _build_compression_spring_transition_curve_paths(
             curve1_cut_point=joint_point,
             curve2_cut_point=joint_point,
         )
+        fillet_binding_report = None
+        if connector.get("operation_variable_bindings"):
+            fillet_binding_report = _bind_operation_variables(fillet, connector.get("operation_variable_bindings") or [])
+            if not fillet_binding_report.get("ok", False):
+                raise RuntimeError("Failed to bind curve fillet operation variables for %s" % fillet_name)
+            if not bool(fillet.Update()):
+                raise RuntimeError("Failed to update curve fillet path %s after variable binding" % fillet_name)
         connector_object = {
             "role": str(connector.get("role") or ""),
             "path_name": fillet_name,
@@ -5909,7 +7382,648 @@ def _build_compression_spring_transition_curve_paths(
                 "trim_curve2": bool(connector.get("trim_curve2", True)),
             }
         )
+        if fillet_binding_report is not None:
+            fillet_binding_report["scenario"] = "compression_spring"
+            fillet_binding_report["target"] = "curve_fillet"
+            fillet_binding_report["role"] = connector_object["role"]
+            fillet_binding_report["path_name"] = connector_object["path_name"]
+            steps_report.append(fillet_binding_report)
     return created_curve_objects
+
+
+def _find_sketch_by_name(model_container, name: str):
+    sketches = _get_sketch_collection(model_container)
+    for index in range(collection_count(sketches)):
+        sketch = _cast_to_com_interface(get_collection_item(sketches, index), "ISketch")
+        if safe_get(sketch, "Name") == name:
+            return sketch
+    raise RuntimeError("Sketch not found: %s" % name)
+
+
+def _find_fillet_curve_by_name(auxiliary_container, name: str):
+    fillets = safe_get(auxiliary_container, "FilletCurves")
+    for index in range(collection_count(fillets)):
+        fillet = get_collection_item(fillets, index)
+        if safe_get(fillet, "Name") == name:
+            return fillet
+    raise RuntimeError("FilletCurve not found: %s" % name)
+
+
+def _sketch_edges_list(sketch, edge_type: int) -> list:
+    raw_edges = sketch.Edges(edge_type)
+    return list(raw_edges) if isinstance(raw_edges, (list, tuple)) else list(iter_collection(raw_edges))
+
+
+def _fillet_result_edges(fillet) -> list:
+    owner = safe_get(fillet, "Owner")
+    if owner is None:
+        raise RuntimeError("FilletCurve has no Owner feature")
+    model_objects = safe_get(owner, "ModelObjects")
+    if not callable(model_objects):
+        raise RuntimeError("FilletCurve owner does not expose ModelObjects")
+    result = model_objects(7)
+    edges = list(result) if isinstance(result, (list, tuple)) else list(iter_collection(result))
+    if len(edges) != 3:
+        raise RuntimeError("Expected 3 result edges from FilletCurve owner ModelObjects(7), got %s" % len(edges))
+    return edges
+
+
+def _find_named_auxiliary_object(container, collection_name: str, name: str):
+    collection = safe_get(container, collection_name)
+    if collection is None:
+        getter = safe_get(container, "Get%s" % collection_name)
+        if callable(getter):
+            collection = getter()
+    if collection is None:
+        return None
+    for index in range(collection_count(collection)):
+        item = get_collection_item(collection, index)
+        if safe_get(item, "Name") == name:
+            return item
+    return None
+
+
+def _transform_self_wrapping_payload_from_endpoint(payload: dict, endpoint_xy: list, spring_radius: float, *, mirror_x: bool, remove_fixed_origin: bool = False) -> dict:
+    copied = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+    anchor_x = float(endpoint_xy[0])
+    anchor_y = float(endpoint_xy[1])
+
+    def transform(point):
+        local_x = float(point[0])
+        local_y = float(point[1]) - float(spring_radius)
+        point[0] = anchor_x - local_x if mirror_x else anchor_x + local_x
+        point[1] = anchor_y + local_y
+
+    for entity in copied.get("entities") or []:
+        for key in ("start", "end", "center"):
+            point = entity.get(key)
+            if isinstance(point, list) and len(point) >= 2:
+                transform(point)
+        if mirror_x and entity.get("kind") == "arc" and "direction" in entity:
+            entity["direction"] = not bool(entity.get("direction"))
+    if remove_fixed_origin:
+        copied["constraints"] = [
+            constraint
+            for constraint in copied.get("constraints") or []
+            if not (constraint.get("kind") == "fixed_point" and constraint.get("target") == "spring_radius_axis" and int(constraint.get("index", 0)) == 0)
+        ]
+    return copied
+
+
+def _add_self_wrapping_work_axis_entity(payload: dict, endpoint_xy: list, spring_radius: float) -> dict:
+    copied = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+    entities = list(copied.get("entities") or [])
+    by_id = {entity.get("id"): entity for entity in entities}
+    diagonal = by_id.get("work_diagonal")
+    shelf = by_id.get("work_shelf")
+    if not diagonal or not shelf:
+        return copied
+    diagonal_points = [list(diagonal.get("start") or []), list(diagonal.get("end") or [])]
+    shelf_points = [list(shelf.get("start") or []), list(shelf.get("end") or [])]
+    if len(diagonal_points[0]) < 2 or len(diagonal_points[1]) < 2 or len(shelf_points[0]) < 2 or len(shelf_points[1]) < 2:
+        return copied
+
+    endpoint_xy = [float(endpoint_xy[0]), float(endpoint_xy[1])]
+
+    def dist2(point):
+        return (float(point[0]) - endpoint_xy[0]) ** 2 + (float(point[1]) - endpoint_xy[1]) ** 2
+
+    spring_index = 0 if dist2(diagonal_points[0]) <= dist2(diagonal_points[1]) else 1
+    spring_point = [float(diagonal_points[spring_index][0]), float(diagonal_points[spring_index][1])]
+    diag_far = [float(diagonal_points[1 - spring_index][0]), float(diagonal_points[1 - spring_index][1])]
+    shelf_free = max(shelf_points, key=lambda point: float(point[1]))
+    shelf_free = [float(shelf_free[0]), float(shelf_free[1])]
+    mirror_start = [0.0, -abs(float(spring_radius))]
+    mirror_end = [float(diag_far[0]), -float(diag_far[1])]
+
+    def line_intersection(a1, a2, b1, b2):
+        x1, y1 = a1
+        x2, y2 = a2
+        x3, y3 = b1
+        x4, y4 = b2
+        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denom) < 1e-9:
+            return None
+        px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
+        py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
+        return [float(px), float(py)]
+
+    axis_start = line_intersection(spring_point, diag_far, mirror_start, mirror_end) or list(spring_point)
+    entities.append(
+        {
+            "kind": "segment",
+            "id": "work_axis",
+            "start": axis_start,
+            "end": shelf_free,
+            "role": "construction_self_wrapping_work_axis",
+            "line_style": 3,
+        }
+    )
+    copied["entities"] = entities
+    return copied
+
+
+def _mirror_payload_x(payload: dict) -> dict:
+    copied = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+
+    def mirror_point(point):
+        if isinstance(point, list) and len(point) >= 2:
+            point[0] = -float(point[0])
+
+    for entity in copied.get("entities") or []:
+        for key in ("start", "end", "center", "point", "position"):
+            mirror_point(entity.get(key))
+    return copied
+
+
+def _right_endpoint_self_wrapping_payload(params: dict) -> dict:
+    payload = _first_sketch_self_wrapping_payload(params)
+    spring_radius = float(_variable_value(params, "SRAD1", (float(params.get("outer_diameter", 30.0)) - float(params.get("wire_diameter", 3.0))) / 2.0))
+    half_width = float(_variable_value(params, "SHW1", float(_variable_value(params, "SW1", 40.0)) / 2.0))
+    top = [0.0, spring_radius]
+    bottom_right = [0.0, -half_width]
+    removed_ids = {"spring_radius_axis", "half_width_axis"}
+    payload["entities"] = [entity for entity in payload.get("entities") or [] if entity.get("id") not in removed_ids]
+    payload["entities"].insert(
+        0,
+        {"kind": "segment", "id": "endpoint_to_bottom_axis", "start": top, "end": bottom_right, "role": "construction_endpoint_to_bottom_axis", "line_style": 6},
+    )
+    payload["constraints"] = [
+        constraint for constraint in payload.get("constraints") or []
+        if constraint.get("target") not in removed_ids and constraint.get("partner") not in removed_ids
+    ]
+    payload["constraints"].extend(
+        [
+            {"kind": "merge_points", "target": "endpoint_to_bottom_axis", "index": 0, "partner": "diagonal_axis", "partner_index": 0},
+            {"kind": "merge_points", "target": "endpoint_to_bottom_axis", "index": 0, "partner": "work_diagonal", "partner_index": 0},
+            {"kind": "merge_points", "target": "endpoint_to_bottom_axis", "index": 1, "partner": "height_axis", "partner_index": 0},
+            {"kind": "vertical", "target": "endpoint_to_bottom_axis"},
+        ]
+    )
+    payload["dimensions"] = [dimension for dimension in payload.get("dimensions") or [] if dimension.get("target") not in removed_ids]
+    payload["dimensions"].insert(
+        0,
+        {"kind": "line_length", "target": "endpoint_to_bottom_axis", "value": spring_radius + half_width, "expression": "(D1 - WD1) / 2 + SHW1"},
+    )
+    return payload
+
+
+def _bind_first_sketch_start_to_projected_point(sketch, sketch_items: list, point3d, *, targets=("spring_radius_axis", "work_diagonal"), target_indices=None, projected_xy=None, projected_object=None, projection_report=None) -> dict:
+    report = {"ok": True, "targets": [], "projection": projection_report or {}}
+    if sketch is None or point3d is None:
+        return {"ok": False, "error": "missing sketch or point"}
+    if projected_xy is None or projected_object is None:
+        projection_report, projected_object = _project_point_to_sketch_xy_with_object(sketch, point3d)
+        report["projection"] = projection_report
+        projected_xy = projection_report.get("xy")
+    if projected_object is None:
+        return {"ok": False, "error": "projection object was not created", "projection": report.get("projection"), "projected_xy": projected_xy}
+    by_id = {item.get("id"): item for item in sketch_items or [] if isinstance(item, dict) and item.get("id")}
+    sketch_doc = sketch.BeginEdit()
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        local_projection = None
+        add_projection = safe_get(sketch, "AddProjectionOf")
+        if callable(add_projection):
+            try:
+                raw_projection = add_projection(point3d)
+                local_projection = _coerce_projection_object(raw_projection)
+                report["binding_projection_raw"] = str(raw_projection)
+                report["binding_projection_reference"] = safe_get(local_projection, "Reference")
+            except Exception as exc:
+                report["binding_projection_error"] = str(exc)
+        if local_projection is not None:
+            projected_object = local_projection
+            report["projection_created_in_binding"] = True
+        line_segments, _ = _collection_for_sketch_entity_kind(drawing_container, "segment")
+        target_indices = target_indices or {}
+        for target in targets:
+            item = by_id.get(target)
+            entry = {"target": target, "created": False}
+            if not item:
+                entry["error"] = "created entity item not found"
+                report["ok"] = False
+                report["targets"].append(entry)
+                continue
+            index = int(item.get("collection_index", item.get("index", -1)))
+            if index < 0:
+                entry["error"] = "invalid collection index"
+                report["ok"] = False
+                report["targets"].append(entry)
+                continue
+            line = get_collection_item(line_segments, index)
+            constraint_report = _apply_constraint_to_line(
+                line,
+                SKETCH_CONSTRAINT_TYPES["merge_points"],
+                index=int(target_indices.get(target, 0)),
+                partner=projected_object,
+                partner_index=0,
+            )
+            entry.update(constraint_report)
+            if not constraint_report.get("created"):
+                report["ok"] = False
+            report["targets"].append(entry)
+    finally:
+        sketch.EndEdit()
+    try:
+        update = safe_get(sketch, "Update")
+        if callable(update):
+            report["sketch_update_ok"] = bool(update())
+    except Exception as exc:
+        report["sketch_update_error"] = str(exc)
+        report["ok"] = False
+    return report
+
+
+def _bind_first_sketch_start_to_anchor_point(sketch, sketch_items: list, *, anchor_id: str, targets=("spring_radius_axis", "work_diagonal"), target_indices=None) -> dict:
+    report = {"ok": True, "targets": [], "anchor_id": anchor_id}
+    by_id = {item.get("id"): item for item in sketch_items if isinstance(item, dict)}
+    anchor_item = by_id.get(anchor_id)
+    if not anchor_item:
+        return {"ok": False, "error": "anchor point item not found", "anchor_id": anchor_id}
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None for anchor point binding")
+    try:
+        drawing_container = _get_sketch_drawing_container(sketch_doc)
+        line_segments, _ = _collection_for_sketch_entity_kind(drawing_container, "segment")
+        points, _ = _collection_for_sketch_entity_kind(drawing_container, "point")
+        anchor_index = int(anchor_item.get("collection_index", anchor_item.get("index", -1)))
+        if anchor_index < 0:
+            return {"ok": False, "error": "invalid anchor point collection index", "anchor_id": anchor_id}
+        anchor_point = get_collection_item(points, anchor_index)
+        target_indices = target_indices or {}
+        for target in targets:
+            item = by_id.get(target)
+            entry = {"target": target, "created": False}
+            if not item:
+                entry["error"] = "created entity item not found"
+                report["ok"] = False
+                report["targets"].append(entry)
+                continue
+            index = int(item.get("collection_index", item.get("index", -1)))
+            if index < 0:
+                entry["error"] = "invalid collection index"
+                report["ok"] = False
+                report["targets"].append(entry)
+                continue
+            line = get_collection_item(line_segments, index)
+            constraint_report = _apply_constraint_to_line(
+                line,
+                SKETCH_CONSTRAINT_TYPES["merge_points"],
+                index=int(target_indices.get(target, 0)),
+                partner=anchor_point,
+                partner_index=0,
+            )
+            entry.update(constraint_report)
+            if not constraint_report.get("created"):
+                report["ok"] = False
+            report["targets"].append(entry)
+    finally:
+        sketch.EndEdit()
+    try:
+        update = safe_get(sketch, "Update")
+        if callable(update):
+            report["sketch_update_ok"] = bool(update())
+    except Exception as exc:
+        report["sketch_update_error"] = str(exc)
+        report["ok"] = False
+    return report
+
+
+def _variable_value(params: dict, name: str, default: float) -> float:
+    for variable in params.get("variable_plan") or []:
+        if not isinstance(variable, dict) or variable.get("name") != name:
+            continue
+        if variable.get("value") is not None:
+            try:
+                return float(variable.get("value"))
+            except Exception:
+                return float(default)
+    return float(default)
+
+
+def _first_sketch_self_wrapping_payload(params: dict) -> dict:
+    plan = params.get("self_wrapping_hook_plan") or {}
+    hook_radius = float(_variable_value(params, "SFR1", 3.0))
+    spring_radius = float(_variable_value(params, "SRAD1", (float(params.get("outer_diameter", 30.0)) - float(params.get("wire_diameter", 3.0))) / 2.0))
+    hook_height = float(_variable_value(params, "SH1", 40.0))
+    hook_width = float(_variable_value(params, "SW1", 40.0))
+    half_width = hook_width / 2.0
+    top = [0.0, spring_radius]
+    origin = [0.0, 0.0]
+    bottom_right = [0.0, -half_width]
+    bottom_left = [-hook_height, -half_width]
+    top_left = [-hook_height, half_width]
+    arc_center = [-hook_height + hook_radius, -13.574361074530819]
+    arc_start = [-hook_height, -13.574361074530819]
+    arc_end = [-35.07379698404049, -15.874304974131086]
+    return {
+        "target": {"mode": "create_new_sketch", "name": plan.get("left_first_sketch_name") or "SELF_WRAPPING_LEFT_FIRST_SKETCH", "plane": "XOY"},
+        "entities": [
+            {"kind": "segment", "id": "spring_radius_axis", "start": origin, "end": top, "role": "construction_spring_endpoint_axis", "line_style": 6},
+            {"kind": "segment", "id": "half_width_axis", "start": origin, "end": bottom_right, "role": "construction_half_width_axis", "line_style": 6},
+            {"kind": "segment", "id": "height_axis", "start": bottom_right, "end": bottom_left, "role": "construction_hook_height_axis", "line_style": 6},
+            {"kind": "segment", "id": "shelf_axis", "start": bottom_left, "end": top_left, "role": "construction_hook_width_shelf", "line_style": 6},
+            {"kind": "segment", "id": "diagonal_axis", "start": top, "end": bottom_left, "role": "construction_diagonal_axis", "line_style": 6},
+            {"kind": "segment", "id": "work_diagonal", "start": top, "end": arc_end, "role": "working_diagonal", "line_style": 1},
+            {"kind": "arc", "id": "work_fillet", "center": arc_center, "radius": hook_radius, "start": arc_end, "end": arc_start, "direction": True, "role": "working_fillet", "line_style": 1},
+            {"kind": "segment", "id": "work_shelf", "start": arc_start, "end": top_left, "role": "working_shelf", "line_style": 1},
+        ],
+        "constraints": [
+            {"kind": "fixed_point", "target": "spring_radius_axis", "index": 0},
+            {"kind": "merge_points", "target": "spring_radius_axis", "index": 0, "partner": "half_width_axis", "partner_index": 0},
+            {"kind": "merge_points", "target": "half_width_axis", "index": 1, "partner": "height_axis", "partner_index": 0},
+            {"kind": "merge_points", "target": "height_axis", "index": 1, "partner": "shelf_axis", "partner_index": 0},
+            {"kind": "merge_points", "target": "shelf_axis", "index": 0, "partner": "diagonal_axis", "partner_index": 1},
+            {"kind": "merge_points", "target": "spring_radius_axis", "index": 1, "partner": "diagonal_axis", "partner_index": 0},
+            {"kind": "merge_points", "target": "spring_radius_axis", "index": 1, "partner": "work_diagonal", "partner_index": 0},
+            {"kind": "merge_points", "target": "work_diagonal", "index": 1, "partner": "work_fillet", "partner_index": 1},
+            {"kind": "merge_points", "target": "work_fillet", "index": 2, "partner": "work_shelf", "partner_index": 0},
+            {"kind": "merge_points", "target": "work_shelf", "index": 1, "partner": "shelf_axis", "partner_index": 1},
+            {"kind": "vertical", "target": "spring_radius_axis"},
+            {"kind": "vertical", "target": "half_width_axis"},
+            {"kind": "horizontal", "target": "height_axis"},
+            {"kind": "vertical", "target": "shelf_axis"},
+            {"kind": "vertical", "target": "work_shelf"},
+            {"kind": "point_on_curve", "target": "work_diagonal", "index": 1, "partner": "diagonal_axis"},
+            {"kind": "point_on_curve", "target": "work_shelf", "index": 0, "partner": "shelf_axis"},
+            {"kind": "point_on_curve", "target": "work_shelf", "index": 1, "partner": "shelf_axis"},
+            {"kind": "tangent", "target": "work_diagonal", "partner": "work_fillet"},
+            {"kind": "tangent", "target": "work_shelf", "partner": "work_fillet"},
+        ],
+        "dimensions": [
+            {"kind": "line_length", "target": "spring_radius_axis", "value": spring_radius, "expression": "(D1 - WD1) / 2"},
+            {"kind": "line_length", "target": "half_width_axis", "value": half_width, "expression": "SHW1"},
+            {"kind": "line_length", "target": "height_axis", "value": hook_height, "expression": "SH1"},
+            {"kind": "line_length", "target": "shelf_axis", "value": hook_width, "expression": "SW1"},
+            {"kind": "arc_radius", "target": "work_fillet", "value": hook_radius, "expression": "SFR1"},
+        ],
+    }
+
+
+def _build_self_wrapping_left_hook_replacement(part, model_container, auxiliary_container, params: dict, steps_report: list, document_id=None, document=None) -> list:
+    plan = params.get("self_wrapping_hook_plan") or {}
+    first_sketch_name = plan.get("left_first_sketch_name") or "SELF_WRAPPING_LEFT_FIRST_SKETCH"
+    projected_sketch_name = plan.get("left_projected_sketch_name") or "SELF_WRAPPING_LEFT_FIRST_SKETCH_PROJECTED"
+    axis_plane_name = plan.get("left_axis_plane_name") or "SELF_WRAPPING_LEFT_AXIS_PERP_PLANE"
+    second_sketch_name = plan.get("left_second_sketch_name") or "SELF_WRAPPING_LEFT_SECOND_SKETCH_PATH"
+    sketch1, _, sketch1_items, sketch1_param = _create_sketch_entities(model_container, part, _first_sketch_self_wrapping_payload(params))
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_left_first_sketch", "ok": True, "sketch": safe_get(sketch1, "Name"), "item_count": len(sketch1_items), "parameterization": sketch1_param})
+    project_result = handle_project_sketch_edges({"document_id": document_id, "_document": document, "source_sketch_name": first_sketch_name, "target": {"mode": "create_new_sketch", "name": projected_sketch_name, "plane": "XOY"}, "edge_types": [1, 2], "only_straight": True, "projected_line_style": 6, "add_self_wrapping_anchor": True, "post_anchor_constraints": True, "add_self_wrapping_constraints": False, "spring_radius": float(_variable_value(params, "SRAD1", (float(params.get("outer_diameter", 30.0)) - float(params.get("wire_diameter", 3.0))) / 2.0)), "include_snapshot": True, "max_items": 200})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_left_projected_sketch", "ok": True, "result": _sketch_full_json_safe(project_result)})
+    axis_plane_result = handle_create_plane_by_edge_and_plane({"document_id": document_id, "_document": document, "sketch_name": projected_sketch_name, "edge_style": 3, "base_plane": "XOY", "parallel": False, "name": axis_plane_name, "max_items": 300})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_left_axis_plane", "ok": True, "result": _sketch_full_json_safe(axis_plane_result)})
+    sketch2_result = handle_create_self_wrapping_sketch2({"document_id": document_id, "_document": document, "source_sketch_name": projected_sketch_name, "target_sketch_name": second_sketch_name, "target_plane": axis_plane_name, "radius": float(_variable_value(params, "SWR1", 3.01)), "radius_expression": plan.get("second_sketch_radius_expression") or "SWR1", "tail_length": float(_variable_value(params, "HT1", 6.0)), "tail_expression": plan.get("tail_length_expression") or "HT1", "side": "right", "use_anchor_points": False, "max_items": 300})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_left_second_sketch", "ok": True, "result": _sketch_full_json_safe(sketch2_result)})
+    if document_id:
+        try:
+            document = cast_document_3d(document) if document is not None else resolve_document(make_app(), document_id)
+            steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_left_rebuild_before_fillet_creation", "ok": bool(document.RebuildDocument())})
+            refreshed_part = safe_get(document, "TopPart")
+            model_container = cast_model_container(refreshed_part)
+            auxiliary_container = _cast_to_com_interface(refreshed_part, "IAuxiliaryGeomContainer")
+        except Exception as exc:
+            steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_left_rebuild_before_fillet_creation", "ok": False, "error": str(exc)})
+    spirals = safe_get(auxiliary_container, "Spirals3D")
+    spiral = get_collection_item(spirals, 0)
+    first_sketch = _find_sketch_by_name(model_container, first_sketch_name)
+    second_sketch = _find_sketch_by_name(model_container, second_sketch_name)
+    first_edges = _get_sketch_edge_tuple(first_sketch, 1)
+    second_edges = _get_sketch_edge_tuple(second_sketch, 1)
+    if len(first_edges) < 3 or len(second_edges) < 3:
+        raise RuntimeError("Self-wrapping sketch edge readback did not produce the expected path edges")
+    first_work_start = first_edges[0]
+    first_work_middle = first_edges[1]
+    first_work_end = first_edges[2]
+    second_work_start = second_edges[2]
+    second_work_middle = second_edges[1]
+    second_work_tail = second_edges[0]
+    fillet_radius = float(_variable_value(params, "SFR1", 3.0))
+    fillet1 = _create_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_LEFT_FILLET_SPIRAL_TO_FIRST_CONTOUR", spiral, first_work_start, fillet_radius, trim_curve1=True, trim_curve2=True)
+    binding1 = _bind_operation_variables(fillet1, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": plan.get("fillet_radius_expression") or "SFR1"}])
+    if not binding1.get("ok", False) or not bool(fillet1.Update()):
+        raise RuntimeError("Failed to bind/update first self-wrapping native curve fillet")
+    fillet1_edges = _fillet_result_edges(fillet1)
+    fillet2 = _create_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_LEFT_FILLET_FIRST_TO_SECOND_CONTOUR", first_work_end, second_work_start, fillet_radius, trim_curve1=True, trim_curve2=True)
+    binding2 = _bind_operation_variables(fillet2, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": plan.get("fillet_radius_expression") or "SFR1"}])
+    if not binding2.get("ok", False) or not bool(fillet2.Update()):
+        raise RuntimeError("Failed to bind/update second self-wrapping native curve fillet")
+    fillet2_edges = _fillet_result_edges(fillet2)
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_left_native_fillets", "ok": True, "bindings": [binding1, binding2]})
+    projected_sketch = _find_sketch_by_name(model_container, projected_sketch_name)
+    axis_plane = _find_named_auxiliary_object(auxiliary_container, "Planes3D", axis_plane_name)
+    auxiliary_visibility_objects = [("self_wrapping_first_sketch", first_sketch), ("self_wrapping_projected_sketch", projected_sketch), ("self_wrapping_second_sketch", second_sketch), ("self_wrapping_first_native_fillet", fillet1), ("self_wrapping_second_native_fillet", fillet2)]
+    if axis_plane is not None:
+        auxiliary_visibility_objects.append(("self_wrapping_axis_plane", axis_plane))
+    path_chain = [("self_wrapping_left_fillet1_edge1", "left_self_wrapping_fillet_result", fillet1_edges[1], 1), ("self_wrapping_left_fillet1_edge0", "left_self_wrapping_fillet_result", fillet1_edges[0], 0), ("self_wrapping_left_fillet1_edge2", "left_self_wrapping_fillet_result", fillet1_edges[2], 2), ("self_wrapping_left_first_edge1", "left_self_wrapping_first_sketch", first_work_middle, 1), ("self_wrapping_left_fillet2_edge1", "left_self_wrapping_fillet_result", fillet2_edges[1], 1), ("self_wrapping_left_fillet2_edge0", "left_self_wrapping_fillet_result", fillet2_edges[0], 0), ("self_wrapping_left_fillet2_edge2", "left_self_wrapping_fillet_result", fillet2_edges[2], 2), ("self_wrapping_left_second_edge1", "left_self_wrapping_second_sketch", second_work_middle, 1), ("self_wrapping_left_second_edge2", "left_self_wrapping_second_sketch", second_work_tail, 2)]
+    return [{"path_name": path_name, "role": role, "path": path, "path_reference": safe_get(path, "Reference"), "edge_index": edge_index, "side": "left", "self_wrapping": True} for path_name, role, path, edge_index in path_chain], auxiliary_container, auxiliary_visibility_objects
+
+
+def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary_container, params: dict, steps_report: list, document_id=None, document=None, body_curve_source=None) -> tuple:
+    right_base_plane = _find_named_auxiliary_object(auxiliary_container, "Planes3D", "%s_RIGHT_HOOK_PLANE" % str(params.get("name") or "EXTENSION_SPRING"))
+    if right_base_plane is None:
+        planes = safe_get(auxiliary_container, "Planes3D")
+        for index in range(collection_count(planes)):
+            plane = get_collection_item(planes, index)
+            if str(safe_get(plane, "Name") or "").endswith("_RIGHT_HOOK_PLANE"):
+                right_base_plane = plane
+                break
+    if right_base_plane is None:
+        raise RuntimeError("self_wrapping_hooks right side requires preserved RIGHT_HOOK_PLANE")
+    right_base_plane_name = str(safe_get(right_base_plane, "Name"))
+    # Point3D objects are owned by the model container; using the auxiliary
+    # container here misses the preserved spring endpoint and creates a visible
+    # duplicate fallback point.
+    right_anchor_point = _find_named_auxiliary_object(model_container, "Points3D", "%s_RIGHT_ANCHOR_POINT" % str(params.get("name") or "EXTENSION_SPRING"))
+    if right_anchor_point is None:
+        points = safe_get(model_container, "Points3D")
+        for index in range(collection_count(points)):
+            point = get_collection_item(points, index)
+            if str(safe_get(point, "Name") or "").endswith("_RIGHT_ANCHOR_POINT"):
+                right_anchor_point = point
+                break
+    if right_anchor_point is None:
+        spirals = safe_get(auxiliary_container, "Spirals3D")
+        body_spiral = get_collection_item(spirals, 0) if spirals is not None and collection_count(spirals) > 0 else None
+        if body_spiral is not None:
+            right_anchor_point = _create_point3d_on_curve(
+                model_container,
+                "%s_RIGHT_ANCHOR_POINT" % str(params.get("name") or "EXTENSION_SPRING"),
+                body_spiral,
+                offset=0.0,
+                direction=False,
+                offset_type=2,
+            )
+            steps_report.append({"step": "self_wrapping_right_anchor_point_fallback", "ok": True, "source": safe_get(body_spiral, "Name"), "anchor": safe_get(right_anchor_point, "Name")})
+        if right_anchor_point is None:
+            raise RuntimeError("self_wrapping_hooks right side requires preserved or rebuildable RIGHT_ANCHOR_POINT")
+    _set_model_object_hidden(right_anchor_point, True)
+    first_sketch_name = "SELF_WRAPPING_RIGHT_FIRST_SKETCH"
+    projected_sketch_name = "SELF_WRAPPING_RIGHT_FIRST_SKETCH_PROJECTED"
+    axis_plane_name = "SELF_WRAPPING_RIGHT_AXIS_PERP_PLANE"
+    second_sketch_name = "SELF_WRAPPING_RIGHT_SECOND_SKETCH_PATH"
+    first_sketch_seed, _ = _create_sketch_on_plane(model_container, part, first_sketch_name, right_base_plane, assign_coordinate_system=True, coordinate_system_before_plane=True)
+    # Project the preserved spiral endpoint into the right hook plane. This
+    # projected 2D anchor drives the local chord/normal math below.
+    projection_report, projected_object = _project_point_to_sketch_xy_with_object(first_sketch_seed, right_anchor_point)
+    projected_xy = projection_report.get("xy") if projection_report else None
+    if projected_object is None:
+        raise RuntimeError("Failed to project right spiral endpoint into right self-wrapping Sketch1")
+    if not projected_xy:
+        raise RuntimeError("Failed to compute right spiral endpoint projection XY in right self-wrapping Sketch1")
+    # The right hook payload is mirrored relative to the sketch projection, so
+    # the raw projected X is inverted before parameterizing Sketch1.
+    right_plane_xy = [-float(projected_xy[0]), float(projected_xy[1])]
+    # Reuse the stable left-hook payload as a geometric template; the transform
+    # below relocates it onto the projected right endpoint and mirrors X.
+    payload = _right_endpoint_self_wrapping_payload({**params, "self_wrapping_hook_plan": {"left_first_sketch_name": first_sketch_name}})
+    payload = _transform_self_wrapping_payload_from_endpoint(
+        payload,
+        right_plane_xy,
+        float(_variable_value(params, "SRAD1", (float(params.get("outer_diameter", 30.0)) - float(params.get("wire_diameter", 3.0))) / 2.0)),
+        mirror_x=True,
+        remove_fixed_origin=True,
+    )
+    payload["target"] = {"mode": "existing_sketch", "sketch_ref": safe_get(first_sketch_seed, "Reference")}
+    sketch1, _, sketch1_items, sketch1_param = _create_sketch_entities(model_container, part, payload)
+    endpoint_binding = _bind_first_sketch_start_to_projected_point(
+        sketch1,
+        sketch1_items,
+        right_anchor_point,
+        targets=("endpoint_to_bottom_axis", "work_diagonal"),
+        target_indices={"endpoint_to_bottom_axis": 0, "work_diagonal": 0},
+        projected_xy=right_plane_xy,
+        projected_object=projected_object,
+        projection_report=projection_report,
+    )
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_first_sketch", "ok": True, "sketch": safe_get(sketch1, "Name"), "item_count": len(sketch1_items), "parameterization": sketch1_param, "endpoint_projection": projection_report, "endpoint_projected_xy_raw": projected_xy, "endpoint_projected_xy": right_plane_xy})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_endpoint_projection_binding", "ok": endpoint_binding.get("ok", False), "result": endpoint_binding})
+    if bool(params.get("self_wrapping_right_stop_after_first_sketch")):
+        steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_step_stop", "ok": True, "after": "first_sketch"})
+        return [], auxiliary_container, []
+    # This service sketch keeps a projected work axis in the same plane as
+    # Sketch1; that axis is the stable input for the perpendicular Sketch2 plane.
+    project_result = handle_project_sketch_edges({"document_id": document_id, "_document": document, "source_sketch_name": first_sketch_name, "target": {"mode": "create_new_sketch", "name": projected_sketch_name, "plane": right_base_plane_name, "coordinate_system": "plane"}, "target_coordinate_system": "plane", "edge_types": [1, 2], "only_straight": True, "projected_line_style": 6, "add_self_wrapping_anchor": True, "post_anchor_constraints": True, "add_self_wrapping_constraints": False, "spring_radius": float(_variable_value(params, "SRAD1", (float(params.get("outer_diameter", 30.0)) - float(params.get("wire_diameter", 3.0))) / 2.0)), "include_snapshot": True, "max_items": 300})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_projected_sketch", "ok": True, "result": _sketch_full_json_safe(project_result)})
+    try:
+        projected_sketch_for_axis = _find_sketch_by_name(model_container, projected_sketch_name)
+        _, projected_axis_report = _select_sketch_axis_edge_by_style(model_container, projected_sketch_for_axis, 3)
+        steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_projected_axis_candidates", "ok": True, "result": _sketch_full_json_safe(projected_axis_report)})
+    except Exception as exc:
+        steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_projected_axis_candidates", "ok": False, "error": str(exc)})
+    if bool(params.get("self_wrapping_right_stop_after_projected_sketch")):
+        steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_step_stop", "ok": True, "after": "projected_sketch"})
+        return [], auxiliary_container, []
+    # Prefer the exact work-axis entity returned by projection; fall back to
+    # geometry/style matching when COM returns only serialized entity metadata.
+    projected_work_axis_geometry = None
+    projected_work_axis_entity = (project_result.get("post_constraint_report") or {}).get("work_axis_entity")
+    projected_work_axis_reference = None
+    for item in ((project_result.get("anchor_report") or {}).get("added") or []):
+        if item.get("id") == "work_axis":
+            projected_work_axis_geometry = {"start": item.get("start"), "end": item.get("end")}
+            projected_work_axis_reference = item.get("reference")
+            break
+    if projected_work_axis_entity is None:
+        def _xy_same(a, b, tol=1.0e-6):
+            return a is not None and b is not None and len(a) >= 2 and len(b) >= 2 and abs(float(a[0]) - float(b[0])) <= tol and abs(float(a[1]) - float(b[1])) <= tol
+        def _geom_same(entity_geometry, expected_geometry):
+            if not entity_geometry or not expected_geometry:
+                return False
+            a0 = entity_geometry.get("start")
+            a1 = entity_geometry.get("end")
+            b0 = expected_geometry.get("start")
+            b1 = expected_geometry.get("end")
+            return (_xy_same(a0, b0) and _xy_same(a1, b1)) or (_xy_same(a0, b1) and _xy_same(a1, b0))
+        style3_entities = [entity for entity in (project_result.get("entities") or []) if entity.get("kind") == "segment" and int((entity.get("raw_properties") or {}).get("Style", -1)) == 3]
+        projected_work_axis_entity = next((entity for entity in style3_entities if _geom_same(entity.get("geometry"), projected_work_axis_geometry)), None) or (style3_entities[0] if style3_entities else None)
+        if projected_work_axis_entity is None:
+            all_segments = [entity for entity in (project_result.get("entities") or []) if entity.get("kind") == "segment"]
+            projected_work_axis_entity = next((entity for entity in all_segments if _geom_same(entity.get("geometry"), projected_work_axis_geometry)), None)
+    # Sketch2 must be drawn on a plane perpendicular to the projected work axis,
+    # otherwise its local coordinates drift when the spiral turn count changes.
+    axis_plane_result = handle_create_plane_by_edge_and_plane({"document_id": document_id, "_document": document, "sketch_name": projected_sketch_name, "edge_style": None, "edge_reference": projected_work_axis_reference, "edge_geometry": projected_work_axis_geometry, "edge_collection_name": (projected_work_axis_entity or {}).get("collection_name"), "edge_index": (projected_work_axis_entity or {}).get("index"), "allow_axis_extra_edge_fallback": True, "allow_target_entity_object": True, "base_plane": right_base_plane_name, "parallel": False, "name": axis_plane_name, "max_items": 300})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_axis_plane", "ok": True, "source": projected_sketch_name, "result": _sketch_full_json_safe(axis_plane_result)})
+    sketch2_result = handle_create_self_wrapping_sketch2({"document_id": document_id, "_document": document, "source_sketch_name": projected_sketch_name, "target_sketch_name": second_sketch_name, "target_plane": axis_plane_name, "target_coordinate_system": "plane", "center_endpoint": "start", "radius": float(_variable_value(params, "SWR1", 3.01)), "radius_expression": "SWR1", "tail_length": float(_variable_value(params, "HT1", 6.0)), "tail_expression": "HT1", "side": "right", "use_anchor_points": False, "max_items": 300})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_second_sketch", "ok": True, "result": _sketch_full_json_safe(sketch2_result)})
+    if bool(params.get("self_wrapping_right_stop_after_second_sketch")):
+        steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_step_stop", "ok": True, "after": "second_sketch"})
+        return [], auxiliary_container, []
+    if document_id:
+        document = cast_document_3d(document) if document is not None else resolve_document(make_app(), document_id)
+        steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_rebuild_before_fillet_creation", "ok": bool(document.RebuildDocument())})
+        refreshed_part = safe_get(document, "TopPart")
+        model_container = cast_model_container(refreshed_part)
+        auxiliary_container = _cast_to_com_interface(refreshed_part, "IAuxiliaryGeomContainer")
+    spirals = safe_get(auxiliary_container, "Spirals3D")
+    spiral = get_collection_item(spirals, 0)
+    first_sketch = _find_sketch_by_name(model_container, first_sketch_name)
+    second_sketch = _find_sketch_by_name(model_container, second_sketch_name)
+    first_edges = _get_sketch_edge_tuple(first_sketch, 1)
+    second_edges = _get_sketch_edge_tuple(second_sketch, 1)
+    if len(first_edges) < 3 or len(second_edges) < 3:
+        raise RuntimeError("Right self-wrapping sketch edge readback did not produce expected edges")
+    fillet_radius = float(_variable_value(params, "SFR1", 3.0))
+    body_curve_for_fillet = body_curve_source or spiral
+    try:
+        fresh_left_fillet = _find_fillet_curve_by_name(auxiliary_container, "SELF_WRAPPING_LEFT_FILLET_SPIRAL_TO_FIRST_CONTOUR")
+        fresh_left_edges = _fillet_result_edges(fresh_left_fillet)
+        if len(fresh_left_edges) > 1:
+            body_curve_for_fillet = fresh_left_edges[1]
+    except Exception:
+        pass
+    right_transition_curve = first_edges[0]
+    curve1_cut_point, curve2_cut_point = _fillet_cut_points_near_shared_endpoint(body_curve_for_fillet, right_transition_curve, curve1_ratio=0.0, curve2_ratio=0.03)
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_transition_fillet_inputs", "ok": True, "body_curve_endpoints": _sample_curve_endpoints(body_curve_for_fillet), "transition_curve_endpoints": _sample_curve_endpoints(right_transition_curve), "curve1_cut_point": curve1_cut_point, "curve2_cut_point": curve2_cut_point})
+    fillet1 = _create_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_SPIRAL_TO_FIRST_CONTOUR", body_curve_for_fillet, right_transition_curve, fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=curve1_cut_point, curve2_cut_point=curve2_cut_point)
+    binding1 = _bind_operation_variables(fillet1, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": "SFR1"}])
+    if not binding1.get("ok", False) or not bool(fillet1.Update()):
+        raise RuntimeError("Failed to bind/update first right self-wrapping native curve fillet")
+    f1_edges = _fillet_result_edges(fillet1)
+    if len(f1_edges) < 3:
+        raise RuntimeError("First right self-wrapping fillet did not expose expected result edges")
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_first_to_second_fillet_inputs", "ok": True, "first_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(first_edges)], "second_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(second_edges)], "f1_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(f1_edges)]})
+    fillet2_curve1_cut_point, fillet2_curve2_cut_point = _fillet_cut_points_near_shared_endpoint(first_edges[2], second_edges[2], curve1_ratio=0.10, curve2_ratio=0.03)
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_first_to_second_fillet_cut_points", "ok": True, "curve1_cut_point": fillet2_curve1_cut_point, "curve2_cut_point": fillet2_curve2_cut_point})
+    fillet2 = _create_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_FIRST_TO_SECOND_CONTOUR", first_edges[2], second_edges[2], fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=fillet2_curve1_cut_point, curve2_cut_point=fillet2_curve2_cut_point)
+    binding2 = _bind_operation_variables(fillet2, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": "SFR1"}])
+    if not binding2.get("ok", False) or not bool(fillet2.Update()):
+        raise RuntimeError("Failed to bind/update second right self-wrapping native curve fillet")
+    f2_edges = _fillet_result_edges(fillet2)
+    if len(f2_edges) < 3:
+        raise RuntimeError("Second right self-wrapping fillet did not expose expected result edges")
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_second_native_fillet", "ok": True, "edge1": _sample_curve_endpoints(f2_edges[1]), "edge0": _sample_curve_endpoints(f2_edges[0]), "edge2": _sample_curve_endpoints(f2_edges[2])})
+    pre_rebuild_first_edges = first_edges
+    pre_rebuild_second_edges = second_edges
+    pre_rebuild_fillet1 = fillet1
+    pre_rebuild_fillet2 = fillet2
+    pre_rebuild_f1_edges = f1_edges
+    pre_rebuild_f2_edges = f2_edges
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_native_fillets", "ok": True, "bindings": [binding1, binding2]})
+    if document_id:
+        steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_rebuild_before_path_capture", "ok": True, "skipped": True})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_path_capture_refetch", "ok": True, "skipped": True, "reason": "native_fillet_edges_are_current"})
+    # Native fillet edges are already current here; keep the pre-rebuild COM
+    # wrappers instead of refetching and risking a different edge ordering.
+    first_edges = pre_rebuild_first_edges
+    second_edges = pre_rebuild_second_edges
+    fillet1 = pre_rebuild_fillet1
+    fillet2 = pre_rebuild_fillet2
+    f1_edges = pre_rebuild_f1_edges
+    f2_edges = pre_rebuild_f2_edges
+    try:
+        projected_sketch = _find_sketch_by_name(model_container, projected_sketch_name)
+    except Exception:
+        projected_sketch = None
+    axis_plane = _find_named_auxiliary_object(auxiliary_container, "Planes3D", axis_plane_name)
+    auxiliary_visibility_objects = [("self_wrapping_right_anchor_point", right_anchor_point), ("self_wrapping_right_first_sketch", first_sketch), ("self_wrapping_right_projected_sketch", projected_sketch), ("self_wrapping_right_second_sketch", second_sketch), ("self_wrapping_right_first_native_fillet", fillet1), ("self_wrapping_right_second_native_fillet", fillet2)]
+    if axis_plane is not None:
+        auxiliary_visibility_objects.append(("self_wrapping_right_axis_plane", axis_plane))
+    # The path order is the contour contract consumed by the evolution feature;
+    # edge names are intentionally explicit so report diffs expose regressions.
+    path_chain = [("self_wrapping_right_fillet1_edge1", "right_self_wrapping_fillet_result", f1_edges[1], 1), ("self_wrapping_right_fillet1_edge0", "right_self_wrapping_fillet_result", f1_edges[0], 0), ("self_wrapping_right_fillet1_edge2", "right_self_wrapping_fillet_result", f1_edges[2], 2), ("self_wrapping_right_first_edge1", "right_self_wrapping_first_sketch", first_edges[1], 1), ("self_wrapping_right_fillet2_edge1", "right_self_wrapping_fillet_result", f2_edges[1], 1), ("self_wrapping_right_fillet2_edge0", "right_self_wrapping_fillet_result", f2_edges[0], 0), ("self_wrapping_right_fillet2_edge2", "right_self_wrapping_fillet_result", f2_edges[2], 2), ("self_wrapping_right_second_edge1", "right_self_wrapping_second_sketch", second_edges[1], 1), ("self_wrapping_right_second_edge0", "right_self_wrapping_second_sketch", second_edges[0], 0)]
+    return [{"path_name": path_name, "role": role, "path": path, "path_reference": safe_get(path, "Reference"), "edge_index": edge_index, "side": "right", "self_wrapping": True} for path_name, role, path, edge_index in path_chain], auxiliary_container, auxiliary_visibility_objects
 
 
 def _resolve_named_curve_sequence(path_names, segment_objects, connector_objects):
@@ -5957,7 +8071,8 @@ def _build_compression_spring_path_contour_with_connectors(
     connector_plan = list(params.get("connector_plan") or [])
     connector_objects = []
     sweep_paths_for_report = [item["path"] for item in segment_objects]
-    if connector_plan:
+    full_path_sequence = list(params.get("full_path_sequence") or [])
+    if connector_plan or full_path_sequence:
         connector_objects = _build_compression_spring_transition_curve_paths(
             part,
             model_container,
@@ -5966,12 +8081,12 @@ def _build_compression_spring_path_contour_with_connectors(
             segment_objects,
             connector_plan,
             steps_report,
-        )
+        ) if connector_plan else []
         auxiliary_objects.extend(
             _collect_compression_spring_connector_auxiliary_objects(connector_objects)
         )
         contour_paths = _resolve_named_curve_sequence(
-            params.get("full_path_sequence") or [],
+            full_path_sequence,
             segment_objects,
             connector_objects,
         )
@@ -6916,6 +9031,783 @@ def handle_list_sketch_entities(payload):
     }
 
 
+def handle_inspect_sketch_full(payload):
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+
+    top_part = safe_get(document, "TopPart")
+    if top_part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    result = _inspect_sketch_full(model_container, payload)
+    result["ok"] = True
+    result["document"] = describe_document(document, app)
+    return result
+
+
+def handle_project_sketch_edges(payload):
+    app = make_app()
+    document_id = payload.get("document_id")
+    doc = cast_document_3d(payload.get("_document")) if payload.get("_document") is not None else resolve_document(app, document_id)
+    if doc is None:
+        raise RuntimeError("No active document")
+    part = safe_get(doc, "TopPart")
+    model_container = cast_model_container(part)
+    if model_container is None:
+        raise RuntimeError("Active document does not expose TopPart model container")
+
+    source_ref = payload.get("source_sketch_ref") or payload.get("source_sketch")
+    source_name = payload.get("source_sketch_name")
+    if source_ref is not None:
+        source_sketch = _resolve_existing_sketch(model_container, source_ref)
+    elif source_name:
+        source_sketch = None
+        sketches = _get_sketch_collection(model_container)
+        for index in range(collection_count(sketches)):
+            candidate = _cast_to_com_interface(get_collection_item(sketches, index), "ISketch")
+            if safe_get(candidate, "Name") == source_name:
+                source_sketch = candidate
+                break
+        if source_sketch is None:
+            raise RuntimeError("source sketch not found: %s" % source_name)
+    else:
+        raise RuntimeError("source_sketch_ref or source_sketch_name is required")
+
+    target = payload.get("target") or {}
+    target_mode = str(target.get("mode") or "create_new_sketch")
+    if target_mode == "existing_sketch":
+        target_sketch = _resolve_existing_sketch(model_container, target.get("sketch_ref"))
+    else:
+        target_plane_value = target.get("plane") or payload.get("plane") or "XOY"
+        target_coordinate_system_mode = str(target.get("coordinate_system") or payload.get("target_coordinate_system") or "").lower()
+        target_plane_object = None
+        if target_coordinate_system_mode == "plane":
+            try:
+                target_plane_key = _normalize_sketch_plane(target_plane_value)
+                target_plane_object = _resolve_default_part_object(part, target_plane_key)
+            except Exception:
+                auxiliary = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+                target_plane_object = _find_named_auxiliary_object(auxiliary, "Planes3D", str(target_plane_value))
+        target_sketch, _ = _create_sketch_on_plane(
+            model_container,
+            part,
+            target.get("name") or payload.get("target_sketch_name") or "PROJECTED_SKETCH",
+            target_plane_object if target_plane_object is not None else target_plane_value,
+            assign_coordinate_system=target_coordinate_system_mode == "plane",
+            coordinate_system_before_plane=target_coordinate_system_mode == "plane",
+        )
+
+    edge_types = payload.get("edge_types") if "edge_types" in payload else [1, 2]
+    only_straight = bool(payload.get("only_straight", False))
+    projected = []
+    projected_live_segments = []
+    seen_edges = set()
+    target_edit_doc = target_sketch.BeginEdit()
+    for edge_type in edge_types:
+        try:
+            edge_value = source_sketch.Edges(edge_type)
+        except Exception as exc:
+            projected.append({"edge_type": edge_type, "error": str(exc)})
+            continue
+        if isinstance(edge_value, (list, tuple)):
+            edges = list(edge_value)
+        else:
+            count = collection_count(edge_value)
+            if count:
+                edges = [get_collection_item(edge_value, index) for index in range(count)]
+            elif edge_value is not None:
+                edges = [edge_value]
+            else:
+                edges = []
+        for index, edge in enumerate(edges):
+            edge_reference = safe_get(edge, "Reference")
+            edge_key = edge_reference or (edge_type, index)
+            if edge_key in seen_edges:
+                projected.append({"edge_type": edge_type, "index": index, "skipped": "duplicate_edge", "reference": edge_reference})
+                continue
+            seen_edges.add(edge_key)
+            if only_straight and safe_get(edge, "IsStraight") is False:
+                projected.append({"edge_type": edge_type, "index": index, "skipped": "non_straight_edge", "reference": edge_reference})
+                continue
+            item = {"edge_type": edge_type, "index": index}
+            try:
+                item["source"] = _read_sketch_full_object_details(
+                    edge,
+                    ("Name", "Reference", "Type", "Curve3DType", "IsStraight"),
+                    related_names=("Owner", "Parent"),
+                )
+                projection_result = target_sketch.AddProjectionOf(edge)
+                item["result"] = _sketch_full_json_safe(projection_result)
+                if isinstance(projection_result, (list, tuple)):
+                    result_items = list(projection_result)
+                elif collection_count(projection_result):
+                    result_items = iter_collection(projection_result)
+                else:
+                    result_items = [projection_result]
+                item["result_items_count"] = len(result_items)
+                item["result_item_types"] = [type(result_item).__name__ for result_item in result_items]
+                item["result_item_errors"] = []
+                for result_item in result_items:
+                    try:
+                        segment_info = {
+                            "index": len(projected_live_segments),
+                            "kind": "segment",
+                            "collection": "projected_live_segments",
+                            "reference": safe_get(result_item, "Reference"),
+                            "style": safe_get(result_item, "Style"),
+                            "geometry": _sketch_entity_geometry("segment", result_item),
+                        }
+                        segment_info["object"] = result_item
+                        segment_info["source_edge_reference"] = edge_reference
+                        projected_live_segments.append(segment_info)
+                    except Exception as exc:
+                        item["result_item_errors"].append(str(exc))
+            except Exception as exc:
+                item["error"] = str(exc)
+            projected.append(item)
+
+    anchor_report = None
+    projected_line_style = payload.get("projected_line_style")
+    add_anchor = bool(payload.get("add_self_wrapping_anchor", False))
+    add_constraints = bool(payload.get("add_self_wrapping_constraints", add_anchor))
+    if (projected_line_style is not None or add_anchor) and target_edit_doc is not None and not (add_anchor and projected_live_segments):
+        try:
+            target_sketch.EndEdit()
+            target_sketch.Update()
+        except Exception as exc:
+            projected.append({"stage": "projection_end_edit_before_anchor", "error": str(exc)})
+        target_edit_doc = target_sketch.BeginEdit()
+    if projected_line_style is not None or add_anchor:
+        anchor_report = {"projected_style": projected_line_style, "added": [], "constraints": None, "errors": [], "existing_segments": []}
+        try:
+            drawing = _get_sketch_drawing_container(target_edit_doc)
+            existing_segments = []
+            if projected_live_segments:
+                for info in projected_live_segments:
+                    existing_segments.append(info)
+                    anchor_report["existing_segments"].append(_sketch_full_json_safe({k: v for k, v in info.items() if k != "object"}))
+                    if projected_line_style is not None:
+                        try:
+                            info["object"].Style = int(projected_line_style)
+                        except Exception as exc:
+                            anchor_report["errors"].append({"stage": "set_projected_style", "index": info.get("index"), "error": str(exc)})
+            else:
+                line_segments = _resolve_model_object_collection(drawing, ("LineSegments", "GetLineSegments"))
+                for index in range(collection_count(line_segments)):
+                    segment = get_collection_item(line_segments, index)
+                    info = {
+                        "index": index,
+                        "kind": "segment",
+                        "collection": "segments",
+                        "reference": safe_get(segment, "Reference"),
+                        "style": safe_get(segment, "Style"),
+                        "geometry": _sketch_entity_geometry("segment", segment),
+                        "object": segment,
+                    }
+                    existing_segments.append(info)
+                    anchor_report["existing_segments"].append(_sketch_full_json_safe({k: v for k, v in info.items() if k != "object"}))
+                    if projected_line_style is not None:
+                        try:
+                            segment.Style = int(projected_line_style)
+                        except Exception as exc:
+                            anchor_report["errors"].append({"stage": "set_projected_style", "index": index, "error": str(exc)})
+
+            if add_anchor:
+                def point_tuple(point):
+                    if isinstance(point, (list, tuple)) and len(point) >= 2:
+                        return float(point[0]), float(point[1])
+                    return float(point["x"]), float(point["y"])
+
+                def segment_points(segment_info):
+                    geometry = segment_info.get("geometry") or {}
+                    return point_tuple(geometry["start"]), point_tuple(geometry["end"])
+
+                def line_intersection(a1, a2, b1, b2):
+                    x1, y1 = a1
+                    x2, y2 = a2
+                    x3, y3 = b1
+                    x4, y4 = b2
+                    denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+                    if abs(denominator) <= 1e-12:
+                        return None
+                    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denominator
+                    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denominator
+                    return [float(px), float(py)]
+
+                spring_radius = float(payload.get("spring_radius", 13.5))
+                non_vertical = []
+                vertical = []
+                for segment_info in existing_segments:
+                    p1, p2 = segment_points(segment_info)
+                    if abs(p1[0] - p2[0]) <= 1e-6:
+                        vertical.append(segment_info)
+                    else:
+                        non_vertical.append(segment_info)
+                projected_diagonal = max(non_vertical, key=lambda item: abs(segment_points(item)[0][0] - segment_points(item)[1][0])) if non_vertical else None
+                projected_shelf = max(vertical, key=lambda item: abs(segment_points(item)[0][1] - segment_points(item)[1][1])) if vertical else None
+                if projected_diagonal is None or projected_shelf is None:
+                    anchor_report["errors"].append({"stage": "add_anchor", "error": "projected_diagonal_or_shelf_not_found"})
+                else:
+                    diag_a, diag_b = segment_points(projected_diagonal)
+                    spring_point = diag_a if abs(diag_a[0]) <= abs(diag_b[0]) else diag_b
+                    diag_far = diag_b if spring_point == diag_a else diag_a
+                    shelf_a, shelf_b = segment_points(projected_shelf)
+                    shelf_free = shelf_a if shelf_a[1] >= shelf_b[1] else shelf_b
+                    mirror_start = [0.0, -spring_radius]
+                    mirror_end = [float(shelf_free[0]), float(shelf_free[1])]
+                    vertical_base = _add_sketch_line_segment(drawing, [0.0, spring_radius], [0.0, -spring_radius], 6)
+                    mirror_diagonal = _add_sketch_line_segment(drawing, mirror_start, mirror_end, 6)
+                    axis_start = line_intersection(spring_point, diag_far, mirror_start, mirror_end)
+                    if axis_start is None:
+                        axis_start = [float((spring_point[0] + diag_far[0]) * 0.5), 0.0]
+                    work_axis = _add_sketch_line_segment(drawing, axis_start, [float(shelf_free[0]), float(shelf_free[1])], 3)
+                    shelf_point = _add_sketch_point(drawing, [float(shelf_free[0]), float(shelf_free[1])], 127)
+
+                    sketch_entities = {
+                        "projected_diagonal": dict(projected_diagonal, role="line"),
+                        "projected_shelf": dict(projected_shelf, role="line"),
+                        "vertical_base": {"object": vertical_base, "role": "line", "x1": 0.0, "y1": spring_radius, "x2": 0.0, "y2": -spring_radius},
+                        "mirror_diagonal": {"object": mirror_diagonal, "role": "line", "x1": mirror_start[0], "y1": mirror_start[1], "x2": mirror_end[0], "y2": mirror_end[1]},
+                        "work_axis": {"object": work_axis, "role": "line", "x1": axis_start[0], "y1": axis_start[1], "x2": float(shelf_free[0]), "y2": float(shelf_free[1])},
+                        "shelf_point": {"object": shelf_point, "role": "point", "x": float(shelf_free[0]), "y": float(shelf_free[1])},
+                    }
+                    constraints = [
+                        {"kind": "merge_points", "target": "vertical_base", "index": 0, "partner": "projected_diagonal", "partner_index": 0 if spring_point == diag_a else 1},
+                        {"kind": "merge_points", "target": "vertical_base", "index": 1, "partner": "mirror_diagonal", "partner_index": 0},
+                        {"kind": "point_on_curve", "target": "work_axis", "index": 0, "partner": "projected_diagonal"},
+                        {"kind": "point_on_curve", "target": "work_axis", "index": 0, "partner": "mirror_diagonal"},
+                        {"kind": "merge_points", "target": "mirror_diagonal", "index": 1, "partner": "projected_shelf", "partner_index": 0 if shelf_free == shelf_a else 1},
+                        {"kind": "merge_points", "target": "work_axis", "index": 1, "partner": "projected_shelf", "partner_index": 0 if shelf_free == shelf_a else 1},
+                        {"kind": "merge_points", "target": "shelf_point", "index": 0, "partner": "work_axis", "partner_index": 1},
+                        {"kind": "merge_points", "target": "shelf_point", "index": 0, "partner": "projected_shelf", "partner_index": 0 if shelf_free == shelf_a else 1},
+                        {"kind": "vertical", "target": "vertical_base"},
+                    ]
+                    anchor_report["added"] = [
+                        {"id": "vertical_base", "start": [0.0, spring_radius], "end": [0.0, -spring_radius], "style": 6, "reference": safe_get(vertical_base, "Reference")},
+                        {"id": "mirror_diagonal", "start": mirror_start, "end": mirror_end, "style": 6, "reference": safe_get(mirror_diagonal, "Reference")},
+                        {"id": "work_axis", "start": axis_start, "end": [float(shelf_free[0]), float(shelf_free[1])], "style": 3, "reference": safe_get(work_axis, "Reference")},
+                        {"id": "shelf_point", "point": [float(shelf_free[0]), float(shelf_free[1])], "style": 127, "reference": safe_get(shelf_point, "Reference")},
+                    ]
+                    anchor_report["constraints"] = _apply_sketch_constraints(sketch_entities, constraints, {"enabled": True})
+                    anchor_report["dimensions"] = _apply_sketch_dimensions(
+                        drawing,
+                        sketch_entities,
+                        [
+                            {
+                                "kind": "line_length",
+                                "target": "vertical_base",
+                                "value": spring_radius * 2.0,
+                                "expression": "D1 - WD1",
+                                "orientation": "vertical",
+                            }
+                        ],
+                        {"enabled": True, "driving": True},
+                    )
+                    for added in anchor_report.get("added") or []:
+                        entity = sketch_entities.get(added.get("id"))
+                        if not entity:
+                            continue
+                        obj = entity.get("object")
+                        added["reference"] = safe_get(obj, "Reference")
+                        if entity.get("role") == "line":
+                            try:
+                                geometry = _sketch_entity_geometry("segment", obj)
+                                added["start"] = geometry.get("start")
+                                added["end"] = geometry.get("end")
+                            except Exception as exc:
+                                added["geometry_error"] = str(exc)
+                        elif entity.get("role") == "point":
+                            try:
+                                geometry = _sketch_entity_geometry("point", obj)
+                                added["point"] = geometry.get("point")
+                            except Exception as exc:
+                                added["geometry_error"] = str(exc)
+        except Exception as exc:
+            anchor_report["errors"].append({"stage": "anchor_outer", "error": str(exc)})
+    if target_edit_doc is not None:
+        try:
+            target_sketch.EndEdit()
+        except Exception as exc:
+            projected.append({"stage": "target_end_edit", "error": str(exc)})
+
+    target_update_ok = bool(target_sketch.Update())
+    try:
+        part_update_ok = bool(part.Update())
+    except Exception as exc:
+        part_update_ok = False
+        projected.append({"stage": "part_update", "error": str(exc)})
+
+    snapshot = None
+    if payload.get("include_snapshot", True):
+        snapshot = _inspect_sketch_full(
+            model_container,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": safe_get(target_sketch, "Reference")},
+                "include_dimensions": True,
+                "include_constraints": True,
+                "include_diagnostics": True,
+                "max_items": payload.get("max_items") or 200,
+            },
+        )
+
+    spring_radius = float(payload.get("spring_radius", 13.5))
+    projected_segments = [item for item in (snapshot or {}).get("entities", []) if item.get("kind") == "segment"]
+    post_anchor_report = None
+    if snapshot and (projected_line_style is not None or (add_anchor and (not anchor_report or not anchor_report.get("added")))):
+        post_anchor_report = {"style_refs": [], "added": [], "errors": []}
+        projected_segments = [item for item in snapshot.get("entities", []) if item.get("kind") == "segment"]
+        if projected_line_style is not None:
+            try:
+                target_sketch.BeginEdit()
+                api5_doc2d, _api5_doc2d_status = _get_api5_document2d()
+                api5_app, _api5_module, _api5_status = _get_api5_kompas_object()
+                for item in projected_segments:
+                    reference = item.get("reference")
+                    if reference in (None, ""):
+                        continue
+                    param = api5_app.GetParamStruct(11)
+                    ok = api5_doc2d.ksGetObjParam(reference, param, 11)
+                    if ok:
+                        param.style = int(projected_line_style)
+                        post_anchor_report["style_refs"].append({"reference": reference, "set": api5_doc2d.ksSetObjParam(reference, param, 11)})
+                    else:
+                        post_anchor_report["style_refs"].append({"reference": reference, "set": False, "error": "ksGetObjParam_failed"})
+                target_sketch.EndEdit()
+                target_sketch.Update()
+            except Exception as exc:
+                post_anchor_report["errors"].append({"stage": "api5_style", "error": str(exc)})
+                try:
+                    target_sketch.EndEdit()
+                except Exception:
+                    pass
+        if projected_line_style is not None and not any(item.get("set") for item in post_anchor_report.get("style_refs", [])):
+            try:
+                target_sketch.BeginEdit()
+                api5_doc2d, _api5_doc2d_status = _get_api5_document2d()
+                find_results = []
+                for item in projected_segments:
+                    geometry = item.get("geometry") or {}
+                    start = geometry.get("start")
+                    end = geometry.get("end")
+                    if not (isinstance(start, (list, tuple)) and isinstance(end, (list, tuple)) and len(start) >= 2 and len(end) >= 2):
+                        continue
+                    mx = (float(start[0]) + float(end[0])) * 0.5
+                    my = (float(start[1]) + float(end[1])) * 0.5
+                    found_ref = 0
+                    for limit in (0.001, 0.01, 0.1, 1.0, 5.0, 20.0):
+                        found_ref = api5_doc2d.ksFindObj(mx, my, limit)
+                        if found_ref:
+                            break
+                    result = {"source_reference": item.get("reference"), "midpoint": [mx, my], "found_ref": found_ref}
+                    if found_ref:
+                        result["style_before"] = api5_doc2d.ksGetObjectStyle(found_ref)
+                        result["set"] = api5_doc2d.ksSetObjectStyle(found_ref, int(projected_line_style))
+                        result["style_after"] = api5_doc2d.ksGetObjectStyle(found_ref)
+                        try:
+                            result["light_off"] = api5_doc2d.ksLightObj(found_ref, 0)
+                        except Exception as exc:
+                            result["light_off_error"] = str(exc)
+                    find_results.append(result)
+                try:
+                    post_anchor_report["ksfind_end_obj"] = api5_doc2d.ksEndObj()
+                except Exception as exc:
+                    post_anchor_report["ksfind_end_obj_error"] = str(exc)
+                post_anchor_report["ksfind_style_refs"] = find_results
+                target_sketch.EndEdit()
+                target_sketch.Update()
+            except Exception as exc:
+                post_anchor_report["errors"].append({"stage": "ksfind_style", "error": str(exc)})
+                try:
+                    target_sketch.EndEdit()
+                except Exception:
+                    pass
+        if add_anchor and (not anchor_report or not anchor_report.get("added")):
+            try:
+                def point_tuple(point):
+                    if isinstance(point, (list, tuple)) and len(point) >= 2:
+                        return float(point[0]), float(point[1])
+                    return float(point["x"]), float(point["y"])
+
+                def geometry_points(item):
+                    geometry = item.get("geometry") or {}
+                    return point_tuple(geometry["start"]), point_tuple(geometry["end"])
+
+                def line_intersection(a1, a2, b1, b2):
+                    x1, y1 = a1
+                    x2, y2 = a2
+                    x3, y3 = b1
+                    x4, y4 = b2
+                    denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+                    if abs(denominator) <= 1e-12:
+                        return None
+                    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denominator
+                    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denominator
+                    return [float(px), float(py)]
+
+                vertical = []
+                non_vertical = []
+                for item in projected_segments:
+                    p1, p2 = geometry_points(item)
+                    if abs(p1[0] - p2[0]) <= 1e-6:
+                        vertical.append(item)
+                    else:
+                        non_vertical.append(item)
+                if vertical and non_vertical:
+                    projected_diagonal = max(non_vertical, key=lambda item: abs(geometry_points(item)[0][0] - geometry_points(item)[1][0]))
+                    projected_shelf = max(vertical, key=lambda item: abs(geometry_points(item)[0][1] - geometry_points(item)[1][1]))
+                    diag_a, diag_b = geometry_points(projected_diagonal)
+                    spring_point = diag_a if abs(diag_a[0]) <= abs(diag_b[0]) else diag_b
+                    diag_far = diag_b if spring_point == diag_a else diag_a
+                    shelf_a, shelf_b = geometry_points(projected_shelf)
+                    shelf_free = shelf_a if shelf_a[1] >= shelf_b[1] else shelf_b
+                    mirror_start = [0.0, -spring_radius]
+                    mirror_end = [float(diag_far[0]), float(-diag_far[1])]
+                    axis_start = line_intersection(spring_point, diag_far, mirror_start, mirror_end)
+                    if axis_start is None:
+                        axis_start = [float((spring_point[0] + diag_far[0]) * 0.5), 0.0]
+                    target_edit_doc = target_sketch.BeginEdit()
+                    drawing = _get_sketch_drawing_container(target_edit_doc)
+                    vertical_base_obj = _add_sketch_line_segment(drawing, [0.0, spring_radius], [0.0, -spring_radius], 6)
+                    mirror_diagonal_obj = _add_sketch_line_segment(drawing, mirror_start, mirror_end, 6)
+                    work_axis_obj = _add_sketch_line_segment(drawing, axis_start, [float(shelf_free[0]), float(shelf_free[1])], 3)
+                    shelf_point_obj = _add_sketch_point(drawing, [float(shelf_free[0]), float(shelf_free[1])], 127)
+                    if payload.get("post_anchor_constraints"):
+                        def attempt_constraint(kind, target, partner_name, func):
+                            item = {"kind": kind, "target": target}
+                            if partner_name:
+                                item["partner"] = partner_name
+                            try:
+                                item["result"] = func()
+                            except Exception as exc:
+                                item["error"] = str(exc)
+                            return item
+
+                        projected_diagonal_obj = None
+                        projected_shelf_obj = None
+                        projected_shelf_free_index = None
+                        projected_anchor_report = []
+                        for projected_info in projected_live_segments:
+                            try:
+                                projected_p1, projected_p2 = segment_points(projected_info)
+                                projected_anchor_report.append(
+                                    _sketch_full_json_safe({k: v for k, v in projected_info.items() if k != "object"})
+                                )
+                                if abs(projected_p1[0] - projected_p2[0]) <= 1e-4:
+                                    projected_shelf_obj = projected_info.get("object")
+                                    projected_shelf_free_index = 0 if projected_p1[1] >= projected_p2[1] else 1
+                                else:
+                                    projected_diagonal_obj = projected_info.get("object")
+                            except Exception as exc:
+                                post_anchor_report["errors"].append({"stage": "classify_projected_live_segment", "error": str(exc)})
+                        post_anchor_report["projected_live_segments"] = projected_anchor_report
+
+                        constraint_attempts = [
+                            attempt_constraint(
+                                "vertical",
+                                "vertical_base",
+                                None,
+                                lambda: _apply_constraint_to_line(vertical_base_obj, SKETCH_CONSTRAINT_TYPES["vertical"]),
+                            ),
+                            attempt_constraint(
+                                "merge_points",
+                                "vertical_base.bottom",
+                                "mirror_diagonal.start",
+                                lambda: _apply_constraint_to_line(
+                                    vertical_base_obj,
+                                    SKETCH_CONSTRAINT_TYPES["merge_points"],
+                                    index=1,
+                                    partner=mirror_diagonal_obj,
+                                    partner_index=0,
+                                ),
+                            ),
+                            attempt_constraint(
+                                "point_on_curve",
+                                "work_axis.start",
+                                "mirror_diagonal",
+                                lambda: _apply_constraint_to_line(
+                                    work_axis_obj,
+                                    SKETCH_CONSTRAINT_TYPES["point_on_curve"],
+                                    index=0,
+                                    partner=mirror_diagonal_obj,
+                                ),
+                            ),
+                            attempt_constraint(
+                                "merge_points",
+                                "work_axis.end",
+                                "shelf_point",
+                                lambda: _apply_constraint_to_line(
+                                    work_axis_obj,
+                                    SKETCH_CONSTRAINT_TYPES["merge_points"],
+                                    index=1,
+                                    partner=shelf_point_obj,
+                                    partner_index=0,
+                                ),
+                            ),
+                        ]
+                        if projected_diagonal_obj is not None:
+                            constraint_attempts.extend(
+                                [
+                                    attempt_constraint(
+                                        "merge_points",
+                                        "vertical_base.top",
+                                        "projected_diagonal.top",
+                                        lambda: _apply_constraint_to_line(
+                                            vertical_base_obj,
+                                            SKETCH_CONSTRAINT_TYPES["merge_points"],
+                                            index=0,
+                                            partner=projected_diagonal_obj,
+                                            partner_index=0,
+                                        ),
+                                    ),
+                                    attempt_constraint(
+                                        "point_on_curve",
+                                        "work_axis.start",
+                                        "projected_diagonal",
+                                        lambda: _apply_constraint_to_line(
+                                            work_axis_obj,
+                                            SKETCH_CONSTRAINT_TYPES["point_on_curve"],
+                                            index=0,
+                                            partner=projected_diagonal_obj,
+                                        ),
+                                    ),
+                                ]
+                            )
+                        if projected_shelf_obj is not None:
+                            constraint_attempts.append(
+                                attempt_constraint(
+                                    "merge_points",
+                                    "work_axis.end",
+                                    "projected_shelf.free_end",
+                                    lambda: _apply_constraint_to_line(
+                                        work_axis_obj,
+                                        SKETCH_CONSTRAINT_TYPES["merge_points"],
+                                        index=1,
+                                        partner=projected_shelf_obj,
+                                        partner_index=projected_shelf_free_index,
+                                    ),
+                                )
+                            )
+                        post_anchor_report["constraint_attempts"] = constraint_attempts
+                        post_anchor_report["dimension_attempts"] = _apply_sketch_dimensions(
+                            drawing,
+                            {
+                                "vertical_base": _sketch_line_entry(
+                                    vertical_base_obj,
+                                    0.0,
+                                    spring_radius,
+                                    0.0,
+                                    -spring_radius,
+                                    role="line",
+                                    target="vertical_base",
+                                )
+                            },
+                            [
+                                {
+                                    "kind": "line_length",
+                                    "target": "vertical_base",
+                                    "value": spring_radius * 2.0,
+                                    "expression": "D1 - WD1",
+                                    "orientation": "vertical",
+                                }
+                            ],
+                            {"enabled": True, "driving": True},
+                        )
+                    target_sketch.EndEdit()
+                    target_sketch.Update()
+                    post_anchor_report["added"] = [
+                        {"id": "vertical_base", "start": [0.0, spring_radius], "end": [0.0, -spring_radius], "style": 6, "reference": safe_get(vertical_base, "Reference")},
+                        {"id": "mirror_diagonal", "start": mirror_start, "end": mirror_end, "style": 6, "reference": safe_get(mirror_diagonal, "Reference")},
+                        {"id": "work_axis", "start": axis_start, "end": [float(shelf_free[0]), float(shelf_free[1])], "style": 3, "reference": safe_get(work_axis, "Reference")},
+                        {"id": "shelf_point", "point": [float(shelf_free[0]), float(shelf_free[1])], "style": 127, "reference": safe_get(shelf_point, "Reference")},
+                    ]
+                else:
+                    post_anchor_report["errors"].append({"stage": "post_add_anchor", "error": "projected_diagonal_or_shelf_not_found"})
+            except Exception as exc:
+                post_anchor_report["errors"].append({"stage": "post_add_anchor", "error": str(exc)})
+                try:
+                    target_sketch.EndEdit()
+                except Exception:
+                    pass
+        snapshot = _inspect_sketch_full(
+            model_container,
+            {
+                "target": {"mode": "existing_sketch", "sketch_ref": safe_get(target_sketch, "Reference")},
+                "include_dimensions": True,
+                "include_constraints": True,
+                "include_diagnostics": True,
+                "max_items": payload.get("max_items") or 200,
+            },
+        )
+        projected_segments = [item for item in (snapshot or {}).get("entities", []) if item.get("kind") == "segment"]
+
+    post_constraint_report = None
+    if add_constraints and snapshot:
+        post_constraint_report = {"errors": [], "constraints": None, "dimensions": None, "entities": {}}
+        try:
+            target_edit_doc = target_sketch.BeginEdit()
+            drawing = _get_sketch_drawing_container(target_edit_doc)
+            line_segments = _resolve_model_object_collection(drawing, ("LineSegments", "GetLineSegments"))
+            points_collection = _resolve_model_object_collection(drawing, ("Points", "GetPoints"))
+
+            def pt_tuple(point):
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    return float(point[0]), float(point[1])
+                return float(point["x"]), float(point["y"])
+
+            def dist2(a, b):
+                return (float(a[0]) - float(b[0])) ** 2 + (float(a[1]) - float(b[1])) ** 2
+
+            def close(a, b, tolerance=1e-5):
+                return dist2(a, b) <= tolerance * tolerance
+
+            def seg_points(info):
+                geometry = info.get("geometry") or {}
+                return pt_tuple(geometry["start"]), pt_tuple(geometry["end"])
+
+            def endpoint_index(info, point):
+                p1, p2 = seg_points(info)
+                return 0 if dist2(p1, point) <= dist2(p2, point) else 1
+
+            lines = []
+            for index in range(collection_count(line_segments)):
+                obj = get_collection_item(line_segments, index)
+                segment = _cast_to_com_interface(obj, "ILineSegment") or obj
+                info = _serialize_line_segment(segment, index, "segments")
+                info["object"] = segment
+                info["style"] = (info.get("raw_properties") or {}).get("Style")
+                lines.append(info)
+
+            vertical_lines = []
+            nonvertical_lines = []
+            for info in lines:
+                p1, p2 = seg_points(info)
+                if abs(p1[0] - p2[0]) <= 1e-6:
+                    vertical_lines.append(info)
+                else:
+                    nonvertical_lines.append(info)
+
+            spring_radius = float(payload.get("spring_radius", 13.5))
+            vertical_base = min(vertical_lines, key=lambda item: min(abs(seg_points(item)[0][0]), abs(seg_points(item)[1][0]))) if vertical_lines else None
+            projected_shelf = max(vertical_lines, key=lambda item: max(abs(seg_points(item)[0][0]), abs(seg_points(item)[1][0]))) if vertical_lines else None
+            work_axis = next((item for item in lines if item.get("style") == 3), None)
+            if work_axis is not None:
+                post_constraint_report["work_axis_entity"] = {k: v for k, v in work_axis.items() if k != "object"}
+            aux_nonvertical = [item for item in nonvertical_lines if item.get("style") == 6]
+            projected_diagonal = None
+            mirror_diagonal = None
+            for info in aux_nonvertical:
+                p1, p2 = seg_points(info)
+                if close(p1, (0.0, spring_radius)) or close(p2, (0.0, spring_radius)):
+                    projected_diagonal = info
+                if close(p1, (0.0, -spring_radius)) or close(p2, (0.0, -spring_radius)):
+                    mirror_diagonal = info
+
+            shelf_point = None
+            if projected_shelf is not None:
+                shelf_a, shelf_b = seg_points(projected_shelf)
+                shelf_free = shelf_a if shelf_a[1] >= shelf_b[1] else shelf_b
+                for index in range(collection_count(points_collection)):
+                    point_obj = get_collection_item(points_collection, index)
+                    point_info = _serialize_point(point_obj, index, "points")
+                    point_geometry = point_info.get("geometry") or {}
+                    if close((point_geometry.get("x"), point_geometry.get("y")), shelf_free):
+                        shelf_point = {"object": point_obj, "role": "point", "x": float(point_geometry.get("x")), "y": float(point_geometry.get("y"))}
+                        break
+
+            required = {
+                "projected_diagonal": projected_diagonal,
+                "projected_shelf": projected_shelf,
+                "vertical_base": vertical_base,
+                "mirror_diagonal": mirror_diagonal,
+                "work_axis": work_axis,
+                "shelf_point": shelf_point,
+            }
+            post_constraint_report["entities"] = {
+                name: _sketch_full_json_safe({k: v for k, v in value.items() if k != "object"}) if isinstance(value, dict) else None
+                for name, value in required.items()
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                post_constraint_report["errors"].append({"stage": "find_entities", "missing": missing})
+            else:
+                sketch_entities = {}
+                for name, info in (
+                    ("projected_diagonal", projected_diagonal),
+                    ("projected_shelf", projected_shelf),
+                    ("vertical_base", vertical_base),
+                    ("mirror_diagonal", mirror_diagonal),
+                    ("work_axis", work_axis),
+                ):
+                    p1, p2 = seg_points(info)
+                    sketch_entities[name] = _sketch_line_entry(info["object"], p1[0], p1[1], p2[0], p2[1], role="line", target=name)
+                sketch_entities["shelf_point"] = shelf_point
+
+                vb_top = (0.0, spring_radius)
+                vb_bottom = (0.0, -spring_radius)
+                pd_spring_index = endpoint_index(projected_diagonal, vb_top)
+                vb_top_index = endpoint_index(vertical_base, vb_top)
+                md_start_index = endpoint_index(mirror_diagonal, vb_bottom)
+                vb_bottom_index = endpoint_index(vertical_base, vb_bottom)
+                shelf_a, shelf_b = seg_points(projected_shelf)
+                shelf_free = shelf_a if shelf_a[1] >= shelf_b[1] else shelf_b
+                shelf_free_index = endpoint_index(projected_shelf, shelf_free)
+                work_end_index = endpoint_index(work_axis, shelf_free)
+                work_start_index = 1 - work_end_index
+
+                constraints = [
+                    {"kind": "merge_points", "target": "vertical_base", "index": vb_top_index, "partner": "projected_diagonal", "partner_index": pd_spring_index},
+                    {"kind": "merge_points", "target": "vertical_base", "index": vb_bottom_index, "partner": "mirror_diagonal", "partner_index": md_start_index},
+                    {"kind": "point_on_curve", "target": "work_axis", "index": work_start_index, "partner": "projected_diagonal"},
+                    {"kind": "point_on_curve", "target": "work_axis", "index": work_start_index, "partner": "mirror_diagonal"},
+                    {"kind": "merge_points", "target": "work_axis", "index": work_end_index, "partner": "projected_shelf", "partner_index": shelf_free_index},
+                    {"kind": "merge_points", "target": "shelf_point", "index": 0, "partner": "work_axis", "partner_index": work_end_index},
+                    {"kind": "merge_points", "target": "shelf_point", "index": 0, "partner": "projected_shelf", "partner_index": shelf_free_index},
+                    {"kind": "vertical", "target": "vertical_base"},
+                ]
+                dimensions = [
+                    {"kind": "line_length", "target": "vertical_base", "value": spring_radius * 2.0, "expression": "D1 - WD1"},
+                ]
+                post_constraint_report["constraints"] = _apply_sketch_constraints(sketch_entities, constraints, {"enabled": True})
+                post_constraint_report["dimensions"] = _apply_sketch_dimensions(drawing, sketch_entities, dimensions, {"enabled": True, "driving": True})
+            target_sketch.EndEdit()
+            target_sketch.Update()
+            snapshot = _inspect_sketch_full(
+                model_container,
+                {
+                    "target": {"mode": "existing_sketch", "sketch_ref": safe_get(target_sketch, "Reference")},
+                    "include_dimensions": True,
+                    "include_constraints": True,
+                    "include_diagnostics": True,
+                    "max_items": payload.get("max_items") or 200,
+                },
+            )
+        except Exception as exc:
+            post_constraint_report["errors"].append({"stage": "post_constraints", "error": str(exc)})
+            try:
+                target_sketch.EndEdit()
+            except Exception:
+                pass
+
+    return {
+        "source": {"name": safe_get(source_sketch, "Name"), "reference": safe_get(source_sketch, "Reference")},
+        "target": {"name": safe_get(target_sketch, "Name"), "reference": safe_get(target_sketch, "Reference")},
+        "projected": projected,
+        "target_update_ok": target_update_ok,
+        "part_update_ok": part_update_ok,
+        "anchor_report": anchor_report,
+        "post_anchor_report": post_anchor_report,
+        "post_constraint_report": post_constraint_report,
+        "snapshot_summary": snapshot.get("summary") if snapshot else None,
+        "constraint_summary": (snapshot.get("constraints") or {}).get("summary") if snapshot else None,
+        "snapshot": snapshot,
+    }
+
+
 def handle_inspect_sketch_entity(payload):
     app = make_app()
     document = resolve_document(app, payload.get("document_id"))
@@ -7718,6 +10610,515 @@ def handle_create_spw_from_rows(payload):
         "summary": summary,
         "specification": specification_payload,
         "spw_columns": spw_columns,
+    }
+
+
+def handle_create_plane_by_edge_and_plane(payload):
+    app = make_app()
+    document = cast_document_3d(payload.get("_document")) if payload.get("_document") is not None else resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+    part = safe_get(document, "TopPart")
+    if part is None:
+        raise RuntimeError("Document does not expose TopPart")
+    model_container = cast_model_container(part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+
+    sketch_name = payload.get("sketch_name") or payload.get("source_sketch_name")
+    if not sketch_name:
+        raise RuntimeError("sketch_name is required")
+
+    sketches = _get_sketch_collection(model_container)
+    target_sketch = None
+    sketch_report = []
+    for index in range(collection_count(sketches)):
+        sketch = _cast_to_com_interface(get_collection_item(sketches, index), "ISketch")
+        item = {"index": index, "name": safe_get(sketch, "Name"), "reference": safe_get(sketch, "Reference")}
+        sketch_report.append(item)
+        if item["name"] == sketch_name:
+            target_sketch = sketch
+    if target_sketch is None:
+        raise RuntimeError("Sketch not found: %s" % sketch_name)
+
+    snapshot = _inspect_sketch_full(
+        model_container,
+        {
+            "target": {"mode": "existing_sketch", "sketch_ref": safe_get(target_sketch, "Reference")},
+            "include_dimensions": True,
+            "include_constraints": True,
+            "include_diagnostics": True,
+            "max_items": payload.get("max_items") or 300,
+        },
+    )
+    edge_style = payload.get("edge_style", payload.get("axis_style", 3))
+    target_geometry = payload.get("edge_geometry")
+    target_entity = None
+    explicit_collection_name = payload.get("edge_collection_name")
+    explicit_edge_index = payload.get("edge_index")
+    if explicit_edge_index is not None:
+        for entity in snapshot.get("entities") or []:
+            if entity.get("kind") != "segment":
+                continue
+            if explicit_collection_name and entity.get("collection_name") != explicit_collection_name:
+                continue
+            if int(entity.get("index", -1)) == int(explicit_edge_index):
+                target_entity = entity
+                break
+    for entity in snapshot.get("entities") or []:
+        if target_entity is not None:
+            break
+        if entity.get("kind") != "segment":
+            continue
+        style = ((entity.get("classification") or {}).get("style")) or (entity.get("raw_properties") or {}).get("Style")
+        if target_geometry is None and edge_style is not None and int(style or -1) == int(edge_style):
+            target_entity = entity
+            break
+    if target_entity is None and target_geometry is not None:
+        target_entity = {"geometry": target_geometry}
+    if target_entity is None:
+        raise RuntimeError("Could not find target sketch segment by style %s" % edge_style)
+
+    def point_tuple(point):
+        if isinstance(point, dict):
+            point = point.get("point") or point.get("start") or point.get("end") or [point.get("x"), point.get("y")]
+        return (float(point[0]), float(point[1]))
+
+    def geometry_points(geometry):
+        return point_tuple(geometry.get("start")), point_tuple(geometry.get("end"))
+
+    def same_points(a, b, tol=1e-4):
+        return math.hypot(a[0] - b[0], a[1] - b[1]) <= tol
+
+    target_start, target_end = geometry_points(target_entity.get("geometry") or {})
+    if target_geometry is not None:
+        for entity in snapshot.get("entities") or []:
+            if entity.get("kind") != "segment" or not entity.get("geometry"):
+                continue
+            try:
+                entity_start, entity_end = geometry_points(entity.get("geometry") or {})
+                if (same_points(entity_start, target_start) and same_points(entity_end, target_end)) or (same_points(entity_start, target_end) and same_points(entity_end, target_start)):
+                    target_entity = entity
+                    break
+            except Exception:
+                pass
+    target_reference = payload.get("edge_reference") or target_entity.get("reference")
+    edge_types = payload.get("edge_types") or [1, 2, 3]
+    edge_candidates = []
+    edge_objects = []
+    selected_edge = None
+    selected_edge_report = None
+    for edge_type in edge_types:
+        try:
+            raw_edges = target_sketch.Edges(int(edge_type))
+        except Exception as exc:
+            edge_candidates.append({"edge_type": edge_type, "error": str(exc)})
+            continue
+        if raw_edges is None:
+            edge_candidates.append({"edge_type": edge_type, "count": 0})
+            continue
+        if isinstance(raw_edges, (list, tuple)):
+            edges = list(raw_edges)
+        elif collection_count(raw_edges):
+            edges = iter_collection(raw_edges)
+        else:
+            edges = [raw_edges]
+        for edge_index, edge in enumerate(edges):
+            item = {"edge_type": edge_type, "index": edge_index, "reference": safe_get(edge, "Reference"), "type": type(edge).__name__}
+            edge_objects.append((edge, item))
+            if selected_edge is None and target_reference not in (None, "") and str(item.get("reference")) == str(target_reference):
+                selected_edge = edge
+                selected_edge_report = dict(item)
+                selected_edge_report["matches_target"] = "reference"
+            try:
+                geometry = _sketch_entity_geometry("segment", edge)
+                item["geometry"] = geometry
+                edge_start, edge_end = geometry_points(geometry)
+                direct = same_points(edge_start, target_start) and same_points(edge_end, target_end)
+                reverse = same_points(edge_start, target_end) and same_points(edge_end, target_start)
+                item["matches_target"] = bool(direct or reverse)
+                if selected_edge is None and item["matches_target"]:
+                    selected_edge = edge
+                    selected_edge_report = dict(item)
+            except Exception as exc:
+                item["geometry_error"] = str(exc)
+            edge_candidates.append(item)
+    if selected_edge is None and len(edge_objects) == 1 and payload.get("allow_single_edge_fallback", True):
+        selected_edge, selected_edge_report = edge_objects[0]
+        selected_edge_report = dict(selected_edge_report)
+        selected_edge_report["matches_target"] = "single_edge_fallback"
+    if selected_edge is None and (int(edge_style or -1) == 3 or target_geometry is not None) and payload.get("allow_axis_extra_edge_fallback", True):
+        refs_by_type = {}
+        for edge, item in edge_objects:
+            refs_by_type.setdefault(item.get("edge_type"), set()).add(item.get("reference"))
+        type1_refs = refs_by_type.get(1, set())
+        type2_extra_refs = [ref for ref in refs_by_type.get(2, set()) if ref not in type1_refs]
+        if len(type2_extra_refs) == 1:
+            extra_ref = type2_extra_refs[0]
+            for edge, item in edge_objects:
+                if item.get("edge_type") == 2 and item.get("reference") == extra_ref:
+                    selected_edge = edge
+                    selected_edge_report = dict(item)
+                    selected_edge_report["matches_target"] = "axis_extra_edge_type2_fallback"
+                    break
+    if selected_edge is None and payload.get("allow_target_entity_object", False) and target_reference is not None:
+        sketch_doc = target_sketch.BeginEdit()
+        if sketch_doc is not None:
+            try:
+                drawing_container = _get_sketch_drawing_container(sketch_doc)
+                collection, _ = _collection_for_sketch_entity_kind(drawing_container, "segment")
+                for index, item in enumerate(iter_collection(collection)):
+                    if str(safe_get(item, "Reference")) == str(target_reference):
+                        selected_edge = item
+                        selected_edge_report = {"matches_target": "target_entity_reference_object", "collection_name": "segments", "index": index, "reference": safe_get(item, "Reference")}
+                        break
+            finally:
+                target_sketch.EndEdit()
+    if selected_edge is None and payload.get("allow_target_entity_object", False) and target_start is not None and target_end is not None:
+        sketch_doc = target_sketch.BeginEdit()
+        if sketch_doc is not None:
+            try:
+                drawing_container = _get_sketch_drawing_container(sketch_doc)
+                collection, _ = _collection_for_sketch_entity_kind(drawing_container, "segment")
+                for index, item in enumerate(iter_collection(collection)):
+                    try:
+                        geometry = _sketch_entity_geometry("segment", item)
+                        item_start, item_end = geometry_points(geometry)
+                        direct = same_points(item_start, target_start) and same_points(item_end, target_end)
+                        reverse = same_points(item_start, target_end) and same_points(item_end, target_start)
+                    except Exception:
+                        direct = reverse = False
+                    if direct or reverse:
+                        selected_edge = item
+                        selected_edge_report = {"matches_target": "target_entity_geometry_object", "collection_name": "segments", "index": index, "reference": safe_get(item, "Reference")}
+                        break
+            finally:
+                target_sketch.EndEdit()
+    if selected_edge is None and payload.get("allow_target_entity_object", False) and explicit_edge_index is not None:
+        sketch_doc = target_sketch.BeginEdit()
+        if sketch_doc is not None:
+            try:
+                drawing_container = _get_sketch_drawing_container(sketch_doc)
+                collection, _ = _collection_for_sketch_entity_kind(drawing_container, "segment")
+                selected_edge = get_collection_item(collection, int(explicit_edge_index))
+                selected_edge_report = {"matches_target": "explicit_target_entity_object", "collection_name": explicit_collection_name or "segments", "index": explicit_edge_index, "reference": safe_get(selected_edge, "Reference")}
+            finally:
+                target_sketch.EndEdit()
+    if selected_edge is None and payload.get("allow_target_entity_object", False) and target_entity is not None and target_entity.get("collection_name") and target_entity.get("index") is not None:
+        sketch_doc = target_sketch.BeginEdit()
+        if sketch_doc is not None:
+            try:
+                drawing_container = _get_sketch_drawing_container(sketch_doc)
+                collection, _ = _collection_for_sketch_entity_kind(drawing_container, target_entity.get("kind") or "segment")
+                selected_edge = get_collection_item(collection, int(target_entity.get("index")))
+                selected_edge_report = {"matches_target": "target_entity_object", "collection_name": target_entity.get("collection_name"), "index": target_entity.get("index"), "reference": safe_get(selected_edge, "Reference")}
+            finally:
+                target_sketch.EndEdit()
+    if selected_edge is None:
+        raise RuntimeError("Could not map sketch segment to IEdge; candidates=%s" % json.dumps(edge_candidates, ensure_ascii=False))
+
+    base_plane_value = payload.get("base_plane") or payload.get("plane") or "XOY"
+    try:
+        base_plane_key = _normalize_sketch_plane(base_plane_value)
+        reference_plane = _resolve_default_part_object(part, base_plane_key)
+    except Exception:
+        reference_plane = _find_named_auxiliary_object(part, "Planes3D", str(base_plane_value))
+        if reference_plane is None:
+            reference_plane = _find_named_auxiliary_object(_cast_to_com_interface(part, "IAuxiliaryGeomContainer"), "Planes3D", str(base_plane_value))
+        if reference_plane is None:
+            raise RuntimeError("Unsupported base plane or plane name: %s" % base_plane_value)
+        base_plane_key = str(safe_get(reference_plane, "Name") or base_plane_value)
+    plane = _create_plane_by_edge_and_plane(
+        part,
+        payload.get("name") or payload.get("plane_name") or "PLANE_BY_EDGE_AND_PLANE",
+        selected_edge,
+        reference_plane,
+        parallel=bool(payload.get("parallel", False)),
+    )
+    try:
+        model_container.Update()
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "sketches": sketch_report,
+        "source_sketch": {"name": sketch_name, "reference": safe_get(target_sketch, "Reference")},
+        "target_entity": _sketch_full_json_safe(target_entity),
+        "edge_candidates": _sketch_full_json_safe(edge_candidates),
+        "selected_edge": _sketch_full_json_safe(selected_edge_report),
+        "plane": {
+            "name": safe_get(plane, "Name"),
+            "reference": safe_get(plane, "Reference"),
+            "type": type(plane).__name__,
+            "parallel": bool(payload.get("parallel", False)),
+            "base_plane": base_plane_key,
+        },
+    }
+
+
+def _select_sketch_axis_edge_by_style(model_container, sketch, edge_style=3):
+    snapshot = _inspect_sketch_full(
+        model_container,
+        {
+            "target": {"mode": "existing_sketch", "sketch_ref": safe_get(sketch, "Reference")},
+            "include_dimensions": True,
+            "include_constraints": True,
+            "include_diagnostics": True,
+            "max_items": 300,
+        },
+    )
+    target_entity = None
+    for entity in snapshot.get("entities") or []:
+        if entity.get("kind") != "segment":
+            continue
+        style = ((entity.get("classification") or {}).get("style")) or (entity.get("raw_properties") or {}).get("Style")
+        if int(style or -1) == int(edge_style):
+            target_entity = entity
+            break
+
+    edge_objects = []
+    edge_candidates = []
+    for edge_type in (1, 2, 3):
+        try:
+            raw_edges = sketch.Edges(int(edge_type))
+        except Exception as exc:
+            edge_candidates.append({"edge_type": edge_type, "error": str(exc)})
+            continue
+        if raw_edges is None:
+            continue
+        if isinstance(raw_edges, (list, tuple)):
+            edges = list(raw_edges)
+        elif collection_count(raw_edges):
+            edges = iter_collection(raw_edges)
+        else:
+            edges = [raw_edges]
+        for edge_index, edge in enumerate(edges):
+            item = {"edge_type": edge_type, "index": edge_index, "reference": safe_get(edge, "Reference"), "type": type(edge).__name__}
+            try:
+                item["endpoints"] = _sample_curve_endpoints(edge)
+            except Exception as exc:
+                item["endpoints_error"] = str(exc)
+            edge_objects.append((edge, item))
+            edge_candidates.append(dict(item))
+    selected_edge = None
+    selected_report = None
+    if selected_edge is None and len(edge_objects) == 1:
+        selected_edge, selected_report = edge_objects[0]
+        selected_report = dict(selected_report)
+        selected_report["matches_target"] = "single_edge_fallback"
+    elif selected_edge is None:
+        refs_by_type = {}
+        for _edge, item in edge_objects:
+            refs_by_type.setdefault(item.get("edge_type"), set()).add(item.get("reference"))
+        type1_refs = refs_by_type.get(1, set())
+        type2_extra_refs = [ref for ref in refs_by_type.get(2, set()) if ref not in type1_refs]
+        if len(type2_extra_refs) == 1:
+            extra_ref = type2_extra_refs[0]
+            for edge, item in edge_objects:
+                if item.get("edge_type") == 2 and item.get("reference") == extra_ref:
+                    selected_edge = edge
+                    selected_report = dict(item)
+                    selected_report["matches_target"] = "axis_extra_edge_type2_fallback"
+                    break
+    if selected_edge is None:
+        raise RuntimeError("Could not select sketch axis edge; candidates=%s" % json.dumps(edge_candidates, ensure_ascii=False))
+    return selected_edge, {"snapshot_target_entity": _sketch_full_json_safe(target_entity), "edge_candidates": edge_candidates, "selected_edge": selected_report}
+
+
+def handle_create_self_wrapping_sketch2(payload):
+    app = make_app()
+    document = cast_document_3d(payload.get("_document")) if payload.get("_document") is not None else resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+    part = safe_get(document, "TopPart")
+    model_container = cast_model_container(part)
+    source_sketch_name = payload.get("source_sketch_name") or "SELF_WRAPPING_PHASE2_LEFT_SKETCH1_PROJECTED"
+    target_name = payload.get("target_sketch_name") or "SELF_WRAPPING_PHASE2_SKETCH2_PATH"
+    target_plane = payload.get("plane") or payload.get("target_plane") or "SELF_WRAPPING_PHASE2_AXIS_PERP_PLANE"
+    radius = float(payload.get("radius", payload.get("p1", 3.01)))
+    radius_expression = str(payload.get("radius_expression") or "P1")
+    tail_length = float(payload.get("tail_length", 6.0))
+    tail_expression = str(payload.get("tail_expression") or "HT1")
+
+    sketches = _get_sketch_collection(model_container)
+    source_sketch = None
+    for index in range(collection_count(sketches)):
+        sketch = _cast_to_com_interface(get_collection_item(sketches, index), "ISketch")
+        if safe_get(sketch, "Name") == source_sketch_name:
+            source_sketch = sketch
+            break
+    if source_sketch is None:
+        raise RuntimeError("Source sketch not found: %s" % source_sketch_name)
+    axis_edge, axis_report = _select_sketch_axis_edge_by_style(model_container, source_sketch, int(payload.get("axis_style", 3)))
+
+    target_coordinate_system_mode = str(payload.get("target_coordinate_system") or "").lower()
+    target_plane_object = None
+    if target_coordinate_system_mode == "plane":
+        try:
+            target_plane_object = _resolve_default_part_object(part, _normalize_sketch_plane(target_plane))
+        except Exception:
+            target_plane_object = _find_named_auxiliary_object(_cast_to_com_interface(part, "IAuxiliaryGeomContainer"), "Planes3D", str(target_plane))
+    target_sketch, target_plane_key = _create_sketch_on_plane(
+        model_container,
+        part,
+        target_name,
+        target_plane_object if target_plane_object is not None else target_plane,
+        assign_coordinate_system=target_coordinate_system_mode == "plane",
+        coordinate_system_before_plane=target_coordinate_system_mode == "plane",
+    )
+    edit_doc = target_sketch.BeginEdit()
+    if edit_doc is None:
+        raise RuntimeError("BeginEdit returned None for Sketch2")
+    drawing = _get_sketch_drawing_container(edit_doc)
+    report = {"axis_edge": axis_report, "created": {}, "constraints": None, "dimensions": None}
+    projected_axis_midpoint = None
+    try:
+        projected_axis_result = target_sketch.AddProjectionOf(axis_edge)
+        if isinstance(projected_axis_result, (list, tuple)):
+            projected_axis = projected_axis_result[0]
+        elif collection_count(projected_axis_result):
+            projected_axis = iter_collection(projected_axis_result)[0]
+        else:
+            projected_axis = projected_axis_result
+        try:
+            projected_axis.Style = 6
+        except Exception:
+            pass
+        projected_axis_geometry = _sketch_entity_geometry("segment", projected_axis)
+        axis_a = projected_axis_geometry.get("start")
+        axis_b = projected_axis_geometry.get("end")
+        if not axis_a or not axis_b:
+            raise RuntimeError("Projected axis geometry is unavailable")
+        projected_axis_midpoint = [(float(axis_a[0]) + float(axis_b[0])) / 2.0, (float(axis_a[1]) + float(axis_b[1])) / 2.0]
+        center_endpoint = str(payload.get("center_endpoint") or "closest_to_origin").lower()
+        if center_endpoint in {"start", "a", "axis_a"}:
+            center = [float(axis_a[0]), float(axis_a[1])]
+            start = [float(axis_b[0]), float(axis_b[1])]
+        elif center_endpoint in {"end", "b", "axis_b"}:
+            center = [float(axis_b[0]), float(axis_b[1])]
+            start = [float(axis_a[0]), float(axis_a[1])]
+        else:
+            dist_a = math.hypot(float(axis_a[0]), float(axis_a[1]))
+            dist_b = math.hypot(float(axis_b[0]), float(axis_b[1]))
+            center = [float(axis_a[0]), float(axis_a[1])] if dist_a <= dist_b else [float(axis_b[0]), float(axis_b[1])]
+            start = [float(axis_b[0]), float(axis_b[1])] if dist_a <= dist_b else [float(axis_a[0]), float(axis_a[1])]
+        ux = start[0] - center[0]
+        uy = start[1] - center[1]
+        distance = math.hypot(ux, uy)
+        if distance <= radius:
+            raise RuntimeError("Projected axis length must be greater than arc radius")
+        ux /= distance
+        uy /= distance
+        side = -1.0 if str(payload.get("side") or "left").lower() in {"right", "negative", "cw"} else 1.0
+        nx = -uy * side
+        ny = ux * side
+        cos_alpha = radius / distance
+        sin_alpha = math.sqrt(max(0.0, 1.0 - cos_alpha * cos_alpha))
+        arc_start = [center[0] + radius * (cos_alpha * ux + sin_alpha * nx), center[1] + radius * (cos_alpha * uy + sin_alpha * ny)]
+        arc_end = [center[0] - radius * nx, center[1] - radius * ny]
+        tail_end = [arc_end[0] + tail_length * ux, arc_end[1] + tail_length * uy]
+
+        long_line = _add_sketch_line_segment(drawing, start, arc_start, 1)
+        arc = _add_sketch_arc(drawing, center, radius, arc_start, arc_end, True, 1)
+        tail_line = _add_sketch_line_segment(drawing, arc_end, tail_end, 1)
+        use_anchor_points = bool(payload.get("use_anchor_points", True))
+        center_point = _add_sketch_point(drawing, center, 127) if use_anchor_points else None
+        end_point = _add_sketch_point(drawing, start, 127) if use_anchor_points else None
+
+        sketch_entities = {
+            "projected_axis": _sketch_line_entry(projected_axis, axis_a[0], axis_a[1], axis_b[0], axis_b[1], role="line", target="projected_axis"),
+            "long_line": _sketch_line_entry(long_line, start[0], start[1], arc_start[0], arc_start[1], role="line", target="long_line"),
+            "turn_arc": _sketch_arc_entry(arc, center[0], center[1], radius, arc_start[0], arc_start[1], arc_end[0], arc_end[1], direction=True, role="arc", target="turn_arc"),
+            "tail_line": _sketch_line_entry(tail_line, arc_end[0], arc_end[1], tail_end[0], tail_end[1], role="line", target="tail_line"),
+        }
+        if use_anchor_points:
+            sketch_entities["center_point"] = _sketch_point_entry(center_point, center[0], center[1], role="point", target="center_point")
+            sketch_entities["end_point"] = _sketch_point_entry(end_point, start[0], start[1], role="point", target="end_point")
+        projected_center_index = 0 if math.hypot(axis_a[0] - center[0], axis_a[1] - center[1]) <= 1e-4 else 1
+        projected_start_index = 1 - projected_center_index
+        if use_anchor_points:
+            constraints = [
+                {"kind": "merge_points", "target": "end_point", "index": 0, "partner": "projected_axis", "partner_index": projected_start_index},
+                {"kind": "merge_points", "target": "end_point", "index": 0, "partner": "long_line", "partner_index": 0},
+                {"kind": "merge_points", "target": "long_line", "index": 1, "partner": "turn_arc", "partner_index": 1},
+                {"kind": "tangent", "target": "long_line", "partner": "turn_arc"},
+                {"kind": "merge_points", "target": "turn_arc", "index": 2, "partner": "tail_line", "partner_index": 0},
+                {"kind": "tangent", "target": "tail_line", "partner": "turn_arc"},
+                {"kind": "horizontal", "target": "tail_line"},
+                {"kind": "merge_points", "target": "center_point", "index": 0, "partner": "turn_arc", "partner_index": 0},
+                {"kind": "merge_points", "target": "center_point", "index": 0, "partner": "projected_axis", "partner_index": projected_center_index},
+            ]
+        else:
+            constraints = [
+                {"kind": "merge_points", "target": "long_line", "index": 0, "partner": "projected_axis", "partner_index": projected_start_index},
+                {"kind": "merge_points", "target": "turn_arc", "index": 0, "partner": "projected_axis", "partner_index": projected_center_index},
+                {"kind": "merge_points", "target": "long_line", "index": 1, "partner": "turn_arc", "partner_index": 1},
+                {"kind": "tangent", "target": "long_line", "partner": "turn_arc"},
+                {"kind": "merge_points", "target": "turn_arc", "index": 2, "partner": "tail_line", "partner_index": 0},
+                {"kind": "tangent", "target": "tail_line", "partner": "turn_arc"},
+                {"kind": "horizontal", "target": "tail_line"},
+            ]
+        report["constraints"] = _apply_sketch_constraints(sketch_entities, constraints, {"enabled": True})
+        report["dimensions"] = _apply_sketch_dimensions(
+            drawing,
+            sketch_entities,
+            [
+                {"kind": "line_length", "target": "tail_line", "value": tail_length, "expression": tail_expression, "orientation": "parallel"},
+                {"kind": "arc_radius", "target": "turn_arc", "value": radius, "expression": radius_expression, "angle": 0.0},
+            ],
+            {"enabled": True, "driving": True},
+        )
+        report["created"] = _sketch_full_json_safe({k: {kk: vv for kk, vv in v.items() if kk != "object"} for k, v in sketch_entities.items()})
+    finally:
+        try:
+            target_sketch.EndEdit()
+        except Exception:
+            pass
+    target_sketch.Update()
+    if projected_axis_midpoint is not None:
+        style_report = {"target": "projected_axis", "midpoint": projected_axis_midpoint}
+        try:
+            target_sketch.BeginEdit()
+            app5, _api5_module, app5_status = _get_api5_kompas_object()
+            api5_doc2d, doc2d_status = _get_api5_document2d()
+            style_report["api5"] = {"app": app5_status, "doc2d": doc2d_status}
+            if api5_doc2d is not None:
+                found_ref = api5_doc2d.ksFindObj(float(projected_axis_midpoint[0]), float(projected_axis_midpoint[1]), 2.0)
+                style_report["found_ref"] = int(found_ref) if found_ref else found_ref
+                if found_ref:
+                    style_report["set_style_result"] = api5_doc2d.ksSetObjectStyle(found_ref, 6)
+                    try:
+                        api5_doc2d.ksLightObj(found_ref, 0)
+                    except Exception:
+                        pass
+                    try:
+                        api5_doc2d.ksEndObj()
+                    except Exception:
+                        pass
+            target_sketch.EndEdit()
+            target_sketch.Update()
+        except Exception as exc:
+            style_report["error"] = str(exc)
+            try:
+                target_sketch.EndEdit()
+            except Exception:
+                pass
+        report["projected_axis_style"] = style_report
+    try:
+        model_container.Update()
+    except Exception:
+        pass
+    snapshot = _inspect_sketch_full(
+        model_container,
+        {"target": {"mode": "existing_sketch", "sketch_ref": safe_get(target_sketch, "Reference")}, "include_dimensions": True, "include_constraints": True, "include_diagnostics": True, "max_items": payload.get("max_items") or 300},
+    )
+    return {
+        "ok": True,
+        "document": describe_document(document, app),
+        "target": {"name": safe_get(target_sketch, "Name"), "reference": safe_get(target_sketch, "Reference"), "plane": target_plane_key},
+        "report": report,
+        "snapshot": snapshot,
     }
 
 
@@ -8897,8 +12298,19 @@ def _apply_part_variables(part, planned_variables):
 
 def _create_part_document(app, visible):
     doc3 = app.Documents.Add(4, bool(visible))
+    fallback_error = None
     if doc3 is None:
-        raise RuntimeError("Documents.Add(ksDocumentPart) returned None")
+        try:
+            import win32com.client
+
+            app = win32com.client.DispatchEx("KOMPAS.Application.7")
+            app.Visible = bool(visible)
+            doc3 = app.Documents.Add(4, bool(visible))
+        except Exception as exc:
+            fallback_error = str(exc)
+            doc3 = None
+    if doc3 is None:
+        raise RuntimeError("Documents.Add(ksDocumentPart) returned None; DispatchEx fallback error=%s" % fallback_error)
     part = safe_get(doc3, "TopPart")
     if part is None:
         doc3_model = cast_document_3d(doc3)
@@ -10206,6 +13618,11 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
         planned_variables = list(params.get("variable_plan") or [])
     if planned_variables:
         steps_report.append(_apply_part_variables(part, planned_variables))
+    if params.get("self_wrapping_hooks") and params.get("self_wrapping_hook_plan"):
+        raise RuntimeError(
+            "self_wrapping_hooks preview is available, but execution is intentionally gated until "
+            "the native sketch/FilletCurves replacement path is wired into the spring builder"
+        )
 
     placement = params.get("placement") or {}
     placement_origin = placement.get("effective_origin") or placement.get("origin") or [0.0, 0.0]
@@ -10331,7 +13748,7 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
     }
 
 
-def _build_compression_spring_feature(part, model_container, params, preview, steps_report, coordinate_system=None):
+def _build_compression_spring_feature(part, model_container, params, preview, steps_report, coordinate_system=None, document=None):
     import win32com.client
 
     planned_variables = []
@@ -11746,6 +15163,59 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 }
             )
 
+    self_wrapping_segment_objects = []
+    if params.get("self_wrapping_hooks") and params.get("self_wrapping_hook_plan"):
+        document_id = None
+        if document is not None:
+            try:
+                document.Active = True
+            except Exception:
+                pass
+            try:
+                document_id = describe_document(document, make_app()).get("id")
+            except Exception:
+                document_id = None
+        self_wrapping_segment_objects, refreshed_auxiliary_container, self_wrapping_auxiliary_objects = _build_self_wrapping_left_hook_replacement(part, model_container, auxiliary_container, params, steps_report, document_id=document_id, document=document)
+        if refreshed_auxiliary_container is not None:
+            auxiliary_container = refreshed_auxiliary_container
+        auxiliary_objects.extend(self_wrapping_auxiliary_objects)
+        right_body_curve_source = None
+        for item in self_wrapping_segment_objects:
+            if str(item.get("path_name") or "") == "self_wrapping_left_fillet1_edge1":
+                right_body_curve_source = item.get("path")
+                break
+        right_self_wrapping_segment_objects, refreshed_auxiliary_container, right_self_wrapping_auxiliary_objects = _build_self_wrapping_right_hook_replacement(
+            part,
+            model_container,
+            auxiliary_container,
+            params,
+            steps_report,
+            document_id=document_id,
+            document=document,
+            body_curve_source=right_body_curve_source,
+        )
+        if refreshed_auxiliary_container is not None:
+            auxiliary_container = refreshed_auxiliary_container
+        auxiliary_objects.extend(right_self_wrapping_auxiliary_objects)
+        segment_objects = [item for item in segment_objects if not str(item.get("role") or "").startswith(("left_hook", "right_hook"))]
+        segment_objects.extend(self_wrapping_segment_objects)
+        segment_objects.extend(right_self_wrapping_segment_objects)
+        steps_report.append(
+            {
+                "step": "self_wrapping_left_hook_replacement",
+                "ok": True,
+                "scenario": "extension_spring",
+                "path_names": [item.get("path_name") for item in self_wrapping_segment_objects],
+            }
+        )
+        steps_report.append(
+            {
+                "step": "self_wrapping_right_hook_replacement",
+                "ok": True,
+                "scenario": "extension_spring",
+                "path_names": [item.get("path_name") for item in right_self_wrapping_segment_objects],
+            }
+        )
     if bool(params.get("construction_only")):
         steps_report.append(
             {
@@ -11765,6 +15235,19 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             "connectors": [],
             "profile": None,
         }
+
+    early_path_contour_bundle = None
+    if params.get("self_wrapping_hooks"):
+        early_path_contour_bundle = _build_compression_spring_path_contour_with_connectors(
+            part,
+            model_container,
+            auxiliary_container,
+            spring_name,
+            params,
+            segment_objects,
+            auxiliary_objects,
+            steps_report,
+        )
 
     profile_anchor_plane = params.get("profile_anchor_plane") or {}
     profile_lcs = None
@@ -11903,18 +15386,21 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             profile_lcs_binding_report["post_binding_update_error"] = str(exc)
         steps_report.append(profile_lcs_binding_report)
 
-    connector_plan, connector_objects, path_contour, contour_report, sweep_paths_for_report = (
-        _build_compression_spring_path_contour_with_connectors(
-            part,
-            model_container,
-            auxiliary_container,
-            spring_name,
-            params,
-            segment_objects,
-            auxiliary_objects,
-            steps_report,
+    if early_path_contour_bundle is not None:
+        connector_plan, connector_objects, path_contour, contour_report, sweep_paths_for_report = early_path_contour_bundle
+    else:
+        connector_plan, connector_objects, path_contour, contour_report, sweep_paths_for_report = (
+            _build_compression_spring_path_contour_with_connectors(
+                part,
+                model_container,
+                auxiliary_container,
+                spring_name,
+                params,
+                segment_objects,
+                auxiliary_objects,
+                steps_report,
+            )
         )
-    )
 
     evolution = win32com.client.CastTo(evolutions.Add(46), "IEvolution")
     if evolution is None:
@@ -11964,6 +15450,61 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
     )
     params["_post_save_anchor_rotation_bindings"] = post_save_anchor_rotation_bindings
 
+    if params.get("self_wrapping_hooks"):
+        coordinate_system_rows = []
+        coordinate_system_ok = True
+        try:
+            current_model = model_container
+            current_auxiliary = auxiliary_container
+            right_plane_name = "%s_RIGHT_HOOK_PLANE" % str(params.get("name") or spring_name or "EXTENSION_SPRING")
+            right_sketch_coordinate_systems = [
+                ("SELF_WRAPPING_RIGHT_FIRST_SKETCH", right_plane_name),
+                ("SELF_WRAPPING_RIGHT_FIRST_SKETCH_PROJECTED", right_plane_name),
+                ("SELF_WRAPPING_RIGHT_SECOND_SKETCH_PATH", "SELF_WRAPPING_RIGHT_AXIS_PERP_PLANE"),
+            ]
+            for sketch_name, plane_name in right_sketch_coordinate_systems:
+                row = {"sketch": sketch_name, "plane": plane_name}
+                try:
+                    sketch = _find_sketch_by_name(current_model, sketch_name)
+                    plane = _find_named_auxiliary_object(current_auxiliary, "Planes3D", plane_name)
+                    if plane is None and str(plane_name).endswith("_RIGHT_HOOK_PLANE"):
+                        planes = safe_get(current_auxiliary, "Planes3D")
+                        for index in range(collection_count(planes)):
+                            candidate = get_collection_item(planes, index)
+                            if str(safe_get(candidate, "Name") or "").endswith("_RIGHT_HOOK_PLANE"):
+                                plane = candidate
+                                row["resolved_plane"] = safe_get(candidate, "Name")
+                                break
+                    sketch.CoordinateSystem = plane
+                    row["ok"] = True
+                    row["sketch_update_ok"] = bool(sketch.Update())
+                    row["plane_reference"] = safe_get(plane, "Reference")
+                    row["sketch_reference"] = safe_get(sketch, "Reference")
+                except Exception as exc:
+                    row["ok"] = False
+                    row["error"] = str(exc)
+                    coordinate_system_ok = False
+                coordinate_system_rows.append(row)
+            try:
+                rebuild_after_cs = bool(part.Update())
+            except Exception as exc:
+                rebuild_after_cs = False
+                coordinate_system_rows.append({"ok": False, "target": "part_update_after_coordinate_systems", "error": str(exc)})
+        except Exception as exc:
+            coordinate_system_ok = False
+            rebuild_after_cs = False
+            coordinate_system_rows.append({"ok": False, "error": str(exc)})
+        steps_report.append(
+            {
+                "step": "self_wrapping_right_sketch_coordinate_systems",
+                "ok": coordinate_system_ok,
+                "scenario": "extension_spring",
+                "timing": "post_body",
+                "rebuild_after_coordinate_systems": rebuild_after_cs,
+                "items": coordinate_system_rows,
+            }
+        )
+
     trim_report = _apply_compression_spring_ground_surface_sections(
         part,
         model_container,
@@ -11975,7 +15516,10 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
         steps_report.append(trim_report)
 
     if bool(params.get("auxiliary_geometry_hidden", True)):
-        visibility_report = _hide_auxiliary_model_objects(auxiliary_objects, True)
+        visibility_objects = auxiliary_objects
+        if params.get("self_wrapping_hooks"):
+            visibility_objects = [item for item in auxiliary_objects if item[0] != "segment_spiral_path"]
+        visibility_report = _hide_auxiliary_model_objects(visibility_objects, True)
         step_report = {
             "step": "hide_spring_auxiliary_geometry",
             "scenario": "compression_spring",
@@ -13722,6 +17266,51 @@ def _create_plane_perpendicular_by_edge(part, name, point, edge):
     plane.Edge = edge
     if not plane.Update():
         raise RuntimeError("IPlane3DPerpendicularByEdge Update returned False")
+    return plane
+
+
+def _get_planes3d_container(container):
+    import win32com.client
+
+    planes = safe_get(container, "Planes3D") or getattr(container, "Planes3D", None)
+    if planes is None or not callable(getattr(planes, "Add", None)):
+        aux = _cast_to_com_interface(container, "IAuxiliaryGeomContainer")
+        if aux is not None:
+            planes = safe_get(aux, "Planes3D") or getattr(aux, "Planes3D", None)
+            if planes is None:
+                get_planes = safe_get(aux, "GetPlanes3D")
+                if callable(get_planes):
+                    planes = get_planes()
+    if planes is None or not callable(getattr(planes, "Add", None)):
+        try:
+            aux_direct = win32com.client.CastTo(container, "IAuxiliaryGeomContainer")
+            planes = safe_get(aux_direct, "Planes3D") or getattr(aux_direct, "Planes3D", None)
+        except Exception:
+            planes = None
+    if planes is None or not callable(getattr(planes, "Add", None)):
+        raise RuntimeError("container does not expose Planes3D")
+    return planes
+
+
+def _create_plane_by_edge_and_plane(container, name, edge, reference_plane, *, parallel=False):
+    import win32com.client
+
+    if edge is None:
+        raise RuntimeError("Plane by edge and plane requires edge")
+    if reference_plane is None:
+        raise RuntimeError("Plane by edge and plane requires reference plane")
+    planes = _get_planes3d_container(container)
+    plane = planes.Add(23)
+    if plane is None:
+        raise RuntimeError("Planes3D.Add(23) returned None")
+    plane = win32com.client.CastTo(plane, "IPlane3DByEdgeAndPlane")
+    if name:
+        plane.Name = str(name)
+    plane.Edge = edge
+    plane.Plane = reference_plane
+    plane.Parallel = bool(parallel)
+    if not plane.Update():
+        raise RuntimeError("IPlane3DByEdgeAndPlane Update returned False")
     return plane
 
 
@@ -17784,9 +21373,7 @@ def handle_create_part_from_scenario(payload):
                         "catalog_matched": material_payload.get("catalog_matched", False),
                     }
                 )
-        doc3 = app.Documents.Add(4, bool(payload.get("visible", False)))
-        if doc3 is None:
-            raise RuntimeError("Documents.Add(ksDocumentPart) returned None")
+        doc3, _part_from_helper, _model_container_from_helper = _create_part_document(app, payload.get("visible", False))
         if material_settings is not None and material_settings_snapshot is not None:
             restore_new_part_document_settings(material_settings, material_settings_snapshot)
             material_settings = None
@@ -17896,6 +21483,7 @@ def handle_create_part_from_scenario(payload):
                 params,
                 payload.get("preview") or {},
                 steps_report,
+                document=doc3,
             )
         else:
             _build_bolt_circle_holes_feature(
@@ -18050,6 +21638,12 @@ def dispatch(request):
         return handle_create_sketch_rectangle(payload)
     if action == "create_sketch_entities":
         return handle_create_sketch_entities(payload)
+    if action == "project_sketch_edges":
+        return handle_project_sketch_edges(payload)
+    if action == "create_plane_by_edge_and_plane":
+        return handle_create_plane_by_edge_and_plane(payload)
+    if action == "create_self_wrapping_sketch2":
+        return handle_create_self_wrapping_sketch2(payload)
     if action == "parameterize_sketch":
         return handle_parameterize_sketch(payload)
     if action == "list_sketches":
@@ -18082,6 +21676,8 @@ def dispatch(request):
         return handle_repair_feature(payload)
     if action == "list_sketch_entities":
         return handle_list_sketch_entities(payload)
+    if action == "inspect_sketch_full":
+        return handle_inspect_sketch_full(payload)
     if action == "inspect_sketch_entity":
         return handle_inspect_sketch_entity(payload)
     if action == "probe_model_object_collections":

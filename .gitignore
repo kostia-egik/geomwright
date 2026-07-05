@@ -7,6 +7,9 @@ __pycache__/
 tmp_*.py
 tmp/
 sample/generated/
+sample/live_outputs/*
+*.m3~
+*.agent_backup
 *.egg-info/
 .pytest_cache/
 build/

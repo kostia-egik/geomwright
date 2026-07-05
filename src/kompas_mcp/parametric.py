@@ -4257,9 +4257,19 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
 
 
 def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
-    result = _preview_part_scenario_legacy("extension_spring", params, "extension_spring")
+    extension_params = copy.deepcopy(params)
+    hook_type = str(extension_params.get("hook_type") or extension_params.get("end_type") or "v_hooks").strip().lower()
+    use_self_wrapping_hooks = hook_type in {"self_wrapping_hooks", "self_wrapping", "wrap_around_hooks", "around_self_hooks"}
+    if use_self_wrapping_hooks:
+        extension_params["hook_type"] = "v_hooks"
+    result = _preview_part_scenario_legacy("extension_spring", extension_params, "extension_spring")
     result_params = result.get("params")
     if isinstance(result_params, dict):
+        if use_self_wrapping_hooks:
+            result_params["hook_type"] = "self_wrapping_hooks"
+            result_params["base_hook_type"] = "v_hooks"
+            result_params["self_wrapping_hooks"] = True
+            result_params.setdefault("self_wrapping_hook_stage", "prepared_sketches_and_native_curve_fillets")
         for key in ("bent_coil_tangent_axis_flip", "bent_coil_angle_direction", "bent_coil_angle_axis_binding", "bent_coil_angle_axis_source", "bent_coil_building_direction"):
             if key in params:
                 result_params[key] = params[key]
@@ -4270,7 +4280,63 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(variable, dict) and variable.get("name"):
                     by_name[variable["name"]] = copy.deepcopy(variable)
             result_params["variable_plan"] = list(by_name.values())
+    if use_self_wrapping_hooks:
+        result = _normalize_self_wrapping_hooks_v1(result)
     return _normalize_bent_coil_left_spike_v2(result)
+
+
+def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
+    params = result.get("params")
+    if not isinstance(params, dict) or not params.get("self_wrapping_hooks"):
+        return result
+    variable_plan = params.setdefault("variable_plan", [])
+    by_name = {variable.get("name"): variable for variable in variable_plan if isinstance(variable, dict)}
+    by_name.setdefault("SH1", {"name": "SH1", "value": 40.0, "kind": "driving_self_wrapping_hook_height", "external": True})
+    by_name.setdefault("SW1", {"name": "SW1", "value": 40.0, "kind": "driving_self_wrapping_hook_width", "external": True})
+    by_name.setdefault("SHW1", {"name": "SHW1", "expression": "SW1 * 0.5", "kind": "derived_self_wrapping_hook_half_width", "external": False})
+    by_name.setdefault("SFR1", {"name": "SFR1", "value": 3.0, "kind": "driving_self_wrapping_fillet_radius", "external": True})
+    wire_diameter = float(params.get("wire_diameter") or params.get("wire_diameter_mm") or 3.0)
+    by_name.setdefault("SWR1", {"name": "SWR1", "value": wire_diameter + 0.01, "expression": "WD1 + 0.01", "kind": "derived_self_wrapping_self_clearance_radius", "external": False})
+    by_name.setdefault("HT1", {"name": "HT1", "value": 6.0, "kind": "driving_self_wrapping_tail_length", "external": True})
+    params["variable_plan"] = list(by_name.values())
+    params["self_wrapping_hook_plan"] = {
+        "version": 1,
+        "base_hook_type": params.get("base_hook_type") or "v_hooks",
+        "left_first_sketch_name": "SELF_WRAPPING_LEFT_FIRST_SKETCH",
+        "left_projected_sketch_name": "SELF_WRAPPING_LEFT_FIRST_SKETCH_PROJECTED",
+        "left_axis_plane_name": "SELF_WRAPPING_LEFT_AXIS_PERP_PLANE",
+        "left_second_sketch_name": "SELF_WRAPPING_LEFT_SECOND_SKETCH_PATH",
+        "fillet_radius_expression": "SFR1",
+        "second_sketch_radius_expression": "SWR1",
+        "tail_length_expression": "HT1",
+    }
+    params["connector_plan"] = []
+    params["profile_anchor_plane"] = {
+        "path_name": "self_wrapping_left_second_edge2",
+        "vertex": "end",
+        "use_perpendicular_plane": True,
+    }
+    params["full_path_sequence"] = [
+        "self_wrapping_left_second_edge2",
+        "self_wrapping_left_second_edge1",
+        "self_wrapping_left_fillet2_edge2",
+        "self_wrapping_left_fillet2_edge0",
+        "self_wrapping_left_fillet2_edge1",
+        "self_wrapping_left_first_edge1",
+        "self_wrapping_left_fillet1_edge2",
+        "self_wrapping_left_fillet1_edge0",
+        "self_wrapping_right_fillet1_edge1",
+        "self_wrapping_right_fillet1_edge0",
+        "self_wrapping_right_fillet1_edge2",
+        "self_wrapping_right_first_edge1",
+        "self_wrapping_right_fillet2_edge1",
+        "self_wrapping_right_fillet2_edge0",
+        "self_wrapping_right_fillet2_edge2",
+        "self_wrapping_right_second_edge1",
+        "self_wrapping_right_second_edge0",
+    ]
+    _sync_add_variables_operation(result, params["variable_plan"])
+    return result
 
 
 def _preview_part_scenario_legacy(normalized_scenario: str, params: dict[str, Any], original_scenario: str) -> dict[str, Any]:
