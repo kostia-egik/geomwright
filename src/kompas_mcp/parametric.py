@@ -4258,13 +4258,16 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
 
 def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
     extension_params = copy.deepcopy(params)
-    hook_type = str(extension_params.get("hook_type") or extension_params.get("end_type") or "v_hooks").strip().lower()
-    use_self_wrapping_hooks = hook_type in {"self_wrapping_hooks", "self_wrapping", "wrap_around_hooks", "around_self_hooks"}
-    if use_self_wrapping_hooks:
-        extension_params["hook_type"] = "v_hooks"
+    hook_selection = _resolve_extension_hook_selection(extension_params)
+    hook_type = hook_selection["base_hook_type"]
+    use_self_wrapping_hooks = hook_selection["left_hook_type"] == "self_wrapping_hooks" and hook_selection["right_hook_type"] == "self_wrapping_hooks"
+    extension_params["hook_type"] = hook_type
     result = _preview_part_scenario_legacy("extension_spring", extension_params, "extension_spring")
     result_params = result.get("params")
     if isinstance(result_params, dict):
+        result_params["hook_selection"] = copy.deepcopy(hook_selection)
+        result_params["left_hook_type"] = hook_selection["left_hook_type"]
+        result_params["right_hook_type"] = hook_selection["right_hook_type"]
         if use_self_wrapping_hooks:
             result_params["hook_type"] = "self_wrapping_hooks"
             result_params["base_hook_type"] = "v_hooks"
@@ -4283,6 +4286,56 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
     if use_self_wrapping_hooks:
         result = _normalize_self_wrapping_hooks_v1(result)
     return _normalize_bent_coil_left_spike_v2(result)
+
+
+def _resolve_extension_hook_selection(params: dict[str, Any]) -> dict[str, Any]:
+    legacy_hook_type = _normalize_extension_hook_type(params.get("hook_type") or params.get("end_type") or "v_hooks")
+    left_hook_type = _normalize_extension_hook_type(
+        params.get("left_hook_type") or params.get("start_hook_type") or params.get("left_end_type") or legacy_hook_type
+    )
+    right_hook_type = _normalize_extension_hook_type(
+        params.get("right_hook_type") or params.get("finish_hook_type") or params.get("right_end_type") or legacy_hook_type
+    )
+    base_hook_type = "v_hooks" if "self_wrapping_hooks" in {legacy_hook_type, left_hook_type, right_hook_type} else legacy_hook_type
+    return {
+        "legacy_hook_type": legacy_hook_type,
+        "base_hook_type": base_hook_type,
+        "left_hook_type": left_hook_type,
+        "right_hook_type": right_hook_type,
+        "left_source": _extension_hook_selection_source(params, ("left_hook_type", "start_hook_type", "left_end_type"), "hook_type"),
+        "right_source": _extension_hook_selection_source(params, ("right_hook_type", "finish_hook_type", "right_end_type"), "hook_type"),
+    }
+
+
+def _extension_hook_selection_source(params: dict[str, Any], side_keys: tuple[str, ...], fallback_key: str) -> str:
+    for key in side_keys:
+        if params.get(key) is not None:
+            return key
+    if params.get(fallback_key) is not None:
+        return fallback_key
+    if params.get("end_type") is not None:
+        return "end_type"
+    return "default"
+
+
+def _normalize_extension_hook_type(value: Any) -> str:
+    raw = str(value or "v_hooks").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "self_wrapping": "self_wrapping_hooks",
+        "wrap_around_hooks": "self_wrapping_hooks",
+        "around_self_hooks": "self_wrapping_hooks",
+        "machine_hook": "machine_hooks",
+        "machine": "machine_hooks",
+        "v_hook": "v_hooks",
+        "v": "v_hooks",
+        "u_hook": "u_hooks",
+        "u": "u_hooks",
+        "open_loop": "open_loop_hooks",
+        "center_loop": "center_loop_hooks",
+        "extended_center_loop": "extended_center_loop_hooks",
+        "bent_coil": "bent_coil_left_spike",
+    }
+    return aliases.get(raw, raw)
 
 
 def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
