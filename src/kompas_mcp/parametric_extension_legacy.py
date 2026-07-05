@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import copy
-import importlib.machinery
-import importlib.util
 import math
 from pathlib import Path
 import re
@@ -58,7 +56,7 @@ SUPPORTED_PART_SCENARIOS = (
     "face_ring_groove",
     "bolt_circle_holes",
     "compression_spring",
-    "extension_spring",
+    "compression_spring_variable_pitch",
     "point",
     "lcs",
     "workflow",
@@ -214,6 +212,20 @@ COMPRESSION_SPRING_SCENARIO_ALIASES = {
     "spring": "compression_spring",
     "coil_spring": "compression_spring",
     "cylindrical_spring": "compression_spring",
+    "conical_compression_spring": "conical_compression_spring",
+    "conical_spring": "conical_compression_spring",
+    "cone_compression_spring": "conical_compression_spring",
+    "tapered_compression_spring": "conical_compression_spring",
+    "torsion_spring": "torsion_spring",
+    "spring_torsion": "torsion_spring",
+    "twist_spring": "torsion_spring",
+    "extension_spring": "extension_spring",
+    "tension_spring": "extension_spring",
+    "spring_extension": "extension_spring",
+    "compression_spring_variable_pitch": "compression_spring_variable_pitch",
+    "variable_pitch_compression_spring": "compression_spring_variable_pitch",
+    "progressive_compression_spring": "compression_spring_variable_pitch",
+    "variable_pitch_spring": "compression_spring_variable_pitch",
 }
 
 
@@ -1680,6 +1692,2656 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_conical_spiral_variable_bindings(
+    *,
+    pitch_expression: str,
+    height_expression: str,
+    start_diameter_expression: str,
+    end_diameter_expression: str,
+    angle_expression: str | None,
+) -> list[dict[str, Any]]:
+    bindings = [
+        {
+            "parameter_note_aliases": ["Шаг", "Step", "Pitch"],
+            "variable": "",
+            "expression": pitch_expression,
+        },
+        {
+            "parameter_note_aliases": ["Высота", "Height"],
+            "variable": "",
+            "expression": height_expression,
+        },
+        {
+            "parameter_note_aliases": ["Диаметр 1", "Diameter 1", "Diameter1"],
+            "variable": "",
+            "expression": start_diameter_expression,
+        },
+        {
+            "parameter_note_aliases": ["Диаметр 2", "Diameter 2", "Diameter2"],
+            "variable": "",
+            "expression": end_diameter_expression,
+        },
+    ]
+    if angle_expression:
+        bindings.append(
+            {
+                "parameter_note_aliases": ["Угол", "Turning angle", "Turning Angle", "Angle"],
+                "variable": "",
+                "expression": angle_expression,
+            }
+        )
+    return bindings
+
+
+def _conical_diameter_expression(
+    *,
+    offset_expression: str,
+    large_diameter_variable: str,
+    small_diameter_variable: str,
+    height_variable: str,
+    large_at_start: bool,
+) -> str:
+    start_variable = large_diameter_variable if large_at_start else small_diameter_variable
+    finish_variable = small_diameter_variable if large_at_start else large_diameter_variable
+    offset = str(offset_expression or "0").strip()
+    if offset in ("0", "0.0"):
+        return start_variable
+    return f"{start_variable} + (({finish_variable} - {start_variable}) * (({offset}) / {height_variable}))"
+
+
+def _conical_diameter_value(
+    *,
+    offset: float,
+    height: float,
+    large_diameter: float,
+    small_diameter: float,
+    large_at_start: bool,
+) -> float:
+    if height <= 1e-9:
+        return large_diameter if large_at_start else small_diameter
+    ratio = max(0.0, min(1.0, float(offset) / float(height)))
+    start = large_diameter if large_at_start else small_diameter
+    finish = small_diameter if large_at_start else large_diameter
+    return start + (finish - start) * ratio
+
+
+def _evaluate_spring_preview_expression(expression: str | None, variable_plan: list[dict[str, Any]]) -> float | None:
+    if expression in (None, ""):
+        return None
+    env: dict[str, Any] = {
+        "floor": math.floor,
+        "ceil": math.ceil,
+        "sin": math.sin,
+        "cos": math.cos,
+        "tan": math.tan,
+        "ln": math.log,
+        "M_PI": math.pi,
+        "M_PI2": 2.0 * math.pi,
+        "M_E": math.e,
+    }
+    for variable in variable_plan:
+        name = str(variable.get("name") or "").strip()
+        if not name:
+            continue
+        value = variable.get("value")
+        if value in (None, ""):
+            continue
+        try:
+            env[name] = float(value)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(eval(str(expression).replace("^", "**"), {"__builtins__": {}}, env))
+    except Exception:
+        return None
+
+
+def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
+    large_diameter = _positive_float(
+        params.get("large_mean_diameter", params.get("large_diameter", params.get("base_mean_diameter"))),
+        "large_mean_diameter",
+    )
+    small_diameter = _positive_float(
+        params.get("small_mean_diameter", params.get("small_diameter", params.get("top_mean_diameter"))),
+        "small_mean_diameter",
+    )
+    if large_diameter <= 0.0 or small_diameter <= 0.0:
+        raise ValueError("conical spring diameters must be positive")
+    if abs(large_diameter - small_diameter) <= 1e-9:
+        raise ValueError("conical_compression_spring requires different large and small diameters")
+    pitch_mode = str(params.get("pitch_mode", params.get("mode", "constant_pitch")) or "constant_pitch").strip().lower()
+    if pitch_mode in {"constant-pitch", "pitch"}:
+        pitch_mode = "constant_pitch"
+    elif pitch_mode in {"constant-angle", "angle"}:
+        pitch_mode = "constant_angle"
+    if pitch_mode not in {"constant_pitch", "constant_angle"}:
+        raise ValueError("conical_compression_spring pitch_mode must be constant_pitch or constant_angle")
+    large_at_start = bool(params.get("large_at_start", True))
+
+    compression_params = dict(params)
+    compression_params["mean_diameter"] = large_diameter if large_at_start else small_diameter
+    preview = preview_compression_spring(compression_params)
+    normalized = preview["params"]
+    normalized["scenario"] = "conical_compression_spring"
+    normalized["pitch_mode"] = pitch_mode
+    normalized["large_mean_diameter"] = large_diameter
+    normalized["small_mean_diameter"] = small_diameter
+    normalized["large_at_start"] = large_at_start
+    normalized["path_family"] = "conical"
+
+    parameter_prefix = str(normalized.get("parameter_prefix") or "")
+    large_diameter_variable = str(normalized.get("mean_diameter_variable") or "D1")
+    small_diameter_variable = f"{parameter_prefix}_D2" if parameter_prefix else "D2"
+    height_variable = str(normalized.get("height_variable") or "H1")
+    normalized["large_mean_diameter_variable"] = large_diameter_variable
+    normalized["small_mean_diameter_variable"] = small_diameter_variable
+    normalized["mean_diameter_variable"] = large_diameter_variable
+    law_parameter_start_variable = f"{parameter_prefix}_t0" if parameter_prefix else "t0"
+    law_parameter_finish_variable = f"{parameter_prefix}_tn" if parameter_prefix else "tn"
+
+    for variable in normalized["variable_plan"]:
+        if variable.get("name") == large_diameter_variable:
+            variable["value"] = large_diameter
+            variable["kind"] = "driving_large_mean_diameter"
+            variable["note"] = build_parameter_note(
+                str(normalized.get("operation_label") or "Spring"),
+                "spring",
+                large_diameter_variable,
+                "Large mean cone diameter",
+            )
+            break
+    if not any(variable.get("name") == small_diameter_variable for variable in normalized["variable_plan"]):
+        insert_at = 1 if normalized["variable_plan"] else 0
+        normalized["variable_plan"].insert(
+            insert_at,
+            {
+                "name": small_diameter_variable,
+                "value": small_diameter,
+                "note": build_parameter_note(
+                    str(normalized.get("operation_label") or "Spring"),
+                    "spring",
+                    small_diameter_variable,
+                    "Small mean cone diameter",
+                ),
+                "kind": "driving_small_mean_diameter",
+                "step_name": "spring",
+                "operation_label": normalized.get("operation_label"),
+                "external": True,
+            },
+        )
+    if pitch_mode == "constant_angle":
+        existing_variable_names = {str(variable.get("name") or "") for variable in normalized["variable_plan"]}
+        if law_parameter_start_variable not in existing_variable_names:
+            normalized["variable_plan"].append(
+                {
+                    "name": law_parameter_start_variable,
+                    "value": 0.0,
+                    "expression": "0",
+                    "note": build_parameter_note(
+                        str(normalized.get("operation_label") or "Spring"),
+                        "spring",
+                        law_parameter_start_variable,
+                        "Law curve start parameter",
+                    ),
+                    "kind": "derived_law_curve_start_parameter",
+                    "step_name": "spring",
+                    "operation_label": normalized.get("operation_label"),
+                    "external": False,
+                }
+            )
+        if law_parameter_finish_variable not in existing_variable_names:
+            normalized["variable_plan"].append(
+                {
+                    "name": law_parameter_finish_variable,
+                    "value": float(normalized.get("turns") or 0.0) * 2.0 * math.pi,
+                    "expression": f"M_PI2 * ({normalized.get('turns_variable') or 'N1'})",
+                    "note": build_parameter_note(
+                        str(normalized.get("operation_label") or "Spring"),
+                        "spring",
+                        law_parameter_finish_variable,
+                        "Law curve finish parameter",
+                    ),
+                    "kind": "derived_law_curve_finish_parameter",
+                    "step_name": "spring",
+                    "operation_label": normalized.get("operation_label"),
+                    "external": False,
+                }
+            )
+
+    placement_origin = normalized["placement"]["effective_origin"]
+    total_height = float(normalized["height"])
+    for segment in normalized["segment_plan"]:
+        start_offset = float(segment["start_offset"])
+        end_offset = start_offset + float(segment["height"])
+        start_expr = str(segment.get("start_offset_expression") or "0")
+        end_expr = f"({start_expr}) + ({segment['height_expression']})"
+        start_diameter = _conical_diameter_value(
+            offset=start_offset,
+            height=total_height,
+            large_diameter=large_diameter,
+            small_diameter=small_diameter,
+            large_at_start=large_at_start,
+        )
+        end_diameter = _conical_diameter_value(
+            offset=end_offset,
+            height=total_height,
+            large_diameter=large_diameter,
+            small_diameter=small_diameter,
+            large_at_start=large_at_start,
+        )
+        start_diameter_expression = _conical_diameter_expression(
+            offset_expression=start_expr,
+            large_diameter_variable=large_diameter_variable,
+            small_diameter_variable=small_diameter_variable,
+            height_variable=height_variable,
+            large_at_start=large_at_start,
+        )
+        end_diameter_expression = _conical_diameter_expression(
+            offset_expression=end_expr,
+            large_diameter_variable=large_diameter_variable,
+            small_diameter_variable=small_diameter_variable,
+            height_variable=height_variable,
+            large_at_start=large_at_start,
+        )
+        segment_anchor_rotation_expression = segment.get("anchor_rotation_expression")
+        if segment_anchor_rotation_expression:
+            segment_anchor_degrees = _evaluate_spring_preview_expression(
+                str(segment_anchor_rotation_expression), normalized["variable_plan"]
+            )
+            if segment_anchor_degrees is None:
+                segment_anchor_degrees = 0.0
+        else:
+            segment_anchor_degrees = 0.0
+        direction_sign = -1.0 if bool(normalized.get("left_hand")) else 1.0
+        start_phase = math.radians(segment_anchor_degrees)
+        end_phase = start_phase + direction_sign * float(segment.get("turns") or 0.0) * 2.0 * math.pi
+        segment["path_type"] = "conic_spiral"
+        segment["start_diameter"] = start_diameter
+        segment["end_diameter"] = end_diameter
+        segment["start_diameter_expression"] = start_diameter_expression
+        segment["end_diameter_expression"] = end_diameter_expression
+        segment["mean_diameter"] = (start_diameter + end_diameter) / 2.0
+        segment["start_point"] = [
+            float(placement_origin[0]) + start_offset,
+            float(placement_origin[1]) + start_diameter / 2.0 * math.cos(start_phase),
+            start_diameter / 2.0 * math.sin(start_phase),
+        ]
+        segment["end_point"] = [
+            float(placement_origin[0]) + end_offset,
+            float(placement_origin[1]) + end_diameter / 2.0 * math.cos(end_phase),
+            end_diameter / 2.0 * math.sin(end_phase),
+        ]
+        segment["operation_variable_bindings"] = _build_conical_spiral_variable_bindings(
+            pitch_expression=str(segment["pitch_expression"]),
+            height_expression=str(segment["height_expression"]),
+            start_diameter_expression=start_diameter_expression,
+            end_diameter_expression=end_diameter_expression,
+            angle_expression=segment.get("anchor_rotation_expression"),
+        )
+        if pitch_mode == "constant_angle" and segment.get("role") == "working":
+            start_radius_expression = f"(({start_diameter_expression}) / 2)"
+            end_radius_expression = f"(({end_diameter_expression}) / 2)"
+            turns_expression = str(segment.get("turns_expression") or "N1")
+            height_expression = str(segment["height_expression"])
+            start_offset_expression = str(segment.get("start_offset_expression") or "0")
+            direction_expression = "t" if not bool(normalized.get("left_hand")) else "-t"
+            law_parameter_expression = (
+                f"(({law_parameter_start_variable}) + "
+                f"(t * (({law_parameter_finish_variable}) - ({law_parameter_start_variable}))))"
+            )
+            direction_parameter_expression = law_parameter_expression if not bool(normalized.get("left_hand")) else f"-({law_parameter_expression})"
+            anchor_rotation_expression = segment_anchor_rotation_expression
+            if anchor_rotation_expression:
+                phase_expression = f"((M_PI2 * ({anchor_rotation_expression})) / 360)"
+                anchor_rotation_degrees = _evaluate_spring_preview_expression(
+                    str(anchor_rotation_expression), normalized["variable_plan"]
+                )
+                if anchor_rotation_degrees is None:
+                    anchor_rotation_degrees = segment_anchor_degrees
+            else:
+                anchor_rotation_degrees = segment_anchor_degrees
+                phase_expression = f"{math.radians(anchor_rotation_degrees):.12g}"
+            angle_expression = f"({direction_parameter_expression}) + ({phase_expression})"
+            m_expression = (
+                f"(ln(({end_radius_expression}) / ({start_radius_expression})) / "
+                f"(({law_parameter_finish_variable}) - ({law_parameter_start_variable})))"
+            )
+            radius_expression = f"({start_radius_expression}) * M_E^(({m_expression}) * ({law_parameter_expression}))"
+            axis_origin = float(placement_origin[0])
+            radial_origin = float(placement_origin[1])
+            phase_radians = math.radians(anchor_rotation_degrees)
+            end_phase_radians = phase_radians + direction_sign * float(segment.get("turns") or 0.0) * 2.0 * math.pi
+            segment["start_point"] = [
+                float(placement_origin[0]) + start_offset,
+                radial_origin + start_diameter / 2.0 * math.cos(phase_radians),
+                start_diameter / 2.0 * math.sin(phase_radians),
+            ]
+            segment["end_point"] = [
+                float(placement_origin[0]) + end_offset,
+                radial_origin + end_diameter / 2.0 * math.cos(end_phase_radians),
+                end_diameter / 2.0 * math.sin(end_phase_radians),
+            ]
+            segment["path_type"] = "law_curve"
+            segment["operation_variable_bindings"] = []
+            segment["law_curve"] = {
+                "parameter": "t",
+                "expression_x": (
+                    f"{axis_origin:.12g} + ({start_offset_expression}) + "
+                    f"((({radius_expression}) - ({start_radius_expression})) * "
+                    f"(({height_expression}) / (({end_radius_expression}) - ({start_radius_expression}))))"
+                ),
+                "expression_y": f"{radial_origin:.12g} + ({radius_expression}) * cos({angle_expression})",
+                "expression_z": f"({radius_expression}) * sin({angle_expression})",
+                "interval_expression": "[0; 1]",
+                "t_min": 0.0,
+                "t_max": 1.0,
+                "law_parameter_expression": law_parameter_expression,
+                "m_expression": m_expression,
+                "radius_expression": radius_expression,
+            }
+
+    normalized["selector_points"] = _build_compression_spring_selector_points(
+        normalized,
+        [float(placement_origin[0]), float(placement_origin[1]), 0.0],
+        [float(placement_origin[0]) + total_height, float(placement_origin[1]), 0.0],
+    )
+    joint_gaps: list[dict[str, Any]] = []
+    max_joint_gap = 0.0
+    for index in range(1, len(normalized["segment_plan"])):
+        previous_segment = normalized["segment_plan"][index - 1]
+        current_segment = normalized["segment_plan"][index]
+        gap_vector = [
+            float(current_segment["start_point"][axis]) - float(previous_segment["end_point"][axis])
+            for axis in range(3)
+        ]
+        gap_length = math.sqrt(sum(component * component for component in gap_vector))
+        max_joint_gap = max(max_joint_gap, gap_length)
+        joint_gaps.append(
+            {
+                "from_role": previous_segment["role"],
+                "to_role": current_segment["role"],
+                "gap": gap_length,
+                "gap_vector": gap_vector,
+            }
+        )
+    normalized["path_verification"] = {
+        "contour_ready": max_joint_gap <= 1e-6,
+        "max_joint_gap": max_joint_gap,
+        "max_joint_angle_gap": 0.0,
+        "joints": joint_gaps,
+    }
+
+    operations_by_role = {
+        str(operation.get("role") or ""): operation
+        for operation in preview["operations"]
+        if operation.get("operation") == "create_spiral_path"
+    }
+    for segment in normalized["segment_plan"]:
+        operation = operations_by_role.get(str(segment["role"]))
+        if not operation:
+            continue
+        operation.update(
+            {
+                "path_type": segment.get("path_type", "conic_spiral"),
+                "mean_diameter": segment["mean_diameter"],
+                "start_diameter": segment["start_diameter"],
+                "end_diameter": segment["end_diameter"],
+                "start_diameter_expression": segment["start_diameter_expression"],
+                "end_diameter_expression": segment["end_diameter_expression"],
+                "law_curve": segment.get("law_curve"),
+                "operation_variable_bindings": list(segment["operation_variable_bindings"]),
+            }
+        )
+    preview["scenario"] = "conical_compression_spring"
+    preview["summary"].update(
+        {
+            "large_mean_diameter": large_diameter,
+            "small_mean_diameter": small_diameter,
+            "pitch_mode": pitch_mode,
+            "path_family": "conical",
+        }
+    )
+    preview["selectors"] = normalized["selector_points"]
+    preview["interface"] = _build_compression_spring_interface(
+        normalized,
+        [float(placement_origin[0]), float(placement_origin[1]), 0.0],
+        [float(placement_origin[0]) + total_height, float(placement_origin[1]), 0.0],
+        normalized["selector_points"],
+    )
+    return preview
+
+
+def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
+    wire_diameter = _positive_float(params.get("wire_diameter", params.get("d")), "wire_diameter")
+    if params.get("outer_diameter", params.get("D_outer")) is not None:
+        outer_diameter = _positive_float(params.get("outer_diameter", params.get("D_outer")), "outer_diameter")
+    elif params.get("mean_diameter", params.get("D")) is not None:
+        legacy_mean_diameter = _positive_float(params.get("mean_diameter", params.get("D")), "mean_diameter")
+        outer_diameter = legacy_mean_diameter + wire_diameter
+    else:
+        outer_diameter = _positive_float(None, "outer_diameter")
+    mean_diameter = outer_diameter - wire_diameter
+    if mean_diameter <= 0.0:
+        raise ValueError("outer_diameter must be larger than wire_diameter")
+    body_turns = _positive_float(params.get("turns", params.get("body_turns", params.get("working_turns"))), "turns")
+    free_angle = float(params.get("free_angle_degrees", params.get("angle_degrees", 0.0)) or 0.0)
+    total_turns = body_turns + free_angle / 360.0
+    if total_turns <= 0.0:
+        raise ValueError("torsion spring total turns must be positive")
+    gap = float(params.get("gap", params.get("clearance", 0.0)) or 0.0)
+    if gap < 0.0:
+        raise ValueError("gap must be non-negative")
+    pitch = wire_diameter + gap
+    body_height = pitch * total_turns
+    left_leg_length = _positive_float(params.get("left_leg_length", params.get("leg_length", 18.0)), "left_leg_length")
+    right_leg_length = _positive_float(params.get("right_leg_length", params.get("leg_length", 18.0)), "right_leg_length")
+    end_type = str(params.get("end_type", params.get("leg_type", "tangent_legs")) or "tangent_legs").strip().lower()
+    end_type_aliases = {
+        "tangent": "tangent_legs",
+        "tangent_leg": "tangent_legs",
+        "tangent_legs": "tangent_legs",
+        "radial": "radial_legs",
+        "radial_legs": "radial_legs",
+        "perpendicular_to_axis": "radial_legs",
+        "axial": "axial_transition_legs",
+        "axial_transition": "axial_transition_legs",
+        "axial_transition_legs": "axial_transition_legs",
+    }
+    end_type = end_type_aliases.get(end_type, end_type)
+    if end_type not in {"tangent_legs", "radial_legs", "axial_transition_legs"}:
+        raise ValueError("torsion_spring end_type must be tangent_legs, radial_legs, or axial_transition_legs")
+    turn_direction = str(params.get("turn_direction", params.get("hand", "right")) or "right").strip().lower()
+    left_hand = turn_direction in {"left", "left_hand", "левое", "левый"}
+    direction_sign = -1.0 if left_hand else 1.0
+    start_phase_degrees = float(params.get("start_phase_degrees", 0.0) or 0.0)
+    if abs(start_phase_degrees) > 1e-9:
+        raise ValueError("torsion_spring tangent_legs currently supports start_phase_degrees=0 only")
+    start_phase = math.radians(start_phase_degrees)
+    end_phase = start_phase + direction_sign * total_turns * 2.0 * math.pi
+    radius = mean_diameter / 2.0
+    spring_name = str(params.get("name", "TORSION_SPRING") or "TORSION_SPRING")
+    parameter_prefix = str(params.get("parameter_prefix", "") or "").strip()
+    def _var(name: str) -> str:
+        return f"{parameter_prefix}_{name}" if parameter_prefix else name
+
+    mean_diameter_variable = _var("D1")
+    wire_diameter_variable = _var("WD1")
+    gap_variable = _var("G1")
+    pitch_variable = _var("P1")
+    turns_variable = _var("N1")
+    body_turns_variable = _var("N0")
+    free_angle_variable = _var("A1")
+    height_variable = _var("H1")
+    left_leg_variable = _var("LL1")
+    right_leg_variable = _var("LL2")
+    start_phase_variable = _var("PH1")
+    left_start_y_variable = _var("LY1")
+    left_start_z_variable = _var("LZ1")
+    body_start_y_variable = _var("BY1")
+    body_start_z_variable = _var("BZ1")
+    body_finish_y_variable = _var("BY2")
+    body_finish_z_variable = _var("BZ2")
+    right_finish_y_variable = _var("RY2")
+    right_finish_z_variable = _var("RZ2")
+    transition_trim_length_variable = _var("TL1")
+    transition_connect_tension_variable = _var("TN1")
+
+    radius_expression = f"(({mean_diameter_variable} - {wire_diameter_variable}) / 2)"
+    sign_expression = "-1" if left_hand else "1"
+    end_phase_degrees_expression = f"({sign_expression} * 360 * {turns_variable})"
+
+    def _line_bindings(
+        *,
+        p1x: str,
+        p1y: str,
+        p1z: str,
+        p2x: str,
+        p2y: str,
+        p2z: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"parameter_note_aliases": ["Точка 1. Координата X", "Point 1. Coordinate X"], "variable": "", "expression": p1x},
+            {"parameter_note_aliases": ["Точка 1. Координата Y", "Point 1. Coordinate Y"], "variable": "", "expression": p1y},
+            {"parameter_note_aliases": ["Точка 1. Координата Z", "Point 1. Coordinate Z"], "variable": "", "expression": p1z},
+            {"parameter_note_aliases": ["Точка 2. Координата X", "Point 2. Coordinate X"], "variable": "", "expression": p2x},
+            {"parameter_note_aliases": ["Точка 2. Координата Y", "Point 2. Coordinate Y"], "variable": "", "expression": p2y},
+            {"parameter_note_aliases": ["Точка 2. Координата Z", "Point 2. Coordinate Z"], "variable": "", "expression": p2z},
+        ]
+
+    start_y_expression = radius_expression
+    start_z_expression = "0"
+    start_tangent_y_expression = f"-({sign_expression}) * sinD({start_phase_variable})"
+    start_tangent_z_expression = f"({sign_expression}) * cosD({start_phase_variable})"
+    end_y_expression = f"({radius_expression}) * cosD({end_phase_degrees_expression})"
+    end_z_expression = f"({radius_expression}) * sinD({end_phase_degrees_expression})"
+    end_tangent_y_expression = f"-({sign_expression}) * sinD({end_phase_degrees_expression})"
+    end_tangent_z_expression = f"({sign_expression}) * cosD({end_phase_degrees_expression})"
+    start_point = [0.0, radius * math.cos(start_phase), radius * math.sin(start_phase)]
+    end_point = [body_height, radius * math.cos(end_phase), radius * math.sin(end_phase)]
+    start_tangent = [0.0, -direction_sign * math.sin(start_phase), direction_sign * math.cos(start_phase)]
+    end_tangent = [0.0, -direction_sign * math.sin(end_phase), direction_sign * math.cos(end_phase)]
+    left_start_x_expression = "0"
+    left_end_x_expression = "0"
+    right_start_x_expression = height_variable
+    right_end_x_expression = height_variable
+    if end_type == "tangent_legs":
+        left_direction = [0.0, -start_tangent[1], -start_tangent[2]]
+        right_direction = [0.0, end_tangent[1], end_tangent[2]]
+        left_start_y_expression = start_y_expression
+        left_start_z_expression = f"-({sign_expression}) * {left_leg_variable}"
+        right_end_y_expression = f"({end_y_expression}) + ({right_leg_variable} * ({end_tangent_y_expression}))"
+        right_end_z_expression = f"({end_z_expression}) + ({right_leg_variable} * ({end_tangent_z_expression}))"
+    elif end_type == "radial_legs":
+        left_direction = [0.0, math.cos(start_phase), math.sin(start_phase)]
+        right_direction = [0.0, math.cos(end_phase), math.sin(end_phase)]
+        left_start_y_expression = f"({start_y_expression}) + ({left_leg_variable} * cosD({start_phase_variable}))"
+        left_start_z_expression = f"({start_z_expression}) + ({left_leg_variable} * sinD({start_phase_variable}))"
+        right_end_y_expression = f"({end_y_expression}) + ({right_leg_variable} * cosD({end_phase_degrees_expression}))"
+        right_end_z_expression = f"({end_z_expression}) + ({right_leg_variable} * sinD({end_phase_degrees_expression}))"
+    else:
+        left_direction = [-1.0, 0.0, 0.0]
+        right_direction = [1.0, 0.0, 0.0]
+        left_start_x_expression = f"-({left_leg_variable})"
+        right_end_x_expression = f"({height_variable}) + ({right_leg_variable})"
+        left_start_y_expression = start_y_expression
+        left_start_z_expression = start_z_expression
+        right_end_y_expression = end_y_expression
+        right_end_z_expression = end_z_expression
+
+    left_start = [
+        start_point[0] + left_leg_length * left_direction[0],
+        start_point[1] + left_leg_length * left_direction[1],
+        start_point[2] + left_leg_length * left_direction[2],
+    ]
+    right_end = [
+        end_point[0] + right_leg_length * right_direction[0],
+        end_point[1] + right_leg_length * right_direction[1],
+        end_point[2] + right_leg_length * right_direction[2],
+    ]
+    segment_plan = [
+        {
+            "role": "left_leg",
+            "path_name": f"{spring_name}_LEFT_LEG_PATH",
+            "label": "left tangent leg",
+            "path_type": "line_segment",
+            "start_point": left_start,
+            "end_point": start_point,
+            "operation_variable_bindings": _line_bindings(
+                p1x=left_start_x_expression,
+                p1y=left_start_y_variable,
+                p1z=left_start_z_variable,
+                p2x=left_end_x_expression,
+                p2y=body_start_y_variable,
+                p2z=body_start_z_variable,
+            ),
+        },
+        {
+            "role": "body",
+            "path_name": f"{spring_name}_BODY_PATH",
+            "label": "torsion body",
+            "path_type": "cylindric_spiral",
+            "mean_diameter": mean_diameter,
+            "pitch": pitch,
+            "height": body_height,
+            "turns": total_turns,
+            "turns_expression": turns_variable,
+            "pitch_expression": pitch_variable,
+            "height_expression": height_variable,
+            "anchor_rotation_degrees": start_phase_degrees,
+            "anchor_rotation_expression": str(start_phase_degrees),
+            "turning_angle_degrees": 0.0,
+            "start_offset": 0.0,
+            "start_point": start_point,
+            "end_point": end_point,
+            "left_hand": left_hand,
+            "operation_variable_bindings": _build_spring_spiral_variable_bindings(
+                mean_diameter_expression=f"{mean_diameter_variable} - {wire_diameter_variable}",
+                pitch_expression=pitch_variable,
+                height_expression=height_variable,
+            ),
+        },
+        {
+            "role": "right_leg",
+            "path_name": f"{spring_name}_RIGHT_LEG_PATH",
+            "label": "right tangent leg",
+            "path_type": "line_segment",
+            "start_point": end_point,
+            "end_point": right_end,
+            "operation_variable_bindings": _line_bindings(
+                p1x=right_start_x_expression,
+                p1y=body_finish_y_variable,
+                p1z=body_finish_z_variable,
+                p2x=right_end_x_expression,
+                p2y=right_finish_y_variable,
+                p2z=right_finish_z_variable,
+            ),
+        },
+    ]
+    variable_plan = [
+        {"name": mean_diameter_variable, "value": outer_diameter, "kind": "driving_outer_diameter", "external": True},
+        {"name": wire_diameter_variable, "value": wire_diameter, "kind": "driving_wire_diameter", "external": True},
+        {"name": gap_variable, "value": gap, "kind": "driving_coil_gap", "external": True},
+        {"name": pitch_variable, "expression": f"{wire_diameter_variable} + {gap_variable}", "kind": "derived_pitch", "external": False},
+        {"name": body_turns_variable, "value": body_turns, "kind": "driving_body_turn_count", "external": True},
+        {"name": free_angle_variable, "value": free_angle, "kind": "driving_free_angle", "external": True},
+        {"name": start_phase_variable, "value": start_phase_degrees, "kind": "driving_start_phase", "external": True},
+        {"name": turns_variable, "expression": f"{body_turns_variable} + ({free_angle_variable} / 360)", "kind": "derived_total_turn_count", "external": False},
+        {"name": height_variable, "expression": f"{pitch_variable} * {turns_variable}", "kind": "derived_body_height", "external": False},
+        {"name": left_leg_variable, "value": left_leg_length, "kind": "driving_left_leg_length", "external": True},
+        {"name": right_leg_variable, "value": right_leg_length, "kind": "driving_right_leg_length", "external": True},
+        {"name": left_start_y_variable, "expression": left_start_y_expression, "kind": "derived_left_leg_start_y", "external": False},
+        {"name": left_start_z_variable, "expression": left_start_z_expression, "kind": "derived_left_leg_start_z", "external": False},
+        {"name": body_start_y_variable, "expression": start_y_expression, "kind": "derived_body_start_y", "external": False},
+        {"name": body_start_z_variable, "expression": start_z_expression, "kind": "derived_body_start_z", "external": False},
+        {"name": body_finish_y_variable, "expression": end_y_expression, "kind": "derived_body_finish_y", "external": False},
+        {"name": body_finish_z_variable, "expression": end_z_expression, "kind": "derived_body_finish_z", "external": False},
+        {"name": right_finish_y_variable, "expression": right_end_y_expression, "kind": "derived_right_leg_finish_y", "external": False},
+        {"name": right_finish_z_variable, "expression": right_end_z_expression, "kind": "derived_right_leg_finish_z", "external": False},
+        {"name": transition_trim_length_variable, "value": float(params.get("transition_trim_length", wire_diameter)), "kind": "driving_transition_trim_length", "external": True},
+        {"name": transition_connect_tension_variable, "value": float(params.get("transition_tension", 1.0)), "kind": "driving_transition_tension", "external": True},
+    ]
+    connector_plan: list[dict[str, Any]] = []
+    if end_type != "tangent_legs":
+        def _torsion_connector(previous_segment: dict[str, Any], current_segment: dict[str, Any]) -> dict[str, Any]:
+            connector_role = f"{previous_segment['role']}_to_{current_segment['role']}"
+            curve1_trim = normalize_trimmed_curve_params(
+                {
+                    "name": f"torsion_{connector_role}_curve1_local_path",
+                    "point_name": f"torsion_{connector_role}_curve1_local_point",
+                    "offset": float(params.get("transition_trim_length", wire_diameter)),
+                    "direction": False,
+                    "sense": True,
+                    "offset_type": 2,
+                }
+            )
+            curve1_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
+                transition_trim_length_variable,
+                f"{connector_role}_curve1_trim_offset",
+            )
+            curve2_trim = normalize_trimmed_curve_params(
+                {
+                    "name": f"torsion_{connector_role}_curve2_local_path",
+                    "point_name": f"torsion_{connector_role}_curve2_local_point",
+                    "offset": float(params.get("transition_trim_length", wire_diameter)),
+                    "direction": True,
+                    "sense": False,
+                    "offset_type": 2,
+                }
+            )
+            curve2_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
+                transition_trim_length_variable,
+                f"{connector_role}_curve2_trim_offset",
+            )
+            connect_curve = normalize_connect_curve_params(
+                {
+                    "name": f"torsion_{connector_role}_connect_path",
+                    "curve1_connect_vertex": False,
+                    "curve2_connect_vertex": True,
+                    "curve1_connect_type": "smooth",
+                    "curve2_connect_type": "smooth",
+                    "tension": float(params.get("transition_tension", 1.0)),
+                }
+            )
+            connect_curve["operation_variable_bindings"] = _build_transition_connect_curve_variable_bindings(
+                transition_connect_tension_variable,
+                f"{connector_role}_connect_curve_tension",
+            )
+            return {
+                "builder": "trimmed_connect_curve",
+                "role": connector_role,
+                "label": connector_role.replace("_", " "),
+                "path_name": connect_curve["name"],
+                "curve1_path_name": str(previous_segment["path_name"]),
+                "curve2_path_name": str(current_segment["path_name"]),
+                "curve1_trim": curve1_trim,
+                "curve2_trim": curve2_trim,
+                "connect_curve": connect_curve,
+                "sequence_curve1_path_name": curve1_trim["name"],
+                "sequence_curve2_path_name": curve2_trim["name"],
+                "trim_length": float(params.get("transition_trim_length", wire_diameter)),
+                "trim_length_expression": transition_trim_length_variable,
+                "tension": float(params.get("transition_tension", 1.0)),
+                "tension_expression": transition_connect_tension_variable,
+            }
+
+        connector_plan = [
+            _torsion_connector(segment_plan[0], segment_plan[1]),
+            _torsion_connector(segment_plan[1], segment_plan[2]),
+        ]
+        # When one curve is trimmed from both ends, the second trim must use the
+        # first trimmed result as its source. Otherwise both cuts target the
+        # original curve and the final contour keeps only one trimmed side.
+        connector_plan[1]["curve1_path_name"] = str(connector_plan[0]["sequence_curve2_path_name"])
+        connector_plan[1]["curve1_source_is_chained_trim"] = True
+    if connector_plan:
+        full_path_sequence = [str(connector_plan[0]["sequence_curve1_path_name"])]
+        for index, connector in enumerate(connector_plan):
+            full_path_sequence.append(str(connector["path_name"]))
+            if index + 1 < len(connector_plan):
+                full_path_sequence.append(str(connector_plan[index + 1]["sequence_curve1_path_name"]))
+            else:
+                full_path_sequence.append(str(connector["sequence_curve2_path_name"]))
+    else:
+        full_path_sequence = [segment["path_name"] for segment in segment_plan]
+    normalized = {
+        "scenario": "torsion_spring",
+        "spring_name": spring_name,
+        "parameter_prefix": parameter_prefix,
+        "operation_label": spring_name,
+        "mean_diameter": mean_diameter,
+        "outer_diameter": outer_diameter,
+        "wire_diameter": wire_diameter,
+        "wire_radius": wire_diameter / 2.0,
+        "pitch": pitch,
+        "height": body_height,
+        "turns": total_turns,
+        "left_hand": left_hand,
+        "turn_direction": "left" if left_hand else "right",
+        "end_type": end_type,
+        "mean_diameter_variable": mean_diameter_variable,
+        "wire_diameter_variable": wire_diameter_variable,
+        "pitch_variable": pitch_variable,
+        "height_variable": height_variable,
+        "turns_variable": turns_variable,
+        "variable_plan": variable_plan,
+        "segment_plan": segment_plan,
+        "connector_plan": connector_plan,
+        "full_path_sequence": full_path_sequence,
+        "ground_trim_plan": {"operations": []},
+        "path_verification": {"contour_ready": True, "max_joint_gap": 0.0, "joints": []},
+        "placement": {"effective_origin": [0.0, 0.0, 0.0]},
+        "profile_path_offset": [0.0, 0.0, -radius],
+        "sketch": {
+            "axis_line_style": 3,
+            "profile_line_style": 1,
+            "parametric": True,
+            "dimension_display": "radius",
+            "dimensions": {"enabled": True},
+            "constraints": {"enabled": True, "auto": True},
+            "parameterization_order": "staged",
+        },
+        "profile_sketch_constraints": [
+            {"kind": "fixed_point", "target": "radius_ref", "index": 0},
+            {"kind": "vertical", "target": "radius_ref"},
+            {"kind": "merge_points", "target": "radius_ref", "index": 1, "partner": "profile_radius_ref", "partner_index": 0},
+            {"kind": "merge_points", "target": "radius_ref", "index": 1, "partner": "profile_circle", "partner_index": 0},
+            {"kind": "horizontal", "target": "profile_radius_ref"},
+            {"kind": "point_on_curve", "target": "profile_radius_ref", "index": 1, "partner": "profile_circle"},
+        ],
+        "profile_sketch_dimensions": [
+            {
+                "kind": "line_length",
+                "target": "radius_ref",
+                "expression": radius_expression,
+                "driving": True,
+            },
+            {
+                "kind": "line_length",
+                "target": "profile_radius_ref",
+                "expression": f"{wire_diameter_variable} / 2",
+                "driving": True,
+                "placement_index": 1,
+            },
+        ],
+        "profile_lcs_rotation": {},
+        "close_after_save": False,
+    }
+    operations = [
+        {"operation": "add_variables", "variables": variable_plan},
+    ] + [
+        {"operation": "create_path_segment", "role": segment["role"], "path_type": segment["path_type"], "path_name": segment["path_name"]}
+        for segment in segment_plan
+    ] + [
+        {"operation": "create_wire_profile", "radius": wire_diameter / 2.0},
+        {"operation": "boss_evolution", "source_path_count": len(segment_plan)},
+    ]
+    selectors = {
+        "left_leg_start_point": list(left_start),
+        "body_start_point": list(start_point),
+        "body_finish_point": list(end_point),
+        "right_leg_finish_point": list(right_end),
+    }
+    return {
+        "scenario": "torsion_spring",
+        "params": normalized,
+        "operations": operations,
+        "selectors": selectors,
+        "summary": {
+            "mean_diameter": mean_diameter,
+            "outer_diameter": outer_diameter,
+            "wire_diameter": wire_diameter,
+            "turns": total_turns,
+            "end_type": end_type,
+            "turn_direction": normalized["turn_direction"],
+        },
+        "interface": {"parameters": {}, "anchors": {"selector_points": selectors}},
+    }
+
+
+def _build_trimmed_connector(
+    *,
+    role: str,
+    previous_path_name: str,
+    current_path_name: str,
+    trim_length: float,
+    trim_length_expression: str,
+    tension: float,
+    tension_expression: str,
+    curve1_trim_overrides: Mapping[str, Any] | None = None,
+    curve2_trim_overrides: Mapping[str, Any] | None = None,
+    connect_curve_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    curve1_trim = normalize_trimmed_curve_params(
+        {
+            "name": f"{role}_curve1_local_path",
+            "point_name": f"{role}_curve1_local_point",
+            "offset": trim_length,
+            "direction": True,
+            "sense": True,
+            "offset_type": 2,
+        }
+    )
+    curve1_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
+        trim_length_expression,
+        f"{role}_curve1_trim_offset",
+    )
+    if curve1_trim_overrides:
+        curve1_trim.update(dict(curve1_trim_overrides))
+    curve2_trim = normalize_trimmed_curve_params(
+        {
+            "name": f"{role}_curve2_local_path",
+            "point_name": f"{role}_curve2_local_point",
+            "offset": trim_length,
+            "direction": True,
+            "sense": False,
+            "offset_type": 2,
+        }
+    )
+    curve2_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
+        trim_length_expression,
+        f"{role}_curve2_trim_offset",
+    )
+    if curve2_trim_overrides:
+        curve2_trim.update(dict(curve2_trim_overrides))
+    connect_curve = normalize_connect_curve_params(
+        {
+            "name": f"{role}_connect_path",
+            "curve1_connect_vertex": False,
+            "curve2_connect_vertex": True,
+            "curve1_connect_type": "smooth",
+            "curve2_connect_type": "smooth",
+            "tension": tension,
+        }
+    )
+    connect_curve["operation_variable_bindings"] = _build_transition_connect_curve_variable_bindings(
+        tension_expression,
+        f"{role}_connect_curve_tension",
+    )
+    if connect_curve_overrides:
+        connect_curve.update(dict(connect_curve_overrides))
+    return {
+        "builder": "trimmed_connect_curve",
+        "role": role,
+        "label": role.replace("_", " "),
+        "path_name": connect_curve["name"],
+        "curve1_path_name": previous_path_name,
+        "curve2_path_name": current_path_name,
+        "curve1_trim": curve1_trim,
+        "curve2_trim": curve2_trim,
+        "connect_curve": connect_curve,
+        "sequence_curve1_path_name": curve1_trim["name"],
+        "sequence_curve2_path_name": curve2_trim["name"],
+        "trim_length": trim_length,
+        "trim_length_expression": trim_length_expression,
+        "tension": tension,
+        "tension_expression": tension_expression,
+    }
+
+
+def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
+    wire_diameter = _positive_float(params.get("wire_diameter", params.get("d")), "wire_diameter")
+    outer_diameter = _positive_float(params.get("outer_diameter", params.get("D1", params.get("D"))), "outer_diameter")
+    mean_diameter = outer_diameter - wire_diameter
+    if mean_diameter <= 0.0:
+        raise ValueError("outer_diameter must be larger than wire_diameter")
+    body_turns = _positive_float(params.get("turns", params.get("body_turns", params.get("working_turns"))), "turns")
+    requested_gap = float(params.get("gap", params.get("initial_gap", 0.0)) or 0.0)
+    if requested_gap < 0.0:
+        raise ValueError("gap must be non-negative")
+    minimum_gap = float(params.get("minimum_gap", params.get("min_gap", 0.01)) or 0.01)
+    if minimum_gap <= 0.0:
+        raise ValueError("minimum_gap must be positive")
+    gap = max(requested_gap, minimum_gap)
+    hook_type = str(params.get("hook_type", params.get("end_type", "machine_hooks")) or "machine_hooks").strip().lower()
+    hook_type_aliases = {
+        "machine": "machine_hooks",
+        "machine_hook": "machine_hooks",
+        "machine_hooks": "machine_hooks",
+        "simple_hooks": "machine_hooks",
+        "v": "v_hooks",
+        "v_hook": "v_hooks",
+        "v_hooks": "v_hooks",
+        "v_shaped_hook": "v_hooks",
+        "v_shaped_hooks": "v_hooks",
+        "u": "u_hooks",
+        "u_hook": "u_hooks",
+        "u_hooks": "u_hooks",
+        "u_shaped_hook": "u_hooks",
+        "u_shaped_hooks": "u_hooks",
+        "open_loop": "open_loop_hooks",
+        "open_loop_hook": "open_loop_hooks",
+        "open_loop_hooks": "open_loop_hooks",
+        "loop_hook": "open_loop_hooks",
+        "loop_hooks": "open_loop_hooks",
+        "open_hooks": "open_loop_hooks",
+        "center_loop": "center_loop_hooks",
+        "center_loop_hook": "center_loop_hooks",
+        "center_loop_hooks": "center_loop_hooks",
+        "center_ring_hook": "center_loop_hooks",
+        "center_ring_hooks": "center_loop_hooks",
+        "extended_center_loop": "extended_center_loop_hooks",
+        "extended_center_loop_hook": "extended_center_loop_hooks",
+        "extended_center_loop_hooks": "extended_center_loop_hooks",
+        "center_loop_extended": "extended_center_loop_hooks",
+        "center_loop_extended_hook": "extended_center_loop_hooks",
+        "center_loop_extended_hooks": "extended_center_loop_hooks",
+        "extended_center_ring_hook": "extended_center_loop_hooks",
+        "extended_center_ring_hooks": "extended_center_loop_hooks",
+        "bent_coil_left_spike": "bent_coil_left_spike",
+        "bent_coil_spike": "bent_coil_left_spike",
+        "bent_coils_spike": "bent_coil_left_spike",
+    }
+    hook_type = hook_type_aliases.get(hook_type, hook_type)
+    if hook_type not in {"machine_hooks", "v_hooks", "u_hooks", "open_loop_hooks", "center_loop_hooks", "extended_center_loop_hooks", "bent_coil_left_spike"}:
+        raise ValueError("Only machine_hooks, v_hooks, u_hooks, open_loop_hooks, center_loop_hooks, extended_center_loop_hooks, and bent_coil_left_spike extension spring ends are implemented in this slice")
+    turn_direction = str(params.get("turn_direction", params.get("hand", "right")) or "right").strip().lower()
+    left_hand = turn_direction in {"left", "left_hand", "левое", "левый"}
+    direction_sign = -1.0 if left_hand else 1.0
+    spring_name = str(params.get("name", "EXTENSION_SPRING") or "EXTENSION_SPRING")
+    parameter_prefix = str(params.get("parameter_prefix", "") or "").strip()
+
+    def _var(name: str) -> str:
+        return f"{parameter_prefix}_{name}" if parameter_prefix else name
+
+    outer_diameter_variable = _var("D1")
+    wire_diameter_variable = _var("WD1")
+    gap_variable = _var("G1")
+    pitch_variable = _var("P1")
+    turns_variable = _var("N1")
+    height_variable = _var("H1")
+    hook_radius_variable = _var("RH1")
+    transition_trim_length_variable = _var("TL1")
+    transition_connect_tension_variable = _var("TN1")
+    hook_clearance_variable = _var("HG1")
+    hook_end_offset_variable = _var("HO1")
+    v_hook_height_variable = _var("VH1")
+    v_hook_contact_axis_variable = _var("VT1")
+    v_hook_height_delta_variable = _var("VQ1")
+    v_hook_radius_ratio_variable = _var("VK1")
+    v_hook_length_variable = _var("VL1")
+    v_hook_fillet_radius_variable = _var("VR1")
+    v_hook_end_distance_variable = _var("VE1")
+    u_hook_height_variable = _var("UH1")
+    u_hook_length_variable = _var("UL1")
+    u_hook_end_offset_variable = _var("UE1")
+    open_loop_height_variable = _var("OH1")
+    open_loop_length_variable = _var("OL1")
+    open_loop_offset_variable = _var("OC1")
+    center_loop_height_variable = _var("CH1")
+    center_loop_radius_variable = _var("CR1")
+    center_loop_offset_variable = _var("CC1")
+    extended_center_loop_extension_variable = _var("CE1")
+    extended_center_loop_fillet_variable = _var("CF1")
+    bent_coil_turns_variable = _var("BT1")
+    bent_coil_height_variable = _var("BH1")
+    bent_coil_angle_variable = _var("BA1")
+    radius_expression = f"(({outer_diameter_variable} - {wire_diameter_variable}) / 2)"
+    pitch_expression = f"{wire_diameter_variable} + {gap_variable}"
+    height_expression = f"{pitch_variable} * {turns_variable}"
+    hook_radius_expression = radius_expression
+    hook_end_offset_expression = f"{pitch_variable} + {hook_clearance_variable}"
+    v_hook_contact_axis_expression = f"{v_hook_height_variable} + {wire_diameter_variable} / 2"
+    v_hook_height_delta_expression = f"{v_hook_contact_axis_variable} - {v_hook_fillet_radius_variable}"
+    v_hook_radius_ratio_expression = f"{v_hook_fillet_radius_variable} / {hook_radius_variable}"
+    v_hook_length_expression = (
+        f"({v_hook_height_delta_variable} + sqrt({v_hook_radius_ratio_variable}^2 * {v_hook_height_delta_variable}^2 + "
+        f"(1 - {v_hook_radius_ratio_variable}^2) * {v_hook_fillet_radius_variable}^2)) / "
+        f"(1 - {v_hook_radius_ratio_variable}^2)"
+    )
+    u_hook_length_expression = f"{u_hook_height_variable} - {hook_radius_variable} + {wire_diameter_variable} / 2"
+    open_loop_length_expression = f"{open_loop_height_variable} - {hook_radius_variable} + {wire_diameter_variable} / 2"
+    extended_center_loop_center_offset_expression = f"sqrt({center_loop_radius_variable}^2 + 2 * {center_loop_radius_variable} * {extended_center_loop_fillet_variable})"
+    extended_center_loop_extension_expression = f"{center_loop_height_variable} - {extended_center_loop_fillet_variable} - {center_loop_radius_variable} - {extended_center_loop_center_offset_expression}"
+    pitch = wire_diameter + gap
+    body_height = pitch * body_turns
+    radius = mean_diameter / 2.0
+    hook_radius = radius
+    trim_length = float(params.get("transition_trim_length", wire_diameter))
+    tension = float(params.get("transition_tension", 1.0))
+    hook_clearance = float(params.get("hook_clearance", params.get("machine_hook_clearance", wire_diameter * 0.25)) or 0.0)
+    if hook_clearance < 0.0:
+        raise ValueError("hook_clearance must be non-negative")
+    hook_end_offset = pitch + hook_clearance
+    if hook_end_offset <= 0.0 or hook_end_offset >= hook_radius:
+        raise ValueError("hook_clearance must keep P1 + HG1 smaller than RH1")
+    v_hook_fillet_radius = float(params.get("v_hook_fillet_radius", params.get("hook_fillet_radius", wire_diameter)) or wire_diameter)
+    if v_hook_fillet_radius <= 0.0:
+        raise ValueError("v_hook_fillet_radius must be positive")
+    if v_hook_fillet_radius >= hook_radius:
+        raise ValueError("v_hook_fillet_radius must be smaller than RH1")
+    deprecated_inputs: list[dict[str, Any]] = []
+
+    def _v_contact_height_from_construction_height(construction_height: float) -> float:
+        contact_axis_distance = construction_height + v_hook_fillet_radius - (
+            v_hook_fillet_radius * math.sqrt((construction_height * construction_height) + (hook_radius * hook_radius)) / hook_radius
+        )
+        return contact_axis_distance - wire_diameter / 2.0
+
+    def _v_construction_height_from_contact_height(contact_height: float) -> float:
+        contact_axis_distance = contact_height + wire_diameter / 2.0
+        height_delta = contact_axis_distance - v_hook_fillet_radius
+        radius_ratio = v_hook_fillet_radius / hook_radius
+        denominator = 1.0 - (radius_ratio * radius_ratio)
+        discriminant = (radius_ratio * radius_ratio * height_delta * height_delta) + (denominator * v_hook_fillet_radius * v_hook_fillet_radius)
+        return (height_delta + math.sqrt(discriminant)) / denominator
+
+    deprecated_v_hook_length = None
+    for deprecated_name in ("v_hook_length", "hook_leg_length"):
+        if deprecated_name in params:
+            deprecated_v_hook_length = float(params.get(deprecated_name) or 0.0)
+            if deprecated_v_hook_length <= 0.0:
+                raise ValueError(f"{deprecated_name} must be positive")
+            deprecated_inputs.append(
+                {
+                    "name": deprecated_name,
+                    "requested": params.get(deprecated_name),
+                    "status": "converted_to_v_hook_height",
+                    "applied": True,
+                    "replacement": "v_hook_height",
+                    "note": (
+                        f"{deprecated_name}: accepted for compatibility only; {v_hook_length_variable} is now derived from "
+                        f"{v_hook_height_variable}, {v_hook_fillet_radius_variable}, {wire_diameter_variable}, and {hook_radius_variable}."
+                    ),
+                }
+            )
+            break
+    if "v_hook_height" in params or "hook_contact_height" in params:
+        v_hook_height = float(params.get("v_hook_height", params.get("hook_contact_height")) or 0.0)
+    elif deprecated_v_hook_length is not None:
+        v_hook_height = _v_contact_height_from_construction_height(deprecated_v_hook_length)
+    else:
+        v_hook_height = max(wire_diameter, _v_contact_height_from_construction_height(hook_radius))
+    if v_hook_height <= 0.0:
+        raise ValueError("v_hook_height must keep VH1 positive after radius and wire allowances")
+    v_hook_length = _v_construction_height_from_contact_height(v_hook_height)
+    u_hook_height = float(params.get("u_hook_height", params.get("u_hook_contact_height", hook_radius + wire_diameter * 2.0)) or (hook_radius + wire_diameter * 2.0))
+    if u_hook_height <= 0.0:
+        raise ValueError("u_hook_height must be positive")
+    u_hook_length = u_hook_height - hook_radius + wire_diameter / 2.0
+    if u_hook_length <= 0.0:
+        raise ValueError("u_hook_height must keep UL1 positive")
+    u_hook_end_offset = float(params.get("u_hook_end_offset", params.get("u_hook_clearance", hook_end_offset)) or hook_end_offset)
+    if u_hook_end_offset <= 0.0 or u_hook_end_offset >= u_hook_length:
+        raise ValueError("u_hook_end_offset must be positive and smaller than UL1")
+    open_loop_height = float(params.get("open_loop_height", params.get("loop_hook_height", u_hook_height)) or u_hook_height)
+    if open_loop_height <= 0.0:
+        raise ValueError("open_loop_height must be positive")
+    open_loop_length = open_loop_height - hook_radius + wire_diameter / 2.0
+    if open_loop_length <= 0.0:
+        raise ValueError("open_loop_height must keep OL1 positive")
+    default_open_loop_offset = hook_radius
+    open_loop_offset = float(
+        params.get(
+            "open_loop_offset",
+            params.get("loop_opening_offset", params.get("open_loop_chord", params.get("loop_opening_chord", default_open_loop_offset))),
+        )
+        or default_open_loop_offset
+    )
+    if open_loop_offset <= 0.0 or open_loop_offset >= 2.0 * hook_radius:
+        raise ValueError("open_loop_offset must be positive and smaller than 2 * RH1")
+    center_loop_radius = float(params.get("center_loop_radius", params.get("ring_hook_radius", hook_radius)) or hook_radius)
+    if center_loop_radius <= 0.0:
+        raise ValueError("center_loop_radius must be positive")
+    center_loop_height = float(params.get("center_loop_height", params.get("ring_hook_height", center_loop_radius + wire_diameter / 2.0)) or (center_loop_radius + wire_diameter / 2.0))
+    if center_loop_height <= 0.0:
+        raise ValueError("center_loop_height must be positive")
+    default_center_loop_offset = center_loop_radius * 1.1
+    center_loop_offset = float(params.get("center_loop_offset", params.get("ring_hook_offset", default_center_loop_offset)) or default_center_loop_offset)
+    if center_loop_offset <= 0.0 or center_loop_offset >= 2.0 * center_loop_radius:
+        raise ValueError("center_loop_offset must be positive and smaller than 2 * CR1")
+    extended_center_loop_fillet = float(
+        params.get(
+            "extended_center_loop_fillet_radius",
+            params.get("center_loop_fillet_radius", params.get("extension_fillet_radius", hook_radius * 0.35)),
+        )
+        or (hook_radius * 0.35)
+    )
+    if extended_center_loop_fillet <= 0.0:
+        raise ValueError("extended_center_loop_fillet_radius must be positive")
+    if extended_center_loop_fillet >= hook_radius:
+        raise ValueError("extended_center_loop_fillet_radius must be smaller than RH1")
+    extended_second_fillet_offset = math.sqrt(max(0.0, center_loop_radius * center_loop_radius + 2.0 * center_loop_radius * extended_center_loop_fillet))
+    deprecated_extended_center_loop_extension = None
+    for deprecated_name in ("extended_center_loop_extension", "center_loop_extension", "extended_center_loop_length"):
+        if deprecated_name in params:
+            deprecated_extended_center_loop_extension = float(params.get(deprecated_name) or 0.0)
+            if deprecated_extended_center_loop_extension <= 0.0:
+                raise ValueError(f"{deprecated_name} must be positive")
+            deprecated_inputs.append(
+                {
+                    "name": deprecated_name,
+                    "requested": params.get(deprecated_name),
+                    "status": "converted_to_extended_center_loop_height",
+                    "applied": True,
+                    "replacement": "extended_center_loop_height",
+                    "note": (
+                        f"{deprecated_name}: accepted for compatibility only; {extended_center_loop_extension_variable} is now derived from "
+                        f"{center_loop_height_variable}, {extended_center_loop_fillet_variable}, {center_loop_radius_variable}, and {extended_center_loop_center_offset_expression}."
+                    ),
+                }
+            )
+            break
+    if hook_type == "extended_center_loop_hooks":
+        if "extended_center_loop_height" in params or "center_loop_height" in params or "ring_hook_height" in params:
+            center_loop_height = float(params.get("extended_center_loop_height", params.get("center_loop_height", params.get("ring_hook_height"))) or 0.0)
+        elif deprecated_extended_center_loop_extension is not None:
+            center_loop_height = deprecated_extended_center_loop_extension + extended_center_loop_fillet + center_loop_radius + extended_second_fillet_offset
+        else:
+            center_loop_height = center_loop_radius + extended_center_loop_fillet + center_loop_radius + extended_second_fillet_offset
+        if center_loop_height <= 0.0:
+            raise ValueError("extended_center_loop_height must be positive")
+    extended_center_loop_extension = center_loop_height - extended_center_loop_fillet - center_loop_radius - extended_second_fillet_offset
+    if hook_type == "extended_center_loop_hooks" and extended_center_loop_extension <= 0.0:
+        raise ValueError("extended_center_loop_height must keep CE1 positive after CF1, CR1, and ring tangent allowances")
+    bent_coil_turns = float(params.get("bent_coil_turns", params.get("bent_hook_turns", 1.0)) or 1.0)
+    if hook_type == "bent_coil_left_spike" and bent_coil_turns <= 0.0:
+        raise ValueError("bent_coil_turns must be positive")
+    bent_coil_angle_degrees = float(params.get("bent_coil_angle_degrees", params.get("bent_hook_angle_degrees", 0.0)) or 0.0)
+    bent_coil_height = pitch * bent_coil_turns
+    bent_coil_height_expression = f"{pitch_variable} * {bent_coil_turns_variable}"
+    for deprecated_name in ("hook_angle_degrees", "machine_hook_angle_degrees"):
+        if deprecated_name in params:
+            deprecated_inputs.append(
+                {
+                    "name": deprecated_name,
+                    "requested": params.get(deprecated_name),
+                    "status": "ignored_after_clearance_offset_migration",
+                    "applied": False,
+                    "replacement": "hook_clearance",
+                    "note": (
+                        f"{deprecated_name}: accepted for compatibility only; machine hook ends are controlled by "
+                        f"{hook_end_offset_variable} = {pitch_variable} + {hook_clearance_variable}."
+                    ),
+                }
+            )
+    left_hook_start_y = -math.sqrt((hook_radius * hook_radius) - (hook_end_offset * hook_end_offset))
+    left_hook_start = [-hook_end_offset, left_hook_start_y, 0.0]
+    body_start = [0.0, radius, 0.0]
+    body_end = [body_height, radius * math.cos(direction_sign * body_turns * 2.0 * math.pi), radius * math.sin(direction_sign * body_turns * 2.0 * math.pi)]
+    right_hook_end_local_y = -hook_radius - math.sqrt((hook_radius * hook_radius) - (hook_end_offset * hook_end_offset))
+    right_hook_end = [body_height + hook_end_offset, right_hook_end_local_y + hook_radius, 0.0]
+    right_hook_end_local = [hook_end_offset, right_hook_end_local_y]
+
+    def _v_fillet_points(vertex: list[float], first_end: list[float], second_end: list[float], radius_value: float) -> dict[str, list[float]]:
+        first_vector = [first_end[0] - vertex[0], first_end[1] - vertex[1]]
+        second_vector = [second_end[0] - vertex[0], second_end[1] - vertex[1]]
+        first_length = math.hypot(first_vector[0], first_vector[1])
+        second_length = math.hypot(second_vector[0], second_vector[1])
+        if first_length <= 0.0 or second_length <= 0.0:
+            raise ValueError("V hook leg length must be positive")
+        first_unit = [first_vector[0] / first_length, first_vector[1] / first_length]
+        second_unit = [second_vector[0] / second_length, second_vector[1] / second_length]
+        dot = max(-0.999999, min(0.999999, first_unit[0] * second_unit[0] + first_unit[1] * second_unit[1]))
+        angle = math.acos(dot)
+        tangent_distance = radius_value / math.tan(angle / 2.0)
+        max_tangent_distance = min(first_length, second_length) * 0.45
+        if tangent_distance >= max_tangent_distance:
+            tangent_distance = max_tangent_distance
+        bisector = [first_unit[0] + second_unit[0], first_unit[1] + second_unit[1]]
+        bisector_length = math.hypot(bisector[0], bisector[1])
+        if bisector_length <= 0.0:
+            raise ValueError("V hook legs must not be opposite")
+        center_distance = radius_value / math.sin(angle / 2.0)
+        return {
+            "first_tangent": [vertex[0] + first_unit[0] * tangent_distance, vertex[1] + first_unit[1] * tangent_distance],
+            "second_tangent": [vertex[0] + second_unit[0] * tangent_distance, vertex[1] + second_unit[1] * tangent_distance],
+            "center": [vertex[0] + bisector[0] / bisector_length * center_distance, vertex[1] + bisector[1] / bisector_length * center_distance],
+        }
+
+    left_v_body_point = [body_start[0], body_start[1]]
+    left_v_axis_point = [-v_hook_length, 0.0]
+    left_v_opposite_point = [0.0, -hook_radius]
+    default_v_hook_end_distance = v_hook_length * 0.25
+    v_hook_end_distance = float(params.get("v_hook_end_distance", params.get("v_hook_gap_distance", default_v_hook_end_distance)) or default_v_hook_end_distance)
+    if v_hook_end_distance <= 0.0 or v_hook_end_distance >= v_hook_length:
+        raise ValueError("v_hook_end_distance must be positive and smaller than v_hook_length")
+    left_v_free_t = (v_hook_length - v_hook_end_distance) / v_hook_length
+    left_v_free_point = [-v_hook_end_distance, -hook_radius * left_v_free_t]
+    left_v_fillet = _v_fillet_points(left_v_axis_point, left_v_body_point, left_v_free_point, v_hook_fillet_radius) if hook_type == "v_hooks" else {}
+    right_v_body_point = [0.0, 0.0]
+    right_v_axis_point = [v_hook_length, -hook_radius]
+    right_v_axis_origin = [0.0, -hook_radius]
+    right_v_opposite_point = [0.0, -2.0 * hook_radius]
+    right_v_free_t = (v_hook_length - v_hook_end_distance) / v_hook_length
+    right_v_free_point = [v_hook_end_distance, -hook_radius - hook_radius * right_v_free_t]
+    right_v_fillet = _v_fillet_points(right_v_axis_point, right_v_body_point, right_v_free_point, v_hook_fillet_radius) if hook_type == "v_hooks" else {}
+    left_u_body_point = [0.0, hook_radius]
+    left_u_center = [-u_hook_length, 0.0]
+    left_u_top_tangent = [-u_hook_length, hook_radius]
+    left_u_bottom_tangent = [-u_hook_length, -hook_radius]
+    left_u_opposite_point = [0.0, -hook_radius]
+    left_u_free_point = [-u_hook_end_offset, -hook_radius]
+    right_u_body_point = [0.0, 0.0]
+    right_u_axis_origin = [0.0, -hook_radius]
+    right_u_center = [u_hook_length, -hook_radius]
+    right_u_top_tangent = [u_hook_length, 0.0]
+    right_u_bottom_tangent = [u_hook_length, -2.0 * hook_radius]
+    right_u_opposite_point = [0.0, -2.0 * hook_radius]
+    right_u_free_point = [u_hook_end_offset, -2.0 * hook_radius]
+    open_loop_relative_x = -hook_radius + open_loop_offset
+    open_loop_relative_y = -math.sqrt(max(0.0, hook_radius * hook_radius - open_loop_relative_x * open_loop_relative_x))
+    left_open_body_point = [0.0, hook_radius]
+    left_open_center = [-open_loop_length, 0.0]
+    left_open_top_tangent = [-open_loop_length, hook_radius]
+    left_open_far_point = [-open_loop_length - hook_radius, 0.0]
+    left_open_end_point = [left_open_center[0] + open_loop_relative_x, open_loop_relative_y]
+    right_open_body_point = [0.0, 0.0]
+    right_open_axis_origin = [0.0, -hook_radius]
+    right_open_center = [open_loop_length, -hook_radius]
+    right_open_top_tangent = [open_loop_length, 0.0]
+    right_open_far_point = [open_loop_length + hook_radius, -hook_radius]
+    right_open_end_point = [right_open_center[0] - open_loop_relative_x, -hook_radius + open_loop_relative_y]
+    center_loop_relative_x = -center_loop_radius + center_loop_offset
+    center_loop_relative_y = math.sqrt(max(0.0, center_loop_radius * center_loop_radius - center_loop_relative_x * center_loop_relative_x))
+    left_center_loop_body_point = [0.0, hook_radius]
+    left_center_loop_tangent = [0.0, 0.0]
+    left_center_loop_center = [-center_loop_radius, 0.0]
+    left_center_loop_far_point = [-2.0 * center_loop_radius, 0.0]
+    left_center_loop_end_point = [left_center_loop_center[0] + center_loop_relative_x, center_loop_relative_y]
+    right_center_loop_body_point = [0.0, 0.0]
+    right_center_loop_tangent = [0.0, -hook_radius]
+    right_center_loop_center = [center_loop_radius, -hook_radius]
+    right_center_loop_far_point = [2.0 * center_loop_radius, -hook_radius]
+    right_center_loop_end_point = [right_center_loop_center[0] - center_loop_relative_x, -hook_radius + center_loop_relative_y]
+    extended_second_fillet_tangent_scale = center_loop_radius / (center_loop_radius + extended_center_loop_fillet)
+    left_extended_body_point = [0.0, hook_radius]
+    left_extended_body_tangent = [0.0, extended_center_loop_fillet]
+    left_extended_first_fillet_center = [-extended_center_loop_fillet, extended_center_loop_fillet]
+    left_extended_first_axis_tangent = [-extended_center_loop_fillet, 0.0]
+    left_extended_second_axis_tangent = [-extended_center_loop_fillet - extended_center_loop_extension, 0.0]
+    left_extended_second_fillet_center = [left_extended_second_axis_tangent[0], -extended_center_loop_fillet]
+    left_extended_loop_center = [left_extended_second_fillet_center[0] - extended_second_fillet_offset, 0.0]
+    left_extended_loop_tangent = [
+        left_extended_loop_center[0] + extended_second_fillet_offset * extended_second_fillet_tangent_scale,
+        -extended_center_loop_fillet * extended_second_fillet_tangent_scale,
+    ]
+    left_extended_loop_far_point = [left_extended_loop_center[0] - center_loop_radius, 0.0]
+    left_extended_loop_end_point = [left_extended_loop_center[0] + center_loop_relative_x, center_loop_relative_y]
+    right_extended_body_point = [0.0, 0.0]
+    right_extended_axis_y = -hook_radius
+    right_extended_body_tangent = [0.0, right_extended_axis_y + extended_center_loop_fillet]
+    right_extended_first_fillet_center = [extended_center_loop_fillet, right_extended_axis_y + extended_center_loop_fillet]
+    right_extended_first_axis_tangent = [extended_center_loop_fillet, right_extended_axis_y]
+    right_extended_second_axis_tangent = [extended_center_loop_fillet + extended_center_loop_extension, right_extended_axis_y]
+    right_extended_second_fillet_center = [right_extended_second_axis_tangent[0], right_extended_axis_y - extended_center_loop_fillet]
+    right_extended_loop_center = [right_extended_second_fillet_center[0] + extended_second_fillet_offset, right_extended_axis_y]
+    right_extended_loop_tangent = [
+        right_extended_loop_center[0] - extended_second_fillet_offset * extended_second_fillet_tangent_scale,
+        right_extended_axis_y - extended_center_loop_fillet * extended_second_fillet_tangent_scale,
+    ]
+    right_extended_loop_far_point = [right_extended_loop_center[0] + center_loop_radius, right_extended_axis_y]
+    right_extended_loop_end_point = [right_extended_loop_center[0] - center_loop_relative_x, right_extended_axis_y + center_loop_relative_y]
+    segment_plan = [
+        {
+            "role": "left_hook",
+            "path_name": f"{spring_name}_LEFT_HOOK_PATH",
+            "path_type": "sketch_path",
+            "sketch_path": {
+                "plane": "XOY",
+                "edge_index": 1,
+                "entities": [
+                    {
+                        "kind": "line",
+                        "name": "hook_radius_ref",
+                        "role": "construction",
+                        "start": [0.0, 0.0],
+                        "end": [body_start[0], body_start[1]],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "line",
+                        "name": "hook_radial_to_end",
+                        "role": "construction",
+                        "start": [0.0, 0.0],
+                        "end": [left_hook_start[0], left_hook_start[1]],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "line",
+                        "name": "hook_end_offset_ref",
+                        "role": "construction",
+                        "start": [body_start[0], body_start[1]],
+                        "end": [-hook_end_offset, body_start[1]],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "line",
+                        "name": "hook_end_drop_ref",
+                        "role": "construction",
+                        "start": [-hook_end_offset, body_start[1]],
+                        "end": [left_hook_start[0], left_hook_start[1]],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "arc",
+                        "name": "hook_arc",
+                        "role": "hook",
+                        "center": [0.0, 0.0],
+                        "radius": hook_radius,
+                        "start": [body_start[0], body_start[1]],
+                        "end": [left_hook_start[0], left_hook_start[1]],
+                        "direction": False,
+                        "style": 1,
+                    },
+                ],
+                "parameterization": {
+                    "constraints": [
+                        {"kind": "fixed_point", "target": "hook_radius_ref", "index": 0},
+                        {"kind": "vertical", "target": "hook_radius_ref"},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 0},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 0, "partner": "hook_radial_to_end", "partner_index": 0},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 1, "partner": "hook_end_offset_ref", "partner_index": 0},
+                        {"kind": "horizontal", "target": "hook_end_offset_ref"},
+                        {"kind": "merge_points", "target": "hook_end_offset_ref", "index": 1, "partner": "hook_end_drop_ref", "partner_index": 0},
+                        {"kind": "vertical", "target": "hook_end_drop_ref"},
+                        {"kind": "merge_points", "target": "hook_end_drop_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                        {"kind": "merge_points", "target": "hook_radial_to_end", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    ],
+                    "dimensions": [
+                        {"kind": "line_length", "target": "hook_radius_ref", "expression": hook_radius_variable, "driving": True},
+                        {"kind": "line_length", "target": "hook_end_offset_ref", "expression": hook_end_offset_variable, "driving": True},
+                    ],
+                    "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+                },
+            },
+            "start_point": body_start,
+            "end_point": left_hook_start,
+        },
+        {
+            "role": "body",
+            "path_name": f"{spring_name}_BODY_PATH",
+            "path_type": "cylindric_spiral",
+            "mean_diameter": mean_diameter,
+            "pitch": pitch,
+            "height": body_height,
+            "turns": body_turns,
+            "turns_expression": turns_variable,
+            "pitch_expression": pitch_variable,
+            "height_expression": height_variable,
+            "anchor_rotation_degrees": 0.0,
+            "anchor_rotation_expression": "0",
+            "turning_angle_degrees": 0.0,
+            "start_offset": 0.0,
+            "start_point": body_start,
+            "end_point": body_end,
+            "left_hand": left_hand,
+            "operation_variable_bindings": _build_spring_spiral_variable_bindings(
+                mean_diameter_expression=f"{outer_diameter_variable} - {wire_diameter_variable}",
+                pitch_expression=pitch_variable,
+                height_expression=height_variable,
+            ),
+        },
+        {
+            "role": "right_hook",
+            "path_name": f"{spring_name}_RIGHT_HOOK_PATH",
+            "path_type": "sketch_path",
+            "sketch_path": {
+                "dynamic_plane": {
+                    "axis_segment_role": "body",
+                    "point_segment_role": "body",
+                    "anchor_point_vertex": "end",
+                    "plane_name": f"{spring_name}_RIGHT_HOOK_PLANE",
+                    "assign_local_coordinate_system": False,
+                },
+                "edge_index": 1,
+                "entities": [
+                    {
+                        "kind": "line",
+                        "name": "hook_radius_ref",
+                        "role": "construction",
+                        "start": [0.0, 0.0],
+                        "end": [0.0, -hook_radius],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "line",
+                        "name": "hook_radial_to_end",
+                        "role": "construction",
+                        "start": [0.0, -hook_radius],
+                        "end": [right_hook_end_local[0], right_hook_end_local[1]],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "line",
+                        "name": "hook_end_offset_ref",
+                        "role": "construction",
+                        "start": [0.0, 0.0],
+                        "end": [hook_end_offset, 0.0],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "line",
+                        "name": "hook_end_drop_ref",
+                        "role": "construction",
+                        "start": [hook_end_offset, 0.0],
+                        "end": [right_hook_end_local[0], right_hook_end_local[1]],
+                        "style": 6,
+                    },
+                    {
+                        "kind": "arc",
+                        "name": "hook_arc",
+                        "role": "hook",
+                        "center": [0.0, -hook_radius],
+                        "radius": hook_radius,
+                        "start": [0.0, 0.0],
+                        "end": [right_hook_end_local[0], right_hook_end_local[1]],
+                        "direction": True,
+                        "style": 1,
+                    },
+                ],
+                "parameterization": {
+                    "constraints": [
+                        {"kind": "fixed_point", "target": "hook_radius_ref", "index": 0},
+                        {"kind": "vertical", "target": "hook_radius_ref"},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 1},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 1, "partner": "hook_radial_to_end", "partner_index": 0},
+                        {"kind": "merge_points", "target": "hook_radius_ref", "index": 0, "partner": "hook_end_offset_ref", "partner_index": 0},
+                        {"kind": "horizontal", "target": "hook_end_offset_ref"},
+                        {"kind": "merge_points", "target": "hook_end_offset_ref", "index": 1, "partner": "hook_end_drop_ref", "partner_index": 0},
+                        {"kind": "vertical", "target": "hook_end_drop_ref"},
+                        {"kind": "merge_points", "target": "hook_end_drop_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                        {"kind": "merge_points", "target": "hook_radial_to_end", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    ],
+                    "dimensions": [
+                        {"kind": "line_length", "target": "hook_radius_ref", "expression": hook_radius_variable, "driving": True},
+                        {"kind": "line_length", "target": "hook_end_offset_ref", "expression": hook_end_offset_variable, "driving": True},
+                    ],
+                    "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+                },
+            },
+            "start_point": body_end,
+            "end_point": right_hook_end,
+        },
+    ]
+    variable_plan = [
+        {
+            "name": outer_diameter_variable,
+            "value": outer_diameter,
+            "kind": "driving_outer_diameter",
+            "external": True,
+            "comment": f"{outer_diameter_variable}: spring outer diameter",
+        },
+        {
+            "name": wire_diameter_variable,
+            "value": wire_diameter,
+            "kind": "driving_wire_diameter",
+            "external": True,
+            "comment": f"{wire_diameter_variable}: wire diameter",
+        },
+        {
+            "name": gap_variable,
+            "value": gap,
+            "kind": "driving_coil_gap",
+            "external": True,
+            "comment": f"{gap_variable}: axial gap between adjacent body coils; clamped to at least {minimum_gap:g} mm",
+        },
+        {
+            "name": pitch_variable,
+            "expression": pitch_expression,
+            "kind": "derived_pitch",
+            "external": False,
+            "comment": f"{pitch_variable}: body pitch, {wire_diameter_variable} + {gap_variable}",
+        },
+        {
+            "name": turns_variable,
+            "value": body_turns,
+            "kind": "driving_body_turn_count",
+            "external": True,
+            "comment": f"{turns_variable}: body turn count",
+        },
+        {
+            "name": height_variable,
+            "expression": height_expression,
+            "kind": "derived_body_height",
+            "external": False,
+            "comment": f"{height_variable}: body height, {pitch_variable} * {turns_variable}",
+        },
+        {
+            "name": hook_radius_variable,
+            "expression": hook_radius_expression,
+            "kind": "derived_hook_radius",
+            "external": False,
+            "comment": f"{hook_radius_variable}: machine hook radius, ({outer_diameter_variable} - {wire_diameter_variable}) / 2",
+        },
+        {
+            "name": hook_clearance_variable,
+            "value": hook_clearance,
+            "kind": "driving_hook_clearance",
+            "external": True,
+            "comment": f"{hook_clearance_variable}: extra hook clearance added to {pitch_variable}",
+        },
+        {
+            "name": hook_end_offset_variable,
+            "expression": hook_end_offset_expression,
+            "kind": "derived_hook_end_offset",
+            "external": False,
+            "comment": f"{hook_end_offset_variable}: hook end offset, {pitch_variable} + {hook_clearance_variable}",
+        },
+        *(
+            [
+                {
+                    "name": v_hook_height_variable,
+                    "value": v_hook_height,
+                    "kind": "driving_v_hook_contact_height",
+                    "external": True,
+                    "comment": f"{v_hook_height_variable}: V-hook useful height to inner contact surface near the fillet",
+                },
+                {
+                    "name": v_hook_fillet_radius_variable,
+                    "value": v_hook_fillet_radius,
+                    "kind": "driving_v_hook_fillet_radius",
+                    "external": True,
+                    "comment": f"{v_hook_fillet_radius_variable}: V-hook corner fillet radius",
+                },
+                {
+                    "name": v_hook_contact_axis_variable,
+                    "expression": v_hook_contact_axis_expression,
+                    "kind": "derived_v_hook_contact_axis_distance",
+                    "external": False,
+                    "comment": f"{v_hook_contact_axis_variable}: V-hook contact distance to centerline, {v_hook_height_variable} + {wire_diameter_variable} / 2",
+                },
+                {
+                    "name": v_hook_height_delta_variable,
+                    "expression": v_hook_height_delta_expression,
+                    "kind": "derived_v_hook_height_delta",
+                    "external": False,
+                    "comment": f"{v_hook_height_delta_variable}: V-hook contact delta, {v_hook_contact_axis_variable} - {v_hook_fillet_radius_variable}",
+                },
+                {
+                    "name": v_hook_radius_ratio_variable,
+                    "expression": v_hook_radius_ratio_expression,
+                    "kind": "derived_v_hook_radius_ratio",
+                    "external": False,
+                    "comment": f"{v_hook_radius_ratio_variable}: V-hook fillet-to-hook-radius ratio, {v_hook_fillet_radius_variable} / {hook_radius_variable}",
+                },
+                {
+                    "name": v_hook_length_variable,
+                    "expression": v_hook_length_expression,
+                    "kind": "derived_v_hook_construction_height",
+                    "external": False,
+                    "comment": f"{v_hook_length_variable}: V-hook construction height solved from {v_hook_height_variable}, {v_hook_fillet_radius_variable}, {wire_diameter_variable}, and {hook_radius_variable}",
+                },
+                {
+                    "name": v_hook_end_distance_variable,
+                    "value": v_hook_end_distance,
+                    "kind": "driving_v_hook_free_end_distance",
+                    "external": True,
+                    "comment": f"{v_hook_end_distance_variable}: V-hook free end distance from sketch origin",
+                },
+            ]
+            if hook_type == "v_hooks"
+            else []
+        ),
+        *(
+            [
+                {
+                    "name": u_hook_height_variable,
+                    "value": u_hook_height,
+                    "kind": "driving_u_hook_contact_height",
+                    "external": True,
+                    "comment": f"{u_hook_height_variable}: U-hook useful depth to inner contact surface",
+                },
+                {
+                    "name": u_hook_length_variable,
+                    "expression": u_hook_length_expression,
+                    "kind": "derived_u_hook_construction_length",
+                    "external": False,
+                    "comment": f"{u_hook_length_variable}: U-hook construction length, {u_hook_height_variable} - {hook_radius_variable} + {wire_diameter_variable} / 2",
+                },
+                {
+                    "name": u_hook_end_offset_variable,
+                    "value": u_hook_end_offset,
+                    "kind": "driving_u_hook_free_end_offset",
+                    "external": True,
+                    "comment": f"{u_hook_end_offset_variable}: U-hook free-end offset from spring end plane",
+                },
+            ]
+            if hook_type == "u_hooks"
+            else []
+        ),
+        *(
+            [
+                {
+                    "name": open_loop_height_variable,
+                    "value": open_loop_height,
+                    "kind": "driving_open_loop_contact_depth",
+                    "external": True,
+                    "comment": f"{open_loop_height_variable}: open-loop hook useful depth to inner contact surface",
+                },
+                {
+                    "name": open_loop_length_variable,
+                    "expression": open_loop_length_expression,
+                    "kind": "derived_open_loop_construction_length",
+                    "external": False,
+                    "comment": f"{open_loop_length_variable}: open-loop construction length, {open_loop_height_variable} - {hook_radius_variable} + {wire_diameter_variable} / 2",
+                },
+                {
+                    "name": open_loop_offset_variable,
+                    "value": open_loop_offset,
+                    "kind": "driving_open_loop_arc_axial_offset",
+                    "external": True,
+                    "comment": f"{open_loop_offset_variable}: open-loop arc end offset parallel to the spring axis from the farthest arc point",
+                },
+            ]
+            if hook_type == "open_loop_hooks"
+            else []
+        ),
+        *(
+            [
+                {
+                    "name": center_loop_height_variable,
+                    "value": center_loop_height,
+                    "kind": "driving_center_loop_contact_depth" if hook_type == "center_loop_hooks" else "driving_extended_center_loop_total_height",
+                    "external": True,
+                    "comment": (
+                        f"{center_loop_height_variable}: center-loop useful depth to inner contact surface"
+                        if hook_type == "center_loop_hooks"
+                        else f"{center_loop_height_variable}: extended center-loop total height from spring end plane to far inner ring contact point"
+                    ),
+                },
+                {
+                    "name": center_loop_radius_variable,
+                    "value": center_loop_radius,
+                    "kind": "driving_center_loop_radius",
+                    "external": True,
+                    "comment": f"{center_loop_radius_variable}: center-loop arc radius on the spring axis",
+                },
+                {
+                    "name": center_loop_offset_variable,
+                    "value": center_loop_offset,
+                    "kind": "driving_center_loop_arc_axial_offset",
+                    "external": True,
+                    "comment": f"{center_loop_offset_variable}: center-loop arc end offset parallel to the spring axis from the farthest arc point",
+                },
+            ]
+            if hook_type in {"center_loop_hooks", "extended_center_loop_hooks"}
+            else []
+        ),
+        *(
+            [
+                {
+                    "name": extended_center_loop_extension_variable,
+                    "value": extended_center_loop_extension,
+                    "expression": extended_center_loop_extension_expression,
+                    "kind": "derived_extended_center_loop_axial_extension",
+                    "external": False,
+                    "comment": f"{extended_center_loop_extension_variable}: extended center-loop straight offset, {extended_center_loop_extension_expression}",
+                },
+                {
+                    "name": extended_center_loop_fillet_variable,
+                    "value": extended_center_loop_fillet,
+                    "kind": "driving_extended_center_loop_fillet_radius",
+                    "external": True,
+                    "comment": f"{extended_center_loop_fillet_variable}: extended center-loop fillet radius for both tangent transitions",
+                },
+            ]
+            if hook_type == "extended_center_loop_hooks"
+            else []
+        ),
+        *(
+            [
+                {
+                    "name": bent_coil_turns_variable,
+                    "value": bent_coil_turns,
+                    "kind": "driving_bent_coil_turn_count_spike",
+                    "external": True,
+                    "comment": f"{bent_coil_turns_variable}: experimental bent-coil hook turn count",
+                },
+                {
+                    "name": bent_coil_height_variable,
+                    "expression": bent_coil_height_expression,
+                    "kind": "derived_bent_coil_height_spike",
+                    "external": False,
+                    "comment": f"{bent_coil_height_variable}: bent-coil height, {pitch_variable} * {bent_coil_turns_variable}",
+                },
+                {
+                    "name": bent_coil_angle_variable,
+                    "value": bent_coil_angle_degrees,
+                    "kind": "driving_bent_coil_angle_spike",
+                    "external": True,
+                    "comment": f"{bent_coil_angle_variable}: experimental bent-coil hook bend angle in degrees",
+                },
+            ]
+            if hook_type == "bent_coil_left_spike"
+            else []
+        ),
+        {
+            "name": transition_trim_length_variable,
+            "value": trim_length,
+            "kind": "driving_transition_trim_length",
+            "external": True,
+            "comment": f"{transition_trim_length_variable}: trim length for smooth hook-body connectors",
+        },
+        {
+            "name": transition_connect_tension_variable,
+            "value": tension,
+            "kind": "driving_transition_tension",
+            "external": True,
+            "comment": f"{transition_connect_tension_variable}: smooth connector tension",
+        },
+    ]
+    if hook_type == "bent_coil_left_spike":
+        segment_plan[0].update(
+            {
+                "path_type": "cylindric_spiral",
+                "name": f"{spring_name}_BENT_COIL_LEFT_SPIKE",
+                "path_name": f"{spring_name}_BENT_COIL_LEFT_SPIKE_PATH",
+                "path_role": "hook_left_bent_coil",
+                "role": "hook_left_bent_coil",
+                "turns": bent_coil_turns,
+                "turns_variable": bent_coil_turns_variable,
+                "height": bent_coil_height,
+                "height_variable": bent_coil_height_variable,
+                "pitch": pitch,
+                "pitch_variable": pitch_variable,
+                "diameter": outer_diameter,
+                "diameter_variable": outer_diameter_variable,
+                "angle_degrees": bent_coil_angle_degrees,
+                "angle_variable": bent_coil_angle_variable,
+                "orientation": "left",
+                "construction_only": False,
+                "note": "Bent-coil left spike uses a real spiral path segment, not a construction-only scaffold.",
+            }
+        )
+    left_hook_body_path_name = segment_plan[0]["path_name"]
+    right_hook_body_path_name = segment_plan[2]["path_name"] if len(segment_plan) > 2 else f"{spring_name}_RIGHT_HOOK_UNUSED_PATH"
+    if hook_type == "v_hooks":
+        left_hook_body_path_name = f"{spring_name}_LEFT_V_BODY_LEG_PATH"
+        right_hook_body_path_name = f"{spring_name}_RIGHT_V_BODY_LEG_PATH"
+        segment_plan[0]["label"] = "left_v_hook"
+        segment_plan[0]["path_name"] = left_hook_body_path_name
+        segment_plan[0]["start_point"] = [left_v_body_point[0], left_v_body_point[1], 0.0]
+        segment_plan[0]["end_point"] = [left_v_free_point[0], left_v_free_point[1], 0.0]
+        segment_plan[0]["sketch_path"] = {
+            "plane": "XOY",
+            "edge_index": 1,
+            "edge_tuple_indices": [0, 1, 2],
+            "path_names": [
+                left_hook_body_path_name,
+                f"{spring_name}_LEFT_V_FILLET_PATH",
+                f"{spring_name}_LEFT_V_END_LEG_PATH",
+            ],
+            "edge_points": [
+                {
+                    "start": [left_v_body_point[0], left_v_body_point[1], 0.0],
+                    "end": [left_v_fillet["first_tangent"][0], left_v_fillet["first_tangent"][1], 0.0],
+                },
+                {
+                    "start": [left_v_fillet["first_tangent"][0], left_v_fillet["first_tangent"][1], 0.0],
+                    "end": [left_v_fillet["second_tangent"][0], left_v_fillet["second_tangent"][1], 0.0],
+                },
+                {
+                    "start": [left_v_fillet["second_tangent"][0], left_v_fillet["second_tangent"][1], 0.0],
+                    "end": [left_v_free_point[0], left_v_free_point[1], 0.0],
+                },
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_axis_ref", "role": "construction", "start": [0.0, 0.0], "end": left_v_axis_point, "style": 6},
+                {"kind": "line", "name": "hook_start_radius_ref", "role": "construction", "start": [0.0, 0.0], "end": left_v_body_point, "style": 6},
+                {"kind": "line", "name": "hook_opposite_radius_ref", "role": "construction", "start": [0.0, 0.0], "end": left_v_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": left_v_body_point, "end": left_v_axis_point, "style": 6},
+                {"kind": "line", "name": "hook_end_guide", "role": "construction", "start": left_v_axis_point, "end": left_v_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_end_offset_ref", "role": "construction", "start": [0.0, 0.0], "end": [left_v_free_point[0], 0.0], "style": 6},
+                {"kind": "line", "name": "hook_end_projection_ref", "role": "construction", "start": [left_v_free_point[0], 0.0], "end": left_v_free_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": left_v_body_point, "end": left_v_fillet["first_tangent"], "style": 1},
+                {"kind": "arc", "name": "hook_fillet", "role": "hook", "center": left_v_fillet["center"], "radius": v_hook_fillet_radius, "start": left_v_fillet["first_tangent"], "end": left_v_fillet["second_tangent"], "direction": False, "style": 1},
+                {"kind": "line", "name": "hook_end_leg", "role": "hook", "start": left_v_fillet["second_tangent"], "end": left_v_free_point, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_axis_ref", "index": 0},
+                    {"kind": "horizontal", "target": "hook_axis_ref"},
+                    {"kind": "merge_points", "target": "hook_axis_ref", "index": 0, "partner": "hook_start_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_ref", "index": 0, "partner": "hook_opposite_radius_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_start_radius_ref"},
+                    {"kind": "vertical", "target": "hook_opposite_radius_ref"},
+                    {"kind": "merge_points", "target": "hook_start_radius_ref", "index": 1, "partner": "hook_start_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_opposite_radius_ref", "index": 1, "partner": "hook_end_guide", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_axis_ref", "index": 1, "partner": "hook_start_guide", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 1, "partner": "hook_end_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_ref", "index": 0, "partner": "hook_end_offset_ref", "partner_index": 0},
+                    {"kind": "horizontal", "target": "hook_end_offset_ref"},
+                    {"kind": "merge_points", "target": "hook_end_offset_ref", "index": 1, "partner": "hook_end_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_end_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "point_on_curve", "target": "hook_start_leg", "index": 1, "partner": "hook_start_guide"},
+                    {"kind": "point_on_curve", "target": "hook_end_leg", "index": 0, "partner": "hook_end_guide"},
+                    {"kind": "point_on_curve", "target": "hook_end_leg", "index": 1, "partner": "hook_end_guide"},
+                    {"kind": "merge_points", "target": "hook_end_projection_ref", "index": 1, "partner": "hook_end_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_fillet", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_fillet", "index": 2, "partner": "hook_end_leg", "partner_index": 0},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_fillet"},
+                    {"kind": "tangent", "target": "hook_end_leg", "partner": "hook_fillet"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_axis_ref", "expression": v_hook_length_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_start_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opposite_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_fillet", "expression": v_hook_fillet_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_end_offset_ref", "expression": v_hook_end_distance_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+        segment_plan[2]["label"] = "right_v_hook"
+        segment_plan[2]["path_name"] = right_hook_body_path_name
+        segment_plan[2]["start_point"] = body_end
+        segment_plan[2]["end_point"] = [body_height + right_v_free_point[0], right_v_free_point[1] + hook_radius, 0.0]
+        segment_plan[2]["sketch_path"] = {
+            "dynamic_plane": {
+                "axis_segment_role": "body",
+                "point_segment_role": "body",
+                "anchor_point_vertex": "end",
+                "plane_name": f"{spring_name}_RIGHT_HOOK_PLANE",
+                "assign_local_coordinate_system": False,
+            },
+            "edge_index": 1,
+            "edge_tuple_indices": [0, 1, 2],
+            "path_names": [
+                right_hook_body_path_name,
+                f"{spring_name}_RIGHT_V_FILLET_PATH",
+                f"{spring_name}_RIGHT_V_END_LEG_PATH",
+            ],
+            "edge_points": [
+                {
+                    "start": [right_v_body_point[0], right_v_body_point[1], 0.0],
+                    "end": [right_v_fillet["first_tangent"][0], right_v_fillet["first_tangent"][1], 0.0],
+                },
+                {
+                    "start": [right_v_fillet["first_tangent"][0], right_v_fillet["first_tangent"][1], 0.0],
+                    "end": [right_v_fillet["second_tangent"][0], right_v_fillet["second_tangent"][1], 0.0],
+                },
+                {
+                    "start": [right_v_fillet["second_tangent"][0], right_v_fillet["second_tangent"][1], 0.0],
+                    "end": [right_v_free_point[0], right_v_free_point[1], 0.0],
+                },
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_axis_radius_ref", "role": "construction", "start": right_v_body_point, "end": right_v_axis_origin, "style": 6},
+                {"kind": "line", "name": "hook_opposite_radius_ref", "role": "construction", "start": right_v_axis_origin, "end": right_v_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_axis_ref", "role": "construction", "start": right_v_axis_origin, "end": right_v_axis_point, "style": 6},
+                {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": right_v_body_point, "end": right_v_axis_point, "style": 6},
+                {"kind": "line", "name": "hook_end_guide", "role": "construction", "start": right_v_axis_point, "end": right_v_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_end_offset_ref", "role": "construction", "start": right_v_body_point, "end": [right_v_free_point[0], 0.0], "style": 6},
+                {"kind": "line", "name": "hook_end_projection_ref", "role": "construction", "start": [right_v_free_point[0], 0.0], "end": right_v_free_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": right_v_body_point, "end": right_v_fillet["first_tangent"], "style": 1},
+                {"kind": "arc", "name": "hook_fillet", "role": "hook", "center": right_v_fillet["center"], "radius": v_hook_fillet_radius, "start": right_v_fillet["first_tangent"], "end": right_v_fillet["second_tangent"], "direction": True, "style": 1},
+                {"kind": "line", "name": "hook_end_leg", "role": "hook", "start": right_v_fillet["second_tangent"], "end": right_v_free_point, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_axis_radius_ref", "index": 0},
+                    {"kind": "vertical", "target": "hook_axis_radius_ref"},
+                    {"kind": "vertical", "target": "hook_opposite_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_axis_ref"},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 1, "partner": "hook_opposite_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 1, "partner": "hook_axis_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 0, "partner": "hook_start_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_ref", "index": 1, "partner": "hook_start_guide", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_axis_ref", "index": 1, "partner": "hook_end_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_opposite_radius_ref", "index": 1, "partner": "hook_end_guide", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 0, "partner": "hook_end_offset_ref", "partner_index": 0},
+                    {"kind": "horizontal", "target": "hook_end_offset_ref"},
+                    {"kind": "merge_points", "target": "hook_end_offset_ref", "index": 1, "partner": "hook_end_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_end_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "point_on_curve", "target": "hook_start_leg", "index": 1, "partner": "hook_start_guide"},
+                    {"kind": "point_on_curve", "target": "hook_end_leg", "index": 0, "partner": "hook_end_guide"},
+                    {"kind": "point_on_curve", "target": "hook_end_leg", "index": 1, "partner": "hook_end_guide"},
+                    {"kind": "merge_points", "target": "hook_end_projection_ref", "index": 1, "partner": "hook_end_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_fillet", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_fillet", "index": 2, "partner": "hook_end_leg", "partner_index": 0},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_fillet"},
+                    {"kind": "tangent", "target": "hook_end_leg", "partner": "hook_fillet"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_axis_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opposite_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_axis_ref", "expression": v_hook_length_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_fillet", "expression": v_hook_fillet_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_end_offset_ref", "expression": v_hook_end_distance_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+    if hook_type == "u_hooks":
+        left_hook_body_path_name = f"{spring_name}_LEFT_U_BODY_LEG_PATH"
+        right_hook_body_path_name = f"{spring_name}_RIGHT_U_BODY_LEG_PATH"
+        segment_plan[0]["label"] = "left_u_hook"
+        segment_plan[0]["path_name"] = left_hook_body_path_name
+        segment_plan[0]["start_point"] = [left_u_body_point[0], left_u_body_point[1], 0.0]
+        segment_plan[0]["end_point"] = [left_u_free_point[0], left_u_free_point[1], 0.0]
+        segment_plan[0]["sketch_path"] = {
+            "plane": "XOY",
+            "edge_index": 1,
+            "edge_tuple_indices": [0, 1, 2],
+            "path_names": [left_hook_body_path_name, f"{spring_name}_LEFT_U_ARC_PATH", f"{spring_name}_LEFT_U_END_LEG_PATH"],
+            "edge_points": [
+                {"start": [left_u_body_point[0], left_u_body_point[1], 0.0], "end": [left_u_top_tangent[0], left_u_top_tangent[1], 0.0]},
+                {"start": [left_u_top_tangent[0], left_u_top_tangent[1], 0.0], "end": [left_u_bottom_tangent[0], left_u_bottom_tangent[1], 0.0]},
+                {"start": [left_u_bottom_tangent[0], left_u_bottom_tangent[1], 0.0], "end": [left_u_free_point[0], left_u_free_point[1], 0.0]},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_depth_ref", "role": "construction", "start": [0.0, 0.0], "end": left_u_center, "style": 6},
+                {"kind": "line", "name": "hook_start_radius_ref", "role": "construction", "start": [0.0, 0.0], "end": left_u_body_point, "style": 6},
+                {"kind": "line", "name": "hook_opposite_radius_ref", "role": "construction", "start": [0.0, 0.0], "end": left_u_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": left_u_body_point, "end": left_u_top_tangent, "style": 6},
+                {"kind": "line", "name": "hook_end_guide", "role": "construction", "start": left_u_bottom_tangent, "end": left_u_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_end_offset_ref", "role": "construction", "start": [0.0, 0.0], "end": [left_u_free_point[0], 0.0], "style": 6},
+                {"kind": "line", "name": "hook_end_projection_ref", "role": "construction", "start": [left_u_free_point[0], 0.0], "end": left_u_free_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": left_u_body_point, "end": left_u_top_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": left_u_center, "radius": hook_radius, "start": left_u_top_tangent, "end": left_u_bottom_tangent, "direction": False, "style": 1},
+                {"kind": "line", "name": "hook_end_leg", "role": "hook", "start": left_u_bottom_tangent, "end": left_u_free_point, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_depth_ref", "index": 0},
+                    {"kind": "horizontal", "target": "hook_depth_ref"},
+                    {"kind": "vertical", "target": "hook_start_radius_ref"},
+                    {"kind": "vertical", "target": "hook_opposite_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_start_guide"},
+                    {"kind": "horizontal", "target": "hook_end_guide"},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 0, "partner": "hook_start_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 0, "partner": "hook_opposite_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 0, "partner": "hook_end_offset_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_radius_ref", "index": 1, "partner": "hook_start_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_opposite_radius_ref", "index": 1, "partner": "hook_end_guide", "partner_index": 1},
+                    {"kind": "horizontal", "target": "hook_end_offset_ref"},
+                    {"kind": "merge_points", "target": "hook_end_offset_ref", "index": 1, "partner": "hook_end_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_end_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 1, "partner": "hook_start_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_end_guide", "index": 0, "partner": "hook_end_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_end_projection_ref", "index": 1, "partner": "hook_end_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_arc", "index": 2, "partner": "hook_end_leg", "partner_index": 0},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
+                    {"kind": "tangent", "target": "hook_end_leg", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_depth_ref", "expression": u_hook_length_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_start_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opposite_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_end_offset_ref", "expression": u_hook_end_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+        segment_plan[2]["label"] = "right_u_hook"
+        segment_plan[2]["path_name"] = right_hook_body_path_name
+        segment_plan[2]["start_point"] = body_end
+        segment_plan[2]["end_point"] = [body_height + right_u_free_point[0], right_u_free_point[1] + hook_radius, 0.0]
+        segment_plan[2]["sketch_path"] = {
+            "dynamic_plane": {"axis_segment_role": "body", "point_segment_role": "body", "anchor_point_vertex": "end", "plane_name": f"{spring_name}_RIGHT_HOOK_PLANE", "assign_local_coordinate_system": False},
+            "edge_index": 1,
+            "edge_tuple_indices": [0, 1, 2],
+            "path_names": [right_hook_body_path_name, f"{spring_name}_RIGHT_U_ARC_PATH", f"{spring_name}_RIGHT_U_END_LEG_PATH"],
+            "edge_points": [
+                {"start": [right_u_body_point[0], right_u_body_point[1], 0.0], "end": [right_u_top_tangent[0], right_u_top_tangent[1], 0.0]},
+                {"start": [right_u_top_tangent[0], right_u_top_tangent[1], 0.0], "end": [right_u_bottom_tangent[0], right_u_bottom_tangent[1], 0.0]},
+                {"start": [right_u_bottom_tangent[0], right_u_bottom_tangent[1], 0.0], "end": [right_u_free_point[0], right_u_free_point[1], 0.0]},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_axis_radius_ref", "role": "construction", "start": right_u_body_point, "end": right_u_axis_origin, "style": 6},
+                {"kind": "line", "name": "hook_depth_ref", "role": "construction", "start": right_u_axis_origin, "end": right_u_center, "style": 6},
+                {"kind": "line", "name": "hook_opposite_radius_ref", "role": "construction", "start": right_u_axis_origin, "end": right_u_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": right_u_body_point, "end": right_u_top_tangent, "style": 6},
+                {"kind": "line", "name": "hook_end_guide", "role": "construction", "start": right_u_bottom_tangent, "end": right_u_opposite_point, "style": 6},
+                {"kind": "line", "name": "hook_end_offset_ref", "role": "construction", "start": right_u_body_point, "end": [right_u_free_point[0], 0.0], "style": 6},
+                {"kind": "line", "name": "hook_end_projection_ref", "role": "construction", "start": [right_u_free_point[0], 0.0], "end": right_u_free_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": right_u_body_point, "end": right_u_top_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": right_u_center, "radius": hook_radius, "start": right_u_top_tangent, "end": right_u_bottom_tangent, "direction": True, "style": 1},
+                {"kind": "line", "name": "hook_end_leg", "role": "hook", "start": right_u_bottom_tangent, "end": right_u_free_point, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_axis_radius_ref", "index": 0},
+                    {"kind": "vertical", "target": "hook_axis_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_depth_ref"},
+                    {"kind": "vertical", "target": "hook_opposite_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_start_guide"},
+                    {"kind": "horizontal", "target": "hook_end_guide"},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 1, "partner": "hook_depth_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 1, "partner": "hook_opposite_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 0, "partner": "hook_start_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 0, "partner": "hook_end_offset_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_opposite_radius_ref", "index": 1, "partner": "hook_end_guide", "partner_index": 1},
+                    {"kind": "horizontal", "target": "hook_end_offset_ref"},
+                    {"kind": "merge_points", "target": "hook_end_offset_ref", "index": 1, "partner": "hook_end_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_end_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 1, "partner": "hook_start_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_end_guide", "index": 0, "partner": "hook_end_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_end_projection_ref", "index": 1, "partner": "hook_end_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_arc", "index": 2, "partner": "hook_end_leg", "partner_index": 0},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
+                    {"kind": "tangent", "target": "hook_end_leg", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_axis_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_depth_ref", "expression": u_hook_length_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opposite_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_end_offset_ref", "expression": u_hook_end_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+    if hook_type == "open_loop_hooks":
+        left_hook_body_path_name = f"{spring_name}_LEFT_OPEN_BODY_LEG_PATH"
+        right_hook_body_path_name = f"{spring_name}_RIGHT_OPEN_BODY_LEG_PATH"
+        segment_plan[0]["label"] = "left_open_loop_hook"
+        segment_plan[0]["path_name"] = left_hook_body_path_name
+        segment_plan[0]["start_point"] = [left_open_body_point[0], left_open_body_point[1], 0.0]
+        segment_plan[0]["end_point"] = [left_open_end_point[0], left_open_end_point[1], 0.0]
+        segment_plan[0]["sketch_path"] = {
+            "plane": "XOY",
+            "edge_index": 1,
+            "edge_tuple_indices": [1, 0],
+            "path_names": [left_hook_body_path_name, f"{spring_name}_LEFT_OPEN_ARC_PATH"],
+            "edge_points": [
+                {"start": [left_open_body_point[0], left_open_body_point[1], 0.0], "end": [left_open_top_tangent[0], left_open_top_tangent[1], 0.0]},
+                {"start": [left_open_top_tangent[0], left_open_top_tangent[1], 0.0], "end": [left_open_end_point[0], left_open_end_point[1], 0.0]},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_depth_ref", "role": "construction", "start": [0.0, 0.0], "end": left_open_center, "style": 6},
+                {"kind": "line", "name": "hook_start_radius_ref", "role": "construction", "start": [0.0, 0.0], "end": left_open_body_point, "style": 6},
+                {"kind": "line", "name": "hook_far_radius_ref", "role": "construction", "start": left_open_center, "end": left_open_far_point, "style": 6},
+                {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": left_open_body_point, "end": left_open_top_tangent, "style": 6},
+                {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": left_open_far_point, "end": [left_open_end_point[0], left_open_far_point[1]], "style": 6},
+                {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [left_open_end_point[0], left_open_far_point[1]], "end": left_open_end_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": left_open_body_point, "end": left_open_top_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": left_open_center, "radius": hook_radius, "start": left_open_top_tangent, "end": left_open_end_point, "direction": False, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_depth_ref", "index": 0},
+                    {"kind": "horizontal", "target": "hook_depth_ref"},
+                    {"kind": "vertical", "target": "hook_start_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_far_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_start_guide"},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 0, "partner": "hook_start_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_far_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_radius_ref", "index": 1, "partner": "hook_start_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 1, "partner": "hook_start_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_opening_ref", "partner_index": 0},
+                    {"kind": "horizontal", "target": "hook_opening_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_opening_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_depth_ref", "expression": open_loop_length_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_start_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_far_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opening_ref", "expression": open_loop_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+        segment_plan[2]["label"] = "right_open_loop_hook"
+        segment_plan[2]["path_name"] = right_hook_body_path_name
+        segment_plan[2]["start_point"] = body_end
+        segment_plan[2]["end_point"] = [body_height + right_open_end_point[0], right_open_end_point[1] + hook_radius, 0.0]
+        segment_plan[2]["sketch_path"] = {
+            "dynamic_plane": {"axis_segment_role": "body", "point_segment_role": "body", "anchor_point_vertex": "end", "plane_name": f"{spring_name}_RIGHT_HOOK_PLANE", "assign_local_coordinate_system": False},
+            "edge_index": 1,
+            "edge_tuple_indices": [0, 1],
+            "path_names": [right_hook_body_path_name, f"{spring_name}_RIGHT_OPEN_ARC_PATH"],
+            "edge_points": [
+                {"start": [right_open_body_point[0], right_open_body_point[1], 0.0], "end": [right_open_top_tangent[0], right_open_top_tangent[1], 0.0]},
+                {"start": [right_open_top_tangent[0], right_open_top_tangent[1], 0.0], "end": [right_open_end_point[0], right_open_end_point[1], 0.0]},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_axis_radius_ref", "role": "construction", "start": right_open_body_point, "end": right_open_axis_origin, "style": 6},
+                {"kind": "line", "name": "hook_depth_ref", "role": "construction", "start": right_open_axis_origin, "end": right_open_center, "style": 6},
+                {"kind": "line", "name": "hook_far_radius_ref", "role": "construction", "start": right_open_center, "end": right_open_far_point, "style": 6},
+                {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": right_open_body_point, "end": right_open_top_tangent, "style": 6},
+                {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": right_open_far_point, "end": [right_open_end_point[0], right_open_far_point[1]], "style": 6},
+                {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [right_open_end_point[0], right_open_far_point[1]], "end": right_open_end_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": right_open_body_point, "end": right_open_top_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": right_open_center, "radius": hook_radius, "start": right_open_top_tangent, "end": right_open_end_point, "direction": True, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_axis_radius_ref", "index": 0},
+                    {"kind": "vertical", "target": "hook_axis_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_depth_ref"},
+                    {"kind": "horizontal", "target": "hook_far_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_start_guide"},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 1, "partner": "hook_depth_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_far_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 0, "partner": "hook_start_guide", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_guide", "index": 1, "partner": "hook_start_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_opening_ref", "partner_index": 0},
+                    {"kind": "horizontal", "target": "hook_opening_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_opening_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_axis_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_depth_ref", "expression": open_loop_length_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_far_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opening_ref", "expression": open_loop_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+    if hook_type == "center_loop_hooks":
+        left_hook_body_path_name = f"{spring_name}_LEFT_CENTER_LOOP_LEG_PATH"
+        right_hook_body_path_name = f"{spring_name}_RIGHT_CENTER_LOOP_LEG_PATH"
+        segment_plan[0]["label"] = "left_center_loop_hook"
+        segment_plan[0]["path_name"] = left_hook_body_path_name
+        segment_plan[0]["start_point"] = [left_center_loop_body_point[0], left_center_loop_body_point[1], 0.0]
+        segment_plan[0]["end_point"] = [left_center_loop_end_point[0], left_center_loop_end_point[1], 0.0]
+        segment_plan[0]["sketch_path"] = {
+            "plane": "XOY",
+            "edge_index": 1,
+            "edge_tuple_indices": [1, 0],
+            "path_names": [left_hook_body_path_name, f"{spring_name}_LEFT_CENTER_LOOP_ARC_PATH"],
+            "edge_points": [
+                {"start": [left_center_loop_tangent[0], left_center_loop_tangent[1], 0.0], "end": [left_center_loop_body_point[0], left_center_loop_body_point[1], 0.0]},
+                {"start": [left_center_loop_end_point[0], left_center_loop_end_point[1], 0.0], "end": [left_center_loop_tangent[0], left_center_loop_tangent[1], 0.0]},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_start_radius_ref", "role": "construction", "start": [0.0, 0.0], "end": left_center_loop_body_point, "style": 6},
+                {"kind": "line", "name": "hook_center_radius_ref", "role": "construction", "start": left_center_loop_tangent, "end": left_center_loop_center, "style": 6},
+                {"kind": "line", "name": "hook_far_radius_ref", "role": "construction", "start": left_center_loop_center, "end": left_center_loop_far_point, "style": 6},
+                {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": left_center_loop_far_point, "end": [left_center_loop_end_point[0], left_center_loop_far_point[1]], "style": 6},
+                {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [left_center_loop_end_point[0], left_center_loop_far_point[1]], "end": left_center_loop_end_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": left_center_loop_tangent, "end": left_center_loop_body_point, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": left_center_loop_center, "radius": center_loop_radius, "start": left_center_loop_end_point, "end": left_center_loop_tangent, "direction": False, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_start_radius_ref", "index": 0},
+                    {"kind": "vertical", "target": "hook_start_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_center_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_far_radius_ref"},
+                    {"kind": "merge_points", "target": "hook_start_radius_ref", "index": 1, "partner": "hook_start_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_start_radius_ref", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 0, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "merge_points", "target": "hook_center_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "merge_points", "target": "hook_center_radius_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_center_radius_ref", "index": 1, "partner": "hook_far_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_opening_ref", "partner_index": 0},
+                    {"kind": "point_on_curve", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_arc"},
+                    {"kind": "horizontal", "target": "hook_opening_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_opening_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_start_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": center_loop_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opening_ref", "expression": center_loop_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+        segment_plan[2]["label"] = "right_center_loop_hook"
+        segment_plan[2]["path_name"] = right_hook_body_path_name
+        segment_plan[2]["start_point"] = body_end
+        segment_plan[2]["end_point"] = [body_height + right_center_loop_end_point[0], right_center_loop_end_point[1] + hook_radius, 0.0]
+        segment_plan[2]["sketch_path"] = {
+            "dynamic_plane": {"axis_segment_role": "body", "point_segment_role": "body", "anchor_point_vertex": "end", "plane_name": f"{spring_name}_RIGHT_HOOK_PLANE", "assign_local_coordinate_system": False},
+            "edge_index": 1,
+            "edge_tuple_indices": [0, 1],
+            "path_names": [right_hook_body_path_name, f"{spring_name}_RIGHT_CENTER_LOOP_ARC_PATH"],
+            "edge_points": [
+                {"start": [right_center_loop_body_point[0], right_center_loop_body_point[1], 0.0], "end": [right_center_loop_tangent[0], right_center_loop_tangent[1], 0.0]},
+                {"start": [right_center_loop_tangent[0], right_center_loop_tangent[1], 0.0], "end": [right_center_loop_end_point[0], right_center_loop_end_point[1], 0.0]},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_axis_radius_ref", "role": "construction", "start": right_center_loop_body_point, "end": right_center_loop_tangent, "style": 6},
+                {"kind": "line", "name": "hook_center_radius_ref", "role": "construction", "start": right_center_loop_tangent, "end": right_center_loop_center, "style": 6},
+                {"kind": "line", "name": "hook_far_radius_ref", "role": "construction", "start": right_center_loop_center, "end": right_center_loop_far_point, "style": 6},
+                {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": right_center_loop_far_point, "end": [right_center_loop_end_point[0], right_center_loop_far_point[1]], "style": 6},
+                {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [right_center_loop_end_point[0], right_center_loop_far_point[1]], "end": right_center_loop_end_point, "style": 6},
+                {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": right_center_loop_body_point, "end": right_center_loop_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": right_center_loop_center, "radius": center_loop_radius, "start": right_center_loop_tangent, "end": right_center_loop_end_point, "direction": False, "style": 1},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_axis_radius_ref", "index": 0},
+                    {"kind": "vertical", "target": "hook_axis_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_center_radius_ref"},
+                    {"kind": "horizontal", "target": "hook_far_radius_ref"},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 1, "partner": "hook_start_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_axis_radius_ref", "index": 0, "partner": "hook_start_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_start_leg", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_center_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_center_radius_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_center_radius_ref", "index": 1, "partner": "hook_far_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_opening_ref", "partner_index": 0},
+                    {"kind": "point_on_curve", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_arc"},
+                    {"kind": "horizontal", "target": "hook_opening_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_opening_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_axis_radius_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": center_loop_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opening_ref", "expression": center_loop_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+    if hook_type == "extended_center_loop_hooks":
+        left_first_fillet_path_name = f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_FIRST_FILLET_PATH"
+        left_axis_path_name = f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_AXIS_PATH"
+        left_second_fillet_path_name = f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_SECOND_FILLET_PATH"
+        left_ring_path_name = f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH"
+        right_first_fillet_path_name = f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_FIRST_FILLET_PATH"
+        right_axis_path_name = f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_AXIS_PATH"
+        right_second_fillet_path_name = f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_SECOND_FILLET_PATH"
+        right_ring_path_name = f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_ARC_PATH"
+        segment_plan[0]["label"] = "left_extended_center_loop_hook"
+        segment_plan[0]["path_name"] = left_hook_body_path_name
+        segment_plan[0]["end_point"] = [left_extended_loop_end_point[0], left_extended_loop_end_point[1] + hook_radius, 0.0]
+        segment_plan[0]["sketch_path"] = {
+            "plane": "XOY",
+            "edge_index": 1,
+            "edge_tuple_indices": [4, 3, 2, 1, 0],
+            "path_names": [left_hook_body_path_name, left_first_fillet_path_name, left_axis_path_name, left_second_fillet_path_name, left_ring_path_name],
+            "edge_points": [
+                {"start": left_extended_body_tangent, "end": left_extended_body_point},
+                {"start": left_extended_first_axis_tangent, "end": left_extended_body_tangent},
+                {"start": left_extended_second_axis_tangent, "end": left_extended_first_axis_tangent},
+                {"start": left_extended_loop_tangent, "end": left_extended_second_axis_tangent},
+                {"start": left_extended_loop_end_point, "end": left_extended_loop_tangent},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_body_leg", "role": "hook", "start": left_extended_body_tangent, "end": left_extended_body_point, "style": 1},
+                {"kind": "arc", "name": "hook_first_fillet", "role": "hook", "center": left_extended_first_fillet_center, "radius": extended_center_loop_fillet, "start": left_extended_first_axis_tangent, "end": left_extended_body_tangent, "direction": False, "style": 1},
+                {"kind": "line", "name": "hook_axis_leg", "role": "hook", "start": left_extended_second_axis_tangent, "end": left_extended_first_axis_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_second_fillet", "role": "hook", "center": left_extended_second_fillet_center, "radius": extended_center_loop_fillet, "start": left_extended_loop_tangent, "end": left_extended_second_axis_tangent, "direction": True, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": left_extended_loop_center, "radius": center_loop_radius, "start": left_extended_loop_end_point, "end": left_extended_loop_tangent, "direction": False, "style": 1},
+                {"kind": "line", "name": "hook_body_plane_ref", "role": "construction", "start": [0.0, 0.0], "end": left_extended_body_point, "style": 6},
+                {"kind": "line", "name": "hook_spring_axis_ref", "role": "construction", "start": [0.0, 0.0], "end": left_extended_loop_center, "style": 6},
+                {"kind": "line", "name": "hook_far_radius_ref", "role": "construction", "start": left_extended_loop_center, "end": left_extended_loop_far_point, "style": 6},
+                {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": left_extended_loop_far_point, "end": [left_extended_loop_end_point[0], left_extended_loop_far_point[1]], "style": 6},
+                {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [left_extended_loop_end_point[0], left_extended_loop_far_point[1]], "end": left_extended_loop_end_point, "style": 6},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_body_plane_ref", "index": 0},
+                    {"kind": "vertical", "target": "hook_body_plane_ref"},
+                    {"kind": "horizontal", "target": "hook_spring_axis_ref"},
+                    {"kind": "merge_points", "target": "hook_body_plane_ref", "index": 0, "partner": "hook_spring_axis_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_body_plane_ref", "index": 1, "partner": "hook_body_leg", "partner_index": 1},
+                    {"kind": "point_on_curve", "target": "hook_body_leg", "index": 0, "partner": "hook_body_plane_ref"},
+                    {"kind": "point_on_curve", "target": "hook_axis_leg", "index": 0, "partner": "hook_spring_axis_ref"},
+                    {"kind": "point_on_curve", "target": "hook_axis_leg", "index": 1, "partner": "hook_spring_axis_ref"},
+                    {"kind": "merge_points", "target": "hook_spring_axis_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "horizontal", "target": "hook_far_radius_ref"},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_opening_ref", "partner_index": 0},
+                    {"kind": "point_on_curve", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_arc"},
+                    {"kind": "horizontal", "target": "hook_opening_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_opening_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_body_leg", "index": 0, "partner": "hook_first_fillet", "partner_index": 2},
+                    {"kind": "merge_points", "target": "hook_first_fillet", "index": 1, "partner": "hook_axis_leg", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_axis_leg", "index": 0, "partner": "hook_second_fillet", "partner_index": 2},
+                    {"kind": "merge_points", "target": "hook_second_fillet", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "vertical", "target": "hook_body_leg"},
+                    {"kind": "horizontal", "target": "hook_axis_leg"},
+                    {"kind": "tangent", "target": "hook_body_leg", "partner": "hook_first_fillet"},
+                    {"kind": "tangent", "target": "hook_first_fillet", "partner": "hook_axis_leg"},
+                    {"kind": "tangent", "target": "hook_axis_leg", "partner": "hook_second_fillet"},
+                    {"kind": "tangent", "target": "hook_second_fillet", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_body_plane_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_body_leg", "expression": f"{hook_radius_variable}-{extended_center_loop_fillet_variable}", "driving": True},
+                    {"kind": "arc_radius", "target": "hook_first_fillet", "expression": extended_center_loop_fillet_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_axis_leg", "expression": extended_center_loop_extension_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_second_fillet", "expression": extended_center_loop_fillet_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": center_loop_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opening_ref", "expression": center_loop_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+        segment_plan[2]["label"] = "right_extended_center_loop_hook"
+        segment_plan[2]["path_name"] = right_hook_body_path_name
+        segment_plan[2]["start_point"] = body_end
+        segment_plan[2]["end_point"] = [body_height + right_extended_loop_end_point[0], right_extended_loop_end_point[1] + hook_radius, 0.0]
+        segment_plan[2]["sketch_path"] = {
+            "dynamic_plane": {"axis_segment_role": "body", "point_segment_role": "body", "anchor_point_vertex": "end", "plane_name": f"{spring_name}_RIGHT_HOOK_PLANE", "assign_local_coordinate_system": False},
+            "edge_index": 1,
+            "edge_tuple_indices": [0, 1, 2, 3, 4],
+            "path_names": [right_hook_body_path_name, right_first_fillet_path_name, right_axis_path_name, right_second_fillet_path_name, right_ring_path_name],
+            "edge_points": [
+                {"start": right_extended_body_point, "end": right_extended_body_tangent},
+                {"start": right_extended_body_tangent, "end": right_extended_first_axis_tangent},
+                {"start": right_extended_first_axis_tangent, "end": right_extended_second_axis_tangent},
+                {"start": right_extended_second_axis_tangent, "end": right_extended_loop_tangent},
+                {"start": right_extended_loop_tangent, "end": right_extended_loop_end_point},
+            ],
+            "entities": [
+                {"kind": "line", "name": "hook_body_leg", "role": "hook", "start": right_extended_body_point, "end": right_extended_body_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_first_fillet", "role": "hook", "center": right_extended_first_fillet_center, "radius": extended_center_loop_fillet, "start": right_extended_body_tangent, "end": right_extended_first_axis_tangent, "direction": False, "style": 1},
+                {"kind": "line", "name": "hook_axis_leg", "role": "hook", "start": right_extended_first_axis_tangent, "end": right_extended_second_axis_tangent, "style": 1},
+                {"kind": "arc", "name": "hook_second_fillet", "role": "hook", "center": right_extended_second_fillet_center, "radius": extended_center_loop_fillet, "start": right_extended_second_axis_tangent, "end": right_extended_loop_tangent, "direction": True, "style": 1},
+                {"kind": "arc", "name": "hook_arc", "role": "hook", "center": right_extended_loop_center, "radius": center_loop_radius, "start": right_extended_loop_tangent, "end": right_extended_loop_end_point, "direction": False, "style": 1},
+                {"kind": "line", "name": "hook_body_plane_ref", "role": "construction", "start": [0.0, 0.0], "end": [0.0, right_extended_axis_y], "style": 6},
+                {"kind": "line", "name": "hook_spring_axis_ref", "role": "construction", "start": [0.0, right_extended_axis_y], "end": right_extended_loop_center, "style": 6},
+                {"kind": "line", "name": "hook_far_radius_ref", "role": "construction", "start": right_extended_loop_center, "end": right_extended_loop_far_point, "style": 6},
+                {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": right_extended_loop_far_point, "end": [right_extended_loop_end_point[0], right_extended_loop_far_point[1]], "style": 6},
+                {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [right_extended_loop_end_point[0], right_extended_loop_far_point[1]], "end": right_extended_loop_end_point, "style": 6},
+            ],
+            "parameterization": {
+                "constraints": [
+                    {"kind": "fixed_point", "target": "hook_body_plane_ref", "index": 0},
+                    {"kind": "vertical", "target": "hook_body_plane_ref"},
+                    {"kind": "horizontal", "target": "hook_spring_axis_ref"},
+                    {"kind": "merge_points", "target": "hook_body_plane_ref", "index": 1, "partner": "hook_spring_axis_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_body_plane_ref", "index": 0, "partner": "hook_body_leg", "partner_index": 0},
+                    {"kind": "point_on_curve", "target": "hook_body_leg", "index": 1, "partner": "hook_body_plane_ref"},
+                    {"kind": "point_on_curve", "target": "hook_axis_leg", "index": 0, "partner": "hook_spring_axis_ref"},
+                    {"kind": "point_on_curve", "target": "hook_axis_leg", "index": 1, "partner": "hook_spring_axis_ref"},
+                    {"kind": "merge_points", "target": "hook_spring_axis_ref", "index": 1, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "horizontal", "target": "hook_far_radius_ref"},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_opening_ref", "partner_index": 0},
+                    {"kind": "point_on_curve", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_arc"},
+                    {"kind": "horizontal", "target": "hook_opening_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
+                    {"kind": "vertical", "target": "hook_opening_projection_ref"},
+                    {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "merge_points", "target": "hook_body_leg", "index": 1, "partner": "hook_first_fillet", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_first_fillet", "index": 2, "partner": "hook_axis_leg", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_axis_leg", "index": 1, "partner": "hook_second_fillet", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_second_fillet", "index": 2, "partner": "hook_arc", "partner_index": 1},
+                    {"kind": "vertical", "target": "hook_body_leg"},
+                    {"kind": "horizontal", "target": "hook_axis_leg"},
+                    {"kind": "tangent", "target": "hook_body_leg", "partner": "hook_first_fillet"},
+                    {"kind": "tangent", "target": "hook_first_fillet", "partner": "hook_axis_leg"},
+                    {"kind": "tangent", "target": "hook_axis_leg", "partner": "hook_second_fillet"},
+                    {"kind": "tangent", "target": "hook_second_fillet", "partner": "hook_arc"},
+                ],
+                "dimensions": [
+                    {"kind": "line_length", "target": "hook_body_plane_ref", "expression": hook_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_body_leg", "expression": f"{hook_radius_variable}-{extended_center_loop_fillet_variable}", "driving": True},
+                    {"kind": "arc_radius", "target": "hook_first_fillet", "expression": extended_center_loop_fillet_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_axis_leg", "expression": extended_center_loop_extension_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_second_fillet", "expression": extended_center_loop_fillet_variable, "driving": True},
+                    {"kind": "arc_radius", "target": "hook_arc", "expression": center_loop_radius_variable, "driving": True},
+                    {"kind": "line_length", "target": "hook_opening_ref", "expression": center_loop_offset_variable, "driving": True},
+                ],
+                "options": {"constraints": {"enabled": True}, "dimensions": {"enabled": True}},
+            },
+        }
+    body_path_name = next(str(segment["path_name"]) for segment in segment_plan if segment.get("role") == "body")
+    profile_anchor_path_name = str(segment_plan[0]["path_name"])
+    profile_anchor_vertex = "start" if hook_type in {"v_hooks", "bent_coil_left_spike"} else "end"
+    if hook_type == "v_hooks":
+        profile_anchor_path_name = f"{spring_name}_LEFT_V_END_LEG_PATH"
+        profile_anchor_vertex = "end"
+    if hook_type == "u_hooks":
+        profile_anchor_path_name = f"{spring_name}_LEFT_U_END_LEG_PATH"
+        profile_anchor_vertex = "end"
+    if hook_type == "open_loop_hooks":
+        profile_anchor_path_name = f"{spring_name}_LEFT_OPEN_ARC_PATH"
+        profile_anchor_vertex = "end"
+    if hook_type == "center_loop_hooks":
+        profile_anchor_path_name = f"{spring_name}_LEFT_CENTER_LOOP_ARC_PATH"
+        profile_anchor_vertex = "start"
+    if hook_type == "extended_center_loop_hooks":
+        profile_anchor_path_name = f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH"
+        profile_anchor_vertex = "start"
+    left_curve1_trim_overrides = {"direction": True, "sense": False}
+    left_connect_curve_overrides = {"curve1_connect_vertex": True}
+    if hook_type in {"center_loop_hooks", "extended_center_loop_hooks"}:
+        left_curve1_trim_overrides = {"direction": False, "sense": True}
+        left_connect_curve_overrides = {"curve1_connect_vertex": False}
+    connector_plan = [
+        _build_trimmed_connector(
+            role="left_hook_to_body",
+            previous_path_name=left_hook_body_path_name,
+            current_path_name=body_path_name,
+            trim_length=trim_length,
+            trim_length_expression=transition_trim_length_variable,
+            tension=tension,
+            tension_expression=transition_connect_tension_variable,
+            curve1_trim_overrides=left_curve1_trim_overrides,
+            connect_curve_overrides=left_connect_curve_overrides,
+        ),
+        _build_trimmed_connector(
+            role="body_to_right_hook",
+            previous_path_name=body_path_name,
+            current_path_name=right_hook_body_path_name,
+            trim_length=trim_length,
+            trim_length_expression=transition_trim_length_variable,
+            tension=tension,
+            tension_expression=transition_connect_tension_variable,
+            curve1_trim_overrides={"direction": False, "sense": True},
+        ),
+    ]
+    connector_plan[1]["curve1_path_name"] = str(connector_plan[0]["sequence_curve2_path_name"])
+    connector_plan[1]["curve1_source_is_chained_trim"] = True
+    left_hook_sequence_paths = [str(connector_plan[0]["sequence_curve1_path_name"])]
+    if hook_type == "v_hooks":
+        left_hook_sequence_paths.extend([
+            f"{spring_name}_LEFT_V_FILLET_PATH",
+            f"{spring_name}_LEFT_V_END_LEG_PATH",
+        ])
+    elif hook_type == "u_hooks":
+        left_hook_sequence_paths.extend([
+            f"{spring_name}_LEFT_U_ARC_PATH",
+            f"{spring_name}_LEFT_U_END_LEG_PATH",
+        ])
+    elif hook_type == "open_loop_hooks":
+        left_hook_sequence_paths.append(f"{spring_name}_LEFT_OPEN_ARC_PATH")
+    elif hook_type == "center_loop_hooks":
+        left_hook_sequence_paths = [
+            f"{spring_name}_LEFT_CENTER_LOOP_ARC_PATH",
+            str(connector_plan[0]["sequence_curve1_path_name"]),
+        ]
+    elif hook_type == "extended_center_loop_hooks":
+        left_hook_sequence_paths = [
+            f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH",
+            f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_SECOND_FILLET_PATH",
+            f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_AXIS_PATH",
+            f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_FIRST_FILLET_PATH",
+            str(connector_plan[0]["sequence_curve1_path_name"]),
+        ]
+    elif hook_type == "bent_coil_left_spike":
+        left_hook_sequence_paths = [str(segment_plan[0]["path_name"])]
+    full_path_sequence = [
+        *left_hook_sequence_paths,
+        str(connector_plan[0]["path_name"]),
+        str(connector_plan[1]["sequence_curve1_path_name"]),
+        str(connector_plan[1]["path_name"]),
+        str(connector_plan[1]["sequence_curve2_path_name"]),
+        *(
+            [
+                f"{spring_name}_RIGHT_V_FILLET_PATH",
+                f"{spring_name}_RIGHT_V_END_LEG_PATH",
+            ]
+            if hook_type == "v_hooks"
+            else []
+        ),
+        *(
+            [
+                f"{spring_name}_RIGHT_U_ARC_PATH",
+                f"{spring_name}_RIGHT_U_END_LEG_PATH",
+            ]
+            if hook_type == "u_hooks"
+            else []
+        ),
+        *(
+            [f"{spring_name}_RIGHT_OPEN_ARC_PATH"]
+            if hook_type == "open_loop_hooks"
+            else []
+        ),
+        *(
+            [f"{spring_name}_RIGHT_CENTER_LOOP_ARC_PATH"]
+            if hook_type == "center_loop_hooks"
+            else []
+        ),
+        *(
+            [
+                f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_FIRST_FILLET_PATH",
+                f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_AXIS_PATH",
+                f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_SECOND_FILLET_PATH",
+                f"{spring_name}_RIGHT_EXTENDED_CENTER_LOOP_ARC_PATH",
+            ]
+            if hook_type == "extended_center_loop_hooks"
+            else []
+        ),
+    ]
+    normalized = {
+        "scenario": "extension_spring",
+        "spring_name": spring_name,
+        "parameter_prefix": parameter_prefix,
+        "operation_label": spring_name,
+        "outer_diameter": outer_diameter,
+        "mean_diameter": mean_diameter,
+        "wire_diameter": wire_diameter,
+        "wire_radius": wire_diameter / 2.0,
+        "requested_gap": requested_gap,
+        "minimum_gap": minimum_gap,
+        "gap": gap,
+        "pitch": pitch,
+        "height": body_height,
+        "turns": body_turns,
+        "left_hand": left_hand,
+        "turn_direction": "left" if left_hand else "right",
+        "hook_type": hook_type,
+        "hook_clearance": hook_clearance,
+        "hook_end_offset": hook_end_offset,
+        "v_hook_height": v_hook_height if hook_type == "v_hooks" else None,
+        "v_hook_length": v_hook_length if hook_type == "v_hooks" else None,
+        "v_hook_fillet_radius": v_hook_fillet_radius if hook_type == "v_hooks" else None,
+        "v_hook_end_distance": v_hook_end_distance if hook_type == "v_hooks" else None,
+        "u_hook_height": u_hook_height if hook_type == "u_hooks" else None,
+        "u_hook_length": u_hook_length if hook_type == "u_hooks" else None,
+        "u_hook_end_offset": u_hook_end_offset if hook_type == "u_hooks" else None,
+        "open_loop_height": open_loop_height if hook_type == "open_loop_hooks" else None,
+        "open_loop_length": open_loop_length if hook_type == "open_loop_hooks" else None,
+        "open_loop_offset": open_loop_offset if hook_type == "open_loop_hooks" else None,
+        "center_loop_height": center_loop_height if hook_type in {"center_loop_hooks", "extended_center_loop_hooks"} else None,
+        "center_loop_radius": center_loop_radius if hook_type in {"center_loop_hooks", "extended_center_loop_hooks"} else None,
+        "center_loop_offset": center_loop_offset if hook_type in {"center_loop_hooks", "extended_center_loop_hooks"} else None,
+        "extended_center_loop_height": center_loop_height if hook_type == "extended_center_loop_hooks" else None,
+        "extended_center_loop_extension": extended_center_loop_extension if hook_type == "extended_center_loop_hooks" else None,
+        "extended_center_loop_fillet_radius": extended_center_loop_fillet if hook_type == "extended_center_loop_hooks" else None,
+        "bent_coil_turns": bent_coil_turns if hook_type == "bent_coil_left_spike" else None,
+        "bent_coil_angle_degrees": bent_coil_angle_degrees if hook_type == "bent_coil_left_spike" else None,
+        "bent_coil_height": bent_coil_height if hook_type == "bent_coil_left_spike" else None,
+        "deprecated_inputs": deprecated_inputs,
+        "mean_diameter_variable": outer_diameter_variable,
+        "wire_diameter_variable": wire_diameter_variable,
+        "pitch_variable": pitch_variable,
+        "height_variable": height_variable,
+        "turns_variable": turns_variable,
+        "variable_plan": variable_plan,
+        "segment_plan": segment_plan,
+        "connector_plan": connector_plan,
+        "full_path_sequence": full_path_sequence,
+        "construction_only": False,
+        "bent_coil_auxiliary_construction": False,
+        "ground_trim_plan": {"operations": []},
+        "profile_path_offset": [0.0, 0.0, 0.0],
+        "profile_sketch_center": [0.0, 0.0],
+        "profile_anchor_plane": {
+            "path_name": profile_anchor_path_name,
+            "vertex": profile_anchor_vertex,
+            **({"use_perpendicular_plane": False} if hook_type == "bent_coil_left_spike" else {}),
+        },
+        "sketch": {
+            "axis_line_style": 3,
+            "profile_line_style": 1,
+            "parametric": True,
+            "dimension_display": "radius",
+            "dimensions": {"enabled": True},
+            "constraints": {"enabled": True, "auto": True},
+            "parameterization_order": "staged",
+        },
+        "profile_sketch_constraints": [
+            {"kind": "fixed_point", "target": "profile_circle", "index": 0},
+        ],
+        "profile_sketch_dimensions": [
+            {"kind": "circle_diameter", "target": "profile_circle", "expression": wire_diameter_variable, "driving": True},
+        ],
+        "profile_lcs_rotation": {},
+        "close_after_save": False,
+    }
+    operations = [
+        {"operation": "add_variables", "variables": variable_plan},
+    ] + [
+        {"operation": "create_path_segment", "role": segment["role"], "path_type": segment["path_type"], "path_name": segment["path_name"]}
+        for segment in segment_plan
+    ] + [
+        {"operation": "create_wire_profile", "radius": wire_diameter / 2.0},
+        {"operation": "boss_evolution", "source_path_count": len(full_path_sequence)},
+    ]
+    selectors = {
+        "left_hook_start_point": list(left_hook_start),
+        "body_start_point": list(body_start),
+        "body_finish_point": list(body_end),
+        "right_hook_finish_point": list(right_hook_end),
+    }
+    return {
+        "scenario": "extension_spring",
+        "params": normalized,
+        "operations": operations,
+        "selectors": selectors,
+        "summary": {
+            "outer_diameter": outer_diameter,
+            "wire_diameter": wire_diameter,
+            "turns": body_turns,
+            "hook_type": hook_type,
+            "turn_direction": normalized["turn_direction"],
+        },
+        "interface": {"parameters": {}, "anchors": {"selector_points": selectors}},
+    }
+
+
 def preview_point(params: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_point_params(params)
     point = normalized["origin"]
@@ -2990,6 +5652,46 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                 raise ValueError("compression_spring total_turns must exceed twice the end_turns_per_side")
             raise ValueError("compression_spring total_turns must exceed start_end_turns + finish_end_turns")
         working_turns = derived_working_turns
+    pitch_mode = str(params.get("pitch_mode") or params.get("pitch_profile") or "constant").strip().lower().replace("-", "_")
+    variable_pitch_enabled = pitch_mode in {"two_zone", "two_step", "variable", "progressive"}
+    working_turns_1 = working_turns_2 = pitch_1 = pitch_2 = None
+    if variable_pitch_enabled:
+        working_turns_1 = _optional_positive_float(
+            params,
+            "working_turns_1",
+            "working_turns_1",
+            "active_turns_1",
+            "zone_1_turns",
+            "n11",
+            "N11",
+        )
+        working_turns_2 = _optional_positive_float(
+            params,
+            "working_turns_2",
+            "working_turns_2",
+            "active_turns_2",
+            "zone_2_turns",
+            "n12",
+            "N12",
+        )
+        pitch_1 = _optional_positive_float(params, "pitch_1", "pitch_1", "zone_1_pitch", "p11", "P11")
+        pitch_2 = _optional_positive_float(params, "pitch_2", "pitch_2", "zone_2_pitch", "p12", "P12")
+        missing = [
+            name
+            for name, value in (
+                ("working_turns_1", working_turns_1),
+                ("pitch_1", pitch_1),
+                ("working_turns_2", working_turns_2),
+                ("pitch_2", pitch_2),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError("compression_spring_variable_pitch requires " + ", ".join(missing))
+        working_turns_1 = _normalize_spring_fractional_turn(float(working_turns_1), field_name="working_turns_1")
+        working_turns_2 = _normalize_spring_fractional_turn(float(working_turns_2), field_name="working_turns_2")
+        working_turns = working_turns_1 + working_turns_2
+
     if working_turns is None:
         raise ValueError("compression_spring requires working_turns or total_turns")
     working_turns = _normalize_spring_fractional_turn(
@@ -3007,6 +5709,12 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
 
     if mean_diameter <= wire_diameter:
         raise ValueError("compression_spring requires mean_diameter greater than wire_diameter")
+    variable_pitch_active_height = None
+    if variable_pitch_enabled:
+        variable_pitch_active_height = float(working_turns_1) * float(pitch_1) + float(working_turns_2) * float(pitch_2)
+        if free_length is None and standard_length is None:
+            free_length = total_end_turns * wire_diameter + variable_pitch_active_height
+
     length_model = _build_compression_spring_length_model(
         standard_length=float(standard_length) if standard_length is not None else None,
         centerline_length=float(free_length) if free_length is not None else None,
@@ -3021,9 +5729,19 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     if free_length <= minimum_length:
         raise ValueError("compression_spring free_length is too small for the requested end turns")
     active_height = free_length - minimum_length
-    pitch = active_height / working_turns
+    if variable_pitch_enabled:
+        if abs(active_height - float(variable_pitch_active_height)) > 1e-6:
+            raise ValueError(
+                "compression_spring_variable_pitch requires L/free_length to match "
+                "working_turns_1 * pitch_1 + working_turns_2 * pitch_2 plus end spans"
+            )
+        pitch = active_height / working_turns
+    else:
+        pitch = active_height / working_turns
     if pitch < float(wire_diameter):
         raise ValueError("compression_spring requires pitch greater than or equal to wire_diameter")
+    if variable_pitch_enabled and (float(pitch_1) < float(wire_diameter) or float(pitch_2) < float(wire_diameter)):
+        raise ValueError("compression_spring_variable_pitch requires pitch_1 and pitch_2 greater than or equal to wire_diameter")
 
     direction_value = str(
         params.get("turn_direction") or params.get("direction") or params.get("hand") or ""
@@ -3064,9 +5782,15 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     spring_diameter_variable = build_parameter_name("D", 1, prefix=parameter_prefix)
     wire_diameter_variable = build_parameter_name("WD", 1, prefix=parameter_prefix)
     pitch_variable = build_parameter_name("P", 1, prefix=parameter_prefix)
+    pitch_1_variable = build_parameter_name("P", 11, prefix=parameter_prefix)
+    pitch_2_variable = build_parameter_name("P", 12, prefix=parameter_prefix)
     standard_length_variable = build_parameter_name("L", 1, prefix=parameter_prefix)
     height_variable = build_parameter_name("H", 1, prefix=parameter_prefix)
     turns_variable = build_parameter_name("N", 1, prefix=parameter_prefix)
+    turns_1_variable = build_parameter_name("N", 11, prefix=parameter_prefix)
+    turns_2_variable = build_parameter_name("N", 12, prefix=parameter_prefix)
+    height_1_variable = build_parameter_name("H", 11, prefix=parameter_prefix)
+    height_2_variable = build_parameter_name("H", 12, prefix=parameter_prefix)
     transition_trim_length_variable = build_parameter_name("TL", 1, prefix=parameter_prefix)
     transition_connect_tension_variable = build_parameter_name("TN", 1, prefix=parameter_prefix)
     outer_diameter = float(mean_diameter) + float(wire_diameter)
@@ -3099,36 +5823,28 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
             "operation_label": operation_label,
             "external": True,
         },
-        *(
-            [
-                {
-                    "name": standard_length_variable,
-                    "value": float(length_model["standard_length"]),
-                    "note": build_parameter_note(
-                        operation_label,
-                        "spring",
-                        standard_length_variable,
-                        "Standard full spring length",
-                    ),
-                    "kind": "driving_standard_length",
-                    "step_name": "spring",
-                    "operation_label": operation_label,
-                    "external": True,
-                }
-            ]
-            if length_model["source"] == "standard_length"
-            else []
-        ),
+        {
+            "name": standard_length_variable,
+            "value": float(length_model["standard_length"]),
+            "note": build_parameter_note(
+                operation_label,
+                "spring",
+                standard_length_variable,
+                "Full spring height",
+            ),
+            "kind": "driving_standard_length",
+            "step_name": "spring",
+            "operation_label": operation_label,
+            "external": True,
+        },
         {
             "name": height_variable,
             "value": float(free_length),
             "note": build_parameter_note(operation_label, "spring", height_variable, "Centerline construction height"),
-            "kind": "derived_centerline_height"
-            if length_model["source"] == "standard_length"
-            else "driving_height",
+            "kind": "derived_centerline_height",
             "step_name": "spring",
             "operation_label": operation_label,
-            "external": length_model["source"] != "standard_length",
+            "external": False,
         },
         {
             "name": turns_variable,
@@ -3140,6 +5856,65 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
             "external": True,
         },
     ]
+    if variable_pitch_enabled:
+        variable_plan.extend(
+            [
+                {
+                    "name": turns_1_variable,
+                    "value": float(working_turns_1),
+                    "note": build_parameter_note(operation_label, "spring", turns_1_variable, "First working-zone turns"),
+                    "kind": "driving_working_zone_1_turn_count",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": pitch_1_variable,
+                    "value": float(pitch_1),
+                    "note": build_parameter_note(operation_label, "spring", pitch_1_variable, "First working-zone pitch"),
+                    "kind": "driving_working_zone_1_pitch",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": height_1_variable,
+                    "value": float(working_turns_1) * float(pitch_1),
+                    "note": build_parameter_note(operation_label, "spring", height_1_variable, "First working-zone height"),
+                    "kind": "derived_working_zone_1_height",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": False,
+                },
+                {
+                    "name": turns_2_variable,
+                    "value": float(working_turns_2),
+                    "note": build_parameter_note(operation_label, "spring", turns_2_variable, "Second working-zone turns"),
+                    "kind": "driving_working_zone_2_turn_count",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": pitch_2_variable,
+                    "value": float(pitch_2),
+                    "note": build_parameter_note(operation_label, "spring", pitch_2_variable, "Second working-zone pitch"),
+                    "kind": "driving_working_zone_2_pitch",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": True,
+                },
+                {
+                    "name": height_2_variable,
+                    "value": float(working_turns_2) * float(pitch_2),
+                    "note": build_parameter_note(operation_label, "spring", height_2_variable, "Second working-zone height"),
+                    "kind": "derived_working_zone_2_height",
+                    "step_name": "spring",
+                    "operation_label": operation_label,
+                    "external": False,
+                },
+            ]
+        )
     end_turns_variable: str | None = None
     ground_turns_variable: str | None = None
     start_end_turns_variable: str | None = None
@@ -3349,18 +6124,22 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     )
     if transfer_first_segment_half_turn:
         first_segment_rotation_expression = None
-    working_rotation_expression = _build_spring_rotation_expression_from_turns(
-        working_rotation_turns_expression,
-        start_phase_degrees=start_phase_raw,
-        left_hand=left_hand,
-        extra_angle_offset_degrees=180.0 if transfer_first_segment_half_turn else 0.0,
-    )
-    finish_rotation_expression = _build_spring_rotation_expression_from_turns(
-        finish_rotation_turns_expression,
-        start_phase_degrees=start_phase_raw,
-        left_hand=left_hand,
-        extra_angle_offset_degrees=180.0 if transfer_first_segment_half_turn else 0.0,
-    )
+    def _sum_spring_turns_expressions(*terms: str | None) -> str | None:
+        parts = [str(term).strip() for term in terms if str(term or "").strip()]
+        if not parts:
+            return None
+        return " + ".join(f"({part})" for part in parts)
+
+    def _build_segment_rotation_expression(turns_before_expression: str | None) -> str | None:
+        return _build_spring_rotation_expression_from_turns(
+            turns_before_expression,
+            start_phase_degrees=start_phase_raw,
+            left_hand=left_hand,
+            extra_angle_offset_degrees=180.0 if transfer_first_segment_half_turn else 0.0,
+        )
+
+    working_rotation_expression = _build_segment_rotation_expression(working_rotation_turns_expression)
+    finish_rotation_expression = _build_segment_rotation_expression(finish_rotation_turns_expression)
     segment_plan: list[dict[str, Any]] = []
     segment_phase_raw = float(start_phase_raw)
     if start_end_turn_span > 1e-9:
@@ -3397,41 +6176,130 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
             }
         )
         segment_phase_raw = segment_end_phase_raw
-    segment_end_phase_raw = segment_phase_raw + phase_multiplier * (active_height / pitch)
-    segment_plan.append(
-        {
-            "role": "working",
-            "label": "working",
-            "description": "Create the working turns with the specified pitch",
-            "path_name": "spring_working_path",
-            "profile_name": "spring_working_profile",
-            "sweep_name": "spring_working_body",
-            "height": active_height,
-            "height_expression": active_height_expression,
-            "pitch": pitch,
-            "pitch_expression": pitch_variable,
-            "turns": turns,
-            "start_offset": start_end_turn_span,
-            "start_offset_expression": working_start_offset_expression,
-            "phase_degrees": _normalize_spring_phase_degrees(segment_phase_raw),
-            "turning_angle_degrees": 0.0,
-            "orientation_angle_degrees": 0.0,
-            "anchor_rotation_expression": (
-                first_segment_rotation_expression if not segment_plan else working_rotation_expression
-            ),
-            "angle_application_mode": "orientation",
-            "end_phase_degrees": _normalize_spring_phase_degrees(segment_end_phase_raw),
-            "start_angle_degrees_raw": float(segment_phase_raw),
-            "end_angle_degrees_raw": float(segment_end_phase_raw),
-            "turn_delta_degrees": float(segment_end_phase_raw - segment_phase_raw),
-            "operation_variable_bindings": _build_spring_spiral_variable_bindings(
-                mean_diameter_expression,
-                pitch_variable,
-                active_height_expression,
-            ),
-        }
-    )
-    segment_phase_raw = segment_end_phase_raw
+    if variable_pitch_enabled:
+        zone_1_rotation_turns_expression = f"({height_1_variable}) / ({pitch_1_variable})"
+        zone_2_rotation_turns_expression = f"({height_2_variable}) / ({pitch_2_variable})"
+        working_2_rotation_turns_expression = _sum_spring_turns_expressions(
+            working_rotation_turns_expression,
+            zone_1_rotation_turns_expression,
+        )
+        finish_rotation_turns_expression = (
+            _sum_spring_turns_expressions(
+                working_2_rotation_turns_expression,
+                zone_2_rotation_turns_expression,
+            )
+            if finish_end_turn_span > 1e-9
+            else None
+        )
+        finish_rotation_expression = _build_segment_rotation_expression(finish_rotation_turns_expression)
+        working_segment_specs = [
+            {
+                "role": "working_1",
+                "label": "working zone 1",
+                "description": "Create the first working zone with its own pitch",
+                "path_name": "spring_working_1_path",
+                "profile_name": "spring_working_1_profile",
+                "sweep_name": "spring_working_1_body",
+                "height": float(working_turns_1) * float(pitch_1),
+                "height_expression": height_1_variable,
+                "pitch": float(pitch_1),
+                "pitch_expression": pitch_1_variable,
+                "turns": float(working_turns_1),
+                "turns_expression": turns_1_variable,
+                "start_offset": start_end_turn_span,
+                "start_offset_expression": working_start_offset_expression,
+                "rotation_turns_expression": working_rotation_turns_expression,
+            },
+            {
+                "role": "working_2",
+                "label": "working zone 2",
+                "description": "Create the second working zone with its own pitch",
+                "path_name": "spring_working_2_path",
+                "profile_name": "spring_working_2_profile",
+                "sweep_name": "spring_working_2_body",
+                "height": float(working_turns_2) * float(pitch_2),
+                "height_expression": height_2_variable,
+                "pitch": float(pitch_2),
+                "pitch_expression": pitch_2_variable,
+                "turns": float(working_turns_2),
+                "turns_expression": turns_2_variable,
+                "start_offset": start_end_turn_span + float(working_turns_1) * float(pitch_1),
+                "start_offset_expression": (
+                    f"({working_start_offset_expression}) + ({height_1_variable})"
+                    if working_start_offset_expression is not None
+                    else height_1_variable
+                ),
+                "rotation_turns_expression": working_2_rotation_turns_expression,
+            },
+        ]
+        finish_start_offset_expression = (
+            f"({working_start_offset_expression}) + ({height_1_variable}) + ({height_2_variable})"
+            if working_start_offset_expression is not None
+            else f"({height_1_variable}) + ({height_2_variable})"
+        ) if finish_end_turn_span > 1e-9 else None
+    else:
+        working_segment_specs = [
+            {
+                "role": "working",
+                "label": "working",
+                "description": "Create the working turns with the specified pitch",
+                "path_name": "spring_working_path",
+                "profile_name": "spring_working_profile",
+                "sweep_name": "spring_working_body",
+                "height": active_height,
+                "height_expression": active_height_expression,
+                "pitch": pitch,
+                "pitch_expression": pitch_variable,
+                "turns": turns,
+                "turns_expression": turns_variable,
+                "start_offset": start_end_turn_span,
+                "start_offset_expression": working_start_offset_expression,
+                "rotation_turns_expression": working_rotation_turns_expression,
+            }
+        ]
+
+    for working_spec in working_segment_specs:
+        segment_end_phase_raw = segment_phase_raw + phase_multiplier * (
+            float(working_spec["height"]) / float(working_spec["pitch"])
+        )
+        working_rotation_expression = _build_segment_rotation_expression(
+            working_spec["rotation_turns_expression"]
+        )
+        segment_plan.append(
+            {
+                "role": working_spec["role"],
+                "label": working_spec["label"],
+                "description": working_spec["description"],
+                "path_name": working_spec["path_name"],
+                "profile_name": working_spec["profile_name"],
+                "sweep_name": working_spec["sweep_name"],
+                "height": working_spec["height"],
+                "height_expression": working_spec["height_expression"],
+                "pitch": working_spec["pitch"],
+                "pitch_expression": working_spec["pitch_expression"],
+                "turns": working_spec["turns"],
+                "turns_expression": working_spec["turns_expression"],
+                "start_offset": working_spec["start_offset"],
+                "start_offset_expression": working_spec["start_offset_expression"],
+                "phase_degrees": _normalize_spring_phase_degrees(segment_phase_raw),
+                "turning_angle_degrees": 0.0,
+                "orientation_angle_degrees": 0.0,
+                "anchor_rotation_expression": (
+                    first_segment_rotation_expression if not segment_plan else working_rotation_expression
+                ),
+                "angle_application_mode": "orientation",
+                "end_phase_degrees": _normalize_spring_phase_degrees(segment_end_phase_raw),
+                "start_angle_degrees_raw": float(segment_phase_raw),
+                "end_angle_degrees_raw": float(segment_end_phase_raw),
+                "turn_delta_degrees": float(segment_end_phase_raw - segment_phase_raw),
+                "operation_variable_bindings": _build_spring_spiral_variable_bindings(
+                    mean_diameter_expression,
+                    working_spec["pitch_expression"],
+                    working_spec["height_expression"],
+                ),
+            }
+        )
+        segment_phase_raw = segment_end_phase_raw
     if finish_end_turn_span > 1e-9:
         segment_end_phase_raw = segment_phase_raw + phase_multiplier * (finish_end_turn_span / wire_diameter)
         segment_plan.append(
@@ -3681,18 +6549,70 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                 full_path_sequence.append(str(segment_plan[index + 1]["path_name"]))
     else:
         full_path_sequence = [str(segment["path_name"]) for segment in segment_plan]
-    length_model["standard_length_expression"] = (
-        standard_length_variable if length_model["source"] == "standard_length" else None
-    )
+    length_model["standard_length_expression"] = standard_length_variable
     length_model["centerline_height_variable"] = height_variable
-    if length_model["source"] == "standard_length":
-        if start_ground_turns > 1e-9 or finish_ground_turns > 1e-9:
-            length_model["centerline_height_expression"] = (
-                f"{standard_length_variable} - {wire_diameter_variable} + "
-                f"(({start_ground_turns_variable} + {finish_ground_turns_variable}) * {wire_diameter_variable})"
-            )
-        else:
-            length_model["centerline_height_expression"] = f"{standard_length_variable} - {wire_diameter_variable}"
+    if start_ground_turns > 1e-9 or finish_ground_turns > 1e-9:
+        length_model["centerline_height_expression"] = (
+            f"{standard_length_variable} - {wire_diameter_variable} + "
+            f"(({start_ground_turns_variable} + {finish_ground_turns_variable}) * {wire_diameter_variable})"
+        )
+    else:
+        length_model["centerline_height_expression"] = f"{standard_length_variable} - {wire_diameter_variable}"
+
+    def _set_variable_plan_expression(name: str, expression: str, *, kind: str | None = None) -> None:
+        for variable in variable_plan:
+            if variable.get("name") == name:
+                variable["expression"] = expression
+                if kind is not None:
+                    variable["kind"] = kind
+                    variable["external"] = False
+                return
+
+    def _sum_spring_height_expressions(*terms: str | None) -> str:
+        parts = [str(term).strip() for term in terms if str(term or "").strip()]
+        if not parts:
+            return "0"
+        return " + ".join(f"({part})" for part in parts)
+
+    _set_variable_plan_expression(
+        height_variable,
+        str(length_model["centerline_height_expression"]),
+        kind="derived_centerline_height",
+    )
+    if variable_pitch_enabled:
+        zone_1_height_expression = f"{turns_1_variable} * {pitch_1_variable}"
+        fixed_height_expression = _sum_spring_height_expressions(
+            start_end_height_expression,
+            height_1_variable,
+            finish_end_height_expression,
+        )
+        zone_2_height_expression = f"{height_variable} - ({fixed_height_expression})"
+        _set_variable_plan_expression(
+            height_1_variable,
+            zone_1_height_expression,
+            kind="derived_first_working_zone_height",
+        )
+        _set_variable_plan_expression(
+            height_2_variable,
+            zone_2_height_expression,
+            kind="derived_second_working_zone_height",
+        )
+        _set_variable_plan_expression(
+            turns_2_variable,
+            f"({height_2_variable}) / ({pitch_2_variable})",
+            kind="derived_second_working_zone_turn_count",
+        )
+        _set_variable_plan_expression(
+            turns_variable,
+            f"(({height_1_variable}) / ({pitch_1_variable})) + (({height_2_variable}) / ({pitch_2_variable}))",
+            kind="derived_working_turn_count",
+        )
+    else:
+        _set_variable_plan_expression(
+            turns_variable,
+            f"({active_height_expression}) / ({pitch_variable})",
+            kind="derived_working_turn_count",
+        )
     ground_trim_plan = _build_compression_spring_ground_trim_plan(
         enabled=start_ground_turns > 1e-9 or finish_ground_turns > 1e-9,
         height_expression=height_variable,
@@ -3736,7 +6656,14 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         "outer_diameter": outer_diameter,
         "inner_diameter": mean_diameter - wire_diameter,
         "wire_diameter": wire_diameter,
+        "pitch_mode": "two_zone" if variable_pitch_enabled else "constant",
         "pitch": pitch,
+        "working_turns_1": float(working_turns_1) if variable_pitch_enabled else None,
+        "pitch_1": float(pitch_1) if variable_pitch_enabled else None,
+        "height_1": float(working_turns_1) * float(pitch_1) if variable_pitch_enabled else None,
+        "working_turns_2": float(working_turns_2) if variable_pitch_enabled else None,
+        "pitch_2": float(pitch_2) if variable_pitch_enabled else None,
+        "height_2": float(working_turns_2) * float(pitch_2) if variable_pitch_enabled else None,
         "standard_length": length_model["standard_length"],
         "length_model": length_model,
         "height": free_length,
@@ -3786,8 +6713,14 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         "outer_diameter_expression": spring_diameter_variable,
         "wire_diameter_expression": wire_diameter_variable,
         "pitch_expression": pitch_variable,
+        "pitch_1_expression": pitch_1_variable if variable_pitch_enabled else None,
+        "pitch_2_expression": pitch_2_variable if variable_pitch_enabled else None,
+        "height_1_expression": height_1_variable if variable_pitch_enabled else None,
+        "height_2_expression": height_2_variable if variable_pitch_enabled else None,
         "height_expression": height_variable,
         "turns_expression": turns_variable,
+        "turns_1_expression": turns_1_variable if variable_pitch_enabled else None,
+        "turns_2_expression": turns_2_variable if variable_pitch_enabled else None,
         "end_turns_expression": end_turns_variable,
         "ground_turns_expression": ground_turns_variable,
         "start_end_turns_expression": (
@@ -3906,20 +6839,6 @@ def _build_compression_spring_length_model(
     start_ground_turns: float,
     finish_ground_turns: float,
 ) -> dict[str, Any]:
-    if standard_length is None:
-        if centerline_length is None:
-            raise ValueError("compression_spring requires free_length or standard_length")
-        return {
-            "source": "centerline_length",
-            "standard_length": None,
-            "centerline_length": float(centerline_length),
-            "height_reference": "centerline_start_to_centerline_finish",
-            "centerline_height_expression": "H1",
-        }
-
-    if centerline_length is not None:
-        raise ValueError("Use either free_length/height or standard_length/L, not both")
-
     if start_ground_turns > 1e-9 or finish_ground_turns > 1e-9:
         centerline_offset = (-1.0 + float(start_ground_turns) + float(finish_ground_turns)) * float(wire_diameter)
         expression = "L1 - WD1 + ((N31 + N32) * WD1)"
@@ -3928,6 +6847,25 @@ def _build_compression_spring_length_model(
         centerline_offset = -float(wire_diameter)
         expression = "L1 - WD1"
         reference = "outer_extreme_to_outer_extreme"
+
+    if standard_length is None:
+        if centerline_length is None:
+            raise ValueError("compression_spring requires free_length or standard_length")
+        standard_length_value = float(centerline_length) - centerline_offset
+        if standard_length_value <= 0.0:
+            raise ValueError("free_length produces a non-positive full spring height")
+        return {
+            "source": "centerline_length",
+            "standard_length": standard_length_value,
+            "centerline_length": float(centerline_length),
+            "height_reference": reference,
+            "centerline_height_expression": expression,
+            "centerline_offset": centerline_offset,
+            "full_height_status": "standard_length_drives_centerline_height",
+        }
+
+    if centerline_length is not None:
+        raise ValueError("Use either free_length/height or standard_length/L, not both")
 
     centerline_length_value = float(standard_length) + centerline_offset
     if centerline_length_value <= 0.0:
@@ -4244,265 +7182,24 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
     if normalized_scenario == "bolt_circle_holes":
         return preview_bolt_circle_holes(params)
     if normalized_scenario == "compression_spring":
-        return _preview_part_scenario_legacy("compression_spring", params, scenario)
+        return preview_compression_spring(params)
+    if normalized_scenario == "conical_compression_spring":
+        return preview_conical_compression_spring(params)
+    if normalized_scenario == "torsion_spring":
+        return preview_torsion_spring(params)
     if normalized_scenario == "extension_spring":
         return preview_extension_spring(params)
+    if normalized_scenario == "compression_spring_variable_pitch":
+        variable_params = dict(params)
+        variable_params.setdefault("pitch_mode", "two_zone")
+        return preview_compression_spring(variable_params)
     if normalized_scenario == "point":
         return preview_point(params)
     if normalized_scenario == "lcs":
         return preview_lcs(params)
     if normalized_scenario == "workflow":
         return preview_workflow(params)
-    return _preview_part_scenario_legacy(normalized_scenario, params, scenario)
-
-
-def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
-    extension_params = copy.deepcopy(params)
-    hook_type = str(extension_params.get("hook_type") or extension_params.get("end_type") or "v_hooks").strip().lower()
-    use_self_wrapping_hooks = hook_type in {"self_wrapping_hooks", "self_wrapping", "wrap_around_hooks", "around_self_hooks"}
-    if use_self_wrapping_hooks:
-        extension_params["hook_type"] = "v_hooks"
-    result = _preview_part_scenario_legacy("extension_spring", extension_params, "extension_spring")
-    result_params = result.get("params")
-    if isinstance(result_params, dict):
-        if use_self_wrapping_hooks:
-            result_params["hook_type"] = "self_wrapping_hooks"
-            result_params["base_hook_type"] = "v_hooks"
-            result_params["self_wrapping_hooks"] = True
-            result_params.setdefault("self_wrapping_hook_stage", "prepared_sketches_and_native_curve_fillets")
-        for key in ("bent_coil_tangent_axis_flip", "bent_coil_angle_direction", "bent_coil_angle_axis_binding", "bent_coil_angle_axis_source", "bent_coil_building_direction"):
-            if key in params:
-                result_params[key] = params[key]
-        if params.get("variable_plan"):
-            existing_variables = result_params.setdefault("variable_plan", [])
-            by_name = {variable.get("name"): variable for variable in existing_variables if isinstance(variable, dict)}
-            for variable in params.get("variable_plan") or []:
-                if isinstance(variable, dict) and variable.get("name"):
-                    by_name[variable["name"]] = copy.deepcopy(variable)
-            result_params["variable_plan"] = list(by_name.values())
-    if use_self_wrapping_hooks:
-        result = _normalize_self_wrapping_hooks_v1(result)
-    return _normalize_bent_coil_left_spike_v2(result)
-
-
-def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
-    params = result.get("params")
-    if not isinstance(params, dict) or not params.get("self_wrapping_hooks"):
-        return result
-    variable_plan = params.setdefault("variable_plan", [])
-    by_name = {variable.get("name"): variable for variable in variable_plan if isinstance(variable, dict)}
-    by_name.setdefault("SH1", {"name": "SH1", "value": 40.0, "kind": "driving_self_wrapping_hook_height", "external": True})
-    by_name.setdefault("SW1", {"name": "SW1", "value": 40.0, "kind": "driving_self_wrapping_hook_width", "external": True})
-    by_name.setdefault("SHW1", {"name": "SHW1", "expression": "SW1 * 0.5", "kind": "derived_self_wrapping_hook_half_width", "external": False})
-    by_name.setdefault("SFR1", {"name": "SFR1", "value": 3.0, "kind": "driving_self_wrapping_fillet_radius", "external": True})
-    wire_diameter = float(params.get("wire_diameter") or params.get("wire_diameter_mm") or 3.0)
-    by_name.setdefault("SWR1", {"name": "SWR1", "value": wire_diameter + 0.01, "expression": "WD1 + 0.01", "kind": "derived_self_wrapping_self_clearance_radius", "external": False})
-    by_name.setdefault("HT1", {"name": "HT1", "value": 6.0, "kind": "driving_self_wrapping_tail_length", "external": True})
-    params["variable_plan"] = list(by_name.values())
-    params["self_wrapping_hook_plan"] = {
-        "version": 1,
-        "base_hook_type": params.get("base_hook_type") or "v_hooks",
-        "left_first_sketch_name": "SELF_WRAPPING_LEFT_FIRST_SKETCH",
-        "left_projected_sketch_name": "SELF_WRAPPING_LEFT_FIRST_SKETCH_PROJECTED",
-        "left_axis_plane_name": "SELF_WRAPPING_LEFT_AXIS_PERP_PLANE",
-        "left_second_sketch_name": "SELF_WRAPPING_LEFT_SECOND_SKETCH_PATH",
-        "fillet_radius_expression": "SFR1",
-        "second_sketch_radius_expression": "SWR1",
-        "tail_length_expression": "HT1",
-    }
-    params["connector_plan"] = []
-    params["profile_anchor_plane"] = {
-        "path_name": "self_wrapping_left_second_edge2",
-        "vertex": "end",
-        "use_perpendicular_plane": True,
-    }
-    params["full_path_sequence"] = [
-        "self_wrapping_left_second_edge2",
-        "self_wrapping_left_second_edge1",
-        "self_wrapping_left_fillet2_edge2",
-        "self_wrapping_left_fillet2_edge0",
-        "self_wrapping_left_fillet2_edge1",
-        "self_wrapping_left_first_edge1",
-        "self_wrapping_left_fillet1_edge2",
-        "self_wrapping_left_fillet1_edge0",
-        "self_wrapping_right_fillet1_edge1",
-        "self_wrapping_right_fillet1_edge0",
-        "self_wrapping_right_fillet1_edge2",
-        "self_wrapping_right_first_edge1",
-        "self_wrapping_right_fillet2_edge1",
-        "self_wrapping_right_fillet2_edge0",
-        "self_wrapping_right_fillet2_edge2",
-        "self_wrapping_right_second_edge1",
-        "self_wrapping_right_second_edge0",
-    ]
-    _sync_add_variables_operation(result, params["variable_plan"])
-    return result
-
-
-def _preview_part_scenario_legacy(normalized_scenario: str, params: dict[str, Any], original_scenario: str) -> dict[str, Any]:
-    legacy = _load_extension_spring_legacy_module()
-    return legacy.preview_part_scenario(normalized_scenario, params)
-
-
-def _load_extension_spring_legacy_module():
-    legacy_path = Path(__file__).with_name("parametric_extension_legacy.py")
-    if not legacy_path.exists():
-        raise ValueError("extension_spring preview is unavailable: missing parametric_extension_legacy.py")
-    loader = importlib.machinery.SourceFileLoader("kompas_mcp._parametric_extension_legacy", str(legacy_path))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    if spec is None or spec.loader is None:
-        raise ValueError("extension_spring preview is unavailable: cannot load legacy implementation")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _normalize_bent_coil_left_spike_v2(result: dict[str, Any]) -> dict[str, Any]:
-    params = result.get("params") if isinstance(result, dict) else None
-    if not isinstance(params, dict) or params.get("hook_type") != "bent_coil_left_spike":
-        return result
-
-    spring_name = str(params.get("name") or "EXTENSION_SPRING")
-    pitch = float(params.get("pitch", 0.0) or 0.0)
-    outer_diameter = float(params.get("outer_diameter", params.get("diameter", 0.0)) or 0.0)
-    bent_turns = float(params.get("bent_coil_turns", 1.0) or 1.0)
-    bent_angle = float(params.get("bent_coil_angle_degrees", 0.0) or 0.0)
-    body_path_name = f"{spring_name}_BODY_PATH"
-    bent_path_name = f"{spring_name}_BENT_COIL_LEFT_SPIKE_PATH"
-    right_bent_path_name = f"{spring_name}_RIGHT_BENT_COIL_PATH"
-
-    body_segment = next(
-        (copy.deepcopy(segment) for segment in params.get("segment_plan", []) if segment.get("role") == "body"),
-        {
-            "role": "body",
-            "path_role": "body",
-            "path_type": "cylindric_spiral",
-            "path_name": body_path_name,
-        },
-    )
-    body_segment["path_name"] = body_path_name
-    body_segment.setdefault("path_type", "cylindric_spiral")
-    body_segment.setdefault("construction_only", False)
-
-    bent_segment = {
-        "role": "bent_coil_left",
-        "side": "left",
-        "base_vertex": "start",
-        "path_role": "bent_coil_left",
-        "path_type": "cylindric_spiral",
-        "path_name": bent_path_name,
-        "path_label": "Bent coil left spike spiral",
-        "turns": bent_turns,
-        "turns_variable": "BT1",
-        "turns_expression": "BT1",
-        "height": pitch * bent_turns,
-        "height_variable": "BH1",
-        "height_expression": "BH1",
-        "pitch": pitch,
-        "pitch_variable": "P1",
-        "pitch_expression": "P1",
-        "diameter": outer_diameter,
-        "diameter_variable": "D1",
-        "diameter_expression": "D1 - WD1",
-        "radius_expression": "(D1 - WD1) / 2",
-        "angle_degrees": bent_angle,
-        "angle_variable": "BA1",
-        "angle_expression": "BA1",
-        "initial_angle_degrees": 90.0,
-        "orientation": "left",
-        "construction_only": True,
-        "operation_variable_bindings": [
-            {
-                "target": "bent_coil_spiral_path",
-                "parameter_note": "Diameter",
-                "parameter_note_aliases": ["Diameter", "Diameter 1", "Диаметр", "Диаметр 1", "D", "D1"],
-                "expression": "D1 - WD1",
-                "role": "bent_coil_diameter",
-            },
-            {
-                "target": "bent_coil_spiral_path",
-                "parameter_note": "Pitch",
-                "parameter_note_aliases": ["Pitch", "Step", "Шаг", "P", "P1"],
-                "expression": "P1",
-                "role": "bent_coil_pitch",
-            },
-            {
-                "target": "bent_coil_spiral_path",
-                "parameter_note": "Height",
-                "parameter_note_aliases": ["Height", "Высота", "H", "BH1"],
-                "expression": "BH1",
-                "role": "bent_coil_height",
-            },
-        ],
-    }
-
-    right_bent_segment = copy.deepcopy(bent_segment)
-    right_bent_segment.update(
-        {
-            "role": "bent_coil_right",
-            "side": "right",
-            "base_vertex": "end",
-            "path_role": "bent_coil_right",
-            "path_name": right_bent_path_name,
-            "path_label": "Bent coil right spike spiral",
-            "orientation": "right",
-            "angle_direction_param": "bent_coil_right_angle_direction",
-            "building_direction_param": "bent_coil_right_building_direction",
-            "initial_angle_degrees": float(params.get("bent_coil_right_initial_angle_degrees", 90.0) or 90.0),
-        }
-    )
-
-    params["segment_plan"] = [body_segment, bent_segment, right_bent_segment]
-    params["connector_plan"] = []
-    params["full_path_sequence"] = [body_path_name, bent_path_name, right_bent_path_name]
-    params["profile_anchor_plane"] = {
-        "path_name": right_bent_path_name,
-        "vertex": "end",
-        "use_perpendicular_plane": True,
-    }
-    params["construction_only"] = False
-    params["bent_coil_auxiliary_construction"] = True
-    params.setdefault("bent_coil_building_direction", False)
-    params.setdefault("bent_coil_right_building_direction", True)
-    _ensure_bent_coil_v2_variables(params, pitch, bent_turns, bent_angle)
-    _sync_add_variables_operation(result, params["variable_plan"])
-    return result
-
-
-def _ensure_bent_coil_v2_variables(params: dict[str, Any], pitch: float, turns: float, angle: float) -> None:
-    variable_plan = params.setdefault("variable_plan", [])
-    by_name = {variable.get("name"): variable for variable in variable_plan if isinstance(variable, dict)}
-    by_name.setdefault("BT1", {"name": "BT1", "value": turns, "kind": "driving_bent_coil_turn_count", "external": True})
-    by_name.setdefault("BH1", {"name": "BH1", "expression": "P1 * BT1", "kind": "derived_bent_coil_height", "external": False})
-    by_name.setdefault(
-        "BA1",
-        {
-            "name": "BA1",
-            "value": angle,
-            "kind": "driving_bent_coil_angle_degrees",
-            "external": True,
-            "comment": "BA1: bent-coil angle plane angle in degrees",
-        },
-    )
-    by_name["BT1"].setdefault("value", turns)
-    by_name["BH1"]["expression"] = "P1 * BT1"
-    by_name["BA1"].setdefault("value", angle)
-    by_name["BA1"]["kind"] = "driving_bent_coil_angle_degrees"
-    by_name["BA1"]["comment"] = "BA1: bent-coil angle plane angle in degrees"
-    params["variable_plan"] = list(by_name.values())
-
-
-def _sync_add_variables_operation(result: dict[str, Any], variable_plan: list[dict[str, Any]]) -> None:
-    operations = result.get("operations")
-    if not isinstance(operations, list):
-        return
-    variables = [copy.deepcopy(variable) for variable in variable_plan if isinstance(variable, dict)]
-    for operation in operations:
-        if isinstance(operation, dict) and operation.get("operation") == "add_variables":
-            operation["variables"] = variables
-            return
-    if variables:
-        operations.insert(0, {"operation": "add_variables", "variables": variables})
+    raise ValueError(f"Unsupported part scenario: {scenario}")
 
 
 def _normalize_scenario(scenario: str) -> str:
@@ -4526,7 +7223,6 @@ def _normalize_scenario(scenario: str) -> str:
     aliases.update(FACE_RING_GROOVE_SCENARIO_ALIASES)
     aliases.update(BOLT_CIRCLE_HOLES_SCENARIO_ALIASES)
     aliases.update(COMPRESSION_SPRING_SCENARIO_ALIASES)
-    aliases.update({"extension_spring": "extension_spring", "tension_spring": "extension_spring"})
     aliases.update(POINT_SCENARIO_ALIASES)
     aliases.update(LCS_SCENARIO_ALIASES)
     aliases.update(WORKFLOW_SCENARIO_ALIASES)
@@ -5572,16 +8268,20 @@ def _build_compression_spring_selector_points(
             "start_body_entry_point": list(start_center),
             "finish_body_exit_point": list(end_center),
         }
-    working_segment = next(
+    working_segments = [
         segment
         for segment in segment_plan
-        if str(segment.get("role") or "") == "working"
-    )
+        if str(segment.get("role") or "") == "working" or str(segment.get("role") or "").startswith("working_")
+    ]
+    working_segment = working_segments[0]
+    last_working_segment = working_segments[-1]
     selector_points: dict[str, list[float]] = {
         "start_tip_point": list(segment_plan[0]["start_point"]),
         "finish_tip_point": list(segment_plan[-1]["end_point"]),
         "start_body_entry_point": list(working_segment["start_point"]),
-        "finish_body_exit_point": list(working_segment["end_point"]),
+        "finish_body_exit_point": list(last_working_segment["end_point"]),
+        "working_start_point": list(working_segment["start_point"]),
+        "working_finish_point": list(last_working_segment["end_point"]),
     }
     start_end_segment = next(
         (
@@ -11549,6 +14249,11 @@ def _build_compression_spring_interface(
         for item in (normalized.get("variable_plan") or [])
         if str(item.get("kind") or "").startswith("driving_")
     }
+    derived_variables = {
+        str(item.get("kind") or ""): item["name"]
+        for item in (normalized.get("variable_plan") or [])
+        if str(item.get("kind") or "").startswith("derived_")
+    }
     outputs: dict[str, dict[str, Any]] = {
         "body": {"type": "body", "live_supported": normalized["live_supported"]},
         "axis": {
@@ -11598,7 +14303,9 @@ def _build_compression_spring_interface(
             "driving_mean_diameter": driving_variables.get("driving_mean_diameter", ""),
             "driving_wire_diameter": driving_variables.get("driving_wire_diameter", ""),
             "driving_pitch": driving_variables.get("driving_pitch", ""),
+            "driving_standard_length": driving_variables.get("driving_standard_length", ""),
             "driving_height": driving_variables.get("driving_height", ""),
+            "derived_centerline_height": derived_variables.get("derived_centerline_height", ""),
             "driving_turn_count": driving_variables.get("driving_turn_count", ""),
             "driving_end_turn_count_per_side": driving_variables.get("driving_end_turn_count_per_side", ""),
             "driving_ground_turn_count_per_side": driving_variables.get("driving_ground_turn_count_per_side", ""),
