@@ -1284,6 +1284,7 @@ Related:
 
 Applies when:
 - building extension spring sweep/evolution profiles;
+- building torsion spring sweep/evolution profiles;
 - adding independent left/right hook composition;
 - choosing `profile_anchor_plane` for a multi-segment `full_path_sequence`.
 
@@ -1303,12 +1304,18 @@ Rule:
 - Always set the wire profile anchor to `full_path_sequence[-1]` with
   `vertex = "end"`.
 - Do not choose the profile anchor from a hook-type-specific left segment.
+- Once the profile is anchored to a point on the final contour, keep the profile
+  sketch local: `profile_path_offset = [0, 0, 0]`,
+  `profile_sketch_center = [0, 0]`, and constrain/dimension the profile circle
+  itself. Do not keep an old in-sketch offset by coil radius.
 
 Verification:
 - Preview: `profile_anchor_plane.path_name == full_path_sequence[-1]` and
   `profile_anchor_plane.vertex == "end"` for every extension hook type.
 - Live CAD: `select_profile_anchor_plane.profile_anchor_path_ref` should match
   the last resolved sequence path.
+- Live CAD: `create_wire_profile.profile_center` should be `[0.0, 0.0]` for
+  anchor-plane-based spring profiles.
 
 Known examples:
 - `machine_hooks`, `v_hooks`, `u_hooks`, `center_loop_hooks`,
@@ -1316,6 +1323,9 @@ Known examples:
   of their final sequence.
 - `self_wrapping_hooks` and `bent_coil_left_spike` use the same helper instead of
   hand-written anchor paths.
+- `torsion_spring` uses local profile sketches for tangent, radial, and
+  axial-transition legs; radial and axial transition fillets no longer require a
+  sketch-level coil-radius offset.
 
 ---
 

@@ -2128,9 +2128,13 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
     total_turns = body_turns + free_angle / 360.0
     if total_turns <= 0.0:
         raise ValueError("torsion spring total turns must be positive")
-    gap = float(params.get("gap", params.get("clearance", 0.0)) or 0.0)
-    if gap < 0.0:
+    requested_gap = float(params.get("gap", params.get("clearance", 0.0)) or 0.0)
+    if requested_gap < 0.0:
         raise ValueError("gap must be non-negative")
+    minimum_gap = float(params.get("minimum_gap", params.get("min_gap", 0.01)) or 0.01)
+    if minimum_gap <= 0.0:
+        raise ValueError("minimum_gap must be positive")
+    gap = max(requested_gap, minimum_gap)
     pitch = wire_diameter + gap
     body_height = pitch * total_turns
     left_leg_length = _positive_float(params.get("left_leg_length", params.get("leg_length", 18.0)), "left_leg_length")
@@ -2183,12 +2187,14 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
     body_finish_z_variable = _var("BZ2")
     right_finish_y_variable = _var("RY2")
     right_finish_z_variable = _var("RZ2")
-    transition_trim_length_variable = _var("TL1")
-    transition_connect_tension_variable = _var("TN1")
+    transition_fillet_radius_variable = _var("TFR1")
+    transition_fillet_radius = float(params.get("transition_fillet_radius", wire_diameter) or wire_diameter)
+    if transition_fillet_radius <= 0.0:
+        raise ValueError("transition_fillet_radius must be positive")
 
     radius_expression = f"(({mean_diameter_variable} - {wire_diameter_variable}) / 2)"
     sign_expression = "-1" if left_hand else "1"
-    end_phase_degrees_expression = f"({sign_expression} * 360 * {turns_variable})"
+    end_phase_degrees_expression = f"({start_phase_variable}) + ({sign_expression} * 360 * {turns_variable})"
 
     def _line_bindings(
         *,
@@ -2208,8 +2214,8 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
             {"parameter_note_aliases": ["Точка 2. Координата Z", "Point 2. Coordinate Z"], "variable": "", "expression": p2z},
         ]
 
-    start_y_expression = radius_expression
-    start_z_expression = "0"
+    start_y_expression = f"({radius_expression}) * cosD({start_phase_variable})"
+    start_z_expression = f"({radius_expression}) * sinD({start_phase_variable})"
     start_tangent_y_expression = f"-({sign_expression}) * sinD({start_phase_variable})"
     start_tangent_z_expression = f"({sign_expression}) * cosD({start_phase_variable})"
     end_y_expression = f"({radius_expression}) * cosD({end_phase_degrees_expression})"
@@ -2288,7 +2294,7 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
             "pitch_expression": pitch_variable,
             "height_expression": height_variable,
             "anchor_rotation_degrees": start_phase_degrees,
-            "anchor_rotation_expression": str(start_phase_degrees),
+            "anchor_rotation_expression": start_phase_variable,
             "turning_angle_degrees": 0.0,
             "start_offset": 0.0,
             "start_point": start_point,
@@ -2320,7 +2326,7 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
     variable_plan = [
         {"name": mean_diameter_variable, "value": outer_diameter, "kind": "driving_outer_diameter", "external": True},
         {"name": wire_diameter_variable, "value": wire_diameter, "kind": "driving_wire_diameter", "external": True},
-        {"name": gap_variable, "value": gap, "kind": "driving_coil_gap", "external": True},
+        {"name": gap_variable, "value": gap, "kind": "driving_coil_gap", "external": True, "comment": f"{gap_variable}: axial gap between adjacent body coils; clamped to at least {minimum_gap:g} mm"},
         {"name": pitch_variable, "expression": f"{wire_diameter_variable} + {gap_variable}", "kind": "derived_pitch", "external": False},
         {"name": body_turns_variable, "value": body_turns, "kind": "driving_body_turn_count", "external": True},
         {"name": free_angle_variable, "value": free_angle, "kind": "driving_free_angle", "external": True},
@@ -2337,86 +2343,37 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
         {"name": body_finish_z_variable, "expression": end_z_expression, "kind": "derived_body_finish_z", "external": False},
         {"name": right_finish_y_variable, "expression": right_end_y_expression, "kind": "derived_right_leg_finish_y", "external": False},
         {"name": right_finish_z_variable, "expression": right_end_z_expression, "kind": "derived_right_leg_finish_z", "external": False},
-        {"name": transition_trim_length_variable, "value": float(params.get("transition_trim_length", wire_diameter)), "kind": "driving_transition_trim_length", "external": True},
-        {"name": transition_connect_tension_variable, "value": float(params.get("transition_tension", 1.0)), "kind": "driving_transition_tension", "external": True},
     ]
     connector_plan: list[dict[str, Any]] = []
     if end_type != "tangent_legs":
+        variable_plan.append({"name": transition_fillet_radius_variable, "value": transition_fillet_radius, "kind": "driving_transition_fillet_radius", "external": True})
+
         def _torsion_connector(previous_segment: dict[str, Any], current_segment: dict[str, Any]) -> dict[str, Any]:
             connector_role = f"{previous_segment['role']}_to_{current_segment['role']}"
-            curve1_trim = normalize_trimmed_curve_params(
-                {
-                    "name": f"torsion_{connector_role}_curve1_local_path",
-                    "point_name": f"torsion_{connector_role}_curve1_local_point",
-                    "offset": float(params.get("transition_trim_length", wire_diameter)),
-                    "direction": False,
-                    "sense": True,
-                    "offset_type": 2,
-                }
+            joint_point = list(previous_segment.get("end_point") or current_segment.get("start_point") or [])
+            return _build_native_fillet_connector(
+                role=connector_role,
+                curve1_path_name=str(previous_segment["path_name"]),
+                curve2_path_name=str(current_segment["path_name"]),
+                path_name=f"{spring_name}_{connector_role.upper()}_PATH",
+                radius=transition_fillet_radius,
+                radius_expression=transition_fillet_radius_variable,
+                curve1_cut_point=joint_point,
+                curve2_cut_point=joint_point,
             )
-            curve1_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
-                transition_trim_length_variable,
-                f"{connector_role}_curve1_trim_offset",
-            )
-            curve2_trim = normalize_trimmed_curve_params(
-                {
-                    "name": f"torsion_{connector_role}_curve2_local_path",
-                    "point_name": f"torsion_{connector_role}_curve2_local_point",
-                    "offset": float(params.get("transition_trim_length", wire_diameter)),
-                    "direction": True,
-                    "sense": False,
-                    "offset_type": 2,
-                }
-            )
-            curve2_trim["point_operation_variable_bindings"] = _build_transition_point_variable_bindings(
-                transition_trim_length_variable,
-                f"{connector_role}_curve2_trim_offset",
-            )
-            connect_curve = normalize_connect_curve_params(
-                {
-                    "name": f"torsion_{connector_role}_connect_path",
-                    "curve1_connect_vertex": False,
-                    "curve2_connect_vertex": True,
-                    "curve1_connect_type": "smooth",
-                    "curve2_connect_type": "smooth",
-                    "tension": float(params.get("transition_tension", 1.0)),
-                }
-            )
-            connect_curve["operation_variable_bindings"] = _build_transition_connect_curve_variable_bindings(
-                transition_connect_tension_variable,
-                f"{connector_role}_connect_curve_tension",
-            )
-            return {
-                "builder": "trimmed_connect_curve",
-                "role": connector_role,
-                "label": connector_role.replace("_", " "),
-                "path_name": connect_curve["name"],
-                "curve1_path_name": str(previous_segment["path_name"]),
-                "curve2_path_name": str(current_segment["path_name"]),
-                "curve1_trim": curve1_trim,
-                "curve2_trim": curve2_trim,
-                "connect_curve": connect_curve,
-                "sequence_curve1_path_name": curve1_trim["name"],
-                "sequence_curve2_path_name": curve2_trim["name"],
-                "trim_length": float(params.get("transition_trim_length", wire_diameter)),
-                "trim_length_expression": transition_trim_length_variable,
-                "tension": float(params.get("transition_tension", 1.0)),
-                "tension_expression": transition_connect_tension_variable,
-            }
 
         connector_plan = [
             _torsion_connector(segment_plan[0], segment_plan[1]),
             _torsion_connector(segment_plan[1], segment_plan[2]),
         ]
-        # When one curve is trimmed from both ends, the second trim must use the
-        # first trimmed result as its source. Otherwise both cuts target the
-        # original curve and the final contour keeps only one trimmed side.
+        # The body spiral is trimmed at both ends by two native fillets. The
+        # second fillet must consume the body-side result edge of the first one,
+        # not the raw body spiral, or the contour keeps an untrimmed body side.
         connector_plan[1]["curve1_path_name"] = str(connector_plan[0]["sequence_curve2_path_name"])
-        connector_plan[1]["curve1_source_is_chained_trim"] = True
     if connector_plan:
         full_path_sequence = [str(connector_plan[0]["sequence_curve1_path_name"])]
         for index, connector in enumerate(connector_plan):
-            full_path_sequence.append(str(connector["path_name"]))
+            full_path_sequence.append(str(connector["sequence_fillet_path_name"]))
             if index + 1 < len(connector_plan):
                 full_path_sequence.append(str(connector_plan[index + 1]["sequence_curve1_path_name"]))
             else:
@@ -2437,6 +2394,7 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
         "turns": total_turns,
         "body_turns": body_turns,
         "free_angle_degrees": free_angle,
+        "minimum_gap": minimum_gap,
         "gap": gap,
         "start_phase_degrees": start_phase_degrees,
         "left_hand": left_hand,
@@ -2454,7 +2412,8 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
         "ground_trim_plan": {"operations": []},
         "path_verification": {"contour_ready": True, "max_joint_gap": 0.0, "joints": []},
         "placement": {"effective_origin": [0.0, 0.0, 0.0]},
-        "profile_path_offset": [0.0, 0.0, -radius],
+        "profile_path_offset": [0.0, 0.0, 0.0],
+        "profile_sketch_center": [0.0, 0.0],
         "sketch": {
             "axis_line_style": 3,
             "profile_line_style": 1,
@@ -2465,27 +2424,10 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
             "parameterization_order": "staged",
         },
         "profile_sketch_constraints": [
-            {"kind": "fixed_point", "target": "radius_ref", "index": 0},
-            {"kind": "vertical", "target": "radius_ref"},
-            {"kind": "merge_points", "target": "radius_ref", "index": 1, "partner": "profile_radius_ref", "partner_index": 0},
-            {"kind": "merge_points", "target": "radius_ref", "index": 1, "partner": "profile_circle", "partner_index": 0},
-            {"kind": "horizontal", "target": "profile_radius_ref"},
-            {"kind": "point_on_curve", "target": "profile_radius_ref", "index": 1, "partner": "profile_circle"},
+            {"kind": "fixed_point", "target": "profile_circle", "index": 0},
         ],
         "profile_sketch_dimensions": [
-            {
-                "kind": "line_length",
-                "target": "radius_ref",
-                "expression": radius_expression,
-                "driving": True,
-            },
-            {
-                "kind": "line_length",
-                "target": "profile_radius_ref",
-                "expression": f"{wire_diameter_variable} / 2",
-                "driving": True,
-                "placement_index": 1,
-            },
+            {"kind": "circle_diameter", "target": "profile_circle", "expression": wire_diameter_variable, "driving": True},
         ],
         "profile_lcs_rotation": {},
         "close_after_save": False,

@@ -190,7 +190,8 @@ Current non-test verification checks:
   `ext-metric-020-240-090-self-wrapping-medium` build live CAD with contours
   `5/5/5`, `3/3/3`, and `17/17/17` respectively.
 - torsion tangent, radial, and axial-transition coverage profiles build live CAD
-  with `3/3/3`, `5/5/5`, and `5/5/5` contours respectively.
+  with `3/3/3`, `5/5/5`, and `5/5/5` contours respectively; radial and axial
+  rows use native curve-fillet leg transitions.
 
 ## Extension Points
 
