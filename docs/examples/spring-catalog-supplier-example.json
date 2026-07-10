@@ -1,0 +1,29 @@
+{
+  "catalogs": [
+    {
+      "id": "supplier_example_compression_v1",
+      "spring_type": "compression_spring",
+      "title": "Example Supplier Compression Spring Catalog",
+      "standard_family": "supplier_part_number_series",
+      "source_kind": "supplier_catalog",
+      "source_note": "Documentation example only. Replace with the supplier name, revision, publication date, and source URL or file reference before use.",
+      "entries": [
+        {
+          "id": "supplier-example-cmp-030-300-100",
+          "title": "Example compression spring d3 D30 L100",
+          "load_class": "medium",
+          "tags": ["example", "supplier"],
+          "note": "Illustrative row only; values are not an official supplier quotation.",
+          "params": {
+            "wire_diameter": 3.0,
+            "outer_diameter": 30.0,
+            "standard_length": 100.0,
+            "working_turns": 9.0,
+            "end_turns_per_side": 0.75,
+            "ground_turns_per_side": 0.75
+          }
+        }
+      ]
+    }
+  ]
+}

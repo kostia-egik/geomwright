@@ -138,6 +138,8 @@ Current non-test verification checks:
   generator;
 - `recommend_spring_sizes` ranks exact and nearest dimensional matches with
   deterministic score ordering;
+- external supplier-style JSON example merges with built-ins as `3` catalogs / `30`
+  entries and resolves through the same preview path;
 - direct `create_spring_from_size` call for `cmp-metric-016-160-050-medium`
   builds live CAD with contour `5/5/5`;
 - compression sample `cmp-metric-030-300-100-medium` builds live CAD with
@@ -160,3 +162,23 @@ Add new catalog families by extending `spring_catalog.py` with another
 
 Do not encode official-standard rows without source metadata. Catalog rows should
 be auditable independently from the CAD mechanics.
+
+## External JSON Catalogs
+
+Load sourced catalogs from either:
+
+- `KOMPAS_MCP_SPRING_CATALOG_DIR` environment variable; or
+- `catalog_dir` argument accepted by all catalog tools.
+
+The loader reads `*.json` files from that directory and merges them with the
+built-in catalogs. It rejects duplicate catalog or entry ids and exposes parse or
+schema errors through `errors`; external rows never silently override built-ins.
+
+Use [spring-catalog-supplier-example.json](examples/spring-catalog-supplier-example.json)
+as the file-shape reference. A file can contain one catalog object or an envelope
+with a `catalogs` array. Each catalog requires `id`, `spring_type`, `title`,
+`standard_family`, `source_kind`, `source_note`, and non-empty `entries`.
+
+Each entry requires `id`, `title`, `load_class`, and `params`. The loader assigns
+`catalog_id` and `catalog_entry_id` to resolved params, so catalog provenance
+survives preview and create calls.

@@ -15,14 +15,18 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
     """Register spring-specific parametric generation tools."""
 
     @mcp.tool()
-    def list_spring_size_catalogs(spring_type: str | None = None, include_entries: bool = False) -> dict:
+    def list_spring_size_catalogs(
+        spring_type: str | None = None,
+        include_entries: bool = False,
+        catalog_dir: str | None = None,
+    ) -> dict:
         """List available built-in spring size catalogs."""
-        return list_spring_catalogs(spring_type=spring_type, include_entries=include_entries)
+        return list_spring_catalogs(spring_type=spring_type, include_entries=include_entries, catalog_dir=catalog_dir)
 
     @mcp.tool()
-    def validate_spring_size_catalogs(include_preview: bool = False) -> dict:
+    def validate_spring_size_catalogs(include_preview: bool = False, catalog_dir: str | None = None) -> dict:
         """Validate built-in spring catalog metadata and optional previews."""
-        return validate_spring_catalogs(include_preview=include_preview)
+        return validate_spring_catalogs(include_preview=include_preview, catalog_dir=catalog_dir)
 
     @mcp.tool()
     def find_spring_sizes(
@@ -37,6 +41,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
         load_class: str | None = None,
         tag: str | None = None,
         limit: int = 50,
+        catalog_dir: str | None = None,
     ) -> dict:
         """Find spring catalog entries by type, size, class, or tag."""
         return find_spring_catalog_entries(
@@ -51,6 +56,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
             load_class=load_class,
             tag=tag,
             limit=limit,
+            catalog_dir=catalog_dir,
         )
 
     @mcp.tool()
@@ -68,6 +74,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
         hook_type: str | None = None,
         tag: str | None = None,
         limit: int = 10,
+        catalog_dir: str | None = None,
     ) -> dict:
         """Recommend nearest spring catalog entries for target dimensions."""
         return recommend_spring_catalog_entries(
@@ -84,6 +91,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
             hook_type=hook_type,
             tag=tag,
             limit=limit,
+            catalog_dir=catalog_dir,
         )
 
     @mcp.tool()
@@ -92,6 +100,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
         entry_id: str,
         overrides: dict | None = None,
         include_preview: bool = False,
+        catalog_dir: str | None = None,
     ) -> dict:
         """Resolve one spring catalog entry to generator-ready scenario params."""
         return resolve_spring_catalog_entry(
@@ -99,6 +108,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
             entry_id=entry_id,
             overrides=overrides,
             include_preview=include_preview,
+            catalog_dir=catalog_dir,
         )
 
     @mcp.tool()
@@ -106,6 +116,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
         catalog_id: str,
         entry_id: str,
         overrides: dict | None = None,
+        catalog_dir: str | None = None,
     ) -> dict:
         """Preview a supported spring from one resolved catalog entry."""
         return resolve_spring_catalog_entry(
@@ -113,6 +124,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
             entry_id=entry_id,
             overrides=overrides,
             include_preview=True,
+            catalog_dir=catalog_dir,
         )
 
     @mcp.tool()
@@ -123,6 +135,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
         output_path: str | None = None,
         visible: bool = True,
         close_after_save: bool = True,
+        catalog_dir: str | None = None,
     ) -> dict:
         """Create a supported spring from one resolved catalog entry."""
         resolved = resolve_spring_catalog_entry(
@@ -130,6 +143,7 @@ def register_spring_tools(mcp: Any, adapter: Any) -> None:
             entry_id=entry_id,
             overrides=overrides,
             include_preview=False,
+            catalog_dir=catalog_dir,
         )
         return adapter.create_part_from_scenario(
             resolved["scenario"],

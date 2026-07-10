@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 
 SPRING_CATALOG_SCHEMA_VERSION = "1.0"
+SPRING_CATALOG_DIR_ENV = "KOMPAS_MCP_SPRING_CATALOG_DIR"
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,7 @@ class SpringCatalog:
     source_kind: str
     source_note: str
     entries: tuple[SpringCatalogEntry, ...]
+    source_path: str = ""
 
     def to_dict(self, *, include_entries: bool = False, include_params: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -58,6 +63,8 @@ class SpringCatalog:
         }
         if include_entries:
             result["entries"] = [entry.to_dict(include_params=include_params) for entry in self.entries]
+        if self.source_path:
+            result["source_path"] = self.source_path
         return result
 
 
@@ -206,14 +213,128 @@ SPRING_CATALOGS: tuple[SpringCatalog, ...] = (
 )
 
 
-def validate_spring_catalogs(*, include_preview: bool = False) -> dict[str, Any]:
+def configured_spring_catalog_dir() -> Path | None:
+    configured = os.getenv(SPRING_CATALOG_DIR_ENV, "").strip()
+    return Path(configured) if configured else None
+
+
+def load_spring_catalog_directory(catalog_dir: str | None = None) -> dict[str, Any]:
+    directory = Path(catalog_dir) if catalog_dir else configured_spring_catalog_dir()
+    catalogs = list(SPRING_CATALOGS)
+    errors: list[dict[str, Any]] = []
+    sources: list[str] = []
+    if directory is None:
+        return {"catalogs": catalogs, "errors": errors, "sources": sources, "catalog_dir": None}
+    if not directory.exists():
+        return {
+            "catalogs": catalogs,
+            "errors": [{"error": "catalog_dir_not_found", "catalog_dir": str(directory)}],
+            "sources": sources,
+            "catalog_dir": str(directory),
+        }
+    if not directory.is_dir():
+        return {
+            "catalogs": catalogs,
+            "errors": [{"error": "catalog_dir_is_not_directory", "catalog_dir": str(directory)}],
+            "sources": sources,
+            "catalog_dir": str(directory),
+        }
+    known_catalog_ids = {catalog.id for catalog in catalogs}
+    known_entry_ids = {entry.id for catalog in catalogs for entry in catalog.entries}
+    for path in sorted(directory.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            errors.append({"error": "catalog_json_read_failed", "source_path": str(path), "detail": str(exc)})
+            continue
+        source_catalogs = payload.get("catalogs") if isinstance(payload, dict) and "catalogs" in payload else [payload]
+        if not isinstance(source_catalogs, list):
+            errors.append({"error": "catalogs_must_be_list", "source_path": str(path)})
+            continue
+        for raw_catalog in source_catalogs:
+            try:
+                catalog = _catalog_from_mapping(raw_catalog, source_path=str(path))
+            except ValueError as exc:
+                errors.append({"error": "catalog_schema_invalid", "source_path": str(path), "detail": str(exc)})
+                continue
+            if catalog.id in known_catalog_ids:
+                errors.append({"error": "duplicate_catalog_id", "catalog_id": catalog.id, "source_path": str(path)})
+                continue
+            local_entry_ids = [entry.id for entry in catalog.entries]
+            duplicate_local_entry = next((entry_id for entry_id in local_entry_ids if local_entry_ids.count(entry_id) > 1), None)
+            if duplicate_local_entry:
+                errors.append({"error": "duplicate_entry_id", "catalog_id": catalog.id, "entry_id": duplicate_local_entry, "source_path": str(path)})
+                continue
+            duplicate_entry = next((entry.id for entry in catalog.entries if entry.id in known_entry_ids), None)
+            if duplicate_entry:
+                errors.append({"error": "duplicate_entry_id", "catalog_id": catalog.id, "entry_id": duplicate_entry, "source_path": str(path)})
+                continue
+            known_catalog_ids.add(catalog.id)
+            known_entry_ids.update(entry.id for entry in catalog.entries)
+            catalogs.append(catalog)
+            sources.append(str(path))
+    return {"catalogs": catalogs, "errors": errors, "sources": sources, "catalog_dir": str(directory)}
+
+
+def _catalog_from_mapping(raw_catalog: Any, *, source_path: str) -> SpringCatalog:
+    if not isinstance(raw_catalog, dict):
+        raise ValueError("catalog must be an object")
+    required_catalog_fields = ("id", "spring_type", "title", "standard_family", "source_kind", "source_note", "entries")
+    missing_catalog_fields = [field for field in required_catalog_fields if not raw_catalog.get(field)]
+    if missing_catalog_fields:
+        raise ValueError("missing catalog fields: %s" % ", ".join(missing_catalog_fields))
+    raw_entries = raw_catalog.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise ValueError("entries must be a non-empty list")
+    entries: list[SpringCatalogEntry] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise ValueError("entry must be an object")
+        required_entry_fields = ("id", "title", "load_class", "params")
+        missing_entry_fields = [field for field in required_entry_fields if not raw_entry.get(field)]
+        if missing_entry_fields:
+            raise ValueError("entry missing fields: %s" % ", ".join(missing_entry_fields))
+        params = raw_entry.get("params")
+        if not isinstance(params, dict):
+            raise ValueError("entry params must be an object")
+        entry_id = str(raw_entry["id"])
+        params = deepcopy(params)
+        params["catalog_id"] = str(raw_catalog["id"])
+        params["catalog_entry_id"] = entry_id
+        entries.append(
+            SpringCatalogEntry(
+                id=entry_id,
+                spring_type=str(raw_catalog["spring_type"]),
+                catalog_id=str(raw_catalog["id"]),
+                title=str(raw_entry["title"]),
+                load_class=str(raw_entry["load_class"]),
+                tags=tuple(str(tag) for tag in raw_entry.get("tags") or ()),
+                note=str(raw_entry.get("note") or ""),
+                params=params,
+            )
+        )
+    return SpringCatalog(
+        id=str(raw_catalog["id"]),
+        spring_type=str(raw_catalog["spring_type"]),
+        title=str(raw_catalog["title"]),
+        standard_family=str(raw_catalog["standard_family"]),
+        source_kind=str(raw_catalog["source_kind"]),
+        source_note=str(raw_catalog["source_note"]),
+        entries=tuple(entries),
+        source_path=source_path,
+    )
+
+
+def validate_spring_catalogs(*, include_preview: bool = False, catalog_dir: str | None = None) -> dict[str, Any]:
+    registry = load_spring_catalog_directory(catalog_dir)
+    catalogs = registry["catalogs"]
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     catalog_ids: set[str] = set()
     entry_ids: set[str] = set()
     entry_count = 0
 
-    for catalog in SPRING_CATALOGS:
+    for catalog in catalogs:
         if catalog.id in catalog_ids:
             errors.append({"catalog_id": catalog.id, "error": "duplicate_catalog_id"})
         catalog_ids.add(catalog.id)
@@ -233,7 +354,7 @@ def validate_spring_catalogs(*, include_preview: bool = False) -> dict[str, Any]
             _validate_entry_geometry(catalog, entry, errors, warnings)
             if include_preview:
                 try:
-                    preview = resolve_spring_catalog_entry(catalog.id, entry.id, include_preview=True).get("preview") or {}
+                    preview = resolve_spring_catalog_entry(catalog.id, entry.id, include_preview=True, catalog_dir=catalog_dir).get("preview") or {}
                 except Exception as exc:
                     errors.append({"catalog_id": catalog.id, "entry_id": entry.id, "error": "preview_exception", "detail": str(exc)})
                 else:
@@ -241,21 +362,32 @@ def validate_spring_catalogs(*, include_preview: bool = False) -> dict[str, Any]
                         errors.append({"catalog_id": catalog.id, "entry_id": entry.id, "error": "preview_missing_operations", "ok": preview.get("ok"), "detail": preview.get("error")})
 
     return {
-        "ok": not errors,
+        "ok": not registry["errors"] and not errors,
         "schema_version": SPRING_CATALOG_SCHEMA_VERSION,
-        "catalog_count": len(SPRING_CATALOGS),
+        "catalog_count": len(catalogs),
         "entry_count": entry_count,
         "include_preview": bool(include_preview),
-        "errors": errors,
+        "catalog_dir": registry["catalog_dir"],
+        "sources": registry["sources"],
+        "errors": registry["errors"] + errors,
         "warnings": warnings,
     }
 
 
-def list_spring_catalogs(spring_type: str | None = None, *, include_entries: bool = False) -> dict[str, Any]:
-    catalogs = [catalog for catalog in SPRING_CATALOGS if spring_type in (None, "", catalog.spring_type)]
+def list_spring_catalogs(
+    spring_type: str | None = None,
+    *,
+    include_entries: bool = False,
+    catalog_dir: str | None = None,
+) -> dict[str, Any]:
+    registry = load_spring_catalog_directory(catalog_dir)
+    catalogs = [catalog for catalog in registry["catalogs"] if spring_type in (None, "", catalog.spring_type)]
     return {
-        "ok": True,
+        "ok": not registry["errors"],
         "schema_version": SPRING_CATALOG_SCHEMA_VERSION,
+        "catalog_dir": registry["catalog_dir"],
+        "sources": registry["sources"],
+        "errors": registry["errors"],
         "catalogs": [catalog.to_dict(include_entries=include_entries, include_params=False) for catalog in catalogs],
     }
 
@@ -273,10 +405,12 @@ def find_spring_catalog_entries(
     load_class: str | None = None,
     tag: str | None = None,
     limit: int = 50,
+    catalog_dir: str | None = None,
 ) -> dict[str, Any]:
+    registry = load_spring_catalog_directory(catalog_dir)
     matches: list[dict[str, Any]] = []
     limit = max(1, min(int(limit or 50), 200))
-    for catalog in SPRING_CATALOGS:
+    for catalog in registry["catalogs"]:
         if spring_type not in (None, "", catalog.spring_type):
             continue
         if catalog_id not in (None, "", catalog.id):
@@ -305,8 +439,11 @@ def find_spring_catalog_entries(
         if len(matches) >= limit:
             break
     return {
-        "ok": True,
+        "ok": not registry["errors"],
         "schema_version": SPRING_CATALOG_SCHEMA_VERSION,
+        "catalog_dir": registry["catalog_dir"],
+        "sources": registry["sources"],
+        "errors": registry["errors"],
         "count": len(matches),
         "entries": matches,
     }
@@ -327,10 +464,12 @@ def recommend_spring_catalog_entries(
     hook_type: str | None = None,
     tag: str | None = None,
     limit: int = 10,
+    catalog_dir: str | None = None,
 ) -> dict[str, Any]:
+    registry = load_spring_catalog_directory(catalog_dir)
     scored: list[dict[str, Any]] = []
     limit = max(1, min(int(limit or 10), 50))
-    for catalog in SPRING_CATALOGS:
+    for catalog in registry["catalogs"]:
         if spring_type not in (None, "", catalog.spring_type):
             continue
         if catalog_id not in (None, "", catalog.id):
@@ -359,8 +498,11 @@ def recommend_spring_catalog_entries(
             scored.append(item)
     scored.sort(key=lambda item: (float(item.get("score") or 0.0), str(item.get("id") or "")))
     return {
-        "ok": True,
+        "ok": not registry["errors"],
         "schema_version": SPRING_CATALOG_SCHEMA_VERSION,
+        "catalog_dir": registry["catalog_dir"],
+        "sources": registry["sources"],
+        "errors": registry["errors"],
         "count": min(len(scored), limit),
         "total_candidates": len(scored),
         "entries": scored[:limit],
@@ -373,8 +515,12 @@ def resolve_spring_catalog_entry(
     *,
     overrides: dict[str, Any] | None = None,
     include_preview: bool = False,
+    catalog_dir: str | None = None,
 ) -> dict[str, Any]:
-    catalog, entry = _find_catalog_entry(catalog_id, entry_id)
+    registry = load_spring_catalog_directory(catalog_dir)
+    if registry["errors"]:
+        raise ValueError("Spring catalog directory contains invalid files: %s" % registry["errors"])
+    catalog, entry = _find_catalog_entry(catalog_id, entry_id, registry["catalogs"])
     params = deepcopy(entry.params)
     params.pop("catalog_id", None)
     params.pop("catalog_entry_id", None)
@@ -384,6 +530,8 @@ def resolve_spring_catalog_entry(
     result: dict[str, Any] = {
         "ok": True,
         "schema_version": SPRING_CATALOG_SCHEMA_VERSION,
+        "catalog_dir": registry["catalog_dir"],
+        "sources": registry["sources"],
         "catalog": catalog.to_dict(include_entries=False),
         "entry": entry.to_dict(include_params=False),
         "scenario": entry.spring_type,
@@ -396,8 +544,12 @@ def resolve_spring_catalog_entry(
     return result
 
 
-def _find_catalog_entry(catalog_id: str, entry_id: str) -> tuple[SpringCatalog, SpringCatalogEntry]:
-    for catalog in SPRING_CATALOGS:
+def _find_catalog_entry(
+    catalog_id: str,
+    entry_id: str,
+    catalogs: list[SpringCatalog] | tuple[SpringCatalog, ...] = SPRING_CATALOGS,
+) -> tuple[SpringCatalog, SpringCatalogEntry]:
+    for catalog in catalogs:
         if catalog.id != catalog_id:
             continue
         for entry in catalog.entries:
