@@ -1285,6 +1285,7 @@ Related:
 Applies when:
 - building extension spring sweep/evolution profiles;
 - building torsion spring sweep/evolution profiles;
+- building conical spring sweep/evolution profiles;
 - adding independent left/right hook composition;
 - choosing `profile_anchor_plane` for a multi-segment `full_path_sequence`.
 
@@ -1326,6 +1327,12 @@ Known examples:
 - `torsion_spring` uses local profile sketches for tangent, radial, and
   axial-transition legs; radial and axial transition fillets no longer require a
   sketch-level coil-radius offset.
+- `conical_spring` uses local profile sketches on the final contour endpoint;
+  start/end conical segments, native curve-fillet transitions, and ground surface
+  cuts must not reintroduce a profile sketch offset.
+- Conical transition fillet defaults should be based on the limiting local cone
+  radius at segment joints, not wire diameter. Keep the default just below that
+  radius and allow explicit override for model-specific tuning.
 
 ---
 

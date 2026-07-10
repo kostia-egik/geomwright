@@ -1817,8 +1817,15 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
     if pitch_mode not in {"constant_pitch", "constant_angle"}:
         raise ValueError("conical_compression_spring pitch_mode must be constant_pitch or constant_angle")
     large_at_start = bool(params.get("large_at_start", True))
+    wire_diameter = float(params.get("wire_diameter", 0.0) or 0.0)
+    if wire_diameter <= 0.0:
+        raise ValueError("wire_diameter must be positive")
 
     compression_params = dict(params)
+    if not any(key in compression_params for key in ("end_turns_per_side", "end_turns")):
+        compression_params["end_turns_per_side"] = 0.75
+    if not any(key in compression_params for key in ("ground_turns_per_side", "ground_turns")):
+        compression_params["ground_turns_per_side"] = 0.75
     compression_params["mean_diameter"] = large_diameter if large_at_start else small_diameter
     preview = preview_compression_spring(compression_params)
     normalized = preview["params"]
@@ -2071,6 +2078,103 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
         "joints": joint_gaps,
     }
 
+    conical_segment_plan = list(normalized.get("segment_plan") or [])
+    if len(conical_segment_plan) > 1:
+        old_connector_plan = list(normalized.get("connector_plan") or [])
+        if params.get("transition_fillet_radius") not in (None, ""):
+            transition_fillet_radius = float(params.get("transition_fillet_radius"))
+            transition_fillet_radius_source = "explicit"
+            transition_fillet_radius_factor = None
+            limiting_joint_radius = None
+        else:
+            transition_fillet_radius_factor = float(
+                params.get("transition_fillet_radius_factor", params.get("transition_fillet_smoothing_factor", 0.875))
+                or 0.875
+            )
+            if transition_fillet_radius_factor <= 0.0 or transition_fillet_radius_factor >= 1.0:
+                raise ValueError("transition_fillet_radius_factor must be between 0 and 1")
+            joint_radii: list[float] = []
+            for index in range(len(conical_segment_plan) - 1):
+                previous_segment = conical_segment_plan[index]
+                current_segment = conical_segment_plan[index + 1]
+                candidate_diameters = [
+                    previous_segment.get("end_diameter"),
+                    current_segment.get("start_diameter"),
+                ]
+                candidate_radii = []
+                for diameter in candidate_diameters:
+                    try:
+                        diameter_value = float(diameter)
+                    except Exception:
+                        continue
+                    if diameter_value > 0.0:
+                        candidate_radii.append(diameter_value / 2.0)
+                if candidate_radii:
+                    joint_radii.append(min(candidate_radii))
+            limiting_joint_radius = min(joint_radii) if joint_radii else max(wire_diameter, 0.01)
+            transition_fillet_radius = max(0.01, limiting_joint_radius * transition_fillet_radius_factor)
+            transition_fillet_radius_source = "joint_radius"
+        if transition_fillet_radius <= 0.0:
+            raise ValueError("transition_fillet_radius must be positive")
+        transition_fillet_radius_variable = f"{parameter_prefix}_TFR1" if parameter_prefix else "TFR1"
+        transition_trim_variables = {
+            str(normalized.get("transition_trim_length_variable") or ""),
+            str(normalized.get("transition_connect_tension_variable") or ""),
+        }
+        normalized["variable_plan"] = [
+            variable
+            for variable in list(normalized.get("variable_plan") or [])
+            if str(variable.get("name") or "") not in transition_trim_variables | {transition_fillet_radius_variable}
+        ]
+        normalized["variable_plan"].append(
+            {
+                "name": transition_fillet_radius_variable,
+                "value": transition_fillet_radius,
+                "kind": "driving_transition_fillet_radius",
+                "external": True,
+                "comment": f"{transition_fillet_radius_variable}: native conical segment transition fillet radius",
+            }
+        )
+        native_connector_plan: list[dict[str, Any]] = []
+        for index in range(len(conical_segment_plan) - 1):
+            previous_segment = conical_segment_plan[index]
+            current_segment = conical_segment_plan[index + 1]
+            role = f"{previous_segment['role']}_to_{current_segment['role']}"
+            old_connector = old_connector_plan[index] if index < len(old_connector_plan) else {}
+            curve1_path_name = str(previous_segment["path_name"])
+            if index > 0 and native_connector_plan:
+                curve1_path_name = str(native_connector_plan[-1]["sequence_curve2_path_name"])
+            native_connector_plan.append(
+                _build_native_fillet_connector(
+                    role=role,
+                    curve1_path_name=curve1_path_name,
+                    curve2_path_name=str(current_segment["path_name"]),
+                    path_name=str(old_connector.get("path_name") or f"CONICAL_{role.upper()}_FILLET_PATH"),
+                    radius=transition_fillet_radius,
+                    radius_expression=transition_fillet_radius_variable,
+                    curve1_cut_point=list(previous_segment.get("end_point") or current_segment.get("start_point") or []),
+                    curve2_cut_point=list(current_segment.get("start_point") or previous_segment.get("end_point") or []),
+                )
+            )
+        normalized["connector_plan"] = native_connector_plan
+        full_path_sequence = [str(native_connector_plan[0]["sequence_curve1_path_name"])]
+        for index, connector in enumerate(native_connector_plan):
+            full_path_sequence.append(str(connector["sequence_fillet_path_name"]))
+            if index + 1 < len(native_connector_plan):
+                full_path_sequence.append(str(native_connector_plan[index + 1]["sequence_curve1_path_name"]))
+            else:
+                full_path_sequence.append(str(connector["sequence_curve2_path_name"]))
+        normalized["full_path_sequence"] = full_path_sequence
+        normalized["transition_fillet_radius"] = transition_fillet_radius
+        normalized["transition_fillet_radius_variable"] = transition_fillet_radius_variable
+        normalized["transition_fillet_radius_source"] = transition_fillet_radius_source
+        normalized["transition_fillet_radius_factor"] = transition_fillet_radius_factor
+        normalized["transition_fillet_reference_radius"] = limiting_joint_radius
+        normalized["transition_trim_length_variable"] = None
+        normalized["transition_connect_tension_variable"] = None
+    else:
+        normalized["connector_plan"] = []
+
     operations_by_role = {
         str(operation.get("role") or ""): operation
         for operation in preview["operations"]
@@ -2107,6 +2211,16 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
         [float(placement_origin[0]), float(placement_origin[1]), 0.0],
         [float(placement_origin[0]) + total_height, float(placement_origin[1]), 0.0],
         normalized["selector_points"],
+    )
+    full_path_sequence = list(normalized.get("full_path_sequence") or [])
+    if full_path_sequence:
+        normalized["profile_anchor_plane"] = {"path_name": str(full_path_sequence[-1]), "vertex": "end"}
+    normalized["profile_path_offset"] = [0.0, 0.0, 0.0]
+    normalized["profile_sketch_center"] = [0.0, 0.0]
+    normalized["profile_sketch_constraints"] = _build_compression_spring_profile_sketch_constraints(local_center=True)
+    normalized["profile_sketch_dimensions"] = _build_compression_spring_profile_sketch_dimensions(
+        normalized.get("wire_diameter_variable", "WD1"),
+        local_center=True,
     )
     return preview
 
@@ -8459,7 +8573,11 @@ def _resolve_spring_segment_orientation_angle_degrees(
     return float(normalized_phase)
 
 
-def _build_compression_spring_profile_sketch_constraints() -> list[dict[str, Any]]:
+def _build_compression_spring_profile_sketch_constraints(*, local_center: bool = False) -> list[dict[str, Any]]:
+    if local_center:
+        return [
+            {"kind": "fixed_point", "target": "profile_circle", "index": 0},
+        ]
     return [
         {"kind": "fixed_point", "target": "radius_ref", "index": 0},
         {"kind": "vertical", "target": "radius_ref"},
@@ -8472,8 +8590,17 @@ def _build_compression_spring_profile_sketch_constraints() -> list[dict[str, Any
 
 def _build_compression_spring_profile_sketch_dimensions(
     outer_diameter_expression: str,
-    wire_diameter_expression: str,
+    wire_diameter_expression: str | None = None,
+    *,
+    local_center: bool = False,
 ) -> list[dict[str, Any]]:
+    if local_center:
+        expression = wire_diameter_expression or outer_diameter_expression
+        return [
+            {"kind": "circle_diameter", "target": "profile_circle", "expression": expression, "driving": True},
+        ]
+    if wire_diameter_expression is None:
+        raise ValueError("wire_diameter_expression is required for offset profile dimensions")
     return [
         {
             "kind": "line_length",
