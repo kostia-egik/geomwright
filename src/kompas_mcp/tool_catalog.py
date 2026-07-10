@@ -124,8 +124,18 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
     {
         "name": "spring_generation",
         "stability": "experimental",
-        "purpose": "Preview or create supported spring-family parametric scenarios.",
-        "tools": ["preview_compression_spring", "create_compression_spring"],
+        "purpose": "Select catalog spring sizes, then preview or create supported spring-family parametric scenarios.",
+        "tools": [
+            "list_spring_size_catalogs",
+            "validate_spring_size_catalogs",
+            "find_spring_sizes",
+            "recommend_spring_sizes",
+            "resolve_spring_size",
+            "preview_spring_from_size",
+            "create_spring_from_size",
+            "preview_compression_spring",
+            "create_compression_spring",
+        ],
     },
     {
         "name": "composition_specification",
