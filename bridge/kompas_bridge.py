@@ -366,6 +366,21 @@ def _apply_center_axis_projection_constraints(center_axis_line, projected_point,
                     break
             except Exception as exc:
                 report["failed"].append({"kind": "merge_points", "partner_index": partner_index, "error": str(exc)})
+    has_anchor = any(item.get("kind") == "merge_points" and item.get("created") for item in report["applied"])
+    if not has_anchor:
+        try:
+            fixed_point = _apply_constraint_to_line(
+                center_axis_line,
+                SKETCH_CONSTRAINT_TYPES["fixed_point"],
+                index=0,
+            )
+            fixed_point_entry = dict(fixed_point)
+            fixed_point_entry["kind"] = "fixed_point"
+            fixed_point_entry["index"] = 0
+            fixed_point_entry["fallback_after_merge"] = True
+            report["applied" if fixed_point.get("created") else "failed"].append(fixed_point_entry)
+        except Exception as exc:
+            report["failed"].append({"kind": "fixed_point", "index": 0, "fallback_after_merge": True, "error": str(exc)})
     try:
         fixed_length = _apply_constraint_to_line(
             center_axis_line,
@@ -6761,6 +6776,16 @@ def _fillet_cut_points_near_shared_endpoint(curve1, curve2, curve1_ratio=0.05, c
     return inward(shared1, other1, curve1_ratio), inward(shared2, other2, curve2_ratio)
 
 
+def _curve_cut_point_near_point(curve, point, ratio=0.03):
+    curve_points = _sample_curve_endpoints(curve)
+    if not curve_points or not point:
+        return None
+    shared_index = 0 if _distance3d(curve_points[0], point) <= _distance3d(curve_points[1], point) else 1
+    shared = curve_points[shared_index]
+    other = curve_points[1 - shared_index]
+    return [float(shared[i]) + (float(other[i]) - float(shared[i])) * float(ratio) for i in range(3)]
+
+
 def _score_curve_endpoints(actual_points, expected_start, expected_end):
     pairings = (
         (actual_points[0], actual_points[1], False),
@@ -6960,6 +6985,30 @@ def _curve_contour_edges_count(contour):
     return None
 
 
+def _curve_reference_report(curve_object):
+    if curve_object is None:
+        return None
+    reference = safe_get(curve_object, "Reference")
+    name = safe_get(curve_object, "Name")
+    model_type = safe_get(curve_object, "ModelObjectType")
+    return {
+        "reference": str(reference) if reference is not None else None,
+        "name": str(name) if name is not None else None,
+        "model_object_type": str(model_type) if model_type is not None else None,
+    }
+
+
+def _curve_collection_reference_report(curves):
+    if curves is None:
+        return []
+    if isinstance(curves, (list, tuple)):
+        return [_curve_reference_report(curve) for curve in curves]
+    count = collection_count(curves)
+    if not count:
+        return []
+    return [_curve_reference_report(get_collection_item(curves, index)) for index in range(count)]
+
+
 def _build_curve_contour(
     auxiliary_container,
     name,
@@ -6988,6 +7037,8 @@ def _build_curve_contour(
         "source_path_count": int(source_count),
         "edges_count": int(edges_count),
         "expected_edges_count": int(expected_count),
+        "source_path_references": _curve_collection_reference_report(curves),
+        "contour_edge_references": _curve_collection_reference_report(safe_get(contour, "Edges")),
     }
     if not allow_incomplete and int(edges_count) != int(expected_count):
         raise RuntimeError(
@@ -7080,6 +7131,8 @@ def _create_staged_curve_fillet_path(
     radius,
     trim_curve1=True,
     trim_curve2=True,
+    curve1_cut_point=None,
+    curve2_cut_point=None,
 ):
     fillet_curves = safe_get(auxiliary_container, "FilletCurves")
     if fillet_curves is None or not callable(safe_get(fillet_curves, "Add")):
@@ -7095,6 +7148,12 @@ def _create_staged_curve_fillet_path(
     fillet.Curve2 = curve2
     fillet.TrimCurve1 = bool(trim_curve1)
     fillet.TrimCurve2 = bool(trim_curve2)
+    normalized_curve1_cut_point = _normalize_curve_cut_point(curve1_cut_point)
+    normalized_curve2_cut_point = _normalize_curve_cut_point(curve2_cut_point)
+    if normalized_curve1_cut_point is not None:
+        fillet.SetCurve1CutPoint(*normalized_curve1_cut_point)
+    if normalized_curve2_cut_point is not None:
+        fillet.SetCurve2CutPoint(*normalized_curve2_cut_point)
     first_update = bool(fillet.Update())
     fillet.Radius = float(radius)
     second_update = bool(fillet.Update())
@@ -7337,7 +7396,7 @@ def _build_compression_spring_transition_curve_paths(
             continue
         fillet_name = str(connector.get("path_name") or ("%s_TRANSITION_FILLET" % spring_name)).strip()
         joint_point = connector.get("joint_point")
-        fillet = _create_curve_fillet_path(
+        fillet, staged_updates = _create_staged_curve_fillet_path(
             auxiliary_container,
             fillet_name,
             curve1_object["path"],
@@ -7345,8 +7404,8 @@ def _build_compression_spring_transition_curve_paths(
             radius=float(connector.get("radius") or 0.0),
             trim_curve1=bool(connector.get("trim_curve1", True)),
             trim_curve2=bool(connector.get("trim_curve2", True)),
-            curve1_cut_point=joint_point,
-            curve2_cut_point=joint_point,
+            curve1_cut_point=connector.get("curve1_cut_point", joint_point),
+            curve2_cut_point=connector.get("curve2_cut_point", joint_point),
         )
         fillet_binding_report = None
         if connector.get("operation_variable_bindings"):
@@ -7366,6 +7425,24 @@ def _build_compression_spring_transition_curve_paths(
         }
         created_curve_objects.append(connector_object)
         curve_by_path_name[connector_object["path_name"]] = connector_object
+        result_edges = _fillet_result_edges(fillet, expected_count=None)
+        edge_names = list(connector.get("result_edge_path_names") or [connector.get("sequence_curve1_path_name"), connector.get("sequence_fillet_path_name"), connector.get("sequence_curve2_path_name")])
+        edge_order = list(connector.get("result_edge_order") or [1, 0, 2])
+        edge_entries = []
+        if len(result_edges) >= len(edge_order) and len(edge_names) >= len(edge_order) and all(edge_names):
+            for logical_index, edge_index in enumerate(edge_order):
+                edge = result_edges[int(edge_index)]
+                edge_object = {
+                    "role": connector_object["role"],
+                    "path_name": str(edge_names[logical_index]),
+                    "path": edge,
+                    "kind": "curve_fillet_result_edge",
+                    "edge_index": int(edge_index),
+                    "feature_path_name": fillet_name,
+                }
+                created_curve_objects.append(edge_object)
+                curve_by_path_name[edge_object["path_name"]] = edge_object
+                edge_entries.append({"path_name": edge_object["path_name"], "edge_index": int(edge_index), "reference": safe_get(edge, "Reference")})
         steps_report.append(
             {
                 "step": "create_curve_fillet_path",
@@ -7378,8 +7455,12 @@ def _build_compression_spring_transition_curve_paths(
                 "curve2_path_name": curve2_path_name,
                 "joint_point": list(joint_point or []),
                 "radius": float(connector.get("radius") or 0.0),
+                "radius_readback": safe_get(fillet, "Radius"),
+                "staged_updates": staged_updates,
                 "trim_curve1": bool(connector.get("trim_curve1", True)),
                 "trim_curve2": bool(connector.get("trim_curve2", True)),
+                "result_edge_count": len(result_edges),
+                "sequence_edges": edge_entries,
             }
         )
         if fillet_binding_report is not None:
@@ -7429,7 +7510,7 @@ def _sketch_edges_list(sketch, edge_type: int) -> list:
     return list(raw_edges) if isinstance(raw_edges, (list, tuple)) else list(iter_collection(raw_edges))
 
 
-def _fillet_result_edges(fillet) -> list:
+def _fillet_result_edges(fillet, expected_count=3) -> list:
     owner = safe_get(fillet, "Owner")
     if owner is None:
         raise RuntimeError("FilletCurve has no Owner feature")
@@ -7438,8 +7519,8 @@ def _fillet_result_edges(fillet) -> list:
         raise RuntimeError("FilletCurve owner does not expose ModelObjects")
     result = model_objects(7)
     edges = list(result) if isinstance(result, (list, tuple)) else list(iter_collection(result))
-    if len(edges) != 3:
-        raise RuntimeError("Expected 3 result edges from FilletCurve owner ModelObjects(7), got %s" % len(edges))
+    if expected_count is not None and len(edges) != int(expected_count):
+        raise RuntimeError("Expected %s result edges from FilletCurve owner ModelObjects(7), got %s" % (int(expected_count), len(edges)))
     return edges
 
 
@@ -8006,7 +8087,9 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
     right_plane_xy = [-float(projected_xy[0]), float(projected_xy[1])]
     # Reuse the stable left-hook payload as a geometric template; the transform
     # below relocates it onto the projected right endpoint and mirrors X.
-    payload = _right_endpoint_self_wrapping_payload({**params, "self_wrapping_hook_plan": {"left_first_sketch_name": first_sketch_name}})
+    payload_params = dict(params)
+    payload_params["self_wrapping_hook_plan"] = {"left_first_sketch_name": first_sketch_name}
+    payload = _right_endpoint_self_wrapping_payload(payload_params)
     payload = _transform_self_wrapping_payload_from_endpoint(
         payload,
         right_plane_xy,
@@ -8103,9 +8186,20 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
     except Exception:
         pass
     right_transition_curve = first_edges[0]
+    logical_body_end = None
+    for segment in list(params.get("segment_plan") or []):
+        if str(segment.get("role") or "") == "body":
+            logical_body_end = list(segment.get("end_point") or segment.get("logical_end_point") or []) or None
+            break
+    body_curve_endpoints = _sample_curve_endpoints(body_curve_for_fillet)
     curve1_cut_point, curve2_cut_point = _fillet_cut_points_near_shared_endpoint(body_curve_for_fillet, right_transition_curve, curve1_ratio=0.0, curve2_ratio=0.03)
-    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_transition_fillet_inputs", "ok": True, "body_curve_endpoints": _sample_curve_endpoints(body_curve_for_fillet), "transition_curve_endpoints": _sample_curve_endpoints(right_transition_curve), "curve1_cut_point": curve1_cut_point, "curve2_cut_point": curve2_cut_point})
-    fillet1 = _create_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_SPIRAL_TO_FIRST_CONTOUR", body_curve_for_fillet, right_transition_curve, fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=curve1_cut_point, curve2_cut_point=curve2_cut_point)
+    if logical_body_end:
+        if curve1_cut_point is None:
+            curve1_cut_point = logical_body_end
+        if curve2_cut_point is None:
+            curve2_cut_point = _curve_cut_point_near_point(right_transition_curve, logical_body_end, ratio=0.03)
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_transition_fillet_inputs", "ok": True, "body_curve_endpoints": body_curve_endpoints, "logical_body_end": logical_body_end, "transition_curve_endpoints": _sample_curve_endpoints(right_transition_curve), "curve1_cut_point": curve1_cut_point, "curve2_cut_point": curve2_cut_point})
+    fillet1, fillet1_staged_updates = _create_staged_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_SPIRAL_TO_FIRST_CONTOUR", body_curve_for_fillet, right_transition_curve, fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=curve1_cut_point, curve2_cut_point=curve2_cut_point)
     binding1 = _bind_operation_variables(fillet1, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": "SFR1"}])
     if not binding1.get("ok", False) or not bool(fillet1.Update()):
         raise RuntimeError("Failed to bind/update first right self-wrapping native curve fillet")
@@ -8115,7 +8209,7 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
     steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_first_to_second_fillet_inputs", "ok": True, "first_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(first_edges)], "second_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(second_edges)], "f1_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(f1_edges)]})
     fillet2_curve1_cut_point, fillet2_curve2_cut_point = _fillet_cut_points_near_shared_endpoint(first_edges[2], second_edges[2], curve1_ratio=0.10, curve2_ratio=0.03)
     steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_first_to_second_fillet_cut_points", "ok": True, "curve1_cut_point": fillet2_curve1_cut_point, "curve2_cut_point": fillet2_curve2_cut_point})
-    fillet2 = _create_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_FIRST_TO_SECOND_CONTOUR", first_edges[2], second_edges[2], fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=fillet2_curve1_cut_point, curve2_cut_point=fillet2_curve2_cut_point)
+    fillet2, fillet2_staged_updates = _create_staged_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_FIRST_TO_SECOND_CONTOUR", first_edges[2], second_edges[2], fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=fillet2_curve1_cut_point, curve2_cut_point=fillet2_curve2_cut_point)
     binding2 = _bind_operation_variables(fillet2, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": "SFR1"}])
     if not binding2.get("ok", False) or not bool(fillet2.Update()):
         raise RuntimeError("Failed to bind/update second right self-wrapping native curve fillet")
@@ -8129,7 +8223,7 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
     pre_rebuild_fillet2 = fillet2
     pre_rebuild_f1_edges = f1_edges
     pre_rebuild_f2_edges = f2_edges
-    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_native_fillets", "ok": True, "bindings": [binding1, binding2]})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_native_fillets", "ok": True, "bindings": [binding1, binding2], "staged_updates": {"fillet1": fillet1_staged_updates, "fillet2": fillet2_staged_updates}})
     if document_id:
         steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_rebuild_before_path_capture", "ok": True, "skipped": True})
     steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_path_capture_refetch", "ok": True, "skipped": True, "reason": "native_fillet_edges_are_current"})
@@ -8253,6 +8347,8 @@ def _build_compression_spring_path_contour_with_connectors(
             "source_path_count": contour_report["source_path_count"],
             "edges_count": contour_report["edges_count"],
             "expected_edges_count": contour_report.get("expected_edges_count"),
+            "source_path_references": contour_report.get("source_path_references"),
+            "contour_edge_references": contour_report.get("contour_edge_references"),
             "connector_count": len(connector_plan),
             "candidate_orientation_angles": contour_report.get("candidate_orientation_angles"),
             "combo_index": contour_report.get("combo_index"),
@@ -13930,7 +14026,8 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
     if params.get("requires_side_specific_hook_builders"):
         hook_selection = dict(params.get("hook_selection") or {})
         raise RuntimeError(
-            "Extension spring mixed hook types require side-specific hook builders: left=%s right=%s"
+            params.get("unsupported_mixed_hook_reason")
+            or "Extension spring mixed hook types require side-specific hook builders: left=%s right=%s"
             % (hook_selection.get("left_hook_type") or params.get("left_hook_type"), hook_selection.get("right_hook_type") or params.get("right_hook_type"))
         )
     steps_report.append(
@@ -14213,7 +14310,11 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 auxiliary_objects.append(("right_hook_plane", sketch_plane))
             else:
                 sketch_plane = str(sketch_plan.get("plane") or "XOY")
-            if params.get("self_wrapping_hooks") and segment_role in ("left_hook", "right_hook"):
+            self_wrapping_skip_sides = set(params.get("self_wrapping_sides") or (["left", "right"] if params.get("self_wrapping_hooks") else []))
+            if params.get("self_wrapping_hooks") and (
+                (segment_role == "left_hook" and "left" in self_wrapping_skip_sides)
+                or (segment_role == "right_hook" and "right" in self_wrapping_skip_sides)
+            ):
                 steps_report.append(
                     {
                         "step": "skip_legacy_hook_sketch_for_self_wrapping",
@@ -14558,15 +14659,89 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 }
             )
 
+    prebuilt_connector_plan = []
+    prebuilt_connector_objects = []
+    self_wrapping_sides = set(params.get("self_wrapping_sides") or (["left", "right"] if params.get("self_wrapping_hooks") else []))
+    early_self_wrapping_segment_objects = []
+    early_self_wrapping_auxiliary_objects = []
+    early_self_wrapping_left_for_right_bent = bool(params.get("self_wrapping_hooks")) and self_wrapping_sides == {"left"} and any(
+        str(item.get("role") or "") == "bent_coil_right" for item in deferred_bent_coil_segments
+    )
+    if early_self_wrapping_left_for_right_bent and params.get("self_wrapping_hook_plan"):
+        document_id = None
+        if document is not None:
+            try:
+                document_id = describe_document(document, make_app()).get("id")
+            except Exception:
+                document_id = None
+        early_self_wrapping_segment_objects, refreshed_auxiliary_container, early_self_wrapping_auxiliary_objects = _build_self_wrapping_left_hook_replacement(
+            part,
+            model_container,
+            auxiliary_container,
+            params,
+            steps_report,
+            document_id=document_id,
+            document=document,
+        )
+        if refreshed_auxiliary_container is not None:
+            auxiliary_container = refreshed_auxiliary_container
+        auxiliary_objects.extend(early_self_wrapping_auxiliary_objects)
+        segment_objects = [item for item in segment_objects if not str(item.get("role") or "") == "left_hook"]
+        segment_objects.extend(early_self_wrapping_segment_objects)
+    right_self_wrapping_needs_left_connector_source = bool(params.get("self_wrapping_hooks")) and "right" in self_wrapping_sides and "left" not in self_wrapping_sides
+    right_bent_needs_left_connector_source = any(
+        str(item.get("role") or "") == "bent_coil_right" for item in deferred_bent_coil_segments
+    ) and any(str(item.get("role") or "") == "left_hook_to_body" for item in list(params.get("connector_plan") or []))
+    if right_bent_needs_left_connector_source or right_self_wrapping_needs_left_connector_source:
+        prebuilt_connector_plan = [
+            connector
+            for connector in list(params.get("connector_plan") or [])
+            if str(connector.get("role") or "") == "left_hook_to_body"
+            and any(str(item.get("path_name") or "") == str(connector.get("curve1_path_name") or "") for item in segment_objects)
+        ]
+        if prebuilt_connector_plan:
+            prebuilt_connector_objects = _build_compression_spring_transition_curve_paths(
+                part,
+                model_container,
+                auxiliary_container,
+                spring_name,
+                segment_objects,
+                prebuilt_connector_plan,
+                steps_report,
+            )
+            segment_objects.extend(prebuilt_connector_objects)
+            auxiliary_objects.extend(_collect_compression_spring_connector_auxiliary_objects(prebuilt_connector_objects))
+            params["connector_plan"] = [
+                connector
+                for connector in list(params.get("connector_plan") or [])
+                if str(connector.get("role") or "") != "left_hook_to_body"
+            ]
+
     if bool(params.get("bent_coil_auxiliary_construction")):
         try:
             body_segment = next((item for item in segment_objects if item.get("role") == "body"), None)
             if body_segment is None:
                 raise RuntimeError("Body segment is required for bent-coil auxiliary construction")
+            if prebuilt_connector_objects:
+                connector_body_path_name = str((prebuilt_connector_plan[0] or {}).get("sequence_curve2_path_name") or "")
+                body_segment = next(
+                    (item for item in prebuilt_connector_objects if str(item.get("path_name") or "") == connector_body_path_name),
+                    body_segment,
+                )
+            if early_self_wrapping_segment_objects:
+                body_segment = next(
+                    (item for item in early_self_wrapping_segment_objects if str(item.get("path_name") or "") == "self_wrapping_left_fillet1_edge1"),
+                    body_segment,
+                )
             bent_coil_plan = next(
-                (item for item in list(params.get("segment_plan") or []) if isinstance(item, dict) and str(item.get("role") or "") == "bent_coil_left"),
+                (item for item in deferred_bent_coil_segments if isinstance(item, dict)),
                 {},
             )
+            has_left_bent_coil_segment = any(
+                str(item.get("role") or "") == "bent_coil_left" for item in deferred_bent_coil_segments
+            )
+            if not has_left_bent_coil_segment:
+                raise StopIteration("skip_bent_coil_left_auxiliary_construction")
             body_start_point = _create_point3d_on_curve(
                 model_container,
                 "%s_BENT_COIL_BODY_START_POINT" % spring_name,
@@ -14729,7 +14904,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             bent_coil_angle_variable_touch_report = _touch_named_variable_same_value(part, "BA1")
             bent_coil_angle_plane = None
             bent_coil_angle_plane_report = None
-            bent_coil_angle_degrees_value = float(params.get("bent_coil_angle_degrees", 0.0) or 0.0)
+            bent_coil_angle_degrees_value = float(params.get("bent_coil_angle_degrees", 90.0) or 90.0)
             bent_coil_angle_expression = str(bent_coil_plan.get("angle_expression") or "BA1")
             try:
                 bent_coil_angle_plane, bent_coil_angle_plane_report = _create_plane_by_angle(
@@ -14772,8 +14947,8 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             center_axis_projection_constraints_report = None
             if bent_coil_angle_plane is not None:
                 center_sketch = sketchs.Add()
-                center_sketch.Plane = bent_coil_angle_plane
                 center_sketch.CoordinateSystem = bent_coil_angle_plane
+                center_sketch.Plane = bent_coil_angle_plane
                 # Backup: without this explicit origin, KOMPAS may place the sketch at the angle plane origin.
                 # Hypothesis 1 anchors the center sketch at the spring body start point.
                 center_sketch_origin_report = _assign_sketch_origin_point(center_sketch, body_start_point)
@@ -14908,18 +15083,27 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 }
             )
         except Exception as exc:
-            steps_report.append(
-                {
-                    "step": "create_bent_coil_auxiliary_construction",
-                    "ok": False,
-                    "error": str(exc),
-                }
-            )
+            if isinstance(exc, StopIteration) and str(exc) == "skip_bent_coil_left_auxiliary_construction":
+                steps_report.append(
+                    {
+                        "step": "skip_bent_coil_left_auxiliary_construction",
+                        "ok": True,
+                        "reason": "no_bent_coil_left_segment",
+                    }
+                )
+            else:
+                steps_report.append(
+                    {
+                        "step": "create_bent_coil_right_auxiliary_construction",
+                        "ok": False,
+                        "error": str(exc),
+                    }
+                )
 
         if any(str(item.get("role") or "") == "bent_coil_right" for item in deferred_bent_coil_segments):
             try:
-                body_segment = next((item for item in segment_objects if item.get("role") == "body"), None)
-                if body_segment is None:
+                right_body_segment = body_segment
+                if right_body_segment is None:
                     raise RuntimeError("Body segment is required for right bent-coil auxiliary construction")
                 right_plan = next(
                     (item for item in list(params.get("segment_plan") or []) if isinstance(item, dict) and str(item.get("role") or "") == "bent_coil_right"),
@@ -14935,7 +15119,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 right_base_point = _create_point3d_on_curve(
                     model_container,
                     "%s_BENT_COIL_RIGHT_BODY_END_POINT" % spring_name,
-                    body_segment["path"],
+                    right_body_segment["path"],
                     direction=False,
                     offset=0.0,
                     offset_type=2,
@@ -15033,14 +15217,14 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                     "%s_BENT_COIL_RIGHT_ANGLE_PLANE" % spring_name,
                     right_tangent_sketch,
                     right_tangent_axis_edge,
-                    float(params.get("bent_coil_angle_degrees", 0.0) or 0.0),
+                    float(params.get("bent_coil_angle_degrees", 90.0) or 90.0),
                     direction=bool(params.get(right_angle_direction_param, True)),
                     axis_binding=str(params.get("bent_coil_angle_axis_binding", "all") or "all"),
                     angle_expression=right_angle_expression,
                 )
                 right_angle_plane_touch_report = _touch_angle_plane_same_value(
                     right_angle_plane,
-                    float(params.get("bent_coil_angle_degrees", 0.0) or 0.0),
+                    float(params.get("bent_coil_angle_degrees", 90.0) or 90.0),
                     angle_expression=right_angle_expression,
                 )
                 right_angle_plane_binding_report = _bind_operation_variables(
@@ -15049,8 +15233,8 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 )
                 auxiliary_objects.append(("bent_coil_right_angle_plane", right_angle_plane))
                 right_center_sketch = sketchs.Add()
-                right_center_sketch.Plane = right_angle_plane
                 right_center_sketch.CoordinateSystem = right_angle_plane
+                right_center_sketch.Plane = right_angle_plane
                 right_center_sketch.Name = "%s_BENT_COIL_RIGHT_CENTER_SKETCH" % spring_name
                 if not right_center_sketch.Update():
                     raise RuntimeError("Right bent-coil center sketch Update returned False")
@@ -15120,6 +15304,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 if not right_center_edges:
                     raise RuntimeError("Right bent-coil center sketch did not expose center edge at Edges(2)")
                 right_center_axis_edge = right_center_edges[0]
+                auxiliary_objects.append(("bent_coil_right_center_axis_edge", right_center_axis_edge))
                 right_center_point3d, right_center_point3d_report = _create_point3d_displace(
                     model_container,
                     "%s_BENT_COIL_RIGHT_CENTER_POINT" % spring_name,
@@ -15133,7 +15318,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 auxiliary_objects.append(("bent_coil_right_center_point3d", right_center_point3d))
                 steps_report.append(
                     {
-                        "step": "create_bent_coil_auxiliary_construction",
+                        "step": "create_bent_coil_right_auxiliary_construction",
                         "role": "bent_coil_right",
                         "ok": True,
                         "base_point_reference": safe_get(right_base_point, "Reference"),
@@ -15150,7 +15335,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                     }
                 )
             except Exception as exc:
-                steps_report.append({"step": "create_bent_coil_auxiliary_construction", "role": "bent_coil_right", "ok": False, "error": str(exc)})
+                steps_report.append({"step": "create_bent_coil_right_auxiliary_construction", "role": "bent_coil_right", "ok": False, "error": str(exc)})
 
     for segment in deferred_bent_coil_segments:
         segment_role = str(segment.get("role") or "bent_coil_left")
@@ -15181,14 +15366,18 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             spiral_position.OrientationType = 0
             if not bool(spiral_position.SetAssociationObject(segment_center_point3d)):
                 raise RuntimeError("Bent-coil spiral SetAssociationObject(center point) returned False")
-            position_parameters = win32com.client.CastTo(spiral_position.LocalCSParameters, "ILocalCSAxesDirectionParam")
+            raw_local_cs_parameters = safe_get(spiral_position, "LocalCSParameters")
+            position_parameters = win32com.client.CastTo(raw_local_cs_parameters, "ILocalCSAxesDirectionParam")
             if position_parameters is None:
                 raise RuntimeError("Bent-coil spiral does not expose ILocalCSAxesDirectionParam")
             position_parameters.LeadAxis = 73
-            if segment_angle_plane is None:
-                raise RuntimeError("Bent-coil angle plane is not available for spiral OZ direction")
             if not bool(position_parameters.SetDirectingObject(73, segment_angle_plane)):
                 raise RuntimeError("Bent-coil spiral SetDirectingObject(OZ, angle plane) returned False")
+            try:
+                position_parameters.AngleByOwnAxis(73, 0.0)
+                own_axis_angle_report = {"axis": 73, "angle": 0.0, "ok": True}
+            except Exception as exc:
+                own_axis_angle_report = {"axis": 73, "angle": 0.0, "ok": False, "error": str(exc)}
             if not bool(spiral_position.Update()):
                 raise RuntimeError("Bent-coil spiral position Update() returned False")
             spiral.DiameterType = 0
@@ -15257,7 +15446,14 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                     "diameter": float(safe_get(spiral, "Diameter", 0.0) or 0.0),
                     "building_direction": bool(safe_get(spiral, "BuildingDirection", False)),
                     "turn_direction": bool(safe_get(spiral, "TurnDirection", False)),
-                    "positioning": {"lead_axis": str(safe_get(position_parameters, "LeadAxis"))},
+                    "positioning": {
+                        "orientation_type": "axis_direction",
+                        "orientation_type_value": safe_get(spiral_position, "OrientationType"),
+                        "parameter_type_value": safe_get(spiral_position, "ParameterType"),
+                        "lead_axis": str(safe_get(position_parameters, "LeadAxis")),
+                        "direction_object": "angle_plane",
+                        "own_axis_angle": own_axis_angle_report,
+                    },
                     "parameterization": {
                         "diameter": diameter_report,
                         "step": step_report,
@@ -15279,7 +15475,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                         }
                         for variable in _iter_operation_variables(spiral)
                     ],
-                    "coordinate_system_reference": safe_get(bent_coil_angle_plane, "Reference") if bent_coil_angle_plane is not None else None,
+                    "coordinate_system_reference": safe_get(segment_angle_plane, "Reference") if segment_angle_plane is not None else None,
                     "built_after_auxiliary": True,
                 }
             )
@@ -15287,20 +15483,20 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             segment_objects.append(
                 {
                     "role": segment_role,
-                    "start_point": bent_coil_center_point3d,
-                    "end_point": bent_coil_center_point3d,
+                    "start_point": segment_center_point3d,
+                    "end_point": segment_center_point3d,
                     "logical_start_point": list(segment.get("start_point") or []),
                     "logical_end_point": list(segment.get("end_point") or []),
                     "path": spiral,
-                    "axis": bent_coil_center_axis_edge,
-                    "direction_object": bent_coil_angle_plane,
+                    "axis": segment_center_axis_edge,
+                    "direction_object": segment_angle_plane,
                     "position_parameters": position_parameters,
                     "angle_application_mode": "initial_angle",
                     "applied_orientation_angle": 0.0,
                     "orientation_angle_candidates": [0.0],
                     "segment": str(segment.get("label") or segment_role),
                     "path_name": str(segment.get("path_name") or ""),
-                    "coordinate_system": bent_coil_angle_plane,
+                    "coordinate_system": segment_angle_plane,
                 }
             )
         except Exception as exc:
@@ -15314,8 +15510,34 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 }
             )
 
-    self_wrapping_segment_objects = []
+    deferred_left_connector_plan = [
+        connector
+        for connector in list(params.get("connector_plan") or [])
+        if str(connector.get("role") or "") == "left_hook_to_body"
+        and any(str(item.get("path_name") or "") == str(connector.get("curve1_path_name") or "") for item in segment_objects)
+    ]
+    self_wrapping_segment_objects = list(early_self_wrapping_segment_objects)
+    if deferred_left_connector_plan and bool(params.get("self_wrapping_hooks")) and "right" in self_wrapping_sides:
+        deferred_left_connector_objects = _build_compression_spring_transition_curve_paths(
+            part,
+            model_container,
+            auxiliary_container,
+            spring_name,
+            segment_objects,
+            deferred_left_connector_plan,
+            steps_report,
+        )
+        segment_objects.extend(deferred_left_connector_objects)
+        auxiliary_objects.extend(_collect_compression_spring_connector_auxiliary_objects(deferred_left_connector_objects))
+        prebuilt_connector_plan.extend(deferred_left_connector_plan)
+        prebuilt_connector_objects.extend(deferred_left_connector_objects)
+        params["connector_plan"] = [
+            connector
+            for connector in list(params.get("connector_plan") or [])
+            if str(connector.get("role") or "") != "left_hook_to_body"
+        ]
     if params.get("self_wrapping_hooks") and params.get("self_wrapping_hook_plan"):
+        self_wrapping_sides = set(params.get("self_wrapping_sides") or ["left", "right"])
         document_id = None
         if document is not None:
             try:
@@ -15326,37 +15548,128 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 document_id = describe_document(document, make_app()).get("id")
             except Exception:
                 document_id = None
-        self_wrapping_segment_objects, refreshed_auxiliary_container, self_wrapping_auxiliary_objects = _build_self_wrapping_left_hook_replacement(
-            part,
-            model_container,
-            auxiliary_container,
-            params,
-            steps_report,
-            document_id=document_id,
-            document=document,
-        )
-        if refreshed_auxiliary_container is not None:
-            auxiliary_container = refreshed_auxiliary_container
-        auxiliary_objects.extend(self_wrapping_auxiliary_objects)
+        self_wrapping_auxiliary_objects = []
+        if "left" in self_wrapping_sides and not early_self_wrapping_segment_objects:
+            self_wrapping_segment_objects, refreshed_auxiliary_container, self_wrapping_auxiliary_objects = _build_self_wrapping_left_hook_replacement(
+                part,
+                model_container,
+                auxiliary_container,
+                params,
+                steps_report,
+                document_id=document_id,
+                document=document,
+            )
+            if refreshed_auxiliary_container is not None:
+                auxiliary_container = refreshed_auxiliary_container
+            auxiliary_objects.extend(self_wrapping_auxiliary_objects)
         right_body_curve_source = None
         for item in self_wrapping_segment_objects:
             if str(item.get("path_name") or "") == "self_wrapping_left_fillet1_edge1":
                 right_body_curve_source = item.get("path")
                 break
-        right_self_wrapping_segment_objects, refreshed_auxiliary_container, right_self_wrapping_auxiliary_objects = _build_self_wrapping_right_hook_replacement(
-            part,
-            model_container,
-            auxiliary_container,
-            params,
-            steps_report,
-            document_id=document_id,
-            document=document,
-            body_curve_source=right_body_curve_source,
-        )
-        if refreshed_auxiliary_container is not None:
-            auxiliary_container = refreshed_auxiliary_container
-        auxiliary_objects.extend(right_self_wrapping_auxiliary_objects)
-        segment_objects = [item for item in segment_objects if not str(item.get("role") or "").startswith(("left_hook", "right_hook"))]
+        explicit_right_body_source_path_name = str(params.get("self_wrapping_right_body_source_path_name") or "")
+        if right_body_curve_source is None and explicit_right_body_source_path_name:
+            for item in segment_objects:
+                if str(item.get("path_name") or "") == explicit_right_body_source_path_name:
+                    explicit_source_path = item.get("path")
+                    explicit_source_edge = None
+                    try:
+                        explicit_source_edge = explicit_source_path.GetEdge() if explicit_source_path is not None else None
+                    except Exception:
+                        explicit_source_edge = None
+                    right_body_curve_source = explicit_source_edge if _sample_curve_endpoints(explicit_source_edge) else explicit_source_path
+                    break
+        if right_body_curve_source is None and prebuilt_connector_objects:
+            connector_body_path_name = str((prebuilt_connector_plan[0] or {}).get("sequence_curve2_path_name") or "")
+            for item in prebuilt_connector_objects:
+                if str(item.get("path_name") or "") == connector_body_path_name:
+                    right_body_curve_source = item.get("path")
+                    break
+        if right_body_curve_source is None:
+            left_bent_source_segment = next((item for item in segment_objects if item.get("role") == "bent_coil_left"), None)
+            body_source_segment = next((item for item in segment_objects if item.get("role") == "body"), None)
+            if left_bent_source_segment is not None and body_source_segment is not None:
+                try:
+                    handoff_contour, handoff_report = _build_curve_contour(
+                        auxiliary_container,
+                        "%s_BENT_TO_RIGHT_SELF_WRAPPING_HANDOFF_CONTOUR" % spring_name,
+                        [left_bent_source_segment.get("path"), body_source_segment.get("path")],
+                        allow_incomplete=True,
+                        expected_edges_count=2,
+                    )
+                    handoff_edges = safe_get(handoff_contour, "Edges")
+                    handoff_edge_count = collection_count(handoff_edges)
+                    if handoff_edge_count:
+                        right_body_curve_source = get_collection_item(handoff_edges, handoff_edge_count - 1)
+                    else:
+                        right_body_curve_source = handoff_contour
+                    steps_report.append(
+                        {
+                            "step": "create_bent_to_right_self_wrapping_handoff_source",
+                            "ok": right_body_curve_source is not None,
+                            "contour": handoff_report,
+                        }
+                    )
+                except Exception as exc:
+                    steps_report.append(
+                        {
+                            "step": "create_bent_to_right_self_wrapping_handoff_source",
+                            "ok": False,
+                            "error": str(exc),
+                        }
+                    )
+        if right_body_curve_source is None:
+            body_source_segment = next((item for item in segment_objects if item.get("role") == "body"), None)
+            if body_source_segment is not None:
+                try:
+                    body_edge_contour, body_edge_report = _build_curve_contour(
+                        auxiliary_container,
+                        "%s_RIGHT_SELF_WRAPPING_BODY_EDGE_SOURCE_CONTOUR" % spring_name,
+                        [body_source_segment.get("path")],
+                        allow_incomplete=False,
+                        expected_edges_count=1,
+                    )
+                    body_edge_collection = safe_get(body_edge_contour, "Edges")
+                    right_body_curve_source = get_collection_item(body_edge_collection, 0)
+                    steps_report.append(
+                        {
+                            "step": "create_right_self_wrapping_body_edge_source",
+                            "ok": right_body_curve_source is not None,
+                            "contour": body_edge_report,
+                        }
+                    )
+                except Exception as exc:
+                    right_body_curve_source = body_source_segment.get("path")
+                    steps_report.append(
+                        {
+                            "step": "create_right_self_wrapping_body_edge_source",
+                            "ok": False,
+                            "error": str(exc),
+                        }
+                    )
+        right_self_wrapping_segment_objects = []
+        right_self_wrapping_auxiliary_objects = []
+        if "right" in self_wrapping_sides:
+            right_self_wrapping_segment_objects, refreshed_auxiliary_container, right_self_wrapping_auxiliary_objects = _build_self_wrapping_right_hook_replacement(
+                part,
+                model_container,
+                auxiliary_container,
+                params,
+                steps_report,
+                document_id=document_id,
+                document=document,
+                body_curve_source=right_body_curve_source,
+            )
+            if refreshed_auxiliary_container is not None:
+                auxiliary_container = refreshed_auxiliary_container
+            auxiliary_objects.extend(right_self_wrapping_auxiliary_objects)
+        remove_prefixes = []
+        if "left" in self_wrapping_sides:
+            remove_prefixes.append("left_hook")
+        if "right" in self_wrapping_sides:
+            remove_prefixes.append("right_hook")
+        if remove_prefixes:
+            segment_objects = [item for item in segment_objects if not str(item.get("role") or "").startswith(tuple(remove_prefixes))]
         segment_objects.extend(self_wrapping_segment_objects)
         segment_objects.extend(right_self_wrapping_segment_objects)
         steps_report.append(
@@ -15396,8 +15709,17 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             "profile": None,
         }
 
+    profile_anchor_plane = params.get("profile_anchor_plane") or {}
     early_path_contour_bundle = None
-    if params.get("self_wrapping_hooks"):
+    profile_anchor_path_name_for_early_contour = str(profile_anchor_plane.get("path_name") or "")
+    profile_anchor_needs_connector_path = bool(profile_anchor_path_name_for_early_contour) and not any(
+        str(item.get("path_name") or "") == profile_anchor_path_name_for_early_contour
+        for item in segment_objects
+    )
+    self_wrapping_requires_symmetric_early_bundle = bool(params.get("self_wrapping_hooks")) and set(
+        params.get("self_wrapping_sides") or ["left", "right"]
+    ) == {"left", "right"}
+    if self_wrapping_requires_symmetric_early_bundle or profile_anchor_needs_connector_path:
         early_path_contour_bundle = _build_compression_spring_path_contour_with_connectors(
             part,
             model_container,
@@ -15409,14 +15731,14 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             steps_report,
         )
 
-    profile_anchor_plane = params.get("profile_anchor_plane") or {}
     profile_lcs = None
     profile_plane_object = sketch_plane
     profile_anchor_report = None
     if profile_anchor_plane:
         anchor_path_name = str(profile_anchor_plane.get("path_name") or "")
         anchor_segment = None
-        for segment_object in list(segment_objects):
+        profile_anchor_connector_objects = early_path_contour_bundle[1] if early_path_contour_bundle is not None else []
+        for segment_object in list(segment_objects) + list(profile_anchor_connector_objects):
             if str(segment_object.get("path_name") or "") == anchor_path_name:
                 anchor_segment = segment_object
                 break

@@ -4285,19 +4285,30 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(variable, dict) and variable.get("name"):
                     by_name[variable["name"]] = copy.deepcopy(variable)
             result_params["variable_plan"] = list(by_name.values())
+        if result_params.get("mixed_hook_types"):
+            result = _compose_mixed_legacy_extension_hooks(result, extension_params, hook_selection)
+            result_params = result.get("params") if isinstance(result.get("params"), dict) else result_params
+            if result_params.get("requires_side_specific_hook_builders"):
+                result_params["unsupported_mixed_hook_reason"] = (
+                    "Mixed extension hooks require side-specific bridge builders for this left/right "
+                    "combination, but no side-fragment composition was produced."
+                )
     if use_self_wrapping_hooks:
         result = _normalize_self_wrapping_hooks_v1(result)
     return _normalize_bent_coil_left_spike_v2(result)
 
 
 def _resolve_extension_hook_selection(params: dict[str, Any]) -> dict[str, Any]:
-    legacy_hook_type = _normalize_extension_hook_type(params.get("hook_type") or params.get("end_type") or "v_hooks")
+    explicit_hook_type = params.get("hook_type") or params.get("end_type")
+    legacy_hook_type = _normalize_extension_hook_type(explicit_hook_type or "v_hooks")
     left_hook_type = _normalize_extension_hook_type(
         params.get("left_hook_type") or params.get("start_hook_type") or params.get("left_end_type") or legacy_hook_type
     )
     right_hook_type = _normalize_extension_hook_type(
         params.get("right_hook_type") or params.get("finish_hook_type") or params.get("right_end_type") or legacy_hook_type
     )
+    if explicit_hook_type is None and left_hook_type == right_hook_type:
+        legacy_hook_type = left_hook_type
     base_hook_type = "v_hooks" if "self_wrapping_hooks" in {legacy_hook_type, left_hook_type, right_hook_type} else legacy_hook_type
     return {
         "legacy_hook_type": legacy_hook_type,
@@ -4342,6 +4353,198 @@ def _normalize_extension_hook_type(value: Any) -> str:
     return aliases.get(raw, raw)
 
 
+def _profile_anchor_at_sequence_end(full_path_sequence: list[str], *, use_perpendicular_plane: bool = True) -> dict[str, Any]:
+    if not full_path_sequence:
+        raise ValueError("extension_spring profile anchor requires a non-empty full_path_sequence")
+    return {
+        "path_name": full_path_sequence[-1],
+        "vertex": "end",
+        "use_perpendicular_plane": bool(use_perpendicular_plane),
+    }
+
+
+_LEGACY_SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES = {
+    "machine_hooks",
+    "v_hooks",
+    "u_hooks",
+    "center_loop_hooks",
+    "extended_center_loop_hooks",
+    "open_loop_hooks",
+}
+
+_DIRECT_SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES = {
+    "bent_coil_left_spike",
+    "self_wrapping_hooks",
+}
+
+_SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES = (
+    _LEGACY_SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES | _DIRECT_SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES
+)
+
+
+def _compose_mixed_legacy_extension_hooks(
+    result: dict[str, Any],
+    extension_params: dict[str, Any],
+    hook_selection: dict[str, Any],
+) -> dict[str, Any]:
+    left_hook_type = str(hook_selection.get("left_hook_type") or "")
+    right_hook_type = str(hook_selection.get("right_hook_type") or "")
+    if left_hook_type not in _SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES:
+        return result
+    if right_hook_type not in _SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES:
+        return result
+    if "self_wrapping_hooks" in {left_hook_type, right_hook_type} and (
+        (left_hook_type != "self_wrapping_hooks" and left_hook_type not in _LEGACY_SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES | {"bent_coil_left_spike"})
+        or (right_hook_type != "self_wrapping_hooks" and right_hook_type not in _LEGACY_SIDE_COMPOSABLE_EXTENSION_HOOK_TYPES | {"bent_coil_left_spike"})
+    ):
+        return result
+    def donor_params_for(hook_type: str) -> dict[str, Any]:
+        donor_params = copy.deepcopy(extension_params)
+        donor_params["hook_type"] = hook_type
+        for key in ("left_hook_type", "right_hook_type", "start_hook_type", "finish_hook_type", "left_end_type", "right_end_type"):
+            donor_params.pop(key, None)
+        donor_result = preview_extension_spring(donor_params)
+        donor_result_params = donor_result.get("params")
+        if not isinstance(donor_result_params, dict):
+            raise ValueError("extension_spring mixed hook donor preview did not return params")
+        return donor_result_params
+
+    def first_by_role(items: list[dict[str, Any]], role: str) -> dict[str, Any]:
+        for item in items:
+            if isinstance(item, dict) and item.get("role") == role:
+                return copy.deepcopy(item)
+        raise ValueError("extension_spring mixed hook donor missing role %s" % role)
+
+    def optional_by_role(items: list[dict[str, Any]], role: str) -> dict[str, Any] | None:
+        for item in items:
+            if isinstance(item, dict) and item.get("role") == role:
+                return copy.deepcopy(item)
+        return None
+
+    def side_segments(hook_type: str, items: list[dict[str, Any]], side: str) -> list[dict[str, Any]]:
+        if hook_type == "self_wrapping_hooks":
+            role = "left_hook" if side == "left" else "right_hook"
+            return [copy.deepcopy(item) for item in items if isinstance(item, dict) and item.get("role") == role]
+        if hook_type == "bent_coil_left_spike":
+            role = "bent_coil_left" if side == "left" else "bent_coil_right"
+            return [copy.deepcopy(item) for item in items if isinstance(item, dict) and item.get("role") == role]
+        return [
+            copy.deepcopy(item)
+            for item in items
+            if isinstance(item, dict) and str(item.get("role") or "").startswith(side)
+        ]
+
+    def sequence_prefix_through(sequence: list[str], marker: str) -> list[str]:
+        if marker not in sequence:
+            raise ValueError("extension_spring mixed hook sequence marker not found: %s" % marker)
+        return list(sequence[: sequence.index(marker) + 1])
+
+    def sequence_suffix_from(sequence: list[str], marker: str) -> list[str]:
+        if marker not in sequence:
+            raise ValueError("extension_spring mixed hook sequence marker not found: %s" % marker)
+        return list(sequence[sequence.index(marker) :])
+
+    def merge_variable_plans(*plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        by_name: dict[str, dict[str, Any]] = {}
+        for plan in plans:
+            for variable in plan or []:
+                if isinstance(variable, dict) and variable.get("name"):
+                    by_name[variable["name"]] = copy.deepcopy(variable)
+        return list(by_name.values())
+
+    left_params = donor_params_for(left_hook_type)
+    right_params = donor_params_for(right_hook_type)
+    result_params = result.get("params")
+    if not isinstance(result_params, dict):
+        return result
+
+    left_segments = side_segments(left_hook_type, left_params.get("segment_plan") or [], "left")
+    right_segments = side_segments(right_hook_type, right_params.get("segment_plan") or [], "right")
+    body_segment = first_by_role(left_params.get("segment_plan") or [], "body")
+    body_path_name = str(body_segment.get("path_name") or "")
+    left_connector = optional_by_role(left_params.get("connector_plan") or [], "left_hook_to_body")
+    right_connector = optional_by_role(right_params.get("connector_plan") or [], "body_to_right_hook")
+
+    if left_hook_type == "self_wrapping_hooks":
+        left_sequence = sequence_prefix_through(
+            list(left_params.get("full_path_sequence") or []),
+            "self_wrapping_left_fillet1_edge0",
+        )
+        body_source_after_left = "self_wrapping_left_fillet1_edge1"
+    elif left_connector is not None:
+        left_sequence = sequence_prefix_through(
+            list(left_params.get("full_path_sequence") or []),
+            str(left_connector.get("sequence_fillet_path_name") or ""),
+        )
+        body_source_after_left = str(left_connector.get("sequence_curve2_path_name") or "")
+    else:
+        left_sequence = [str(segment.get("path_name") or "") for segment in left_segments if segment.get("path_name")]
+        body_source_after_left = body_path_name
+
+    if right_hook_type == "self_wrapping_hooks":
+        right_sequence = sequence_suffix_from(
+            list(right_params.get("full_path_sequence") or []),
+            "self_wrapping_right_fillet1_edge1",
+        )
+    elif right_connector is not None:
+        right_connector["curve1_path_name"] = body_source_after_left
+        right_sequence = sequence_suffix_from(
+            list(right_params.get("full_path_sequence") or []),
+            str(right_connector.get("sequence_curve1_path_name") or ""),
+        )
+    else:
+        right_sequence = [body_source_after_left] + [
+            str(segment.get("path_name") or "") for segment in right_segments if segment.get("path_name")
+        ]
+    full_path_sequence = list(left_sequence) + list(right_sequence)
+
+    result_params["hook_type"] = hook_selection.get("legacy_hook_type")
+    result_params["left_hook_type"] = left_hook_type
+    result_params["right_hook_type"] = right_hook_type
+    result_params["mixed_hook_types"] = True
+    result_params["requires_side_specific_hook_builders"] = False
+    result_params["side_specific_hook_builders"] = True
+    result_params["side_hook_composition"] = {
+        "mode": "side_fragments",
+        "left_hook_type": left_hook_type,
+        "right_hook_type": right_hook_type,
+        "left_connector": left_connector is not None,
+        "right_connector": right_connector is not None,
+    }
+    if "bent_coil_left_spike" in {left_hook_type, right_hook_type}:
+        result_params["bent_coil_hooks"] = True
+        result_params["bent_coil_auxiliary_construction"] = True
+        if right_hook_type == "bent_coil_left_spike" and left_hook_type != "bent_coil_left_spike":
+            result_params["bent_coil_right_building_direction"] = True
+    if "self_wrapping_hooks" in {left_hook_type, right_hook_type}:
+        result_params["self_wrapping_hooks"] = True
+        result_params["self_wrapping_sides"] = [
+            side
+            for side, hook_type in (("left", left_hook_type), ("right", right_hook_type))
+            if hook_type == "self_wrapping_hooks"
+        ]
+        if right_hook_type == "self_wrapping_hooks":
+            result_params["self_wrapping_right_body_source_path_name"] = body_source_after_left
+        self_params = left_params if left_hook_type == "self_wrapping_hooks" else right_params
+        if self_params.get("self_wrapping_hook_plan"):
+            result_params["self_wrapping_hook_plan"] = copy.deepcopy(self_params.get("self_wrapping_hook_plan"))
+    result_params["hook_selection"] = copy.deepcopy(hook_selection)
+    result_params["hook_selection"]["requires_side_specific_hook_builders"] = False
+    result_params["hook_selection"]["composition_mode"] = "side_fragments"
+    result_params["segment_plan"] = list(left_segments) + [body_segment] + list(right_segments)
+    result_params["connector_plan"] = [connector for connector in (left_connector, right_connector) if connector is not None]
+    result_params["transition_connector_builder"] = "curve_fillet"
+    result_params["full_path_sequence"] = full_path_sequence
+    result_params["profile_anchor_plane"] = _profile_anchor_at_sequence_end(full_path_sequence)
+    result_params["variable_plan"] = merge_variable_plans(
+        left_params.get("variable_plan") or [],
+        right_params.get("variable_plan") or [],
+        result_params.get("variable_plan") or [],
+    )
+    _sync_add_variables_operation(result, result_params["variable_plan"])
+    return result
+
+
 def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
     params = result.get("params")
     if not isinstance(params, dict) or not params.get("self_wrapping_hooks"):
@@ -4368,11 +4571,6 @@ def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
         "tail_length_expression": "HT1",
     }
     params["connector_plan"] = []
-    params["profile_anchor_plane"] = {
-        "path_name": "self_wrapping_left_second_edge2",
-        "vertex": "end",
-        "use_perpendicular_plane": True,
-    }
     params["full_path_sequence"] = [
         "self_wrapping_left_second_edge2",
         "self_wrapping_left_second_edge1",
@@ -4392,6 +4590,7 @@ def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
         "self_wrapping_right_second_edge1",
         "self_wrapping_right_second_edge0",
     ]
+    params["profile_anchor_plane"] = _profile_anchor_at_sequence_end(params["full_path_sequence"])
     _sync_add_variables_operation(result, params["variable_plan"])
     return result
 
@@ -4423,7 +4622,7 @@ def _normalize_bent_coil_left_spike_v2(result: dict[str, Any]) -> dict[str, Any]
     pitch = float(params.get("pitch", 0.0) or 0.0)
     outer_diameter = float(params.get("outer_diameter", params.get("diameter", 0.0)) or 0.0)
     bent_turns = float(params.get("bent_coil_turns", 1.0) or 1.0)
-    bent_angle = float(params.get("bent_coil_angle_degrees", 0.0) or 0.0)
+    bent_angle = float(params.get("bent_coil_angle_degrees", 90.0) or 90.0)
     body_path_name = f"{spring_name}_BODY_PATH"
     bent_path_name = f"{spring_name}_BENT_COIL_LEFT_SPIKE_PATH"
     right_bent_path_name = f"{spring_name}_RIGHT_BENT_COIL_PATH"
@@ -4467,7 +4666,7 @@ def _normalize_bent_coil_left_spike_v2(result: dict[str, Any]) -> dict[str, Any]
         "angle_expression": "BA1",
         "initial_angle_degrees": 90.0,
         "orientation": "left",
-        "construction_only": True,
+        "construction_only": False,
         "operation_variable_bindings": [
             {
                 "target": "bent_coil_spiral_path",
@@ -4505,18 +4704,14 @@ def _normalize_bent_coil_left_spike_v2(result: dict[str, Any]) -> dict[str, Any]
             "orientation": "right",
             "angle_direction_param": "bent_coil_right_angle_direction",
             "building_direction_param": "bent_coil_right_building_direction",
-            "initial_angle_degrees": float(params.get("bent_coil_right_initial_angle_degrees", 90.0) or 90.0),
+            "initial_angle_degrees": float(params.get("bent_coil_right_initial_angle_degrees", 270.0) or 270.0),
         }
     )
 
     params["segment_plan"] = [body_segment, bent_segment, right_bent_segment]
     params["connector_plan"] = []
-    params["full_path_sequence"] = [body_path_name, bent_path_name, right_bent_path_name]
-    params["profile_anchor_plane"] = {
-        "path_name": right_bent_path_name,
-        "vertex": "end",
-        "use_perpendicular_plane": True,
-    }
+    params["full_path_sequence"] = [bent_path_name, body_path_name, right_bent_path_name]
+    params["profile_anchor_plane"] = _profile_anchor_at_sequence_end(params["full_path_sequence"])
     params["construction_only"] = False
     params["bent_coil_auxiliary_construction"] = True
     params.setdefault("bent_coil_building_direction", False)

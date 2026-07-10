@@ -2598,6 +2598,59 @@ def _build_trimmed_connector(
     }
 
 
+def _build_native_fillet_connector(
+    *,
+    role: str,
+    curve1_path_name: str,
+    curve2_path_name: str,
+    path_name: str,
+    radius: float,
+    radius_expression: str,
+    trim_curve1: bool = True,
+    trim_curve2: bool = True,
+    curve1_cut_point: list[float] | None = None,
+    curve2_cut_point: list[float] | None = None,
+) -> dict[str, Any]:
+    curve1_edge_path_name = f"{path_name}_CURVE1_EDGE"
+    fillet_edge_path_name = f"{path_name}_FILLET_EDGE"
+    curve2_edge_path_name = f"{path_name}_CURVE2_EDGE"
+    if trim_curve1 and trim_curve2:
+        result_edge_path_names = [curve1_edge_path_name, fillet_edge_path_name, curve2_edge_path_name]
+        result_edge_order = [1, 0, 2]
+    elif trim_curve1:
+        result_edge_path_names = [fillet_edge_path_name]
+        result_edge_order = [0]
+    elif trim_curve2:
+        result_edge_path_names = [fillet_edge_path_name]
+        result_edge_order = [0]
+    else:
+        result_edge_path_names = [fillet_edge_path_name]
+        result_edge_order = [0]
+    return {
+        "builder": "curve_fillet",
+        "role": role,
+        "label": role.replace("_", " "),
+        "path_name": path_name,
+        "curve1_path_name": curve1_path_name,
+        "curve2_path_name": curve2_path_name,
+        "sequence_curve1_path_name": curve1_edge_path_name,
+        "sequence_fillet_path_name": fillet_edge_path_name,
+        "sequence_curve2_path_name": curve2_edge_path_name,
+        "result_edge_path_names": result_edge_path_names,
+        "result_edge_order": result_edge_order,
+        "radius": radius,
+        "trim_curve1": bool(trim_curve1),
+        "trim_curve2": bool(trim_curve2),
+        "curve1_cut_point": curve1_cut_point,
+        "curve2_cut_point": curve2_cut_point,
+        "operation_variable_bindings": _build_transition_curve_fillet_variable_bindings(
+            radius_expression,
+            f"{role}_radius",
+        ),
+        "radius_expression": radius_expression,
+    }
+
+
 def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
     wire_diameter = _positive_float(params.get("wire_diameter", params.get("d")), "wire_diameter")
     outer_diameter = _positive_float(params.get("outer_diameter", params.get("D1", params.get("D"))), "outer_diameter")
@@ -2672,6 +2725,7 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
     hook_radius_variable = _var("RH1")
     transition_trim_length_variable = _var("TL1")
     transition_connect_tension_variable = _var("TN1")
+    transition_fillet_radius_variable = _var("TFR1")
     hook_clearance_variable = _var("HG1")
     hook_end_offset_variable = _var("HO1")
     v_hook_height_variable = _var("VH1")
@@ -2718,6 +2772,9 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
     hook_radius = radius
     trim_length = float(params.get("transition_trim_length", wire_diameter))
     tension = float(params.get("transition_tension", 1.0))
+    transition_fillet_radius = float(params.get("transition_fillet_radius", trim_length))
+    if transition_fillet_radius <= 0.0:
+        raise ValueError("transition_fillet_radius must be positive")
     hook_clearance = float(params.get("hook_clearance", params.get("machine_hook_clearance", wire_diameter * 0.25)) or 0.0)
     if hook_clearance < 0.0:
         raise ValueError("hook_clearance must be non-negative")
@@ -2856,7 +2913,7 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
     bent_coil_turns = float(params.get("bent_coil_turns", params.get("bent_hook_turns", 1.0)) or 1.0)
     if hook_type == "bent_coil_left_spike" and bent_coil_turns <= 0.0:
         raise ValueError("bent_coil_turns must be positive")
-    bent_coil_angle_degrees = float(params.get("bent_coil_angle_degrees", params.get("bent_hook_angle_degrees", 0.0)) or 0.0)
+    bent_coil_angle_degrees = float(params.get("bent_coil_angle_degrees", params.get("bent_hook_angle_degrees", 90.0)) or 90.0)
     bent_coil_height = pitch * bent_coil_turns
     bent_coil_height_expression = f"{pitch_variable} * {bent_coil_turns_variable}"
     for deprecated_name in ("hook_angle_degrees", "machine_hook_angle_degrees"):
@@ -3439,7 +3496,14 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
             "value": tension,
             "kind": "driving_transition_tension",
             "external": True,
-            "comment": f"{transition_connect_tension_variable}: smooth connector tension",
+            "comment": f"{transition_connect_tension_variable}: legacy trimmed connector tension",
+        },
+        {
+            "name": transition_fillet_radius_variable,
+            "value": transition_fillet_radius,
+            "kind": "driving_transition_fillet_radius",
+            "external": True,
+            "comment": f"{transition_fillet_radius_variable}: native 3D fillet radius for hook-body connectors",
         },
     ]
     if hook_type == "bent_coil_left_spike":
@@ -3763,7 +3827,7 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
         segment_plan[0]["sketch_path"] = {
             "plane": "XOY",
             "edge_index": 1,
-            "edge_tuple_indices": [1, 0],
+            "edge_tuple_indices": [0, 1],
             "path_names": [left_hook_body_path_name, f"{spring_name}_LEFT_OPEN_ARC_PATH"],
             "edge_points": [
                 {"start": [left_open_body_point[0], left_open_body_point[1], 0.0], "end": [left_open_top_tangent[0], left_open_top_tangent[1], 0.0]},
@@ -3776,6 +3840,7 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
                 {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": left_open_body_point, "end": left_open_top_tangent, "style": 6},
                 {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": left_open_far_point, "end": [left_open_end_point[0], left_open_far_point[1]], "style": 6},
                 {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [left_open_end_point[0], left_open_far_point[1]], "end": left_open_end_point, "style": 6},
+                {"kind": "line", "name": "hook_end_radius_ref", "role": "construction", "start": left_open_center, "end": left_open_end_point, "style": 6},
                 {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": left_open_body_point, "end": left_open_top_tangent, "style": 1},
                 {"kind": "arc", "name": "hook_arc", "role": "hook", "center": left_open_center, "radius": hook_radius, "start": left_open_top_tangent, "end": left_open_end_point, "direction": False, "style": 1},
             ],
@@ -3798,6 +3863,11 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
                     {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
                     {"kind": "vertical", "target": "hook_opening_projection_ref"},
                     {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_end_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_end_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_end_radius_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_end_radius_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "vertical", "target": "hook_end_radius_ref"},
                     {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
                 ],
                 "dimensions": [
@@ -3830,6 +3900,7 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
                 {"kind": "line", "name": "hook_start_guide", "role": "construction", "start": right_open_body_point, "end": right_open_top_tangent, "style": 6},
                 {"kind": "line", "name": "hook_opening_ref", "role": "construction", "start": right_open_far_point, "end": [right_open_end_point[0], right_open_far_point[1]], "style": 6},
                 {"kind": "line", "name": "hook_opening_projection_ref", "role": "construction", "start": [right_open_end_point[0], right_open_far_point[1]], "end": right_open_end_point, "style": 6},
+                {"kind": "line", "name": "hook_end_radius_ref", "role": "construction", "start": right_open_center, "end": right_open_end_point, "style": 6},
                 {"kind": "line", "name": "hook_start_leg", "role": "hook", "start": right_open_body_point, "end": right_open_top_tangent, "style": 1},
                 {"kind": "arc", "name": "hook_arc", "role": "hook", "center": right_open_center, "radius": hook_radius, "start": right_open_top_tangent, "end": right_open_end_point, "direction": True, "style": 1},
             ],
@@ -3852,6 +3923,11 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
                     {"kind": "merge_points", "target": "hook_opening_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 0},
                     {"kind": "vertical", "target": "hook_opening_projection_ref"},
                     {"kind": "merge_points", "target": "hook_opening_projection_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "merge_points", "target": "hook_depth_ref", "index": 1, "partner": "hook_end_radius_ref", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_end_radius_ref", "index": 0, "partner": "hook_arc", "partner_index": 0},
+                    {"kind": "merge_points", "target": "hook_end_radius_ref", "index": 1, "partner": "hook_opening_projection_ref", "partner_index": 1},
+                    {"kind": "merge_points", "target": "hook_end_radius_ref", "index": 1, "partner": "hook_arc", "partner_index": 2},
+                    {"kind": "vertical", "target": "hook_end_radius_ref"},
                     {"kind": "tangent", "target": "hook_start_leg", "partner": "hook_arc"},
                 ],
                 "dimensions": [
@@ -4116,53 +4192,62 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
             },
         }
     body_path_name = next(str(segment["path_name"]) for segment in segment_plan if segment.get("role") == "body")
-    profile_anchor_path_name = str(segment_plan[0]["path_name"])
-    profile_anchor_vertex = "start" if hook_type in {"v_hooks", "bent_coil_left_spike"} else "end"
-    if hook_type == "v_hooks":
-        profile_anchor_path_name = f"{spring_name}_LEFT_V_END_LEG_PATH"
-        profile_anchor_vertex = "end"
-    if hook_type == "u_hooks":
-        profile_anchor_path_name = f"{spring_name}_LEFT_U_END_LEG_PATH"
-        profile_anchor_vertex = "end"
-    if hook_type == "open_loop_hooks":
-        profile_anchor_path_name = f"{spring_name}_LEFT_OPEN_ARC_PATH"
-        profile_anchor_vertex = "end"
-    if hook_type == "center_loop_hooks":
-        profile_anchor_path_name = f"{spring_name}_LEFT_CENTER_LOOP_ARC_PATH"
-        profile_anchor_vertex = "start"
-    if hook_type == "extended_center_loop_hooks":
-        profile_anchor_path_name = f"{spring_name}_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH"
-        profile_anchor_vertex = "start"
-    left_curve1_trim_overrides = {"direction": True, "sense": False}
-    left_connect_curve_overrides = {"curve1_connect_vertex": True}
-    if hook_type in {"center_loop_hooks", "extended_center_loop_hooks"}:
-        left_curve1_trim_overrides = {"direction": False, "sense": True}
-        left_connect_curve_overrides = {"curve1_connect_vertex": False}
-    connector_plan = [
-        _build_trimmed_connector(
-            role="left_hook_to_body",
-            previous_path_name=left_hook_body_path_name,
-            current_path_name=body_path_name,
-            trim_length=trim_length,
-            trim_length_expression=transition_trim_length_variable,
-            tension=tension,
-            tension_expression=transition_connect_tension_variable,
-            curve1_trim_overrides=left_curve1_trim_overrides,
-            connect_curve_overrides=left_connect_curve_overrides,
-        ),
-        _build_trimmed_connector(
-            role="body_to_right_hook",
-            previous_path_name=body_path_name,
-            current_path_name=right_hook_body_path_name,
-            trim_length=trim_length,
-            trim_length_expression=transition_trim_length_variable,
-            tension=tension,
-            tension_expression=transition_connect_tension_variable,
-            curve1_trim_overrides={"direction": False, "sense": True},
-        ),
-    ]
-    connector_plan[1]["curve1_path_name"] = str(connector_plan[0]["sequence_curve2_path_name"])
-    connector_plan[1]["curve1_source_is_chained_trim"] = True
+    transition_connector_builder = "curve_fillet"
+    if transition_connector_builder == "trimmed_connect_curve":
+        connector_plan = [
+            _build_trimmed_connector(
+                role="left_hook_to_body",
+                previous_path_name=left_hook_body_path_name,
+                current_path_name=body_path_name,
+                trim_length=trim_length,
+                trim_length_expression=transition_trim_length_variable,
+                tension=tension,
+                tension_expression=transition_connect_tension_variable,
+                curve1_trim_overrides={"direction": True, "sense": False},
+                connect_curve_overrides={"curve1_connect_vertex": True},
+            ),
+            _build_trimmed_connector(
+                role="body_to_right_hook",
+                previous_path_name=body_path_name,
+                current_path_name=right_hook_body_path_name,
+                trim_length=trim_length,
+                trim_length_expression=transition_trim_length_variable,
+                tension=tension,
+                tension_expression=transition_connect_tension_variable,
+                curve1_trim_overrides={"direction": False, "sense": True},
+            ),
+        ]
+        connector_plan[1]["curve1_path_name"] = str(connector_plan[0]["sequence_curve2_path_name"])
+        connector_plan[1]["curve1_source_is_chained_trim"] = True
+    else:
+        connector_plan = [
+            _build_native_fillet_connector(
+                role="left_hook_to_body",
+                curve1_path_name=left_hook_body_path_name,
+                curve2_path_name=body_path_name,
+                path_name=f"{spring_name}_LEFT_HOOK_TO_BODY_FILLET_PATH",
+                radius=transition_fillet_radius,
+                radius_expression=transition_fillet_radius_variable,
+                trim_curve1=True,
+                trim_curve2=True,
+                curve1_cut_point=body_start,
+                curve2_cut_point=body_start,
+            ),
+            _build_native_fillet_connector(
+                role="body_to_right_hook",
+                curve1_path_name=body_path_name,
+                curve2_path_name=right_hook_body_path_name,
+                path_name=f"{spring_name}_BODY_TO_RIGHT_HOOK_FILLET_PATH",
+                radius=transition_fillet_radius,
+                radius_expression=transition_fillet_radius_variable,
+                trim_curve1=True,
+                trim_curve2=True,
+                curve1_cut_point=body_end,
+                curve2_cut_point=body_end,
+            ),
+        ]
+        connector_plan[1]["curve1_path_name"] = str(connector_plan[0]["sequence_curve2_path_name"])
+        connector_plan[1]["curve1_source_is_chained_native_fillet"] = True
     left_hook_sequence_paths = [str(connector_plan[0]["sequence_curve1_path_name"])]
     if hook_type == "v_hooks":
         left_hook_sequence_paths.extend([
@@ -4191,12 +4276,7 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
         ]
     elif hook_type == "bent_coil_left_spike":
         left_hook_sequence_paths = [str(segment_plan[0]["path_name"])]
-    full_path_sequence = [
-        *left_hook_sequence_paths,
-        str(connector_plan[0]["path_name"]),
-        str(connector_plan[1]["sequence_curve1_path_name"]),
-        str(connector_plan[1]["path_name"]),
-        str(connector_plan[1]["sequence_curve2_path_name"]),
+    right_extra_sequence_paths = [
         *(
             [
                 f"{spring_name}_RIGHT_V_FILLET_PATH",
@@ -4234,6 +4314,28 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
             else []
         ),
     ]
+    if transition_connector_builder == "trimmed_connect_curve":
+        full_path_sequence = [
+            *left_hook_sequence_paths,
+            str(connector_plan[0]["path_name"]),
+            str(connector_plan[1]["sequence_curve1_path_name"]),
+            str(connector_plan[1]["path_name"]),
+            str(connector_plan[1]["sequence_curve2_path_name"]),
+            *right_extra_sequence_paths,
+        ]
+    else:
+        full_path_sequence = [
+            *left_hook_sequence_paths,
+            str(connector_plan[0]["sequence_fillet_path_name"]),
+            str(connector_plan[1]["sequence_curve1_path_name"]),
+            str(connector_plan[1]["sequence_fillet_path_name"]),
+            str(connector_plan[1]["sequence_curve2_path_name"]),
+            *right_extra_sequence_paths,
+        ]
+    if not full_path_sequence:
+        raise ValueError("extension_spring profile anchor requires a non-empty full_path_sequence")
+    profile_anchor_path_name = str(full_path_sequence[-1])
+    profile_anchor_vertex = "end"
     normalized = {
         "scenario": "extension_spring",
         "spring_name": spring_name,
@@ -4254,6 +4356,10 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
         "hook_type": hook_type,
         "hook_clearance": hook_clearance,
         "hook_end_offset": hook_end_offset,
+        "transition_connector_builder": transition_connector_builder,
+        "transition_fillet_radius": transition_fillet_radius,
+        "legacy_transition_trim_length": trim_length,
+        "legacy_transition_tension": tension,
         "v_hook_height": v_hook_height if hook_type == "v_hooks" else None,
         "v_hook_length": v_hook_length if hook_type == "v_hooks" else None,
         "v_hook_fillet_radius": v_hook_fillet_radius if hook_type == "v_hooks" else None,
@@ -7956,6 +8062,24 @@ def _build_transition_connect_curve_variable_bindings(
             ],
             "expression": text,
             "role": str(role or "transition_connect_tension"),
+        }
+    ]
+
+
+def _build_transition_curve_fillet_variable_bindings(
+    expression: str,
+    role: str,
+) -> list[dict[str, Any]]:
+    text = str(expression or "").strip()
+    if not text:
+        return []
+    return [
+        {
+            "target": "curve_fillet",
+            "parameter_note": "Радиус",
+            "parameter_note_aliases": ["Радиус", "Radius"],
+            "expression": text,
+            "role": str(role or "transition_curve_fillet_radius"),
         }
     ]
 

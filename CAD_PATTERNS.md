@@ -41,6 +41,7 @@ guessing COM API behavior.
 | Composite path mixes sketch edges and 3D edges | `EDGE-002` |
 | Sketch cannot be assigned to extrude/revolve/evolution | `OP-001` |
 | Bent coil / hook spiral phase is wrong | `SPIRAL-001`, `VAR-001` |
+| Native curve fillet needs a source cut point but raw spiral endpoints cannot be read | `FILLET-003` |
 | Need full bent-coil construction chain | `CASE-001` |
 
 ## Rules
@@ -1241,28 +1242,80 @@ Cause:
 | Mechanism | Initial angle | Positioning orientation |
 |---|---|---|
 | Meaning | phase of the first turn | rotation of local CS relative to guide |
-| API surface | `spiral.InitialAngle` or spiral parameter | `ILocalCSAxesDirectionParam` |
-| Formula support | yes, when field supports it | no; through wrapper only `LeadAxis` / `SetDirectingObject` are readable |
-| Use in bent coil | join spiral ends | keep zero in deferred block |
+| API surface | `spiral.InitialAngle` or spiral parameter | `ILocalCSAxesDirectionParam`, Euler readback, object orientation modes |
+| Formula support | yes, when field supports it | not a formula field; COM derives absolute orientation from placement mode |
+| Use in bent coil | phase of the helical curve | placement of the spiral's local coordinate system |
 
 Rule:
 - Control spiral phase through `InitialAngle`, not through positioning CS
   rotation.
-- In deferred bent-spiral creation, keep positioning rotation at zero. Position
-  through insertion point plus directing plane/object.
+- Do not treat visible nutation/precession/rotation fields as disposable
+  garbage. KOMPAS shows absolute orientation values for the positioned local CS;
+  they can appear regardless of the placement mode.
+- The physical phase at the connection point is the sum of positioning
+  orientation and the spiral's own initial angle. Debug bent-coil connection
+  failures by checking both components together.
+- `OrientationType=2` / `ILocalCSOrientByObjectParam.SetOrientationObject(...)`
+  is not accepted as a bent-coil fix: it can produce a full contour count while
+  placing the spiral incorrectly.
 
 Verification:
-- Check readback coordinates of points on the spiral after rebuild.
-- If COM-wrapper cannot read nutation/precession/rotation fields, use live visual
-  verification.
+- Check the positioning mode, the visible absolute orientation, and the spiral
+  initial angle together.
+- Verify geometry visually/live; a full contour count alone is not sufficient for
+  bent-coil spirals.
 
 Known examples:
 - `CASE-001`: `_apply_spiral_turning_angle` changed positioning orientation,
   not spiral phase. Stable left hook used numeric initial angle `90`.
+- `bent_coil_left_spike`: orient-by-object was re-tested and rejected because it
+  gives an incorrect physical placement despite the correct orientation object.
+- `bent_coil_left_spike` right hook: with axis-direction positioning, KOMPAS can
+  show a `90` degree absolute rotation for the position. The right spiral uses
+  internal initial angle `270` so the effective phase is `360`, not `180`.
 
 Related:
 - `DIR-001`
 - `VAR-001`
+
+---
+
+### PROFILE-001: Place Wire Profile At Final Path Sequence End
+
+Applies when:
+- building extension spring sweep/evolution profiles;
+- adding independent left/right hook composition;
+- choosing `profile_anchor_plane` for a multi-segment `full_path_sequence`.
+
+Symptom:
+- Some hook types place the wire profile at the left/start side, while others
+  place it at the right/end side.
+- A mixed left/right hook generator changes profile placement depending on which
+  hook type owns the anchor.
+
+Cause:
+- Old hook previews chose the profile anchor from hook-specific paths. This was
+  harmless when both sides used the same hook type, but it is not a stable
+  contract for independent side composition.
+
+Rule:
+- Treat `full_path_sequence` as the canonical left-to-right final contour order.
+- Always set the wire profile anchor to `full_path_sequence[-1]` with
+  `vertex = "end"`.
+- Do not choose the profile anchor from a hook-type-specific left segment.
+
+Verification:
+- Preview: `profile_anchor_plane.path_name == full_path_sequence[-1]` and
+  `profile_anchor_plane.vertex == "end"` for every extension hook type.
+- Live CAD: `select_profile_anchor_plane.profile_anchor_path_ref` should match
+  the last resolved sequence path.
+
+Known examples:
+- `machine_hooks`, `v_hooks`, `u_hooks`, `center_loop_hooks`,
+  `extended_center_loop_hooks`, and `open_loop_hooks` now use the right/end side
+  of their final sequence.
+- `self_wrapping_hooks` and `bent_coil_left_spike` use the same helper instead of
+  hand-written anchor paths.
 
 ---
 
@@ -1306,9 +1359,9 @@ point3d.Update()
 Known fields:
 - `IPoint3DParamDisplace.Distance`: bent spiral center offset.
 - `IPlane3DByAngle.Angle`: bend angle plane.
-- `IFilletCurve.Radius`: native 3D curve fillet radius. Create with a numeric
-  fallback, then bind the operation variable with `ParameterNote == "Радиус"`
-  to the expression, for example `SFR1`.
+- `IFilletCurve.Radius`: native 3D curve fillet radius. Use the staged
+  `FILLET-002` order below; assigning `Radius` before the first `Update()` can
+  leave the saved operation radius at `0.0`.
 
 Verification:
 - Change `D1`, `WD1`, or the driving variable and rebuild.
@@ -1340,6 +1393,60 @@ Known example:
 - `self_wrapping_hooks` left hook: using whole `FilletCurve` gave a false-positive
   API build, but `RebuildDocument()` invalidated the contour/body. Replacing it
   with `Owner.ModelObjects(7)` result edges fixed rebuild stability.
+
+### FILLET-002: Assign Native Curve-Fillet Radius After First Update
+
+For native 3D `IFilletCurve` operations, do not set `Radius` before the first
+`Update()`. On legacy extension-hook connector curves this produced visually
+valid-looking operations whose saved radius read back as `0.0`.
+
+Use this order:
+
+1. Create the `IFilletCurve` and assign `Curve1`, `Curve2`, trim flags, and cut
+   points.
+2. Call `Update()` once to materialize the operation topology.
+3. Assign numeric `FilletCurve.Radius`.
+4. Call `Update()` again and verify `FilletCurve.Radius` readback.
+5. Bind operation variable `ParameterNote == "Радиус"` to the driving expression
+   such as `TFR1` or `SFR1`.
+6. Call `Update()` again and verify the expression reads back exactly as the
+   driving variable, not as `TFR1 - <offset>`.
+7. Read `fillet.Owner.ModelObjects(7)` and use the result edges in the final
+   contour, per `FILLET-001`.
+
+Verification example for legacy extension hooks:
+
+```text
+radius=3.0
+radius_readback=3.0
+staged_updates=[True, True]
+expression_after=TFR1
+source_path_count == expected_edges_count == edges_count
+```
+
+### FILLET-003: Use Logical Cut Points For Raw Spiral Fillet Sources
+
+Native `FilletCurve` can accept a raw spiral/path object as `Curve1` even when
+the same COM object does not expose usable endpoint readback through `GetPoint`.
+Do not add an extra connector or auxiliary fillet only to get a selectable source
+edge. That changes the model topology.
+
+When the intended geometry is an unfilleted joint followed by a right-side native
+fillet, keep the raw source curve and provide the cut point from generator
+metadata:
+
+1. Resolve `Curve1` to the raw body path.
+2. Read the logical body end from `segment_plan`.
+3. Use that point as `Curve1CutPoint`.
+4. Compute `Curve2CutPoint` from the target curve endpoints near the same logical
+   point.
+5. Continue with the staged `FILLET-002` update/radius/binding order.
+
+Known example:
+- `bent_coil_left_spike -> self_wrapping_hooks`: the bent-coil-to-body joint must
+  remain unfilleted. The right self-wrapping transition fillet uses raw
+  `BODY_PATH` plus the logical body end point, producing a stable `10/10/10`
+  contour without a synthetic left bent-to-body fillet.
 
 ### CONTOUR-001: Build KOMPAS Contours In Continuous UI Order
 

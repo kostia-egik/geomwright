@@ -1,8 +1,8 @@
 # Bent coil parametrization report
 
 Отчет фиксирует работы по `extension_spring / bent_coil_left_spike`, начиная с
-`tasks/18-bent-coil-parametrize.md`, и текущее рабочее состояние перед переходом
-ко второму зацепу.
+`tasks/18-bent-coil-parametrize.md`, и текущее рабочее состояние отогнутых
+кольцевых зацепов.
 
 ## 1. Исходная задача
 
@@ -25,17 +25,18 @@ Task 18 задавал три основных направления:
 
 ## 2. Итоговая схема построения
 
-Для `bent_coil_left_spike` сейчас используются два сегмента:
+Для `bent_coil_left_spike` сейчас используются три сегмента:
 
 1. `body` - основная спираль пружины.
-2. `bent_coil_left` - отдельная отогнутая спираль.
+2. `bent_coil_left` - левая отогнутая спираль.
+3. `bent_coil_right` - правая отогнутая спираль.
 
 Preview normalization добавляет:
 
-- `construction_only = true`;
+- `construction_only = false` для финальных bent-coil сегментов;
 - `bent_coil_auxiliary_construction = true`;
 - `connector_plan = []`;
-- `segment_plan = [body, bent_coil_left]`;
+- `segment_plan = [body, bent_coil_left, bent_coil_right]`;
 - `bent_coil_building_direction = false` по умолчанию.
 
 Для отогнутого сегмента заданы:
@@ -45,7 +46,7 @@ Preview normalization добавляет:
 - шаг: `P1`;
 - число витков: `BT1`;
 - высота: `BH1`, где `BH1 = P1 * BT1`;
-- угол плоскости отгиба: `BA1`;
+- угол плоскости отгиба: `BA1`, по умолчанию `90` градусов;
 - начальный угол самой спирали: жесткое значение `90`.
 
 Ключевой вывод: `BA1` больше не является начальным углом спирали. Это
@@ -100,6 +101,10 @@ Center sketch создается на `bent_coil_angle_plane` и использ�
 - `fixed_length = (D1 - WD1) / 2`.
 
 Live-проверка показала `created_count = 3` для center sketch.
+Если `merge_points` с проекцией центра не создается для одной из сторон,
+bridge добавляет fallback `fixed_point` на начало center-axis линии. Поэтому
+center-axis получает точку, вертикальность и фиксированную длину даже при
+нестабильном projection-merge.
 
 ## 6. Точка центра отогнутой спирали
 
@@ -136,12 +141,18 @@ Live-проверка показала `angle_plane_binding_ok = true`.
 Позиционирование:
 
 - точка вставки: `COMPRESSION_SPRING_BENT_COIL_CENTER_POINT`;
-- ось направления: `LeadAxis = 73` (`OZ`);
-- направляющий объект: `bent_coil_angle_plane` через `SetDirectingObject(73, ...)`;
+- `Position.ParameterType = 1` - точка задается association-object;
+- `Position.OrientationType = 0` - ориентация задается направлением осей;
+- `Position.LocalCSParameters` приводится к `ILocalCSAxesDirectionParam`;
+- `LeadAxis = 73` (`OZ`);
+- направляющий объект: `bent_coil_angle_plane` через
+  `SetDirectingObject(73, ...)`;
 - `RotateAxis` в deferred-блоке отогнутой спирали не задается.
 
-Это важно: позиционирование должно быть только по точке и плоскости `Z`.
-Угол вращения не должен задаваться в полях ориентации позиции.
+Важно: видимые в UI углы нутации, прецессии и вращения не являются мусорными
+полями, которые нужно обнулять. KOMPAS показывает абсолютную ориентацию позиции.
+Фактическое угловое положение начала спирали складывается из этой ориентации и
+внутреннего начального угла спирали.
 
 Параметризация спирали:
 
@@ -150,7 +161,8 @@ Live-проверка показала `angle_plane_binding_ok = true`.
 - `Height -> BH1`;
 - `BuildingDirection = false`;
 - `TurnDirection = not left_hand`;
-- начальный угол операции спирали задается числом `90`.
+- начальный угол левой отогнутой спирали задается числом `90`;
+- начальный угол правой отогнутой спирали задается числом `270`.
 
 `BA1` намеренно не привязывается к начальному углу спирали.
 
@@ -163,9 +175,12 @@ Live-проверка показала `angle_plane_binding_ok = true`.
 - `BuildingDirection` применяется только в deferred-блоке `bent_coil_left`, а не
   в основном цикле построения спиралей.
 
-После удаления смешивания с ориентацией системы координат подбор `BA1` показал,
-что для начального угла самой отогнутой спирали правильное значение - `90`.
-Сейчас это зашито как число в параметрах операции спирали.
+Для правого зацепа KOMPAS показывает абсолютный угол вращения позиции `90`, и
+начальный угол спирали `90` разворачивал начало на `180`. Поэтому правый
+внутренний `InitialAngle` компенсирован до `270`: `90 + 270 = 360`.
+
+Это меняет именно внутренний угол спирали, а не `BA1`, `AngleByOwnAxis` или
+способ ориентации позиции.
 
 ## 10. Диагностические точки
 
@@ -187,22 +202,23 @@ Live-проверка показала `angle_plane_binding_ok = true`.
 
 - эти поля не являются начальным углом спирали;
 - они относятся к ориентации локальной системы координат при позиционировании;
-- через доступный COM-wrapper `ILocalCSAxesDirectionParam` они не читаются как
-  обычные свойства `Nutation/Precession/Rotation`;
-- wrapper показывает только `LeadAxis`, `SetDirectingObject(...)` и метод
-  `RotateAxis(axis)`.
+- в режиме `ILocalCSAxesDirectionParam` они не читаются как обычные свойства
+  `Nutation/Precession/Rotation` через текущий wrapper;
+- SDK KOMPAS API7 показывает отдельные интерфейсы: `ILocalCSAxesDirectionParam`,
+  `ILocalCSEulerParam` и `ILocalCSOrientByObjectParam`;
+- `ILocalCSOrientByObjectParam` уже проверялся как альтернатива, но для
+  bent-coil дает неправильное физическое положение несмотря на правильный объект.
 
 Принятое решение:
 
-- в deferred-блоке отогнутой спирали не задавать `RotateAxis`;
-- не использовать вращение СК для фазы отогнутой спирали;
-- позиционировать только по association point и направлению `OZ` через
+- не пытаться очищать видимые Euler-поля как ошибку;
+- позиционировать через association point и axis-direction по
   `bent_coil_angle_plane`;
-- начальный угол держать в параметрах самой спирали числом `90`.
+- фазу стыковки подбирать через начальный угол самой спирали с учетом
+  абсолютной ориентации позиции.
 
-Оставшаяся проверка ручная: в KOMPAS открыть live-модель и убедиться, что поля
-нутации/прецессии/вращения в позиционировании отогнутой спирали равны нулю.
-Программно эти поля пока не подтверждаются через текущий COM-интерфейс.
+Правая отогнутая спираль не должна исправляться сменой способа ориентации на
+`OrientByObject`; компенсация выполняется через внутренний `InitialAngle`.
 
 ## 12. Live-модели
 
@@ -224,42 +240,62 @@ Live-проверка показала `angle_plane_binding_ok = true`.
 - center sketch: `created_count = 3`;
 - `angle_plane_binding_ok = true`;
 - `center_point_binding_ok = true`;
-- `positioning = {"lead_axis": "73"}`.
+- `positioning.orientation_type = "axis_direction"`;
+- `positioning.orientation_type_value = 0`;
+- `positioning.parameter_type_value = 1`;
+- контурный счетчик сам по себе не является достаточным доказательством
+  правильной фазы bent-coil спирали.
 
-## 13. Автотесты
+## 13. Live CAD readback
 
-Последние успешные проверки:
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/test_parametric.py tests/test_spring_readback.py tests/test_docs_links.py tests/test_primitive_write_operations.py -q
-```
-
-Результат:
-
-```text
-269 passed, 2 subtests passed
-```
-
-Полный suite:
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/ -q
-```
-
-Результат:
+Проверка выполняется live-созданием модели KOMPAS, без добавления автотестов.
+Ложноположительный вариант, который нельзя считать финальным:
 
 ```text
-792 passed, 21 subtests passed
+sample/live_outputs/bent_orient_by_object_clean.m3d
+```
+
+Он давал полный contour count, но физическое положение было неправильным из-за
+неподходящего способа ориентации.
+
+Актуальный контроль должен смотреть не только count, но и суммарный фазовый угол:
+
+```text
+position orientation + spiral initial angle
+```
+
+После компенсации правого внутреннего начального угла текущая live-модель:
+
+```text
+sample/live_outputs/bent_right_initial_270_readback.m3d
+```
+
+Readback:
+
+```text
+bent_coil_left.positioning.orientation_type = axis_direction
+bent_coil_right.positioning.orientation_type = axis_direction
+bent_coil_left.positioning.orientation_type_value = 0
+bent_coil_right.positioning.orientation_type_value = 0
+bent_coil_left.positioning.parameter_type_value = 1
+bent_coil_right.positioning.parameter_type_value = 1
+bent_coil_left.parameterization.initial_angle.value = 90
+bent_coil_right.parameterization.initial_angle.value = 270
+source_path_count = 3
+expected_edges_count = 3
+edges_count = 3
 ```
 
 ## 14. Что важно сохранить при втором зацепе
 
 1. Не смешивать три разных угла:
    - `BA1` - угол плоскости отгиба;
-   - `90` - начальный угол отогнутой спирали;
-   - поля ориентации позиции - должны оставаться нулями.
+   - `90`/`270` - начальные углы левой/правой отогнутой спирали;
+   - поля ориентации позиции - абсолютное угловое положение локальной СК.
 2. Не возвращать `RotateAxis` в deferred-позиционирование отогнутой спирали.
-3. Не задавать `CoordinateSystem` у самой отогнутой спирали.
+3. Не заменять bent-coil positioning на `ILocalCSOrientByObjectParam` без
+   отдельной визуальной проверки геометрии; этот путь уже давал неверное
+   положение.
 4. Параметризацию COM-полей, которые не принимают строки до `Update()`, делать
    через operation-variable binding после создания объекта.
 5. Constraints первого sketch создавать внутри первоначального `BeginEdit()`.
@@ -269,22 +305,27 @@ Live-проверка показала `angle_plane_binding_ok = true`.
 
 Некоторые исходные гипотезы задачи были уточнены live-проверками:
 
-- Начальный угол через переменную оказался не нужен в финальной схеме. Правильное
-  значение найдено и зашито числом `90`.
+- Начальный угол через переменную оказался не нужен в финальной схеме. Левый
+  зацеп использует `90`, правый зацеп использует `270`.
 - `BA1` используется для угловой плоскости, а не для initial angle.
 - Прямое присваивание формул в некоторые COM-поля ненадежно; рабочий путь -
   числовое создание плюс operation-variable binding.
-- Проверка полей нутации/прецессии/вращения через COM пока невозможна текущими
-  wrapper-свойствами, поэтому контроль остается live-визуальным.
+- Прямое чтение Euler-полей через текущий COM-wrapper ограничено, но сами поля
+  нельзя считать ошибкой; они отражают абсолютную ориентацию позиции.
 
 ## 16. Текущее состояние
 
-Механика `bent_coil_left_spike` считается готовой для перехода ко второму зацепу:
+Механика `bent_coil_left_spike` сейчас строит оба отогнутых кольцевых зацепа:
 
 - отогнутая спираль параметризована;
-- первый и center sketches доопределены;
+- первый и center sketches доопределены точкой, вертикальностью и длиной;
 - центр отогнутой спирали параметризован радиусом;
 - угол плоскости отгиба параметризован `BA1`;
-- начальный угол спирали зафиксирован числом `90`;
+- начальный угол спирали зафиксирован числом `90` слева и `270` справа;
 - диагностические объекты удалены;
-- deferred-позиционирование не задает вращение СК.
+- deferred-позиционирование возвращено к axis-direction по angle plane;
+- live-readback для дефолтного `bent_coil_left_spike` дает полный контур `3/3/3`;
+- mixed-пары с `bent_coil_left_spike` включены в общую extension-hook матрицу
+  `64/64`; для `bent_coil_left_spike -> self_wrapping_hooks` стык
+  отогнутого кольца с телом остается без скругления, а правый self-wrapping
+  fillet использует raw `BODY_PATH` и logical body-end cut point.
