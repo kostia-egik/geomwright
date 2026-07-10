@@ -61,6 +61,30 @@ The extension spring preview/create path still owns all hook construction,
 side-selection metadata, native fillets, profile anchors, and live CAD readback.
 Catalog rows only choose parameter sets.
 
+### `torsion_metric_preferred_v1`
+
+- `spring_type`: `torsion_spring`
+- `source_kind`: `project_seed_catalog`
+- `standard_family`: `metric_preferred_stock_grid`
+- entries: `7`
+
+The torsion catalog covers tangent, radial, and axial-transition leg families.
+The radial and axial mechanics-coverage rows include a `30` degree start phase;
+one radial row also uses left-hand winding. Tangent rows keep
+`start_phase_degrees=0`, matching the public torsion contract.
+
+Each entry resolves to these generator fields:
+
+- `wire_diameter`
+- `outer_diameter`
+- `turns`
+- `leg_length`
+- `end_type`
+- `start_phase_degrees`
+- `turn_direction`
+- `catalog_id`
+- `catalog_entry_id`
+
 ## Tools
 
 Use the catalog tools in this order:
@@ -83,6 +107,7 @@ entries by normalized dimensional deltas. A score of `0.0` is an exact match;
 larger scores mean a larger average relative mismatch across the requested
 target fields. Use `target_length` as a generic length target, or
 `target_standard_length` / `target_height` when the spring type is already known.
+For torsion springs, use `end_type`, `leg_length`, and `target_leg_length`.
 
 Example recommendation query:
 
@@ -94,6 +119,22 @@ Example recommendation query:
   "target_length": 90.0,
   "hook_type": "self_wrapping_hooks",
   "limit": 3
+}
+```
+
+Torsion spring:
+
+```json
+{
+  "wire_diameter": 2.0,
+  "outer_diameter": 22.0,
+  "turns": 5.0,
+  "leg_length": 35.0,
+  "end_type": "radial_legs",
+  "start_phase_degrees": 30.0,
+  "turn_direction": "left",
+  "catalog_id": "torsion_metric_preferred_v1",
+  "catalog_entry_id": "tor-metric-020-220-n5-radial-left-phase30"
 }
 ```
 
@@ -134,11 +175,11 @@ Extension spring:
 Current non-test verification checks:
 
 - `validate_spring_size_catalogs(include_preview=True)` returns `ok=True`;
-- all `29` catalog entries resolve and preview through their existing scenario
+- all `36` catalog entries resolve and preview through their existing scenario
   generator;
 - `recommend_spring_sizes` ranks exact and nearest dimensional matches with
   deterministic score ordering;
-- external supplier-style JSON example merges with built-ins as `3` catalogs / `30`
+- external supplier-style JSON example merges with built-ins as `4` catalogs / `37`
   entries and resolves through the same preview path;
 - direct `create_spring_from_size` call for `cmp-metric-016-160-050-medium`
   builds live CAD with contour `5/5/5`;
@@ -148,6 +189,8 @@ Current non-test verification checks:
   `ext-metric-020-240-090-bent-coil-medium`, and
   `ext-metric-020-240-090-self-wrapping-medium` build live CAD with contours
   `5/5/5`, `3/3/3`, and `17/17/17` respectively.
+- torsion tangent, radial, and axial-transition coverage profiles build live CAD
+  with `3/3/3`, `5/5/5`, and `5/5/5` contours respectively.
 
 ## Extension Points
 

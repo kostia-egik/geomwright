@@ -2154,7 +2154,7 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
     left_hand = turn_direction in {"left", "left_hand", "левое", "левый"}
     direction_sign = -1.0 if left_hand else 1.0
     start_phase_degrees = float(params.get("start_phase_degrees", 0.0) or 0.0)
-    if abs(start_phase_degrees) > 1e-9:
+    if end_type == "tangent_legs" and abs(start_phase_degrees) > 1e-9:
         raise ValueError("torsion_spring tangent_legs currently supports start_phase_degrees=0 only")
     start_phase = math.radians(start_phase_degrees)
     end_phase = start_phase + direction_sign * total_turns * 2.0 * math.pi
@@ -2435,6 +2435,10 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
         "pitch": pitch,
         "height": body_height,
         "turns": total_turns,
+        "body_turns": body_turns,
+        "free_angle_degrees": free_angle,
+        "gap": gap,
+        "start_phase_degrees": start_phase_degrees,
         "left_hand": left_hand,
         "turn_direction": "left" if left_hand else "right",
         "end_type": end_type,

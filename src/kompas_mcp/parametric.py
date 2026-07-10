@@ -59,6 +59,7 @@ SUPPORTED_PART_SCENARIOS = (
     "bolt_circle_holes",
     "compression_spring",
     "extension_spring",
+    "torsion_spring",
     "point",
     "lcs",
     "workflow",
@@ -4244,16 +4245,18 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
     if normalized_scenario == "bolt_circle_holes":
         return preview_bolt_circle_holes(params)
     if normalized_scenario == "compression_spring":
-        return _preview_part_scenario_legacy("compression_spring", params, scenario)
+        return _attach_catalog_provenance(_preview_part_scenario_legacy("compression_spring", params, scenario), params)
     if normalized_scenario == "extension_spring":
-        return preview_extension_spring(params)
+        return _attach_catalog_provenance(preview_extension_spring(params), params)
+    if normalized_scenario == "torsion_spring":
+        return _attach_catalog_provenance(preview_torsion_spring(params), params)
     if normalized_scenario == "point":
         return preview_point(params)
     if normalized_scenario == "lcs":
         return preview_lcs(params)
     if normalized_scenario == "workflow":
         return preview_workflow(params)
-    return _preview_part_scenario_legacy(normalized_scenario, params, scenario)
+    return _attach_catalog_provenance(_preview_part_scenario_legacy(normalized_scenario, params, scenario), params)
 
 
 def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
@@ -4545,6 +4548,19 @@ def _compose_mixed_legacy_extension_hooks(
     return result
 
 
+def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
+    result = _preview_part_scenario_legacy("torsion_spring", copy.deepcopy(params), "torsion_spring")
+    result_params = result.get("params") if isinstance(result, dict) else None
+    if not isinstance(result_params, dict):
+        return result
+    full_path_sequence = list(result_params.get("full_path_sequence") or [])
+    if full_path_sequence:
+        result_params["profile_anchor_plane"] = _profile_anchor_at_sequence_end(full_path_sequence)
+    result_params["live_supported"] = True
+    result_params["creation_status"] = "live_verified_parametric_torsion_spring"
+    return result
+
+
 def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
     params = result.get("params")
     if not isinstance(params, dict) or not params.get("self_wrapping_hooks"):
@@ -4598,6 +4614,16 @@ def _normalize_self_wrapping_hooks_v1(result: dict[str, Any]) -> dict[str, Any]:
 def _preview_part_scenario_legacy(normalized_scenario: str, params: dict[str, Any], original_scenario: str) -> dict[str, Any]:
     legacy = _load_extension_spring_legacy_module()
     return legacy.preview_part_scenario(normalized_scenario, params)
+
+
+def _attach_catalog_provenance(preview: dict[str, Any], source_params: dict[str, Any]) -> dict[str, Any]:
+    preview_params = preview.get("params") if isinstance(preview, dict) else None
+    if not isinstance(preview_params, dict):
+        return preview
+    for key in ("catalog_id", "catalog_entry_id"):
+        if source_params.get(key) not in (None, ""):
+            preview_params[key] = source_params[key]
+    return preview
 
 
 def _load_extension_spring_legacy_module():
@@ -4990,28 +5016,34 @@ def _normalize_workflow_operation(
                     reference,
                     path="operations[%s].params.placement.base.reference" % (index - 1),
                 )
-        if scenario == "stepped_shaft":
-            preview = preview_stepped_shaft(params)
-        elif scenario == "external_conical_step":
-            preview = preview_external_conical_step(params)
-        elif scenario == "internal_conical_step":
-            preview = preview_internal_conical_step(params)
-        elif scenario == "internal_cylindrical_step":
-            preview = preview_internal_cylindrical_step(params)
-        elif scenario == "external_polygonal_step":
-            preview = preview_external_polygonal_step(params)
-        elif scenario == "internal_polygonal_step":
-            preview = preview_internal_polygonal_step(params)
-        elif scenario == "external_flat_step":
-            preview = preview_external_flat_step(params)
-        elif scenario == "internal_flat_step":
-            preview = preview_internal_flat_step(params)
-        elif scenario == "face_ring_groove":
-            preview = preview_face_ring_groove(params)
-        elif scenario == "bolt_circle_holes":
-            preview = preview_bolt_circle_holes(params)
-        else:
-            preview = preview_compression_spring(params)
+    if scenario == "point":
+        preview = preview_point(params)
+    elif scenario == "lcs":
+        preview = preview_lcs(params)
+    elif scenario == "stepped_shaft":
+        preview = preview_stepped_shaft(params)
+    elif scenario == "external_conical_step":
+        preview = preview_external_conical_step(params)
+    elif scenario == "internal_conical_step":
+        preview = preview_internal_conical_step(params)
+    elif scenario == "internal_cylindrical_step":
+        preview = preview_internal_cylindrical_step(params)
+    elif scenario == "external_polygonal_step":
+        preview = preview_external_polygonal_step(params)
+    elif scenario == "internal_polygonal_step":
+        preview = preview_internal_polygonal_step(params)
+    elif scenario == "external_flat_step":
+        preview = preview_external_flat_step(params)
+    elif scenario == "internal_flat_step":
+        preview = preview_internal_flat_step(params)
+    elif scenario == "face_ring_groove":
+        preview = preview_face_ring_groove(params)
+    elif scenario == "bolt_circle_holes":
+        preview = preview_bolt_circle_holes(params)
+    elif scenario == "compression_spring":
+        preview = preview_compression_spring(params)
+    elif scenario in {"extension_spring", "torsion_spring"}:
+        preview = preview_part_scenario(scenario, params)
     else:
         raise ValueError(f"Unsupported workflow operation scenario: {scenario}")
 

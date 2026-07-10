@@ -143,6 +143,47 @@ def _extension_entry(
     )
 
 
+def _torsion_entry(
+    entry_id: str,
+    *,
+    wire_diameter: float,
+    outer_diameter: float,
+    turns: float,
+    leg_length: float,
+    end_type: str,
+    load_class: str,
+    tags: tuple[str, ...],
+    start_phase_degrees: float = 0.0,
+    turn_direction: str = "right",
+) -> SpringCatalogEntry:
+    title = "Torsion spring d%s D%s N%s %s" % (
+        _format_size_token(wire_diameter),
+        _format_size_token(outer_diameter),
+        _format_size_token(turns),
+        end_type,
+    )
+    return SpringCatalogEntry(
+        id=entry_id,
+        spring_type="torsion_spring",
+        catalog_id="torsion_metric_preferred_v1",
+        title=title,
+        load_class=load_class,
+        tags=tags,
+        params={
+            "wire_diameter": float(wire_diameter),
+            "outer_diameter": float(outer_diameter),
+            "turns": float(turns),
+            "leg_length": float(leg_length),
+            "end_type": end_type,
+            "start_phase_degrees": float(start_phase_degrees),
+            "turn_direction": turn_direction,
+            "catalog_entry_id": entry_id,
+            "catalog_id": "torsion_metric_preferred_v1",
+        },
+        note="Preferred metric torsion-spring CAD seed entry; verify against the required supplier or official standard table before production release.",
+    )
+
+
 def _format_size_token(value: float) -> str:
     text = ("%.3f" % float(value)).rstrip("0").rstrip(".")
     return text.replace(".", "p")
@@ -185,6 +226,17 @@ _EXTENSION_METRIC_PREFERRED_ENTRIES: tuple[SpringCatalogEntry, ...] = (
 )
 
 
+_TORSION_METRIC_PREFERRED_ENTRIES: tuple[SpringCatalogEntry, ...] = (
+    _torsion_entry("tor-metric-012-140-n4-tangent-light", wire_diameter=1.2, outer_diameter=14.0, turns=4.0, leg_length=25.0, end_type="tangent_legs", load_class="light", tags=("compact", "tangent_legs")),
+    _torsion_entry("tor-metric-016-180-n5-tangent-medium", wire_diameter=1.6, outer_diameter=18.0, turns=5.0, leg_length=32.0, end_type="tangent_legs", load_class="medium", tags=("general", "tangent_legs")),
+    _torsion_entry("tor-metric-020-220-n5-tangent-medium", wire_diameter=2.0, outer_diameter=22.0, turns=5.0, leg_length=35.0, end_type="tangent_legs", load_class="medium", tags=("general", "tangent_legs")),
+    _torsion_entry("tor-metric-025-280-n6-tangent-heavy", wire_diameter=2.5, outer_diameter=28.0, turns=6.0, leg_length=42.0, end_type="tangent_legs", load_class="heavy", tags=("large", "tangent_legs")),
+    _torsion_entry("tor-metric-020-220-n5-radial-phase30", wire_diameter=2.0, outer_diameter=22.0, turns=5.0, leg_length=35.0, end_type="radial_legs", load_class="medium", tags=("mechanics_coverage", "radial_legs"), start_phase_degrees=30.0),
+    _torsion_entry("tor-metric-020-220-n5-axial-phase30", wire_diameter=2.0, outer_diameter=22.0, turns=5.0, leg_length=35.0, end_type="axial_transition_legs", load_class="medium", tags=("mechanics_coverage", "axial_transition_legs"), start_phase_degrees=30.0),
+    _torsion_entry("tor-metric-020-220-n5-radial-left-phase30", wire_diameter=2.0, outer_diameter=22.0, turns=5.0, leg_length=35.0, end_type="radial_legs", load_class="medium", tags=("mechanics_coverage", "radial_legs", "left_hand"), start_phase_degrees=30.0, turn_direction="left"),
+)
+
+
 SPRING_CATALOGS: tuple[SpringCatalog, ...] = (
     SpringCatalog(
         id="compression_metric_preferred_v1",
@@ -209,6 +261,18 @@ SPRING_CATALOGS: tuple[SpringCatalog, ...] = (
             "It is intentionally source-tagged as project data, not as an official GOST/DIN table."
         ),
         entries=_EXTENSION_METRIC_PREFERRED_ENTRIES,
+    ),
+    SpringCatalog(
+        id="torsion_metric_preferred_v1",
+        spring_type="torsion_spring",
+        title="Torsion Spring Preferred Metric Size Grid",
+        standard_family="metric_preferred_stock_grid",
+        source_kind="project_seed_catalog",
+        source_note=(
+            "Seed catalog of preferred metric CAD sizes for the live-verified torsion_spring generator. "
+            "It is intentionally source-tagged as project data, not as an official GOST/DIN table."
+        ),
+        entries=_TORSION_METRIC_PREFERRED_ENTRIES,
     ),
 )
 
@@ -402,6 +466,8 @@ def find_spring_catalog_entries(
     height: float | None = None,
     turns: float | None = None,
     hook_type: str | None = None,
+    end_type: str | None = None,
+    leg_length: float | None = None,
     load_class: str | None = None,
     tag: str | None = None,
     limit: int = 50,
@@ -433,6 +499,10 @@ def find_spring_catalog_entries(
                 continue
             if hook_type not in (None, "", params.get("hook_type"), params.get("left_hook_type"), params.get("right_hook_type")):
                 continue
+            if end_type not in (None, "", params.get("end_type")):
+                continue
+            if not _matches_float(params.get("leg_length"), leg_length):
+                continue
             matches.append(entry.to_dict(include_params=True))
             if len(matches) >= limit:
                 break
@@ -460,8 +530,10 @@ def recommend_spring_catalog_entries(
     target_height: float | None = None,
     target_turns: float | None = None,
     target_pitch: float | None = None,
+    target_leg_length: float | None = None,
     load_class: str | None = None,
     hook_type: str | None = None,
+    end_type: str | None = None,
     tag: str | None = None,
     limit: int = 10,
     catalog_dir: str | None = None,
@@ -482,6 +554,8 @@ def recommend_spring_catalog_entries(
                 continue
             if hook_type not in (None, "", params.get("hook_type"), params.get("left_hook_type"), params.get("right_hook_type")):
                 continue
+            if end_type not in (None, "", params.get("end_type")):
+                continue
             score, breakdown = _score_entry_against_targets(
                 params,
                 target_wire_diameter=target_wire_diameter,
@@ -491,6 +565,7 @@ def recommend_spring_catalog_entries(
                 target_height=target_height,
                 target_turns=target_turns,
                 target_pitch=target_pitch,
+                target_leg_length=target_leg_length,
             )
             item = entry.to_dict(include_params=True)
             item["score"] = score
@@ -579,6 +654,12 @@ def _validate_entry_geometry(
                 errors.append({"catalog_id": catalog.id, "entry_id": entry.id, "field": field_name, "error": "expected_positive_number"})
         if not params.get("hook_type") and not (params.get("left_hook_type") and params.get("right_hook_type")):
             errors.append({"catalog_id": catalog.id, "entry_id": entry.id, "error": "missing_extension_hook_type"})
+    elif catalog.spring_type == "torsion_spring":
+        for field_name in ("turns", "leg_length"):
+            if not _positive_float(params.get(field_name)):
+                errors.append({"catalog_id": catalog.id, "entry_id": entry.id, "field": field_name, "error": "expected_positive_number"})
+        if params.get("end_type") not in {"tangent_legs", "radial_legs", "axial_transition_legs"}:
+            errors.append({"catalog_id": catalog.id, "entry_id": entry.id, "error": "invalid_torsion_end_type"})
     else:
         warnings.append({"catalog_id": catalog.id, "entry_id": entry.id, "warning": "unknown_spring_type_not_geometry_validated"})
 
@@ -590,11 +671,19 @@ def _score_entry_against_targets(params: dict[str, Any], **targets: float | None
     _append_score(comparisons, "standard_length", params.get("standard_length"), targets.get("target_standard_length"))
     _append_score(comparisons, "height", params.get("height"), targets.get("target_height"))
     if targets.get("target_length") is not None:
-        length_value = params.get("standard_length") if params.get("standard_length") is not None else params.get("height")
-        length_field = "standard_length" if params.get("standard_length") is not None else "height"
+        if params.get("standard_length") is not None:
+            length_value = params.get("standard_length")
+            length_field = "standard_length"
+        elif params.get("height") is not None:
+            length_value = params.get("height")
+            length_field = "height"
+        else:
+            length_value = params.get("leg_length")
+            length_field = "leg_length"
         _append_score(comparisons, length_field, length_value, targets.get("target_length"), alias="length")
     _append_score(comparisons, "turns", params.get("turns") or params.get("working_turns"), targets.get("target_turns"))
     _append_score(comparisons, "pitch", params.get("pitch"), targets.get("target_pitch"))
+    _append_score(comparisons, "leg_length", params.get("leg_length"), targets.get("target_leg_length"))
     if not comparisons:
         return 0.0, []
     return sum(float(item["normalized_delta"]) for item in comparisons) / float(len(comparisons)), comparisons
