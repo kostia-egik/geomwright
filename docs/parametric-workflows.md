@@ -4,6 +4,8 @@ This document keeps the detailed notes and live examples for parametric
 part generation, thread modules, workflow links, and known modelling gaps.
 The README intentionally stays shorter and points here for details.
 
+Подробности по пружинам — в [`docs/archive/`](archive/).
+
 ## Следующее направление: типы резьб после метрической
 
 Метрическую физическую `external_helical_thread` / `internal_helical_thread` считаем достаточной базой для перехода к другим стандартам. Ближайшая линия развития - не переписывать модуль заново, а выделить семейство профиля и табличный каталог:
@@ -25,12 +27,41 @@ The README intentionally stays shorter and points here for details.
 - `internal_cylindrical_step` — внутренний многоступенчатый bore;
 - `face_ring_groove` — кольцевая проточка на торце;
 - `bolt_circle_holes` — отверстия по диаметру через базовое отверстие + концентрический массив;
+- `compression_spring` — пружина сжатия через segmented spiral path + staged profile sketch;
+- `extension_spring` — пружина растяжения с machine hooks через sketch path зацепы, ассоциативную правую плоскость и clearance-based hook ends;
 - `external_polygonal_step` / `internal_polygonal_step` — многогранные ступени через выдавливание/вырезание;
 - `external_threaded_step` / `internal_threaded_step` — внешняя и внутренняя native-резьба по каталогу КОМПАС;
 - `external_helical_thread` / `internal_helical_thread` — физическая винтовая резьба на существующем цилиндре/отверстии через спираль и кинематический вырез;
 - `point` — опорные точки (`global`, `offset_from_point`, `center_of_object`);
 - `lcs` — локальные системы координат (`global`, `point`, часть `object`);
 - `workflow` — цепочка операций в одном документе со ссылками между шагами.
+
+`compression_spring` принимает `mean_diameter` либо внешний/внутренний
+диаметр, считает рабочие и опорные витки отдельно, собирает путь из
+`start_end` / `working` / `finish_end` сегментов, а затем ведёт один круглый
+профиль по всему пути через `boss_evolution`. В preview сразу видны
+`contour_ready`, `max_joint_gap`, `max_joint_angle_gap`, `operation_variable_bindings`,
+`start_offset_expression` и phase/orientation для первого сегмента, поэтому
+живой прогон проще проверять без ручного разбора bridge payload.
+`compression_spring_variable_pitch` — alias этой же ветки с двумя рабочими
+зонами `working_1`/`working_2`; для длинных составных путей bridge может
+использовать `direct_path_list` как fallback после неудачного `IEvolution` от
+`Contour3D`.
+Текущий contract переходов и profile anchor описан в
+[`docs/compression-spring.md`](compression-spring.md).
+
+`extension_spring` использует эскизные зацепы для текущего `machine_hooks`
+контракта. Концы дуг не управляются угловыми размерами: offset задаётся
+линейно через `HO1 = P1 + HG1`, где `P1 = WD1 + G1`, а `HG1` приходит из
+`hook_clearance`. Входной `gap=0` поднимается до минимального `G1=0.01` мм по
+умолчанию, чтобы тело не самопересекалось из-за касающихся витков. Правая
+плоскость зацепа строится через ассоциативную точку конца спирали, а не через
+координатную точку. Эта sketch-hook схема подходит для близких hook-end
+пружин, но support для 3D-кривых оставляем: другие типы пружин могут требовать
+прямых 3D траекторий.
+
+Детали anchor rotation, backlog и планы V2 — в
+[`docs/archive/`](archive/).
 
 Для `external_helical_thread` и `internal_helical_thread` после построения скрываются служебные точки, LCS профиля, профильный эскиз, ось и спираль. Bridge выставляет `Hidden=True` и сразу коммитит это через `Update()`, чтобы состояние сохранялось в дереве построений после переоткрытия `.m3d`.
 

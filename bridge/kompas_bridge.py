@@ -7133,6 +7133,8 @@ def _create_staged_curve_fillet_path(
     trim_curve2=True,
     curve1_cut_point=None,
     curve2_cut_point=None,
+    initial_radius=None,
+    dependency_touch_items=None,
 ):
     fillet_curves = safe_get(auxiliary_container, "FilletCurves")
     if fillet_curves is None or not callable(safe_get(fillet_curves, "Add")):
@@ -7154,12 +7156,37 @@ def _create_staged_curve_fillet_path(
         fillet.SetCurve1CutPoint(*normalized_curve1_cut_point)
     if normalized_curve2_cut_point is not None:
         fillet.SetCurve2CutPoint(*normalized_curve2_cut_point)
+    target_radius = float(radius)
+    seed_radius = float(initial_radius) if initial_radius is not None else target_radius
+    seed_radius = max(0.01, min(seed_radius, target_radius))
     first_update = bool(fillet.Update())
-    fillet.Radius = float(radius)
+    if not first_update and dependency_touch_items:
+        touch_items = tuple(dependency_touch_items or ()) + (("curve_fillet", fillet),)
+        _touch_com_dependency_chain(*touch_items)
+        first_update = bool(fillet.Update())
+    staged_updates = [first_update]
+    if seed_radius != target_radius:
+        fillet.Radius = seed_radius
+        seed_update = bool(fillet.Update())
+        if not seed_update and dependency_touch_items:
+            touch_items = tuple(dependency_touch_items or ()) + (("curve_fillet", fillet),)
+            _touch_com_dependency_chain(*touch_items)
+            seed_update = bool(fillet.Update())
+        staged_updates.append(seed_update)
+    if staged_updates[-1] and dependency_touch_items:
+        touch_items = tuple(dependency_touch_items or ()) + (("curve_fillet", fillet),)
+        _touch_com_dependency_chain(*touch_items)
+    fillet.Radius = target_radius
     second_update = bool(fillet.Update())
+    staged_updates.append(second_update)
+    if not second_update and dependency_touch_items:
+        touch_items = tuple(dependency_touch_items or ()) + (("curve_fillet", fillet),)
+        _touch_com_dependency_chain(*touch_items)
+        second_update = bool(fillet.Update())
+        staged_updates.append(second_update)
     if not second_update:
         raise RuntimeError("Failed to create staged curve fillet path %s" % name)
-    return fillet, [first_update, second_update]
+    return fillet, staged_updates
 
 
 def _create_connect_curve_path(
@@ -7396,6 +7423,59 @@ def _build_compression_spring_transition_curve_paths(
             continue
         fillet_name = str(connector.get("path_name") or ("%s_TRANSITION_FILLET" % spring_name)).strip()
         joint_point = connector.get("joint_point")
+        preview_curve1_cut_point = connector.get("curve1_cut_point", joint_point)
+        preview_curve2_cut_point = connector.get("curve2_cut_point", joint_point)
+        runtime_curve1_cut_point, runtime_curve2_cut_point = _fillet_cut_points_near_shared_endpoint(
+            curve1_object["path"],
+            curve2_object["path"],
+            curve1_ratio=0.03,
+            curve2_ratio=0.03,
+        )
+        com_curve_cut_point_report = None
+        if connector.get("use_com_curve_cut_points"):
+            com_curve_cut_point_report = {"curve1": None, "curve2": None}
+            try:
+                curve1_point = _create_point3d_on_curve(
+                    model_container,
+                    "%s_CURVE1_CUT_POINT" % fillet_name,
+                    curve1_object["path"],
+                    offset=float(connector.get("curve1_cut_point_offset") or 0.0),
+                    direction=bool(connector.get("curve1_cut_point_direction", False)),
+                    offset_type=int(connector.get("curve_cut_point_offset_type") or 2),
+                )
+                runtime_curve1_cut_point = [
+                    float(safe_get(curve1_point, "X", 0.0) or 0.0),
+                    float(safe_get(curve1_point, "Y", 0.0) or 0.0),
+                    float(safe_get(curve1_point, "Z", 0.0) or 0.0),
+                ]
+                com_curve_cut_point_report["curve1"] = runtime_curve1_cut_point
+            except Exception as exc:
+                com_curve_cut_point_report["curve1_error"] = str(exc)
+            try:
+                curve2_point = _create_point3d_on_curve(
+                    model_container,
+                    "%s_CURVE2_CUT_POINT" % fillet_name,
+                    curve2_object["path"],
+                    offset=float(connector.get("curve2_cut_point_offset") or 0.0),
+                    direction=bool(connector.get("curve2_cut_point_direction", True)),
+                    offset_type=int(connector.get("curve_cut_point_offset_type") or 2),
+                )
+                runtime_curve2_cut_point = [
+                    float(safe_get(curve2_point, "X", 0.0) or 0.0),
+                    float(safe_get(curve2_point, "Y", 0.0) or 0.0),
+                    float(safe_get(curve2_point, "Z", 0.0) or 0.0),
+                ]
+                com_curve_cut_point_report["curve2"] = runtime_curve2_cut_point
+            except Exception as exc:
+                com_curve_cut_point_report["curve2_error"] = str(exc)
+        if not connector.get("use_com_curve_cut_points") and curve1_object.get("kind") != "curve_fillet_edge":
+            runtime_curve1_cut_point = preview_curve1_cut_point
+        elif runtime_curve1_cut_point is None:
+            runtime_curve1_cut_point = preview_curve1_cut_point
+        if not connector.get("use_com_curve_cut_points"):
+            runtime_curve2_cut_point = preview_curve2_cut_point
+        elif runtime_curve2_cut_point is None:
+            runtime_curve2_cut_point = preview_curve2_cut_point
         fillet, staged_updates = _create_staged_curve_fillet_path(
             auxiliary_container,
             fillet_name,
@@ -7404,15 +7484,29 @@ def _build_compression_spring_transition_curve_paths(
             radius=float(connector.get("radius") or 0.0),
             trim_curve1=bool(connector.get("trim_curve1", True)),
             trim_curve2=bool(connector.get("trim_curve2", True)),
-            curve1_cut_point=connector.get("curve1_cut_point", joint_point),
-            curve2_cut_point=connector.get("curve2_cut_point", joint_point),
+            curve1_cut_point=runtime_curve1_cut_point,
+            curve2_cut_point=runtime_curve2_cut_point,
+            initial_radius=connector.get("initial_radius"),
+            dependency_touch_items=(
+                ("model_container", model_container),
+                ("auxiliary_container", auxiliary_container),
+            ),
         )
         fillet_binding_report = None
+        post_binding_dependency_touch = None
         if connector.get("operation_variable_bindings"):
             fillet_binding_report = _bind_operation_variables(fillet, connector.get("operation_variable_bindings") or [])
             if not fillet_binding_report.get("ok", False):
                 raise RuntimeError("Failed to bind curve fillet operation variables for %s" % fillet_name)
-            if not bool(fillet.Update()):
+            fillet_update_ok = bool(fillet.Update())
+            if not fillet_update_ok:
+                post_binding_dependency_touch = _touch_com_dependency_chain(
+                    ("model_container", model_container),
+                    ("auxiliary_container", auxiliary_container),
+                    ("curve_fillet", fillet),
+                )
+                fillet_update_ok = bool(fillet.Update())
+            if not fillet_update_ok:
                 raise RuntimeError("Failed to update curve fillet path %s after variable binding" % fillet_name)
         connector_object = {
             "role": str(connector.get("role") or ""),
@@ -7426,6 +7520,14 @@ def _build_compression_spring_transition_curve_paths(
         created_curve_objects.append(connector_object)
         curve_by_path_name[connector_object["path_name"]] = connector_object
         result_edges = _fillet_result_edges(fillet, expected_count=None)
+        raw_result_edge_entries = [
+            {
+                "edge_index": index,
+                "reference": safe_get(edge, "Reference"),
+                "sampled_endpoints": _sample_curve_endpoints(edge),
+            }
+            for index, edge in enumerate(result_edges)
+        ]
         edge_names = list(connector.get("result_edge_path_names") or [connector.get("sequence_curve1_path_name"), connector.get("sequence_fillet_path_name"), connector.get("sequence_curve2_path_name")])
         edge_order = list(connector.get("result_edge_order") or [1, 0, 2])
         edge_entries = []
@@ -7442,7 +7544,14 @@ def _build_compression_spring_transition_curve_paths(
                 }
                 created_curve_objects.append(edge_object)
                 curve_by_path_name[edge_object["path_name"]] = edge_object
-                edge_entries.append({"path_name": edge_object["path_name"], "edge_index": int(edge_index), "reference": safe_get(edge, "Reference")})
+                edge_entries.append(
+                    {
+                        "path_name": edge_object["path_name"],
+                        "edge_index": int(edge_index),
+                        "reference": safe_get(edge, "Reference"),
+                        "sampled_endpoints": _sample_curve_endpoints(edge),
+                    }
+                )
         steps_report.append(
             {
                 "step": "create_curve_fillet_path",
@@ -7454,12 +7563,20 @@ def _build_compression_spring_transition_curve_paths(
                 "curve1_path_name": curve1_path_name,
                 "curve2_path_name": curve2_path_name,
                 "joint_point": list(joint_point or []),
+                "preview_curve1_cut_point": list(preview_curve1_cut_point or []),
+                "preview_curve2_cut_point": list(preview_curve2_cut_point or []),
+                "runtime_curve1_cut_point": list(runtime_curve1_cut_point or []),
+                "runtime_curve2_cut_point": list(runtime_curve2_cut_point or []),
+                "com_curve_cut_point_report": com_curve_cut_point_report,
                 "radius": float(connector.get("radius") or 0.0),
+                "initial_radius": connector.get("initial_radius"),
                 "radius_readback": safe_get(fillet, "Radius"),
                 "staged_updates": staged_updates,
+                "post_binding_dependency_touch": post_binding_dependency_touch,
                 "trim_curve1": bool(connector.get("trim_curve1", True)),
                 "trim_curve2": bool(connector.get("trim_curve2", True)),
                 "result_edge_count": len(result_edges),
+                "raw_result_edges": raw_result_edge_entries,
                 "sequence_edges": edge_entries,
             }
         )
@@ -15730,6 +15847,19 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             auxiliary_objects,
             steps_report,
         )
+        if document is not None:
+            try:
+                rebuild_document = safe_get(document, "RebuildDocument")
+                if callable(rebuild_document):
+                    rebuild_document()
+            except Exception:
+                pass
+            try:
+                update_document = safe_get(document, "Update")
+                if callable(update_document):
+                    update_document()
+            except Exception:
+                pass
 
     profile_lcs = None
     profile_plane_object = sketch_plane
@@ -15764,6 +15894,7 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
                 "%s_PROFILE_ANCHOR_PLANE" % spring_name,
                 profile_anchor,
                 anchor_segment["path"],
+                document=document,
             )
             auxiliary_objects.append(("profile_anchor_plane", profile_plane_object))
         else:
@@ -15909,7 +16040,31 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
         evolution.Name = sweep_name
     except Exception:
         pass
-    if not bool(evolution.Update()):
+    evolution_edge_input_mode = "path_contour"
+    evolution_update_ok = bool(evolution.Update())
+    evolution_fallback_reports = []
+    if not evolution_update_ok:
+        for fallback_mode, fallback_edges in (
+            ("direct_path_list", list(sweep_paths_for_report)),
+            ("direct_path_tuple", tuple(sweep_paths_for_report)),
+        ):
+            try:
+                evolution.Edges = fallback_edges
+                fallback_update_ok = bool(evolution.Update())
+            except Exception as exc:
+                fallback_update_ok = False
+                evolution_fallback_reports.append(
+                    {"mode": fallback_mode, "ok": False, "error": str(exc)}
+                )
+                continue
+            evolution_fallback_reports.append(
+                {"mode": fallback_mode, "ok": fallback_update_ok}
+            )
+            if fallback_update_ok:
+                evolution_edge_input_mode = fallback_mode
+                evolution_update_ok = True
+                break
+    if not evolution_update_ok:
         raise RuntimeError("Failed to create compression_spring body")
     steps_report.append(
         {
@@ -15921,6 +16076,8 @@ def _build_compression_spring_feature(part, model_container, params, preview, st
             "model_object_type": safe_get(evolution, "ModelObjectType"),
             "operation_result": safe_get(evolution, "OperationResult"),
             "edge_count": len(sweep_paths_for_report),
+            "edge_input_mode": evolution_edge_input_mode,
+            "edge_input_fallbacks": evolution_fallback_reports,
             "path_contour_reference": safe_get(path_contour, "Reference"),
             "paths": [safe_get(path, "Reference") for path in sweep_paths_for_report],
             "profile": safe_get(profile_sketch, "Reference"),
@@ -17714,7 +17871,7 @@ def _create_plane_parallel_by_point(part, name, reference_plane, point):
     return plane
 
 
-def _create_plane_perpendicular_by_edge(part, name, point, edge):
+def _create_plane_perpendicular_by_edge(part, name, point, edge, document=None):
     import win32com.client
 
     planes = safe_get(part, "Planes3D") or getattr(part, "Planes3D", None) or safe_get(part, "Planes") or getattr(part, "Planes", None)
@@ -17746,7 +17903,30 @@ def _create_plane_perpendicular_by_edge(part, name, point, edge):
         plane.Name = str(name)
     plane.Point = point
     plane.Edge = edge
-    if not plane.Update():
+    plane_update_ok = bool(plane.Update())
+    if not plane_update_ok:
+        _touch_com_dependency_chain(
+            ("planes_container", planes),
+            ("profile_plane", plane),
+            ("profile_anchor_point", point),
+            ("profile_anchor_edge", edge),
+        )
+        plane_update_ok = bool(plane.Update())
+    if not plane_update_ok and document is not None:
+        try:
+            rebuild_document = safe_get(document, "RebuildDocument")
+            if callable(rebuild_document):
+                rebuild_document()
+        except Exception:
+            pass
+        try:
+            update_document = safe_get(document, "Update")
+            if callable(update_document):
+                update_document()
+        except Exception:
+            pass
+        plane_update_ok = bool(plane.Update())
+    if not plane_update_ok:
         raise RuntimeError("IPlane3DPerpendicularByEdge Update returned False")
     return plane
 

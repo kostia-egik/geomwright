@@ -1284,6 +1284,7 @@ Related:
 
 Applies when:
 - building extension spring sweep/evolution profiles;
+- building compression spring sweep/evolution profiles;
 - building torsion spring sweep/evolution profiles;
 - building conical spring sweep/evolution profiles;
 - adding independent left/right hook composition;
@@ -1330,6 +1331,10 @@ Known examples:
 - `conical_spring` uses local profile sketches on the final contour endpoint;
   start/end conical segments, native curve-fillet transitions, and ground surface
   cuts must not reintroduce a profile sketch offset.
+- `compression_spring` uses the same final endpoint anchor and local profile
+  sketch. Cylindrical segment transitions use native result edges for both
+  right-hand and left-hand turns; the legacy trimmed-connect path is now an
+  explicit fallback, not the auto mode.
 - Conical transition fillet defaults should be based on the limiting local cone
   radius at segment joints, not wire diameter. Keep the default just below that
   radius and allow explicit override for model-specific tuning.
@@ -1464,6 +1469,16 @@ Known example:
   remain unfilleted. The right self-wrapping transition fillet uses raw
   `BODY_PATH` plus the logical body end point, producing a stable `10/10/10`
   contour without a synthetic left bent-to-body fillet.
+- `compression_spring` native transitions use cut points slightly inside the
+  adjacent spiral segments, not the exact shared endpoint. For cylindrical
+  springs, create those cut points on the actual COM curve with
+  `Point3DParamCurve`; analytic preview coordinates can pick the wrong selectable
+  side on left-hand spirals even when the preview phase gap is zero.
+- The default cylindrical native radius is `min(0.4 * mean_radius,
+  1.5 * wire_diameter)` (`TFR1 = min(0.2 * (D1 - WD1), 1.5 * WD1)` for the
+  standard outside-diameter variable). Stage native fillets in UI-like order:
+  create/update topology, optionally update at a smaller seed radius, then update
+  at the target radius and bind `Радиус = TFR1`.
 
 ### CONTOUR-001: Build KOMPAS Contours In Continuous UI Order
 
@@ -1482,6 +1497,13 @@ For generated path contours:
 For self-wrapping hooks, the final left-side path has 9 elements. The profile
 anchor must stay at the physical end of that path. Do not move the profile anchor
 to compensate for a broken or incomplete contour.
+
+For variable-pitch compression springs, KOMPAS can build a visually correct
+seven-edge `Contour3D` and still reject it as `IEvolution.Edges`. Keep the
+contour as readback evidence, but if the first evolution `Update()` fails, retry
+with the direct list of path parts in the same UI order. Record the selected
+`edge_input_mode` so it is clear whether the body used `path_contour` or the
+`direct_path_list` fallback.
 
 ### REBUILD-001: Materialize Newly Created CAD Features Before Capturing Result Edges
 

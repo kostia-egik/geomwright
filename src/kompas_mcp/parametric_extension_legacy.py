@@ -1583,7 +1583,15 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
                 "radius": connector["radius"],
                 "trim_curve1": bool(connector["trim_curve1"]),
                 "trim_curve2": bool(connector["trim_curve2"]),
+                "curve1_cut_point": list(connector.get("curve1_cut_point") or []),
+                "curve2_cut_point": list(connector.get("curve2_cut_point") or []),
                 "joint_point": list(connector["joint_point"]),
+                "result_edge_path_names": list(
+                    connector.get("result_edge_path_names") or []
+                ),
+                "operation_variable_bindings": list(
+                    connector.get("operation_variable_bindings") or []
+                ),
                 "description": connector["description"],
                 "live_status": "planned",
             }
@@ -1597,6 +1605,11 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
                 "profile": "circle",
                 "plane": normalized["plane"],
                 "center": profile_center,
+                "profile_anchor_plane": normalized.get("profile_anchor_plane"),
+                "profile_path_offset": list(normalized.get("profile_path_offset") or []),
+                "profile_sketch_center": list(
+                    normalized.get("profile_sketch_center") or []
+                ),
                 "radius": normalized["wire_diameter"] / 2.0,
                 "phase_degrees": profile_phase_degrees,
                 "sketch_parameterization": {
@@ -1606,7 +1619,7 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
                     "dimensions": list(normalized["profile_sketch_dimensions"]),
                     "target_state": normalized["profile_sketch_target_state"],
                 },
-                "description": "Create one circular wire profile at the start of the composed spring path",
+                "description": "Create one circular wire profile at the anchored end of the composed spring path",
                 "live_status": "planned",
             },
             {
@@ -1680,6 +1693,9 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
             "connector_count": len(normalized["connector_plan"]),
             "contour_ready": bool(normalized["path_verification"]["contour_ready"]),
             "max_joint_gap": float(normalized["path_verification"]["max_joint_gap"]),
+            "max_joint_angle_gap": float(
+                normalized["path_verification"].get("max_joint_angle_gap") or 0.0
+            ),
         },
         "selectors": selector_points,
         "interface": _build_compression_spring_interface(
@@ -2052,31 +2068,10 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
         [float(placement_origin[0]), float(placement_origin[1]), 0.0],
         [float(placement_origin[0]) + total_height, float(placement_origin[1]), 0.0],
     )
-    joint_gaps: list[dict[str, Any]] = []
-    max_joint_gap = 0.0
-    for index in range(1, len(normalized["segment_plan"])):
-        previous_segment = normalized["segment_plan"][index - 1]
-        current_segment = normalized["segment_plan"][index]
-        gap_vector = [
-            float(current_segment["start_point"][axis]) - float(previous_segment["end_point"][axis])
-            for axis in range(3)
-        ]
-        gap_length = math.sqrt(sum(component * component for component in gap_vector))
-        max_joint_gap = max(max_joint_gap, gap_length)
-        joint_gaps.append(
-            {
-                "from_role": previous_segment["role"],
-                "to_role": current_segment["role"],
-                "gap": gap_length,
-                "gap_vector": gap_vector,
-            }
-        )
-    normalized["path_verification"] = {
-        "contour_ready": max_joint_gap <= 1e-6,
-        "max_joint_gap": max_joint_gap,
-        "max_joint_angle_gap": 0.0,
-        "joints": joint_gaps,
-    }
+    normalized["path_verification"] = _build_compression_spring_path_verification(
+        normalized["segment_plan"],
+        mean_radius=large_diameter / 2.0,
+    )
 
     conical_segment_plan = list(normalized.get("segment_plan") or [])
     if len(conical_segment_plan) > 1:
@@ -2203,6 +2198,11 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
             "small_mean_diameter": small_diameter,
             "pitch_mode": pitch_mode,
             "path_family": "conical",
+            "contour_ready": bool(normalized["path_verification"]["contour_ready"]),
+            "max_joint_gap": float(normalized["path_verification"]["max_joint_gap"]),
+            "max_joint_angle_gap": float(
+                normalized["path_verification"].get("max_joint_angle_gap") or 0.0
+            ),
         }
     )
     preview["selectors"] = normalized["selector_points"]
@@ -5784,6 +5784,14 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     )
     if transition_fillet_radius is not None and transition_fillet_radius <= 1e-9:
         transition_fillet_radius = None
+    transition_fillet_initial_radius = _optional_non_negative_float(
+        params,
+        "transition_fillet_initial_radius",
+        "transition_initial_radius",
+        "initial_transition_fillet_radius",
+    )
+    if transition_fillet_initial_radius is not None and transition_fillet_initial_radius <= 1e-9:
+        transition_fillet_initial_radius = None
     transition_trim_length = _optional_non_negative_float(
         params,
         "transition_trim_length",
@@ -5797,6 +5805,34 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         "transition_connect_tension",
         "transition_tension",
     )
+    transition_connector_builder_raw = (
+        params.get("transition_connector_builder")
+        or params.get("transition_connector_mode")
+        or params.get("transition_builder")
+    )
+    transition_connector_builder = "auto"
+    if transition_connector_builder_raw is not None:
+        transition_connector_builder = (
+            str(transition_connector_builder_raw).strip().lower().replace("-", "_")
+        )
+        transition_connector_aliases = {
+            "auto": "auto",
+            "default": "auto",
+            "native": "curve_fillet",
+            "native_fillet": "curve_fillet",
+            "curve_fillet": "curve_fillet",
+            "fillet": "curve_fillet",
+            "legacy": "trimmed_connect_curve",
+            "connect": "trimmed_connect_curve",
+            "connect_curve": "trimmed_connect_curve",
+            "trimmed_connect": "trimmed_connect_curve",
+            "trimmed_connect_curve": "trimmed_connect_curve",
+        }
+        if transition_connector_builder not in transition_connector_aliases:
+            raise ValueError(
+                "compression_spring transition_connector_builder must be auto, curve_fillet, or trimmed_connect_curve"
+            )
+        transition_connector_builder = transition_connector_aliases[transition_connector_builder]
     end_turns_per_side = (
         float(end_contract["end_turns_per_side"])
         if end_contract["end_turns_per_side"] is not None
@@ -5957,6 +5993,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     turns_2_variable = build_parameter_name("N", 12, prefix=parameter_prefix)
     height_1_variable = build_parameter_name("H", 11, prefix=parameter_prefix)
     height_2_variable = build_parameter_name("H", 12, prefix=parameter_prefix)
+    transition_fillet_radius_variable = build_parameter_name("TFR", 1, prefix=parameter_prefix)
     transition_trim_length_variable = build_parameter_name("TL", 1, prefix=parameter_prefix)
     transition_connect_tension_variable = build_parameter_name("TN", 1, prefix=parameter_prefix)
     outer_diameter = float(mean_diameter) + float(wire_diameter)
@@ -6514,6 +6551,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         and len(segment_plan) >= 2
     ):
         transition_fillet_radius = _resolve_compression_spring_transition_fillet_radius(
+            mean_diameter=mean_diameter,
             wire_diameter=wire_diameter,
         )
     connector_plan: list[dict[str, Any]] = []
@@ -6521,6 +6559,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     resolved_transition_connect_tension: float | None = transition_connect_tension
     transition_trim_length_expression: str | None = None
     transition_connect_tension_expression: str | None = None
+    use_native_transition_fillets = False
     if transition_fillet_radius is not None and len(segment_plan) >= 2:
         resolved_transition_trim_length = (
             float(transition_trim_length)
@@ -6573,40 +6612,106 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                     f"({base_tension_expression}) + ({pitch_adjustment_expression})"
                 ),
             )
-        variable_plan.extend(
-            [
-                {
-                    "name": transition_trim_length_variable,
-                    "value": float(resolved_transition_trim_length),
-                    "expression": transition_trim_length_expression,
-                    "note": build_parameter_note(
-                        operation_label,
-                        "spring",
-                        transition_trim_length_variable,
-                        "Transition trim length",
-                    ),
-                    "kind": "derived_transition_trim_length",
-                    "step_name": "spring",
-                    "operation_label": operation_label,
-                    "external": True,
-                },
-                {
-                    "name": transition_connect_tension_variable,
-                    "value": float(resolved_transition_connect_tension),
-                    "expression": transition_connect_tension_expression,
-                    "note": build_parameter_note(
-                        operation_label,
-                        "spring",
-                        transition_connect_tension_variable,
-                        "Transition connect-curve tension",
-                    ),
-                    "kind": "derived_transition_connect_tension",
-                    "step_name": "spring",
-                    "operation_label": operation_label,
-                    "external": True,
-                },
+        if transition_connector_builder == "curve_fillet":
+            use_native_transition_fillets = True
+        elif transition_connector_builder == "trimmed_connect_curve":
+            use_native_transition_fillets = False
+        else:
+            use_native_transition_fillets = True
+        if use_native_transition_fillets:
+            variable_plan.extend(
+                [
+                    {
+                        "name": transition_fillet_radius_variable,
+                        "value": float(transition_fillet_radius),
+                        "expression": (
+                            _format_compression_spring_expression_literal(
+                                transition_fillet_radius
+                            )
+                            if transition_fillet_radius_explicit
+                            else _compression_spring_expression_min(
+                                f"0.2 * ({mean_diameter_expression})",
+                                f"1.5 * ({wire_diameter_variable})",
+                            )
+                        ),
+                        "note": build_parameter_note(
+                            operation_label,
+                            "spring",
+                            transition_fillet_radius_variable,
+                            "Native transition fillet radius",
+                        ),
+                        "kind": "derived_transition_fillet_radius",
+                        "step_name": "spring",
+                        "operation_label": operation_label,
+                        "external": True,
+                    },
+                ]
+            )
+        else:
+            variable_plan.extend(
+                [
+                    {
+                        "name": transition_trim_length_variable,
+                        "value": float(resolved_transition_trim_length),
+                        "expression": transition_trim_length_expression,
+                        "note": build_parameter_note(
+                            operation_label,
+                            "spring",
+                            transition_trim_length_variable,
+                            "Transition trim length",
+                        ),
+                        "kind": "derived_transition_trim_length",
+                        "step_name": "spring",
+                        "operation_label": operation_label,
+                        "external": True,
+                    },
+                    {
+                        "name": transition_connect_tension_variable,
+                        "value": float(resolved_transition_connect_tension),
+                        "expression": transition_connect_tension_expression,
+                        "note": build_parameter_note(
+                            operation_label,
+                            "spring",
+                            transition_connect_tension_variable,
+                            "Transition connect-curve tension",
+                        ),
+                        "kind": "derived_transition_connect_tension",
+                        "step_name": "spring",
+                        "operation_label": operation_label,
+                        "external": True,
+                    },
+                ]
+            )
+
+        def _build_transition_cut_point(
+            segment: dict[str, Any],
+            *,
+            near: str,
+        ) -> list[float]:
+            segment_height = max(float(segment.get("height") or 0.0), 0.0)
+            if segment_height <= 1e-9:
+                key = "end_point" if near == "end" else "start_point"
+                return list(segment[key])
+            cut_offset = max(segment_height * 0.03, 1e-6)
+            distance_from_start = (
+                segment_height - cut_offset if near == "end" else cut_offset
+            )
+            fraction = distance_from_start / segment_height
+            angle_degrees = float(segment["start_angle_degrees_raw"]) + (
+                float(segment["turn_delta_degrees"]) * fraction
+            )
+            angle_radians = math.radians(angle_degrees)
+            mean_radius = float(mean_diameter) / 2.0
+            x = float(segment["start_offset"]) + distance_from_start
+            return [
+                x,
+                mean_radius * math.cos(angle_radians),
+                mean_radius * math.sin(angle_radians),
             ]
-        )
+
+        def _transition_cut_offset(segment: dict[str, Any]) -> float:
+            segment_height = max(float(segment.get("height") or 0.0), 0.0)
+            return max(segment_height * 0.03, 1e-6)
 
         def _build_trimmed_transition_connector(
             previous_segment: dict[str, Any],
@@ -6682,11 +6787,60 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                 "tension_expression": transition_connect_tension_variable,
             }
 
+        def _build_native_transition_connector(
+            previous_segment: dict[str, Any],
+            current_segment: dict[str, Any],
+            *,
+            curve1_source_path_name: str | None = None,
+        ) -> dict[str, Any]:
+            connector_role = f"{str(previous_segment['role'])}_to_{str(current_segment['role'])}"
+            previous_path_name = curve1_source_path_name or str(previous_segment["path_name"])
+            current_path_name = str(current_segment["path_name"])
+            connector = _build_native_fillet_connector(
+                role=connector_role,
+                curve1_path_name=previous_path_name,
+                curve2_path_name=current_path_name,
+                path_name="spring_%s_fillet_path" % connector_role,
+                radius=float(transition_fillet_radius),
+                radius_expression=transition_fillet_radius_variable,
+                trim_curve1=True,
+                trim_curve2=True,
+                curve1_cut_point=_build_transition_cut_point(previous_segment, near="end"),
+                curve2_cut_point=_build_transition_cut_point(current_segment, near="start"),
+            )
+            connector["description"] = (
+                "Create a native curve fillet between %s and %s"
+                % (previous_segment["label"], current_segment["label"])
+            )
+            connector["joint_point"] = list(previous_segment["end_point"])
+            connector["use_com_curve_cut_points"] = True
+            connector["curve1_cut_point_offset"] = _transition_cut_offset(previous_segment)
+            connector["curve1_cut_point_direction"] = False
+            connector["curve2_cut_point_offset"] = _transition_cut_offset(current_segment)
+            connector["curve2_cut_point_direction"] = True
+            connector["curve_cut_point_offset_type"] = 2
+            connector["initial_radius"] = min(
+                float(transition_fillet_radius),
+                float(transition_fillet_initial_radius)
+                if transition_fillet_initial_radius is not None
+                else float(wire_diameter),
+            )
+            connector["trim_length"] = resolved_transition_trim_length
+            connector["trim_length_expression"] = transition_trim_length_expression
+            connector["tension"] = resolved_transition_connect_tension
+            connector["tension_expression"] = transition_connect_tension_expression
+            return connector
+
         prior_connector_curve2_path_name: str | None = None
         for segment_index in range(len(segment_plan) - 1):
             previous_segment = segment_plan[segment_index]
             current_segment = segment_plan[segment_index + 1]
-            connector = _build_trimmed_transition_connector(
+            connector_builder = (
+                _build_native_transition_connector
+                if use_native_transition_fillets
+                else _build_trimmed_transition_connector
+            )
+            connector = connector_builder(
                 previous_segment,
                 current_segment,
                 curve1_source_path_name=prior_connector_curve2_path_name,
@@ -6696,6 +6850,19 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     full_path_sequence: list[str] = []
     if connector_plan:
         if all(
+            str(connector.get("builder") or "") == "curve_fillet"
+            for connector in connector_plan
+        ):
+            full_path_sequence.append(str(connector_plan[0]["sequence_curve1_path_name"]))
+            for index, connector in enumerate(connector_plan):
+                full_path_sequence.append(str(connector["sequence_fillet_path_name"]))
+                if index + 1 < len(connector_plan):
+                    full_path_sequence.append(
+                        str(connector_plan[index + 1]["sequence_curve1_path_name"])
+                    )
+                else:
+                    full_path_sequence.append(str(connector["sequence_curve2_path_name"]))
+        elif all(
             str(connector.get("builder") or "") == "trimmed_connect_curve"
             for connector in connector_plan
         ):
@@ -6799,10 +6966,13 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         finish_ground_turns=finish_ground_turns,
         axis=direction,
     )
-    profile_sketch_constraints = _build_compression_spring_profile_sketch_constraints()
+    profile_sketch_constraints = _build_compression_spring_profile_sketch_constraints(
+        local_center=True
+    )
     profile_sketch_dimensions = _build_compression_spring_profile_sketch_dimensions(
         spring_diameter_variable,
         wire_diameter_variable,
+        local_center=True,
     )
 
     return {
@@ -6842,15 +7012,26 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
             float(ground_turns_per_side) if ground_turns_per_side is not None else None
         ),
         "transition_fillet_radius": transition_fillet_radius,
+        "transition_connector_builder": (
+            "curve_fillet" if use_native_transition_fillets else "trimmed_connect_curve"
+        ) if transition_fillet_radius is not None else None,
+        "transition_connector_builder_requested": transition_connector_builder,
+        "transition_fillet_radius_variable": (
+            transition_fillet_radius_variable if use_native_transition_fillets else None
+        ),
         "transition_trim_length": resolved_transition_trim_length,
         "transition_trim_length_expression": transition_trim_length_expression,
         "transition_trim_length_variable": (
-            transition_trim_length_variable if transition_trim_length_expression else None
+            transition_trim_length_variable
+            if transition_trim_length_expression and not use_native_transition_fillets
+            else None
         ),
         "transition_connect_tension": resolved_transition_connect_tension,
         "transition_connect_tension_expression": transition_connect_tension_expression,
         "transition_connect_tension_variable": (
-            transition_connect_tension_variable if transition_connect_tension_expression else None
+            transition_connect_tension_variable
+            if transition_connect_tension_expression and not use_native_transition_fillets
+            else None
         ),
         "end_contract_mode": str(end_contract["end_contract_mode"]),
         "end_projection_mode": end_projection_mode,
@@ -6905,7 +7086,10 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
             if end_contract["end_contract_mode"] == "v2_per_end"
             else None
         ),
+        "profile_anchor_plane": {"path_name": full_path_sequence[-1], "vertex": "end"},
+        "profile_path_offset": [0.0, 0.0, 0.0],
         "profile_name": "spring_wire_profile",
+        "profile_sketch_center": [0.0, 0.0],
         "profile_sketch_constraints": profile_sketch_constraints,
         "profile_sketch_dimensions": profile_sketch_dimensions,
         "profile_sketch_target_state": "fully_defined",
@@ -8691,9 +8875,10 @@ def _resolve_compression_spring_transition_trim_length(
 
 def _resolve_compression_spring_transition_fillet_radius(
     *,
+    mean_diameter: float,
     wire_diameter: float,
 ) -> float:
-    return max(0.01, 0.375 * float(wire_diameter))
+    return max(0.01, min(0.2 * float(mean_diameter), 1.5 * float(wire_diameter)))
 
 
 def _resolve_compression_spring_transition_connect_tension(
