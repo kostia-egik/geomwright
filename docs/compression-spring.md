@@ -70,6 +70,9 @@ Native fillets are staged in a UI-like order: create and update the fillet with
 curves/cut points, optionally update at a smaller seed radius, then update at the
 target radius and bind the operation variable. The result edges from
 `FilletCurve.Owner.ModelObjects(7)` are used in the final path.
+In auto mode the seed radius is based on local pitch spacing, currently
+`0.02 * min(adjacent local pitch)`, capped by the target radius. This keeps the
+first selectable fillet well below the spacing to neighboring turns.
 
 For variable-pitch paths, KOMPAS can build a visually correct seven-edge
 `Contour3D` but reject that contour as `IEvolution.Edges`. The bridge therefore

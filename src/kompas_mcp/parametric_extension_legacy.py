@@ -2139,18 +2139,34 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
             curve1_path_name = str(previous_segment["path_name"])
             if index > 0 and native_connector_plan:
                 curve1_path_name = str(native_connector_plan[-1]["sequence_curve2_path_name"])
-            native_connector_plan.append(
-                _build_native_fillet_connector(
-                    role=role,
-                    curve1_path_name=curve1_path_name,
-                    curve2_path_name=str(current_segment["path_name"]),
-                    path_name=str(old_connector.get("path_name") or f"CONICAL_{role.upper()}_FILLET_PATH"),
-                    radius=transition_fillet_radius,
-                    radius_expression=transition_fillet_radius_variable,
-                    curve1_cut_point=list(previous_segment.get("end_point") or current_segment.get("start_point") or []),
-                    curve2_cut_point=list(current_segment.get("start_point") or previous_segment.get("end_point") or []),
-                )
+            connector = _build_native_fillet_connector(
+                role=role,
+                curve1_path_name=curve1_path_name,
+                curve2_path_name=str(current_segment["path_name"]),
+                path_name=str(old_connector.get("path_name") or f"CONICAL_{role.upper()}_FILLET_PATH"),
+                radius=transition_fillet_radius,
+                radius_expression=transition_fillet_radius_variable,
+                curve1_cut_point=list(previous_segment.get("end_point") or current_segment.get("start_point") or []),
+                curve2_cut_point=list(current_segment.get("start_point") or previous_segment.get("end_point") or []),
             )
+            connector["use_com_curve_cut_points"] = True
+            connector["curve1_cut_point_offset"] = max(
+                float(previous_segment.get("height") or 0.0) * 0.03,
+                1e-6,
+            )
+            connector["curve1_cut_point_direction"] = False
+            connector["curve2_cut_point_offset"] = max(
+                float(current_segment.get("height") or 0.0) * 0.03,
+                1e-6,
+            )
+            connector["curve2_cut_point_direction"] = True
+            connector["curve_cut_point_offset_type"] = 2
+            connector["initial_radius"] = _spring_native_fillet_initial_radius(
+                float(transition_fillet_radius),
+                _spring_segment_local_pitch(previous_segment),
+                _spring_segment_local_pitch(current_segment),
+            )
+            native_connector_plan.append(connector)
         normalized["connector_plan"] = native_connector_plan
         full_path_sequence = [str(native_connector_plan[0]["sequence_curve1_path_name"])]
         for index, connector in enumerate(native_connector_plan):
@@ -2198,6 +2214,10 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
             "small_mean_diameter": small_diameter,
             "pitch_mode": pitch_mode,
             "path_family": "conical",
+            "transition_fillet_radius": float(normalized["transition_fillet_radius"]),
+            "transition_fillet_radius_source": normalized.get("transition_fillet_radius_source"),
+            "transition_fillet_radius_factor": normalized.get("transition_fillet_radius_factor"),
+            "transition_fillet_reference_radius": normalized.get("transition_fillet_reference_radius"),
             "contour_ready": bool(normalized["path_verification"]["contour_ready"]),
             "max_joint_gap": float(normalized["path_verification"]["max_joint_gap"]),
             "max_joint_angle_gap": float(
@@ -2213,7 +2233,13 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
         normalized["selector_points"],
     )
     full_path_sequence = list(normalized.get("full_path_sequence") or [])
-    if full_path_sequence:
+    segment_plan = list(normalized.get("segment_plan") or [])
+    if segment_plan:
+        normalized["profile_anchor_plane"] = {
+            "path_name": str(segment_plan[-1].get("path_name") or full_path_sequence[-1]),
+            "vertex": "end",
+        }
+    elif full_path_sequence:
         normalized["profile_anchor_plane"] = {"path_name": str(full_path_sequence[-1]), "vertex": "end"}
     normalized["profile_path_offset"] = [0.0, 0.0, 0.0]
     normalized["profile_sketch_center"] = [0.0, 0.0]
@@ -2465,7 +2491,7 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
         def _torsion_connector(previous_segment: dict[str, Any], current_segment: dict[str, Any]) -> dict[str, Any]:
             connector_role = f"{previous_segment['role']}_to_{current_segment['role']}"
             joint_point = list(previous_segment.get("end_point") or current_segment.get("start_point") or [])
-            return _build_native_fillet_connector(
+            connector = _build_native_fillet_connector(
                 role=connector_role,
                 curve1_path_name=str(previous_segment["path_name"]),
                 curve2_path_name=str(current_segment["path_name"]),
@@ -2475,6 +2501,11 @@ def preview_torsion_spring(params: dict[str, Any]) -> dict[str, Any]:
                 curve1_cut_point=joint_point,
                 curve2_cut_point=joint_point,
             )
+            connector["initial_radius"] = _spring_native_fillet_initial_radius(
+                float(transition_fillet_radius),
+                pitch,
+            )
+            return connector
 
         connector_plan = [
             _torsion_connector(segment_plan[0], segment_plan[1]),
@@ -2709,6 +2740,50 @@ def _build_native_fillet_connector(
         ),
         "radius_expression": radius_expression,
     }
+
+
+def _spring_segment_local_pitch(segment: dict[str, Any] | None) -> float | None:
+    if not segment:
+        return None
+    pitch = segment.get("pitch")
+    if pitch is not None:
+        try:
+            pitch_value = abs(float(pitch))
+        except Exception:
+            pitch_value = 0.0
+        if pitch_value > 1e-9:
+            return pitch_value
+    try:
+        height = abs(float(segment.get("height") or 0.0))
+        turns = abs(float(segment.get("turns") or 0.0))
+    except Exception:
+        return None
+    if height > 1e-9 and turns > 1e-9:
+        return height / turns
+    return None
+
+
+def _spring_native_fillet_initial_radius(
+    target_radius: float,
+    *spacing_values: Any,
+    explicit_initial_radius: float | None = None,
+) -> float:
+    target = max(0.01, float(target_radius))
+    if explicit_initial_radius is not None:
+        return min(target, max(0.01, float(explicit_initial_radius)))
+    spacings: list[float] = []
+    for value in spacing_values:
+        if value is None:
+            continue
+        try:
+            spacing = abs(float(value))
+        except Exception:
+            continue
+        if spacing > 1e-9:
+            spacings.append(spacing)
+    if not spacings:
+        return min(target, 0.01)
+    return min(target, max(0.01, min(spacings) * 0.02))
 
 
 def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
@@ -4308,6 +4383,11 @@ def preview_extension_spring(params: dict[str, Any]) -> dict[str, Any]:
         ]
         connector_plan[1]["curve1_path_name"] = str(connector_plan[0]["sequence_curve2_path_name"])
         connector_plan[1]["curve1_source_is_chained_native_fillet"] = True
+        for connector in connector_plan:
+            connector["initial_radius"] = _spring_native_fillet_initial_radius(
+                float(transition_fillet_radius),
+                pitch,
+            )
     left_hook_sequence_paths = [str(connector_plan[0]["sequence_curve1_path_name"])]
     if hook_type == "v_hooks":
         left_hook_sequence_paths.extend([
@@ -6819,11 +6899,11 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
             connector["curve2_cut_point_offset"] = _transition_cut_offset(current_segment)
             connector["curve2_cut_point_direction"] = True
             connector["curve_cut_point_offset_type"] = 2
-            connector["initial_radius"] = min(
+            connector["initial_radius"] = _spring_native_fillet_initial_radius(
                 float(transition_fillet_radius),
-                float(transition_fillet_initial_radius)
-                if transition_fillet_initial_radius is not None
-                else float(wire_diameter),
+                _spring_segment_local_pitch(previous_segment),
+                _spring_segment_local_pitch(current_segment),
+                explicit_initial_radius=transition_fillet_initial_radius,
             )
             connector["trim_length"] = resolved_transition_trim_length
             connector["trim_length_expression"] = transition_trim_length_expression

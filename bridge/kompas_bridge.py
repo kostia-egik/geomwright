@@ -7443,6 +7443,11 @@ def _build_compression_spring_transition_curve_paths(
                     direction=bool(connector.get("curve1_cut_point_direction", False)),
                     offset_type=int(connector.get("curve_cut_point_offset_type") or 2),
                 )
+                com_curve_cut_point_report["curve1_hidden"] = _set_model_object_hidden(
+                    curve1_point,
+                    True,
+                    role="%s_curve1_cut_point" % fillet_name,
+                )
                 runtime_curve1_cut_point = [
                     float(safe_get(curve1_point, "X", 0.0) or 0.0),
                     float(safe_get(curve1_point, "Y", 0.0) or 0.0),
@@ -7459,6 +7464,11 @@ def _build_compression_spring_transition_curve_paths(
                     offset=float(connector.get("curve2_cut_point_offset") or 0.0),
                     direction=bool(connector.get("curve2_cut_point_direction", True)),
                     offset_type=int(connector.get("curve_cut_point_offset_type") or 2),
+                )
+                com_curve_cut_point_report["curve2_hidden"] = _set_model_object_hidden(
+                    curve2_point,
+                    True,
+                    role="%s_curve2_cut_point" % fillet_name,
                 )
                 runtime_curve2_cut_point = [
                     float(safe_get(curve2_point, "X", 0.0) or 0.0),
@@ -8294,6 +8304,13 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
     if len(first_edges) < 3 or len(second_edges) < 3:
         raise RuntimeError("Right self-wrapping sketch edge readback did not produce expected edges")
     fillet_radius = float(_variable_value(params, "SFR1", 3.0))
+    fillet_seed_radius = min(
+        fillet_radius,
+        max(
+            0.01,
+            abs(float(_variable_value(params, "P1", float(params.get("wire_diameter", 3.0)) + float(params.get("gap", 0.0))))) * 0.02,
+        ),
+    )
     body_curve_for_fillet = body_curve_source or spiral
     try:
         fresh_left_fillet = _find_fillet_curve_by_name(auxiliary_container, "SELF_WRAPPING_LEFT_FILLET_SPIRAL_TO_FIRST_CONTOUR")
@@ -8316,7 +8333,7 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
         if curve2_cut_point is None:
             curve2_cut_point = _curve_cut_point_near_point(right_transition_curve, logical_body_end, ratio=0.03)
     steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_transition_fillet_inputs", "ok": True, "body_curve_endpoints": body_curve_endpoints, "logical_body_end": logical_body_end, "transition_curve_endpoints": _sample_curve_endpoints(right_transition_curve), "curve1_cut_point": curve1_cut_point, "curve2_cut_point": curve2_cut_point})
-    fillet1, fillet1_staged_updates = _create_staged_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_SPIRAL_TO_FIRST_CONTOUR", body_curve_for_fillet, right_transition_curve, fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=curve1_cut_point, curve2_cut_point=curve2_cut_point)
+    fillet1, fillet1_staged_updates = _create_staged_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_SPIRAL_TO_FIRST_CONTOUR", body_curve_for_fillet, right_transition_curve, fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=curve1_cut_point, curve2_cut_point=curve2_cut_point, initial_radius=fillet_seed_radius)
     binding1 = _bind_operation_variables(fillet1, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": "SFR1"}])
     if not binding1.get("ok", False) or not bool(fillet1.Update()):
         raise RuntimeError("Failed to bind/update first right self-wrapping native curve fillet")
@@ -8326,7 +8343,7 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
     steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_first_to_second_fillet_inputs", "ok": True, "first_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(first_edges)], "second_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(second_edges)], "f1_edges": [{"index": index, "endpoints": _sample_curve_endpoints(edge)} for index, edge in enumerate(f1_edges)]})
     fillet2_curve1_cut_point, fillet2_curve2_cut_point = _fillet_cut_points_near_shared_endpoint(first_edges[2], second_edges[2], curve1_ratio=0.10, curve2_ratio=0.03)
     steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_first_to_second_fillet_cut_points", "ok": True, "curve1_cut_point": fillet2_curve1_cut_point, "curve2_cut_point": fillet2_curve2_cut_point})
-    fillet2, fillet2_staged_updates = _create_staged_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_FIRST_TO_SECOND_CONTOUR", first_edges[2], second_edges[2], fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=fillet2_curve1_cut_point, curve2_cut_point=fillet2_curve2_cut_point)
+    fillet2, fillet2_staged_updates = _create_staged_curve_fillet_path(auxiliary_container, "SELF_WRAPPING_RIGHT_FILLET_FIRST_TO_SECOND_CONTOUR", first_edges[2], second_edges[2], fillet_radius, trim_curve1=True, trim_curve2=True, curve1_cut_point=fillet2_curve1_cut_point, curve2_cut_point=fillet2_curve2_cut_point, initial_radius=fillet_seed_radius)
     binding2 = _bind_operation_variables(fillet2, [{"parameter_note": "Радиус", "parameter_note_aliases": ["Radius"], "expression": "SFR1"}])
     if not binding2.get("ok", False) or not bool(fillet2.Update()):
         raise RuntimeError("Failed to bind/update second right self-wrapping native curve fillet")
@@ -8340,7 +8357,7 @@ def _build_self_wrapping_right_hook_replacement(part, model_container, auxiliary
     pre_rebuild_fillet2 = fillet2
     pre_rebuild_f1_edges = f1_edges
     pre_rebuild_f2_edges = f2_edges
-    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_native_fillets", "ok": True, "bindings": [binding1, binding2], "staged_updates": {"fillet1": fillet1_staged_updates, "fillet2": fillet2_staged_updates}})
+    steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_native_fillets", "ok": True, "bindings": [binding1, binding2], "initial_radius": fillet_seed_radius, "staged_updates": {"fillet1": fillet1_staged_updates, "fillet2": fillet2_staged_updates}})
     if document_id:
         steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_rebuild_before_path_capture", "ok": True, "skipped": True})
     steps_report.append({"scenario": "extension_spring", "target": "self_wrapping_right_path_capture_refetch", "ok": True, "skipped": True, "reason": "native_fillet_edges_are_current"})

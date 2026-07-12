@@ -1330,7 +1330,10 @@ Known examples:
   sketch-level coil-radius offset.
 - `conical_spring` uses local profile sketches on the final contour endpoint;
   start/end conical segments, native curve-fillet transitions, and ground surface
-  cuts must not reintroduce a profile sketch offset.
+  cuts must not reintroduce a profile sketch offset. Use the original final
+  `finish_end` spiral edge for the profile anchor plane when the physical
+  endpoint is unchanged; native fillet result edges can be valid contour members
+  but fail as `IPlane3DPerpendicularByEdge` inputs.
 - `compression_spring` uses the same final endpoint anchor and local profile
   sketch. Cylindrical segment transitions use native result edges for both
   right-hand and left-hand turns; the legacy trimmed-connect path is now an
@@ -1427,13 +1430,17 @@ Use this order:
 1. Create the `IFilletCurve` and assign `Curve1`, `Curve2`, trim flags, and cut
    points.
 2. Call `Update()` once to materialize the operation topology.
-3. Assign numeric `FilletCurve.Radius`.
-4. Call `Update()` again and verify `FilletCurve.Radius` readback.
-5. Bind operation variable `ParameterNote == "Радиус"` to the driving expression
+3. If the fillet is between spiral-derived spring curves, assign a small seed
+   radius based on local pitch spacing, not wire or spring diameter. Use a value
+   such as `0.02 * min(adjacent local pitch)`, capped by the target radius.
+4. Call `Update()` again and verify the seed radius readback.
+5. Assign the target numeric `FilletCurve.Radius`.
+6. Call `Update()` again and verify target radius readback.
+7. Bind operation variable `ParameterNote == "Радиус"` to the driving expression
    such as `TFR1` or `SFR1`.
-6. Call `Update()` again and verify the expression reads back exactly as the
+8. Call `Update()` again and verify the expression reads back exactly as the
    driving variable, not as `TFR1 - <offset>`.
-7. Read `fillet.Owner.ModelObjects(7)` and use the result edges in the final
+9. Read `fillet.Owner.ModelObjects(7)` and use the result edges in the final
    contour, per `FILLET-001`.
 
 Verification example for legacy extension hooks:
@@ -1474,11 +1481,17 @@ Known example:
   springs, create those cut points on the actual COM curve with
   `Point3DParamCurve`; analytic preview coordinates can pick the wrong selectable
   side on left-hand spirals even when the preview phase gap is zero.
-- The default cylindrical native radius is `min(0.4 * mean_radius,
+- `conical_spring` uses the same COM-curve cut-point pattern. Its target fillet
+  radius can be larger than the spacing to the neighboring turn, so the native
+  fillet must be staged from a seed radius derived from local pitch spacing before
+  applying the target radius.
+- Hide generated `Point3DParamCurve` cut-point helpers immediately after creation;
+  they are selection aids for `SetCurve*CutPoint`, not user-facing construction
+  geometry.
+- The default cylindrical target radius is `min(0.4 * mean_radius,
   1.5 * wire_diameter)` (`TFR1 = min(0.2 * (D1 - WD1), 1.5 * WD1)` for the
-  standard outside-diameter variable). Stage native fillets in UI-like order:
-  create/update topology, optionally update at a smaller seed radius, then update
-  at the target radius and bind `Радиус = TFR1`.
+  standard outside-diameter variable). The initial seed radius is separate from
+  that target and follows the local-pitch rule above.
 
 ### CONTOUR-001: Build KOMPAS Contours In Continuous UI Order
 
