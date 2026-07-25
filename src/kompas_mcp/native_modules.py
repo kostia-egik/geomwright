@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
 import struct
+import subprocess
+import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+
+from .bridge_runner import DEFAULT_KOMPAS_PYTHON, default_bridge_script_path
 
 
 DEFAULT_KOMPAS_ENV_VARS = ("KOMPAS_ROOT", "KOMPAS_INSTALL_DIR", "KOMPAS_HOME")
@@ -115,6 +121,91 @@ SPRING_ENTRYPOINT_HINTS: dict[str, dict[str, Any]] = {
         "native_file_hint": "SPR_CRS.dll",
     },
 }
+_LOADER_PROBE_CHILD_SCRIPT = r"""
+import ctypes
+import json
+import os
+import pathlib
+import sys
+import traceback
+
+SEM_FAILCRITICALERRORS = 0x0001
+SEM_NOGPFAULTERRORBOX = 0x0002
+SEM_NOOPENFILEERRORBOX = 0x8000
+
+
+def main() -> int:
+    dll_path = pathlib.Path(sys.argv[1])
+    export_name = sys.argv[2]
+    result_path = pathlib.Path(sys.argv[3])
+    search_dirs = [pathlib.Path(value) for value in sys.argv[4:]]
+    payload = {
+        "ok": False,
+        "dll_path": str(dll_path),
+        "export_name": export_name,
+        "cwd": os.getcwd(),
+        "python_executable": sys.executable,
+        "python_bitness": 64 if sys.maxsize > 2**32 else 32,
+    }
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX)
+        kernel32.GetProcAddress.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        kernel32.GetProcAddress.restype = ctypes.c_void_p
+        kernel32.FreeLibrary.argtypes = [ctypes.c_void_p]
+        kernel32.FreeLibrary.restype = ctypes.c_int
+
+        added_dir = None
+        add_dll_directory = getattr(os, "add_dll_directory", None)
+        added_dirs = []
+        if add_dll_directory is not None:
+            for search_dir in search_dirs:
+                if search_dir.exists():
+                    added_dirs.append(add_dll_directory(str(search_dir)))
+            if added_dirs:
+                payload["added_dll_directories"] = [str(path) for path in search_dirs if path.exists()]
+
+        try:
+            library = ctypes.WinDLL(str(dll_path))
+            payload["load_library"] = {
+                "ok": True,
+                "handle": hex(library._handle),
+            }
+            address = kernel32.GetProcAddress(ctypes.c_void_p(library._handle), export_name.encode("ascii"))
+            if address:
+                payload["get_proc_address"] = {
+                    "ok": True,
+                    "address": hex(address),
+                }
+            else:
+                payload["get_proc_address"] = {
+                    "ok": False,
+                    "win_error": ctypes.get_last_error(),
+                }
+            payload["free_library"] = {
+                "ok": bool(kernel32.FreeLibrary(ctypes.c_void_p(library._handle))),
+            }
+        finally:
+            for added_dir in added_dirs:
+                added_dir.close()
+
+        payload["ok"] = payload.get("load_library", {}).get("ok", False) and payload.get(
+            "get_proc_address", {}
+        ).get("ok", False)
+    except Exception as exc:
+        payload["exception"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback.format_exc(limit=8),
+        }
+
+    result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if payload.get("ok") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
 
 
 def list_native_modules(
@@ -306,6 +397,8 @@ def inspect_native_module_interfaces(
 
 def inspect_native_spring_workflow(
     *,
+    spring_kind: str | None = None,
+    command_id: int | str | None = None,
     kompas_root: str | None = None,
     libs_dir: str | None = None,
     max_tables: int | None = 80,
@@ -314,6 +407,10 @@ def inspect_native_spring_workflow(
     """Build a bounded read-only dossier for the native Spring calculation workflow."""
     table_limit = _normalize_limit(max_tables, default=80, maximum=200)
     row_limit = _normalize_limit(max_sample_rows, default=3, maximum=10)
+    selection = _normalize_native_spring_workflow_selection(
+        spring_kind=spring_kind,
+        command_id=command_id,
+    )
     inspection = inspect_native_module(
         "Spring",
         kompas_root=kompas_root,
@@ -336,6 +433,20 @@ def inspect_native_spring_workflow(
         inspection.get("database_inventory", []),
         max_sample_rows=row_limit,
     )
+    selected_command = _select_native_spring_workflow_command(
+        workflow.get("commands", []),
+        spring_kind=selection.get("spring_kind"),
+        command_id=selection.get("command_id"),
+    )
+    if selected_command is not None:
+        workflow = _filter_native_spring_workflow(
+            workflow,
+            command_id=selected_command.get("id"),
+        )
+        reference_map = _filter_native_spring_reference_map(
+            reference_map,
+            allowed_groups=selected_command.get("likely_reference_groups") or [],
+        )
     return {
         "ok": True,
         "module": inspection["module"],
@@ -343,6 +454,16 @@ def inspect_native_spring_workflow(
         "app_id": inspection.get("app_id"),
         "path": inspection.get("path"),
         "workflow_kind": "native_calculation_workflow",
+        "selection": {
+            "spring_kind": selection.get("spring_kind"),
+            "command_id": selected_command.get("id") if selected_command else selection.get("command_id"),
+            "command_title": selected_command.get("title") if selected_command else None,
+            "reference_groups": (
+                list(selected_command.get("likely_reference_groups") or [])
+                if selected_command is not None
+                else []
+            ),
+        },
         "commands": workflow["commands"],
         "workflow_capabilities": workflow["capabilities"],
         "reference_data": reference_map,
@@ -367,11 +488,7 @@ def inspect_native_spring_workflow(
             "help_database_detected": (module_dir / "SPRING_ru-RU.db").is_file(),
         },
         "automation_assessment": _spring_workflow_automation_assessment(reference_map),
-        "next_experiments": [
-            "Run start_native_module_result_probe(module='Spring', command_id=101, allow_interactive=true), complete one compression spring manually, then diff before/after captures.",
-            "During the manual workflow, watch whether Spring creates or modifies a job/session file outside the reference databases.",
-            "If a stable job/session artifact appears, inspect that artifact before attempting any parameter automation.",
-        ],
+        "next_experiments": _native_spring_next_experiments(selected_command),
     }
 
 
@@ -618,7 +735,232 @@ def inspect_native_entrypoint_static_abi(
             "loads_library": False,
             "calls_exports": False,
             "safe_for_production_bridge": True,
-            "promotion_to_loader_probe_allowed": False,
+        "promotion_to_loader_probe_allowed": False,
+        },
+    }
+
+
+def probe_native_entrypoint_loader(
+    module: str = "Spring",
+    *,
+    export_name: str | None = None,
+    command_id: int | str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_exports_per_file: int | None = 120,
+    max_import_dlls: int | None = 80,
+    max_imports_per_dll: int | None = 80,
+    timeout_seconds: int | None = 10,
+    confirm_load: bool = False,
+) -> dict[str, Any]:
+    """Resolve a private export in an isolated child process without calling it."""
+    static_abi = inspect_native_entrypoint_static_abi(
+        module,
+        export_name=export_name,
+        command_id=command_id,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        max_exports_per_file=max_exports_per_file,
+        max_import_dlls=max_import_dlls,
+        max_imports_per_dll=max_imports_per_dll,
+    )
+    if not static_abi.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "probe_kind": "native_entrypoint_loader_probe",
+            "stage": "inspect_native_entrypoint_static_abi",
+            "static_abi": static_abi,
+            "error": static_abi.get("error", "Native entrypoint loader probe could not be prepared"),
+        }
+    if confirm_load is not True:
+        return {
+            "ok": False,
+            "module": static_abi["module"],
+            "probe_kind": "native_entrypoint_loader_probe",
+            "stage": "approval",
+            "requires_confirmation": True,
+            "confirmation_parameter": "confirm_load",
+            "static_abi": static_abi,
+            "error": "Loading a native DLL can execute DllMain; rerun with confirm_load=true after reviewing static ABI evidence.",
+        }
+
+    untrusted_paths = [
+        str(entry.get("dll_path") or "")
+        for entry in static_abi.get("entries", [])
+        if not _is_trusted_kompas_native_path(Path(str(entry.get("dll_path") or "")))
+    ]
+    if untrusted_paths:
+        return {
+            "ok": False,
+            "module": static_abi["module"],
+            "probe_kind": "native_entrypoint_loader_probe",
+            "stage": "trusted_path_check",
+            "static_abi": static_abi,
+            "untrusted_paths": untrusted_paths,
+            "error": "Loader probes are restricted to KOMPAS installations under Program Files/ASCON.",
+        }
+
+    entries = []
+    for entry in static_abi.get("entries", []):
+        candidate = entry.get("candidate", {})
+        selected_export = str(
+            candidate.get("export") or entry.get("static_abi", {}).get("selected_export") or ""
+        )
+        dll_path = Path(entry["dll_path"])
+        try:
+            loader_probe = _run_isolated_loader_probe(
+                dll_path,
+                export_name=selected_export,
+                timeout_seconds=timeout_seconds,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            loader_probe = _loader_probe_exception_payload(
+                dll_path,
+                selected_export,
+                exc,
+                hosted=False,
+            )
+        entries.append(
+            {
+                "candidate": candidate,
+                "dll_path": entry.get("dll_path"),
+                "static_abi": entry.get("static_abi"),
+                "readiness": entry.get("readiness"),
+                "loader_probe": loader_probe,
+            }
+        )
+
+    return {
+        "ok": True,
+        "module": static_abi["module"],
+        "query": module,
+        "title": static_abi.get("title"),
+        "app_id": static_abi.get("app_id"),
+        "path": static_abi.get("path"),
+        "probe_kind": "native_entrypoint_loader_probe",
+        "filters": static_abi.get("filters", {}),
+        "entry_count": len(entries),
+        "entries": entries,
+        "assessment": _loader_probe_assessment(entries, static_abi),
+        "execution_policy": {
+            "loads_library": True,
+            "calls_exports": False,
+            "safe_for_production_bridge": False,
+            "isolated_process_required": True,
+        },
+    }
+
+
+def probe_native_entrypoint_loader_hosted(
+    module: str = "Spring",
+    *,
+    export_name: str | None = None,
+    command_id: int | str | None = None,
+    kompas_root: str | None = None,
+    libs_dir: str | None = None,
+    max_exports_per_file: int | None = 120,
+    max_import_dlls: int | None = 80,
+    max_imports_per_dll: int | None = 80,
+    timeout_seconds: int | None = 15,
+    confirm_load: bool = False,
+) -> dict[str, Any]:
+    """Resolve a private export inside a fresh KOMPAS-hosted bridge process without calling it."""
+    static_abi = inspect_native_entrypoint_static_abi(
+        module,
+        export_name=export_name,
+        command_id=command_id,
+        kompas_root=kompas_root,
+        libs_dir=libs_dir,
+        max_exports_per_file=max_exports_per_file,
+        max_import_dlls=max_import_dlls,
+        max_imports_per_dll=max_imports_per_dll,
+    )
+    if not static_abi.get("ok"):
+        return {
+            "ok": False,
+            "module": module,
+            "probe_kind": "native_entrypoint_loader_hosted_probe",
+            "stage": "inspect_native_entrypoint_static_abi",
+            "static_abi": static_abi,
+            "error": static_abi.get("error", "Hosted native entrypoint loader probe could not be prepared"),
+        }
+    if confirm_load is not True:
+        return {
+            "ok": False,
+            "module": static_abi["module"],
+            "probe_kind": "native_entrypoint_loader_hosted_probe",
+            "stage": "approval",
+            "requires_confirmation": True,
+            "confirmation_parameter": "confirm_load",
+            "static_abi": static_abi,
+            "error": "Loading a native DLL can execute DllMain; rerun with confirm_load=true after reviewing static ABI evidence.",
+        }
+
+    untrusted_paths = [
+        str(entry.get("dll_path") or "")
+        for entry in static_abi.get("entries", [])
+        if not _is_trusted_kompas_native_path(Path(str(entry.get("dll_path") or "")))
+    ]
+    if untrusted_paths:
+        return {
+            "ok": False,
+            "module": static_abi["module"],
+            "probe_kind": "native_entrypoint_loader_hosted_probe",
+            "stage": "trusted_path_check",
+            "static_abi": static_abi,
+            "untrusted_paths": untrusted_paths,
+            "error": "Hosted loader probes are restricted to KOMPAS installations under Program Files/ASCON.",
+        }
+
+    entries = []
+    for entry in static_abi.get("entries", []):
+        candidate = entry.get("candidate", {})
+        selected_export = str(
+            candidate.get("export") or entry.get("static_abi", {}).get("selected_export") or ""
+        )
+        dll_path = Path(entry["dll_path"])
+        try:
+            loader_probe = _run_hosted_bridge_loader_probe(
+                dll_path,
+                export_name=selected_export,
+                timeout_seconds=timeout_seconds,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            loader_probe = _loader_probe_exception_payload(
+                dll_path,
+                selected_export,
+                exc,
+                hosted=True,
+            )
+        entries.append(
+            {
+                "candidate": candidate,
+                "dll_path": entry.get("dll_path"),
+                "static_abi": entry.get("static_abi"),
+                "readiness": entry.get("readiness"),
+                "loader_probe": loader_probe,
+            }
+        )
+
+    return {
+        "ok": True,
+        "module": static_abi["module"],
+        "query": module,
+        "title": static_abi.get("title"),
+        "app_id": static_abi.get("app_id"),
+        "path": static_abi.get("path"),
+        "probe_kind": "native_entrypoint_loader_hosted_probe",
+        "filters": static_abi.get("filters", {}),
+        "entry_count": len(entries),
+        "entries": entries,
+        "assessment": _loader_probe_assessment(entries, static_abi),
+        "execution_policy": {
+            "loads_library": True,
+            "calls_exports": False,
+            "safe_for_production_bridge": False,
+            "isolated_process_required": True,
+            "kompas_hosted_process": True,
         },
     }
 
@@ -726,6 +1068,24 @@ def _candidate_kompas_roots(explicit_root: str | None) -> list[Path]:
         seen.add(key)
         unique.append(root)
     return unique
+
+
+def _is_trusted_kompas_native_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return False
+    for env_name in ("ProgramFiles", "ProgramW6432"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        try:
+            trusted_root = (Path(base) / "ASCON").resolve(strict=True)
+        except OSError:
+            continue
+        if resolved == trusted_root or trusted_root in resolved.parents:
+            return True
+    return False
 
 
 def _find_module_manifest(module_dir: Path) -> Path | None:
@@ -1869,6 +2229,309 @@ def _entrypoint_validation_harness(selected: list[dict[str, Any]]) -> dict[str, 
     }
 
 
+def _native_probe_file_identity(path: Path) -> dict[str, Any] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return {
+        "path": str(path.resolve()),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _bounded_process_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()[:4000]
+    return str(value or "").strip()[:4000]
+
+
+def _loader_probe_exception_payload(
+    dll_path: Path,
+    export_name: str,
+    exc: BaseException,
+    *,
+    hosted: bool,
+) -> dict[str, Any]:
+    identity = _native_probe_file_identity(dll_path)
+    return {
+        "ok": False,
+        "dll_path": str(dll_path),
+        "export_name": export_name,
+        "probe_kind": "hosted" if hosted else "isolated",
+        "file_identity_before": identity,
+        "file_identity_after": identity,
+        "file_identity_unchanged": False,
+        "load_library": {"ok": False, "error": "probe_setup_failed"},
+        "get_proc_address": {"ok": False, "error": "probe_setup_failed"},
+        "error": "%s: %s" % (type(exc).__name__, exc),
+    }
+
+
+def _run_isolated_loader_probe(
+    dll_path: Path,
+    *,
+    export_name: str,
+    timeout_seconds: int | None,
+) -> dict[str, Any]:
+    timeout = max(int(timeout_seconds or 10), 1)
+    temp_root = os.environ.get("KOMPAS_MCP_TEMP_DIR", r"C:\Windows\Temp")
+    search_dirs = _loader_probe_search_dirs(dll_path)
+    identity_before = _native_probe_file_identity(dll_path)
+    with tempfile.TemporaryDirectory(prefix="kompas-loader-probe-", dir=temp_root) as temp_dir:
+        result_path = Path(temp_dir) / "result.json"
+        env = os.environ.copy()
+        if search_dirs:
+            env["PATH"] = os.pathsep.join(str(path) for path in search_dirs) + os.pathsep + env.get("PATH", "")
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    _LOADER_PROBE_CHILD_SCRIPT,
+                    str(dll_path),
+                    export_name,
+                    str(result_path),
+                    *(str(path) for path in search_dirs),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=temp_dir,
+                check=False,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "dll_path": str(dll_path),
+                "export_name": export_name,
+                "search_dirs": [str(path) for path in search_dirs],
+                "file_identity_before": identity_before,
+                "file_identity_after": _native_probe_file_identity(dll_path),
+                "file_identity_unchanged": False,
+                "load_library": {"ok": False, "error": "probe_timeout"},
+                "get_proc_address": {"ok": False, "error": "probe_timeout"},
+                "error": "Isolated loader probe timed out after %s seconds" % timeout,
+                "subprocess": {
+                    "exit_code": None,
+                    "timed_out": True,
+                    "stdout": _bounded_process_text(exc.stdout),
+                    "stderr": _bounded_process_text(exc.stderr),
+                    "cwd": temp_dir,
+                    "timeout_seconds": timeout,
+                },
+            }
+        payload = _read_loader_probe_result(result_path)
+        payload.setdefault("dll_path", str(dll_path))
+        payload.setdefault("export_name", export_name)
+        payload.setdefault("search_dirs", [str(path) for path in search_dirs])
+        payload["subprocess"] = {
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout.strip()[:4000],
+            "stderr": completed.stderr.strip()[:4000],
+            "cwd": temp_dir,
+            "timeout_seconds": timeout,
+        }
+        identity_after = _native_probe_file_identity(dll_path)
+        payload["file_identity_before"] = identity_before
+        payload["file_identity_after"] = identity_after
+        payload["file_identity_unchanged"] = identity_before is not None and identity_before == identity_after
+        payload["ok"] = bool(
+            payload.get("load_library", {}).get("ok") and payload.get("get_proc_address", {}).get("ok")
+            and payload["file_identity_unchanged"]
+        )
+    return payload
+
+
+def _run_hosted_bridge_loader_probe(
+    dll_path: Path,
+    *,
+    export_name: str,
+    timeout_seconds: int | None,
+) -> dict[str, Any]:
+    timeout = max(int(timeout_seconds or 15), 1)
+    temp_root = os.environ.get("KOMPAS_MCP_TEMP_DIR", r"C:\Windows\Temp")
+    search_dirs = _loader_probe_search_dirs(dll_path)
+    identity_before = _native_probe_file_identity(dll_path)
+    kompas_python = Path(os.environ.get("KOMPAS_PYTHON") or DEFAULT_KOMPAS_PYTHON)
+    bridge_script = Path(os.environ.get("KOMPAS_BRIDGE_SCRIPT") or default_bridge_script_path())
+
+    payload: dict[str, Any] = {
+        "ok": False,
+        "dll_path": str(dll_path),
+        "export_name": export_name,
+        "search_dirs": [str(path) for path in search_dirs],
+        "bridge_runtime": {
+            "kompas_python": str(kompas_python),
+            "bridge_script": str(bridge_script),
+        },
+    }
+    if not kompas_python.exists():
+        payload["error"] = f"KOMPAS Python not found: {kompas_python}"
+        return payload
+    if not bridge_script.exists():
+        payload["error"] = f"Bridge script not found: {bridge_script}"
+        return payload
+
+    with tempfile.TemporaryDirectory(prefix="kompas-hosted-loader-probe-", dir=temp_root) as temp_dir:
+        request_path = Path(temp_dir) / "request.json"
+        response_path = Path(temp_dir) / "response.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    "action": "probe_native_entrypoint_loader_hosted",
+                    "payload": {
+                        "dll_path": str(dll_path),
+                        "export_name": export_name,
+                        "search_dirs": [str(path) for path in search_dirs],
+                        "confirm_load": True,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        env = os.environ.copy()
+        runtime_dirs = [str(path) for path in search_dirs]
+        runtime_dirs.append(str(kompas_python.parent))
+        env["PATH"] = os.pathsep.join(runtime_dirs) + os.pathsep + env.get("PATH", "")
+        try:
+            completed = subprocess.run(
+                [str(kompas_python), str(bridge_script), str(request_path), str(response_path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=temp_dir,
+                check=False,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            payload["error"] = "Hosted loader probe timed out after %s seconds" % timeout
+            payload["file_identity_before"] = identity_before
+            payload["file_identity_after"] = _native_probe_file_identity(dll_path)
+            payload["file_identity_unchanged"] = False
+            payload["load_library"] = {"ok": False, "error": "probe_timeout"}
+            payload["get_proc_address"] = {"ok": False, "error": "probe_timeout"}
+            payload["subprocess"] = {
+                "exit_code": None,
+                "timed_out": True,
+                "stdout": _bounded_process_text(exc.stdout),
+                "stderr": _bounded_process_text(exc.stderr),
+                "cwd": temp_dir,
+                "timeout_seconds": timeout,
+            }
+            return payload
+        bridge_payload = _read_bridge_loader_probe_result(response_path)
+        if bridge_payload:
+            payload.update(bridge_payload)
+        payload["subprocess"] = {
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout.strip()[:4000],
+            "stderr": completed.stderr.strip()[:4000],
+            "cwd": temp_dir,
+            "timeout_seconds": timeout,
+        }
+        identity_after = _native_probe_file_identity(dll_path)
+        payload["file_identity_before"] = identity_before
+        payload["file_identity_after"] = identity_after
+        payload["file_identity_unchanged"] = identity_before is not None and identity_before == identity_after
+        payload["ok"] = bool(
+            payload.get("load_library", {}).get("ok") and payload.get("get_proc_address", {}).get("ok")
+            and payload["file_identity_unchanged"]
+        )
+    return payload
+
+
+def _loader_probe_search_dirs(dll_path: Path) -> list[Path]:
+    search_dirs: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        normalized = os.path.normcase(str(path))
+        if normalized in seen or not path.exists():
+            return
+        seen.add(normalized)
+        search_dirs.append(path)
+
+    add(dll_path.parent)
+    libs_dir = next((parent for parent in dll_path.parents if parent.name.lower() == "libs"), None)
+    if libs_dir is not None:
+        kompas_root = libs_dir.parent
+        add(libs_dir)
+        add(kompas_root / "Bin")
+        add(kompas_root / "Sys")
+    return search_dirs
+
+
+def _read_loader_probe_result(result_path: Path) -> dict[str, Any]:
+    if not result_path.exists():
+        return {
+            "ok": False,
+            "error": "Loader probe subprocess did not produce a result file",
+        }
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Loader probe result JSON could not be parsed: {exc}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "error": f"Loader probe result must be an object, got {type(payload).__name__}",
+        }
+    return payload
+
+
+def _read_bridge_loader_probe_result(response_path: Path) -> dict[str, Any]:
+    if not response_path.exists():
+        return {
+            "ok": False,
+            "error": "Hosted loader probe bridge process did not produce a response file",
+        }
+    try:
+        envelope = json.loads(response_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Hosted loader probe response JSON could not be parsed: {exc}",
+        }
+    if not isinstance(envelope, dict):
+        return {
+            "ok": False,
+            "error": f"Hosted loader probe response must be an object, got {type(envelope).__name__}",
+        }
+    if envelope.get("ok"):
+        payload = envelope.get("data")
+        if not isinstance(payload, dict):
+            return {
+                "ok": False,
+                "error": f"Hosted loader probe response data must be an object, got {type(payload).__name__}",
+            }
+        return payload
+    error = envelope.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or "Hosted loader probe bridge action failed"
+        return {
+            "ok": False,
+            "error": message,
+            "bridge_error": error,
+        }
+    return {
+        "ok": False,
+        "error": str(error or "Hosted loader probe bridge action failed"),
+    }
+
+
 def _pe_static_abi_inventory(
     path: Path,
     *,
@@ -2206,6 +2869,54 @@ def _static_abi_inventory_assessment(entries: list[dict[str, Any]], plan: dict[s
     }
 
 
+def _loader_probe_assessment(entries: list[dict[str, Any]], static_abi: dict[str, Any]) -> dict[str, Any]:
+    total = len(entries)
+    load_ok = 0
+    resolve_ok = 0
+    probe_ok = 0
+    identity_changed = 0
+    hard_blocks: list[str] = []
+    for entry in entries:
+        probe = entry.get("loader_probe", {})
+        if probe.get("load_library", {}).get("ok"):
+            load_ok += 1
+        if probe.get("get_proc_address", {}).get("ok"):
+            resolve_ok += 1
+        if probe.get("ok"):
+            probe_ok += 1
+        if probe.get("file_identity_unchanged") is False:
+            identity_changed += 1
+
+    if load_ok != total:
+        hard_blocks.append("Some selected Spring DLLs could not be loaded in an isolated process.")
+    if resolve_ok != total:
+        hard_blocks.append("Some selected private exports could not be resolved with GetProcAddress.")
+    if identity_changed:
+        hard_blocks.append("One or more selected DLLs changed while the isolated loader probe was running.")
+
+    complete = total > 0 and probe_ok == total
+    return {
+        "status": "isolated_loader_probe_complete" if complete else "isolated_loader_probe_incomplete",
+        "entry_count": total,
+        "load_library_success_count": load_ok,
+        "get_proc_address_success_count": resolve_ok,
+        "probe_success_count": probe_ok,
+        "file_identity_change_count": identity_changed,
+        "requires_isolated_process": True,
+        "may_call_export_now": False,
+        "production_bridge_allowed": False,
+        "full_autonomous_access_supported": False,
+        "next_gate": "signature_validation" if complete else "fix_loader_probe_failures",
+        "verdict": (
+            "The export can be resolved by name in an isolated process, but its callable ABI is still unknown."
+            if complete
+            else "The isolated loader probe did not fully resolve the selected private export."
+        ),
+        "hard_blocks": hard_blocks,
+        "static_abi_status": static_abi.get("assessment", {}).get("status"),
+    }
+
+
 def _spring_calculation_workflow(inspection: dict[str, Any]) -> dict[str, Any]:
     spring = inspection.get("spring") or {}
     commands: list[dict[str, Any]] = []
@@ -2231,6 +2942,7 @@ def _spring_calculation_workflow(inspection: dict[str, Any]) -> dict[str, Any]:
             {
                 "id": command.get("id"),
                 "title": command.get("title"),
+                "spring_kind": _spring_kind_for_command_id(command.get("id")),
                 "help_key": command.get("help_key"),
                 "workflow": workflow,
                 "descriptions": {
@@ -2368,6 +3080,251 @@ def _spring_command_reference_groups(command_id: Any) -> list[str]:
         "105": ["torsion_spring_reference", "material_strength_reference", "tolerance_reference"],
     }
     return mapping.get(str(command_id), ["other_reference"])
+
+
+def _spring_kind_for_command_id(command_id: Any) -> str | None:
+    normalized_id = str(command_id).strip()
+    for hint in SPRING_ENTRYPOINT_HINTS.values():
+        if str(hint.get("command_id")).strip() == normalized_id:
+            return str(hint.get("spring_kind"))
+    return None
+
+
+def _normalize_native_spring_workflow_selection(
+    *,
+    spring_kind: str | None,
+    command_id: int | str | None,
+) -> dict[str, Any]:
+    aliases = {
+        "compression": "compression_spring",
+        "compression_spring": "compression_spring",
+        "coil": "compression_spring",
+        "coil_spring": "compression_spring",
+        "extension": "extension_spring",
+        "extension_spring": "extension_spring",
+        "tension": "extension_spring",
+        "tension_spring": "extension_spring",
+        "disc": "disc_spring",
+        "disk": "disc_spring",
+        "disc_spring": "disc_spring",
+        "disk_spring": "disc_spring",
+        "conical": "conical_spring",
+        "conical_spring": "conical_spring",
+        "torsion": "torsion_spring",
+        "torsion_spring": "torsion_spring",
+    }
+    normalized_kind = None
+    if spring_kind not in (None, ""):
+        raw_kind = str(spring_kind).strip().lower().replace("-", "_")
+        normalized_kind = aliases.get(raw_kind)
+        if normalized_kind is None:
+            raise ValueError(
+                "spring_kind must be one of compression_spring, extension_spring, disc_spring, conical_spring, torsion_spring"
+            )
+    normalized_command_id = None
+    if command_id not in (None, ""):
+        try:
+            normalized_command_id = int(command_id)
+        except (TypeError, ValueError):
+            raise ValueError("command_id must be an integer Spring command id") from None
+        command_kind = _spring_kind_for_command_id(normalized_command_id)
+        if command_kind is None:
+            raise ValueError("command_id must be one of 101, 102, 103, 104, 105")
+        if normalized_kind is not None and normalized_kind != command_kind:
+            raise ValueError(
+                f"spring_kind={normalized_kind} does not match command_id={normalized_command_id} ({command_kind})"
+            )
+        normalized_kind = normalized_kind or command_kind
+    return {
+        "spring_kind": normalized_kind,
+        "command_id": normalized_command_id,
+    }
+
+
+def _select_native_spring_workflow_command(
+    commands: list[dict[str, Any]],
+    *,
+    spring_kind: str | None,
+    command_id: int | None,
+) -> dict[str, Any] | None:
+    if spring_kind is None and command_id is None:
+        return None
+    selected = commands
+    if spring_kind:
+        selected = [
+            command
+            for command in selected
+            if command.get("spring_kind") == spring_kind
+        ]
+    if command_id is not None:
+        selected = [
+            command
+            for command in selected
+            if command.get("id") == command_id
+        ]
+    return dict(selected[0]) if selected else None
+
+
+def _filter_native_spring_workflow(
+    workflow: dict[str, Any],
+    *,
+    command_id: Any,
+) -> dict[str, Any]:
+    selected_commands = [
+        dict(command)
+        for command in workflow.get("commands", [])
+        if command.get("id") == command_id
+    ]
+    capability_counts = {
+        "design_calculation_commands": 0,
+        "verification_calculation_commands": 0,
+        "result_report_commands": 0,
+        "build_model_or_drawing_commands": 0,
+        "build_without_calculation_mentions": 0,
+    }
+    for command in selected_commands:
+        workflow_flags = set(command.get("workflow") or [])
+        if "design_calculation" in workflow_flags:
+            capability_counts["design_calculation_commands"] += 1
+        if "verification_calculation" in workflow_flags:
+            capability_counts["verification_calculation_commands"] += 1
+        if "result_report" in workflow_flags:
+            capability_counts["result_report_commands"] += 1
+        if "build_model_or_drawing" in workflow_flags:
+            capability_counts["build_model_or_drawing_commands"] += 1
+        if command.get("descriptions", {}).get("build_without_calculation"):
+            capability_counts["build_without_calculation_mentions"] += 1
+    return {
+        "commands": selected_commands,
+        "capabilities": {
+            **capability_counts,
+            "notes": list(workflow.get("capabilities", {}).get("notes", [])),
+        },
+    }
+
+
+def _filter_native_spring_reference_map(
+    reference_map: dict[str, Any],
+    *,
+    allowed_groups: list[str],
+) -> dict[str, Any]:
+    allowed = {str(group) for group in allowed_groups if group}
+    filtered_groups = {
+        group: dict(payload)
+        for group, payload in (reference_map.get("groups") or {}).items()
+        if group in allowed
+    }
+    filtered_databases = []
+    for database in reference_map.get("databases", []):
+        tables = [
+            dict(table)
+            for table in database.get("tables", [])
+            if table.get("group") in allowed
+        ]
+        if not tables:
+            continue
+        groups = {
+            str(group): count
+            for group, count in (database.get("groups") or {}).items()
+            if group in allowed
+        }
+        filtered_databases.append(
+            {
+                **database,
+                "table_count": len(tables),
+                "groups": groups,
+                "tables": tables,
+                "truncated": bool(database.get("truncated")),
+            }
+        )
+    return {
+        "database_count": len(filtered_databases),
+        "databases": filtered_databases,
+        "groups": filtered_groups,
+        "notes": list(reference_map.get("notes", [])),
+    }
+
+
+def _native_spring_next_experiments(selected_command: dict[str, Any] | None) -> list[str]:
+    if selected_command is None:
+        return [
+            "Run start_native_module_result_probe(module='Spring', command_id=101, allow_interactive=true), complete one compression spring manually, then diff before/after captures.",
+            "During the manual workflow, watch whether Spring creates or modifies a job/session file outside the reference databases.",
+            "If a stable job/session artifact appears, inspect that artifact before attempting any parameter automation.",
+        ]
+    command_id = selected_command.get("id")
+    command_title = str(selected_command.get("title") or "Spring command")
+    spring_kind = str(selected_command.get("spring_kind") or "spring")
+    if spring_kind == "extension_spring":
+        return [
+            (
+                f"Run start_native_module_result_probe(module='Spring', command_id={command_id}, "
+                "allow_interactive=true), complete one extension_spring workflow manually with one representative "
+                "hook style from the hook catalogue, then diff before/after captures."
+            ),
+            (
+                f"During the manual '{command_title}' workflow, record the chosen hook style and watch whether "
+                "Spring creates or modifies a job/session file outside the filtered reference databases."
+            ),
+            (
+                "After manual completion, capture document snapshot/readback evidence and note whether hook style "
+                "survives reopen as formulas, named geometry, tree labels, or only UI state."
+            ),
+        ]
+    if spring_kind == "torsion_spring":
+        return [
+            (
+                f"Run start_native_module_result_probe(module='Spring', command_id={command_id}, "
+                "allow_interactive=true), complete one torsion_spring workflow manually with one representative "
+                "leg layout, then diff before/after captures."
+            ),
+            (
+                f"During the manual '{command_title}' workflow, record the chosen leg layout or winding direction "
+                "and watch whether Spring creates or modifies a job/session file outside the filtered reference databases."
+            ),
+            (
+                "After manual completion, capture document snapshot/readback evidence and note whether leg layout "
+                "survives reopen as formulas, named geometry, tree labels, or only UI state."
+            ),
+        ]
+    if spring_kind == "conical_spring":
+        return [
+            (
+                f"Run start_native_module_result_probe(module='Spring', command_id={command_id}, "
+                "allow_interactive=true), complete one conical_spring workflow manually with one representative "
+                "taper/support variant, then diff before/after captures."
+            ),
+            (
+                f"During the manual '{command_title}' workflow, record the chosen taper or support variant and watch "
+                "whether Spring creates or modifies a job/session file outside the filtered reference databases."
+            ),
+            (
+                "After manual completion, capture document snapshot/readback evidence and note whether taper/support "
+                "choices survive reopen as formulas, named geometry, tree labels, or only UI state."
+            ),
+        ]
+    if spring_kind == "disc_spring":
+        return [
+            (
+                f"Run start_native_module_result_probe(module='Spring', command_id={command_id}, "
+                "allow_interactive=true), complete one disc_spring workflow manually with one representative "
+                "stack arrangement, then diff before/after captures."
+            ),
+            (
+                f"During the manual '{command_title}' workflow, record the chosen stack arrangement or series "
+                "variant and watch whether Spring creates or modifies a job/session file outside the filtered "
+                "reference databases."
+            ),
+            (
+                "After manual completion, capture document snapshot/readback evidence and note whether stack "
+                "arrangement survives reopen as formulas, named geometry, tree labels, or only UI state."
+            ),
+        ]
+    return [
+        f"Run start_native_module_result_probe(module='Spring', command_id={command_id}, allow_interactive=true), complete one {spring_kind} workflow manually, then diff before/after captures.",
+        f"During the manual '{command_title}' workflow, watch whether Spring creates or modifies a job/session file outside the filtered reference databases.",
+        "If a stable job/session artifact appears, inspect that artifact before attempting any parameter automation.",
+    ]
 
 
 def _sqlite_table_sample(

@@ -4876,9 +4876,50 @@ def _run_loader_probe_in_process(dll_path, export_name):
     return report
 
 
+def _is_trusted_native_loader_path(path, require_file):
+    candidate = os.path.normcase(os.path.realpath(str(path or "")))
+    if not candidate:
+        return False
+    if require_file and not os.path.isfile(candidate):
+        return False
+    if not require_file and not os.path.isdir(candidate):
+        return False
+    for env_name in ("ProgramFiles", "ProgramW6432"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        trusted_root = os.path.normcase(os.path.realpath(os.path.join(base, "ASCON")))
+        prefix = trusted_root.rstrip("\\/") + os.sep
+        if candidate == trusted_root or candidate.startswith(prefix):
+            return True
+    return False
+
+
 def handle_probe_native_entrypoint_loader_hosted(payload):
-    app = make_app()
+    if payload.get("confirm_load") is not True:
+        return {
+            "ok": False,
+            "requires_confirmation": True,
+            "confirmation_parameter": "confirm_load",
+            "error": "Hosted native DLL loading requires confirm_load=true",
+        }
+    dll_path = payload.get("dll_path")
     search_dirs = [item for item in (payload.get("search_dirs") or []) if isinstance(item, str) and item]
+    if not _is_trusted_native_loader_path(dll_path, True):
+        return {
+            "ok": False,
+            "error": "dll_path must resolve inside a KOMPAS installation under Program Files/ASCON",
+        }
+    untrusted_search_dirs = [
+        item for item in search_dirs if not _is_trusted_native_loader_path(item, False)
+    ]
+    if untrusted_search_dirs:
+        return {
+            "ok": False,
+            "untrusted_search_dirs": untrusted_search_dirs,
+            "error": "search_dirs must resolve inside a KOMPAS installation under Program Files/ASCON",
+        }
+    app = make_app()
     path_before = os.environ.get("PATH", "")
     dll_dir_handles = []
     if search_dirs:
@@ -4892,7 +4933,7 @@ def handle_probe_native_entrypoint_loader_hosted(payload):
                     pass
     try:
         report = _run_loader_probe_in_process(
-            payload.get("dll_path"),
+            dll_path,
             payload.get("export_name") or "",
         )
         app_name = safe_get(app, "ApplicationName")

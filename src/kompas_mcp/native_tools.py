@@ -178,8 +178,9 @@ def register_native_tools(mcp: Any, adapter: Any) -> None:
         max_import_dlls: int | None = 80,
         max_imports_per_dll: int | None = 80,
         timeout_seconds: int | None = 10,
+        confirm_load: bool = False,
     ) -> dict:
-        """Load a private native DLL in a child process and resolve one export without calling it."""
+        """Load an approved KOMPAS DLL in a child process and resolve one export without calling it."""
         return build_native_entrypoint_loader_probe(
             module=module,
             export_name=export_name,
@@ -190,6 +191,7 @@ def register_native_tools(mcp: Any, adapter: Any) -> None:
             max_import_dlls=max_import_dlls,
             max_imports_per_dll=max_imports_per_dll,
             timeout_seconds=timeout_seconds,
+            confirm_load=confirm_load,
         )
 
     @mcp.tool()
@@ -203,8 +205,9 @@ def register_native_tools(mcp: Any, adapter: Any) -> None:
         max_import_dlls: int | None = 80,
         max_imports_per_dll: int | None = 80,
         timeout_seconds: int | None = 15,
+        confirm_load: bool = False,
     ) -> dict:
-        """Load a private native DLL inside a fresh KOMPAS bridge process and resolve one export without calling it."""
+        """Load an approved KOMPAS DLL in a fresh bridge process and resolve one export without calling it."""
         return build_native_entrypoint_loader_hosted_probe(
             module=module,
             export_name=export_name,
@@ -215,6 +218,7 @@ def register_native_tools(mcp: Any, adapter: Any) -> None:
             max_import_dlls=max_import_dlls,
             max_imports_per_dll=max_imports_per_dll,
             timeout_seconds=timeout_seconds,
+            confirm_load=confirm_load,
         )
 
     @mcp.tool()
