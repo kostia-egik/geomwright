@@ -362,6 +362,34 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
+    def test_inspect_sketch_full_forwards_selector_payload(self) -> None:
+        runner = _FakeRunner()
+        adapter = KompasAdapter(runner)
+
+        result = adapter.inspect_sketch_full(
+            document_id="doc-1",
+            sketch_ref=100,
+            include_dimensions=False,
+            include_constraints=True,
+            max_items=12,
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                "inspect_sketch_full",
+                {
+                    "document_id": "doc-1",
+                    "target": {"mode": "existing_sketch", "sketch_ref": "100"},
+                    "include_dimensions": False,
+                    "include_constraints": True,
+                    "include_diagnostics": True,
+                    "max_items": 12,
+                },
+            ),
+        )
+        self.assertTrue(result["ok"])
+
     def test_list_sketch_entities_validates_payload_before_bridge_call(self) -> None:
         runner = _FakeRunner()
         adapter = KompasAdapter(runner)

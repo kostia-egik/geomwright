@@ -170,6 +170,28 @@ class BridgeVisibilityTests(unittest.TestCase):
         self.assertTrue(point.Hidden)
         self.assertTrue(axis.Hidden)
 
+    def test_collect_compression_spring_connector_auxiliary_objects_includes_trim_points(self) -> None:
+        trim_point = _FakeHiddenObject(hidden=False)
+        trim_curve = object()
+
+        report = BRIDGE._collect_compression_spring_connector_auxiliary_objects(
+            [
+                {
+                    "kind": "trimmed_curve",
+                    "path": trim_curve,
+                    "point": trim_point,
+                }
+            ]
+        )
+
+        self.assertEqual(
+            report,
+            [
+                ("spring_trimmed_curve", trim_curve),
+                ("spring_trimmed_curve_point", trim_point),
+            ],
+        )
+
     def test_bind_operation_variables_sets_expression_by_parameter_note(self) -> None:
         pitch = _FakeOperationVariable("v1", "Шаг", "2")
         height = _FakeOperationVariable("v2", "Высота", "12")

@@ -14,6 +14,8 @@ from kompas_mcp.native_modules import inspect_native_spring_workflow
 from kompas_mcp.native_modules import list_native_modules
 from kompas_mcp.native_modules import plan_native_entrypoint_validation
 from kompas_mcp.native_modules import preview_native_module_launch
+from kompas_mcp.native_modules import probe_native_entrypoint_loader
+from kompas_mcp.native_modules import probe_native_entrypoint_loader_hosted
 from kompas_mcp.native_modules import probe_native_module_programmatic_access
 from kompas_mcp.native_module_result import capture_native_module_result
 from kompas_mcp.native_module_result import diff_native_module_results
@@ -100,6 +102,42 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(material_tables[0]["sample_rows"][0]["NAME"], "Steel A")
         self.assertFalse(payload["automation_assessment"]["public_parameter_contract_detected"])
         self.assertFalse(payload["automation_assessment"]["safe_to_use_for_automation"])
+
+    def test_inspects_extension_spring_workflow_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+
+            payload = inspect_native_spring_workflow(
+                libs_dir=str(libs_dir),
+                spring_kind="extension",
+                max_tables=20,
+                max_sample_rows=2,
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["selection"]["spring_kind"], "extension_spring")
+        self.assertEqual(payload["selection"]["command_id"], 102)
+        self.assertEqual(payload["commands"][0]["id"], 102)
+        self.assertEqual(payload["commands"][0]["spring_kind"], "extension_spring")
+        self.assertEqual(payload["workflow_capabilities"]["design_calculation_commands"], 1)
+        self.assertIn("extension_spring_reference", payload["reference_data"]["groups"])
+        self.assertNotIn("coil_spring_design_tables", payload["reference_data"]["groups"])
+        extension_tables = payload["reference_data"]["groups"]["extension_spring_reference"]["tables"]
+        self.assertEqual(extension_tables[0]["sample_rows"][0]["HOOK_TYPE"], "German loop")
+        self.assertIn("command_id=102", payload["next_experiments"][0])
+        self.assertIn("hook style", payload["next_experiments"][0])
+        self.assertIn("hook style", payload["next_experiments"][1])
+
+    def test_rejects_mismatched_extension_spring_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+
+            with self.assertRaisesRegex(ValueError, "does not match command_id=101"):
+                inspect_native_spring_workflow(
+                    libs_dir=str(libs_dir),
+                    spring_kind="extension_spring",
+                    command_id=101,
+                )
 
     def test_probes_programmatic_access_without_treating_hints_as_full_api(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -262,6 +300,56 @@ class NativeModuleDiscoveryTests(unittest.TestCase):
         self.assertEqual(entry["readiness"]["status"], "static_abi_inventory_complete")
         self.assertFalse(payload["execution_policy"]["loads_library"])
         self.assertFalse(payload["assessment"]["may_call_export_now"])
+
+    def test_loader_probes_require_confirmation_and_trusted_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            libs_dir = _create_spring_fixture(Path(temp_dir))
+            fake_exports = _fake_spring_ccs_export_inventory()
+            fake_abi = {
+                "ok": True,
+                "is_pe": True,
+                "machine": "0x8664",
+                "architecture": "x64",
+                "pe_kind": "PE32+",
+                "selected_export": "SpringCCS",
+                "selected_export_found": True,
+                "selected_export_entry": {
+                    "name": "SpringCCS",
+                    "ordinal": 1,
+                    "ordinal_index": 0,
+                    "rva": "0x00001234",
+                    "forwarded": False,
+                },
+                "exports": [],
+                "imports": [],
+                "dependencies": ["KOMPAS6API5.dll"],
+            }
+            with patch("kompas_mcp.native_modules._runtime_export_inventory", return_value=fake_exports):
+                with patch("kompas_mcp.native_modules._pe_static_abi_inventory", return_value=fake_abi):
+                    cases = (
+                        (probe_native_entrypoint_loader, "kompas_mcp.native_modules._run_isolated_loader_probe"),
+                        (probe_native_entrypoint_loader_hosted, "kompas_mcp.native_modules._run_hosted_bridge_loader_probe"),
+                    )
+                    for probe_function, runner_name in cases:
+                        with self.subTest(probe=probe_function.__name__), patch(runner_name) as run_probe:
+                            approval = probe_function(
+                                "Spring",
+                                libs_dir=str(libs_dir),
+                                export_name="SpringCCS",
+                            )
+                            self.assertFalse(approval["ok"])
+                            self.assertEqual(approval["stage"], "approval")
+                            self.assertTrue(approval["requires_confirmation"])
+
+                            rejected = probe_function(
+                                "Spring",
+                                libs_dir=str(libs_dir),
+                                export_name="SpringCCS",
+                                confirm_load=True,
+                            )
+                            self.assertFalse(rejected["ok"])
+                            self.assertEqual(rejected["stage"], "trusted_path_check")
+                            run_probe.assert_not_called()
 
     def test_missing_module_returns_available_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -565,6 +653,7 @@ def _create_sqlite_database(path: Path) -> None:
     try:
         connection.execute("create table MATERIALS (ID integer primary key, NAME text)")
         connection.execute("create table SPRPARAMSCOILS (ID integer primary key, F3 real, D real, D1 real)")
+        connection.execute("create table HOOKDATA_CES (ID integer primary key, HOOK_TYPE text, D1 real, F1 real)")
         connection.execute("create table DOPUSKD1 (ID integer primary key, DMIN real, DMAX real, DOPUSK real)")
         connection.execute("create table SPRCPS (NOMER integer primary key, F3 real, D1 real, D2 real)")
         connection.executemany(
@@ -574,6 +663,10 @@ def _create_sqlite_database(path: Path) -> None:
         connection.executemany(
             "insert into SPRPARAMSCOILS (ID, F3, D, D1) values (?, ?, ?, ?)",
             [(1, 20.0, 12.0, 16.0), (2, 30.0, 14.0, 18.0)],
+        )
+        connection.executemany(
+            "insert into HOOKDATA_CES (ID, HOOK_TYPE, D1, F1) values (?, ?, ?, ?)",
+            [(1, "German loop", 12.0, 80.0), (2, "Machine loop", 14.0, 95.0)],
         )
         connection.execute("insert into DOPUSKD1 (ID, DMIN, DMAX, DOPUSK) values (1, 1.0, 10.0, 0.2)")
         connection.execute("insert into SPRCPS (NOMER, F3, D1, D2) values (1, 100.0, 20.0, 40.0)")
@@ -588,12 +681,22 @@ def _create_help_database(path: Path) -> None:
         connection.execute("create table Ids (Id integer, Name text)")
         connection.execute("create table Help (Id text, D1 text, D2 text, D3 text)")
         connection.execute("insert into Ids (Id, Name) values (101, 'IDD_HELP_CCS')")
+        connection.execute("insert into Ids (Id, Name) values (102, 'IDD_HELP_CES')")
         connection.execute(
             "insert into Help (Id, D1, D2, D3) values (?, ?, ?, ?)",
             (
                 "IDD_HELP_CCS",
                 "Design and verification calculation for compression springs.",
                 "Calculation method: fixture standard.",
+                "Build model or drawing without calculation.",
+            ),
+        )
+        connection.execute(
+            "insert into Help (Id, D1, D2, D3) values (?, ?, ?, ?)",
+            (
+                "IDD_HELP_CES",
+                "Design and verification calculation for extension springs.",
+                "Calculation method: hook catalogue.",
                 "Build model or drawing without calculation.",
             ),
         )
