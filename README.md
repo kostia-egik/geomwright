@@ -1,255 +1,127 @@
 # kompas-mcp
 
-Практичный MCP для первого этапа работы с КОМПАС-3D:
+`kompas-mcp` is a local MCP server for inspecting and automating KOMPAS-3D on
+Windows. It combines a Python MCP host with an isolated bridge executed by the
+Python runtime bundled with KOMPAS.
 
-- чтение состояния сессии
-- список открытых документов
-- чтение дерева 3D-документа
-- поиск и выборка узлов
-- анализ проблем в именах
-- анализ базовых проблем спецификации
-- безопасная пакетная обработка моделей
-- параметрические `.m3d`-сценарии через `stepped_shaft`, `point`, `lcs`
-- revolve/extrude модули поверх этой базы: conical step, stepped bore, ring groove, polygonal step, bolt-circle holes
-- каталожные native-резьбы КОМПАС: `external_threaded_step`, `internal_threaded_step`
-- физические винтовые резьбы на уже существующей цилиндрической геометрии: `external_helical_thread`, `internal_helical_thread`
-- цепочки операций через публичный `workflow`
+The project supports document lifecycle operations, model-tree and sketch
+inspection, controlled sketch/feature edits, specifications, parametric part
+workflows, spring families, and live CAD verification. Native KOMPAS module
+inspection is available as a separate research surface.
 
-Что уже реально работает в этой версии:
+## Status
 
-- подключение к живому `Kompas.Application.7`
-- bridge через встроенный Python КОМПАСа
-- безопасное чтение без записи в документ
-- анализаторы поверх дерева модели
-- отдельные `.spw`-спецификации с preview и export
-- batch smoke-check и batch-анализ качества по папке моделей
-- live-построение параметрических деталей и опорной геометрии
-- object-selectors для торцев, плеч и цилиндрических поверхностей `stepped_shaft`
-- рабочие revolve/cut/extrude сценарии поверх `workflow`, `point` и `lcs`
-- native thread-модули через каталог `thread.db` и API `ISymbols3DContainer.Threads`
-- физические спиральные резьбы через `ICylindricSpiral3D` + `IEvolution`
+The runtime catalog is the source of truth for the exposed MCP surface. Call
+`get_mcp_tool_catalog` to discover current tools and their stability level.
 
-Что оставлено на следующий этап:
+| Area | Status |
+| --- | --- |
+| Session/document lifecycle, composition, specifications, relinking | stable |
+| Low-level sketch and feature runtime | experimental |
+| Parametric part and spring generation | experimental |
+| Native KOMPAS module inspection and command launching | research |
 
-- редактирование свойств
-- preview/apply changeset
-- checkpoint/restore
-- атрибуты и расширенные поля спецификации
-- более общие external object-references между feature-модулями
-- устойчивое сохранение/перезапись уже открытых `.m3d`
-- добивание внешних driving-параметров там, где COM пока даёт только числовой fallback
+Generated CAD files and live readback artifacts are local evidence. They are
+stored under `sample/generated/` and `sample/live_outputs/` and are intentionally
+excluded from Git.
 
-## Run
+## Requirements
 
-```powershell
-cd C:\Users\Костя\work\kompas-mcp
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -U pip
-.\.venv\Scripts\python -m pip install -e .
-.\.venv\Scripts\python -m kompas_mcp
-```
+- Windows;
+- KOMPAS-3D v23 with its runtime components installed;
+- Python 3.11 or newer for the MCP host;
+- an MCP-capable client.
 
-Packaged installs include the default rules and bridge script. Development
-checkouts still prefer the root `rules/default.json` and
-`bridge/kompas_bridge.py` files when they exist. Override paths with
-`KOMPAS_BRIDGE_SCRIPT` or an explicit rules path when testing a custom bridge or
-rule set.
+Building or inspecting native modules additionally requires the matching KOMPAS
+SDK/toolchain; ordinary managed workflows do not.
 
-## MCP tool map
+The host package and the KOMPAS bridge have different compatibility constraints:
+ordinary package code may use the Python version declared in `pyproject.toml`,
+while `bridge/kompas_bridge.py` must remain compatible with the Python runtime
+bundled with KOMPAS-3D v23.
 
-The server exposes many tools, so start with `get_mcp_tool_catalog` when
-you need orientation. It returns categories such as `low_level_runtime`,
-`session_lifecycle`, `composition_specification`, `relink`,
-`document_tree_items`, and `quality_changesets`.
+## Installation
 
-Low-level runtime/readback tools are documented in
-[`docs/low-level-runtime.md`](docs/low-level-runtime.md).
-Snapshot-verified write contracts are documented in
-[`docs/write_operations.md`](docs/write_operations.md).
-For the first live read-only audit, run
-`sample\audit_live_kompas_low_level_2026_05_20.py`.
-
-Parametric workflow and thread details are documented in
-[`docs/parametric-workflows.md`](docs/parametric-workflows.md).
-
-## Отдельные .spw-спецификации
-
-Поток `.spw` создаёт отдельный документ спецификации КОМПАС из текущего дерева
-сборки/модели. Это отдельный сценарий, не встроенное описание спецификации
-внутри `.a3d`.
-
-По умолчанию записываются только стабильные базовые колонки:
-
-```json
-{
-  "tool": "create_spw_from_model",
-  "arguments": {
-    "output_path": "C:\\Temp\\kompas-mcp\\assembly.spw"
-  }
-}
-```
-
-Базовый набор колонок:
-
-- `position`
-- `designation`
-- `title`
-- `quantity`
-- `comment`
-
-Инженерные данные доступны в строках preview/отчёта, но не пишутся в стандартную
-форму `.spw` без явного запроса. Готовый пресет можно использовать, если в
-целевой форме есть подходящие колонки примечаний/пользовательские ячейки:
-
-```json
-{
-  "tool": "create_spw_from_model",
-  "arguments": {
-    "output_path": "C:\\Temp\\kompas-mcp\\assembly-engineering.spw",
-    "column_preset": "engineering_comment_columns"
-  }
-}
-```
-
-Для нестандартной формы передайте явную карту колонок. Инженерные поля требуют
-`include_engineering: true` на весь вызов или `allow_engineering: true` на
-конкретную колонку:
-
-```json
-{
-  "tool": "create_spw_from_model",
-  "arguments": {
-    "output_path": "C:\\Temp\\kompas-mcp\\assembly-custom.spw",
-    "columns": [
-      "position",
-      "designation",
-      "title",
-      { "field": "quantity", "skip_unit_value": true },
-      "comment",
-      {
-        "field": "mass",
-        "column_type": 7,
-        "block_number": 2,
-        "column_number": 5,
-        "allow_engineering": true
-      }
-    ]
-  }
-}
-```
-
-Перед записью удобно вызвать `preview_spw_generation` с теми же
-`columns` / `column_preset` и проверить `spw_columns`, `spw_ignored_columns`,
-`spw_column_report` и счётчики engineering-данных.
-
-## Пакетная проверка моделей
-
-Первый безопасный слой пакетной обработки не меняет исходные модели. Он нужен,
-чтобы быстро понять, какие файлы лежат в папке и стабильно ли КОМПАС может
-открывать/закрывать их через MCP.
-
-Сканирование папки без запуска КОМПАС:
-
-```json
-{
-  "tool": "scan_model_files",
-  "arguments": {
-    "root": "C:\\Users\\Костя\\work\\kompas-test\\r2-pump-pilot\\renamed",
-    "recursive": false
-  }
-}
-```
-
-По умолчанию выбираются только `.a3d` и `.m3d`, а временные `~$...` lock-файлы
-пропускаются. В отчёте есть `by_extension` и `skipped_by_reason`.
-
-Пакетный lifecycle smoke-check по папке:
-
-```json
-{
-  "tool": "batch_smoke_check_session",
-  "arguments": {
-    "root": "C:\\Users\\Костя\\work\\kompas-test\\r2-pump-pilot\\renamed",
-    "recursive": false,
-    "limit": 2,
-    "output_dir": "C:\\Temp\\kompas-mcp"
-  }
-}
-```
-
-Команда для каждого файла делает open -> save-as smoke copy -> close ->
-open read-only -> close. Ошибка одного файла не останавливает пакет, если не
-передать `continue_on_error: false`.
-
-Пакетный анализ качества без записи в модели:
-
-```json
-{
-  "tool": "batch_analyze_model_quality",
-  "arguments": {
-    "root": "C:\\Users\\Костя\\work\\kompas-test\\r2-pump-pilot\\renamed",
-    "recursive": false,
-    "limit": 5,
-    "analyses": ["naming", "spec"]
-  }
-}
-```
-
-Команда открывает каждый файл read-only, читает дерево, запускает проверки
-именования и базовых данных спецификации, затем закрывает документ в любом
-случае. В результате есть общий `summary`, список `results` по файлам и
-детальные замечания внутри `analyses`.
-
-Чтобы сохранить результат в файлы, передайте `report_dir`. По умолчанию будут
-созданы полный JSON и короткий Markdown-отчёт:
-
-```json
-{
-  "tool": "batch_analyze_model_quality",
-  "arguments": {
-    "root": "C:\\Users\\Костя\\work\\kompas-test\\r2-pump-pilot\\renamed",
-    "recursive": false,
-    "limit": 5,
-    "report_dir": "C:\\Temp\\kompas-mcp\\reports",
-    "report_name": "r2-quality-check",
-    "report_formats": ["json", "md"]
-  }
-}
-```
-
-`report_formats` можно ограничить, например `["md"]`, если нужен только
-человеческий отчёт.
-
-## Parametric details
-
-The main entry points are `preview_part_scenario` and
-`create_part_from_scenario`. Current scenarios cover `stepped_shaft`,
-conical/bore/groove/bolt-circle modules, polygonal steps, native KOMPAS
-thread modules, physical helical-thread operations, and `workflow` chains.
-
-Detailed live examples, thread roadmap, workflow links, and known modelling
-gaps are in [`docs/parametric-workflows.md`](docs/parametric-workflows.md).
-
-## Тесты
-
-Быстрые проверки без живой сессии КОМПАС после `pip install -e .`:
+From a PowerShell prompt in a local clone:
 
 ```powershell
-.\.venv\Scripts\python -m unittest discover -s tests
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-Из сырого checkout без editable install:
+The server entry point is:
 
 ```powershell
-$env:PYTHONPATH='src'
-python -m unittest discover -s tests
+.\.venv\Scripts\python.exe -m kompas_mcp
 ```
 
-## Notes
+Do not copy a user-specific absolute path from another machine. Point the MCP
+client at the virtual environment inside its own clone. For example:
 
-- По умолчанию используется встроенный Python КОМПАСа:
-  `C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe`
-- При необходимости можно переопределить:
-  - `KOMPAS_PYTHON`
-  - `KOMPAS_BRIDGE_SCRIPT`
-  - `KOMPAS_RULES_PATH`
+```json
+{
+  "mcp": {
+    "kompas": {
+      "type": "local",
+      "command": [
+        "C:\\path\\to\\kompas-mcp\\.venv\\Scripts\\python.exe",
+        "-m",
+        "kompas_mcp"
+      ],
+      "enabled": true,
+      "timeout": 600000
+    }
+  }
+}
+```
+
+Keep machine-specific MCP configuration and absolute paths out of commits.
+[`opencode.example.json`](opencode.example.json) is the tracked template; copy it
+to `opencode.json`, replace the placeholder path, and restart OpenCode so the
+project configuration is reloaded.
+
+## First workflow
+
+1. Call `get_mcp_tool_catalog` and select tools by stability and purpose.
+2. Use `get_session_state` and `list_documents` before opening or modifying a
+   model.
+3. Prefer readback and preview tools before write operations.
+4. Use the Plan → Execute → Verify → Correct pattern for geometry changes.
+5. Save generated evidence to the ignored sample output directories, not beside
+   source files.
+
+For sketch authoring, start with `inspect_sketch_full`; for parametric generation,
+start from the preview operation for the relevant workflow or spring family.
+
+## Repository layout
+
+```text
+src/kompas_mcp/                 MCP host, schemas, normalizers, and tool groups
+bridge/kompas_bridge.py         KOMPAS-side bridge source
+src/kompas_mcp/assets/bridge/   packaged bridge copy; must match the root bridge
+docs/                           canonical contracts, workflows, and research notes
+sample/                         maintained examples plus ignored local evidence
+rules/                          tracked runtime rule data
+experiments/spikes/             ignored local quarantine for unfinished prototypes
+```
+
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Architecture and ownership](ARCHITECTURE.md)
+- [Reusable CAD patterns](CAD_PATTERNS.md)
+- [Parametric workflows](docs/parametric-workflows.md)
+- [Sketch authoring protocol](docs/sketch-authoring-agent-protocol.md)
+- [Spring workflows](docs/spring-workflows.md)
+- [Write operations and safety](docs/write_operations.md)
+
+`docs/archive/` is reserved for intentionally retained historical records. Raw
+backlogs and uncommitted research material stay in the ignored experiment
+quarantine instead of the canonical documentation tree.
+
+## Development policy
+
+Keep production behavior, documentation, and live readback evidence aligned.
+Do not commit generated CAD binaries, local MCP paths, embedded bridge payloads,
+or disposable probe scripts. Repository-specific agent rules are defined in
+`.opencode/AGENTS.md`.

@@ -7,6 +7,8 @@ __pycache__/
 tmp_*.py
 tmp/
 sample/generated/
+experiments/spikes/
+opencode.json
 sample/live_outputs/*
 *.m3~
 *.agent_backup

@@ -4,7 +4,9 @@ This document keeps the detailed notes and live examples for parametric
 part generation, thread modules, workflow links, and known modelling gaps.
 The README intentionally stays shorter and points here for details.
 
-Подробности по пружинам — в [`docs/archive/`](archive/).
+Актуальный статус и навигация по пружинам — в
+[`spring-workflows.md`](spring-workflows.md). Исторические briefs не являются
+runtime-контрактом.
 
 ## Следующее направление: типы резьб после метрической
 
@@ -182,8 +184,9 @@ oval relief, `end_radius=100`, `R=6`, `count=12`. Во всех четырёх �
 `end_radius` фактически выводит relief за область пересечения tangent plane с
 телом.
 
-Детали anchor rotation, backlog и планы V2 — в
-[`docs/archive/`](archive/).
+Текущий контракт anchor rotation и family-specific детали находятся в
+[`spring-workflows.md`](spring-workflows.md) и связанных документах семейства;
+исторические V2-планы не являются runtime-контрактом.
 
 Для `external_helical_thread` и `internal_helical_thread` после построения скрываются служебные точки, LCS профиля, профильный эскиз, ось и спираль. Bridge выставляет `Hidden=True` и сразу коммитит это через `Update()`, чтобы состояние сохранялось в дереве построений после переоткрытия `.m3d`.
 
@@ -222,14 +225,6 @@ python sample/create_internal_bsp_g_helical_thread_example_2026_05_20.py
 ```
 
 Скрипт создаёт папку `sample/generated/internal_bsp_g_helical_thread_example_2026_05_20` и валидирует, что `pipe_bsp_g_v55` для `internal_helical_thread` использует Whitworth-профиль 55° с round-root из `thread_geometry` и зеркальным вторым crest-pass.
-
-Автономный smoke-пакет sketch-runtime preflight/readback без запуска КОМПАС:
-
-```powershell
-python sample/create_sketch_runtime_algorithm_smoke_2026_05_20.py
-```
-
-Скрипт создаёт `sample/generated/sketch_runtime_algorithm_smoke_2026_05_20` с положительными preflight/readback отчётами и двумя ожидаемыми диагностическими отказами: неверный direction-alias и смещённая точка readback.
 
 Live-пример verified-задачи для наружной M12x1 с preflight, operation invariants, geometry probes, COM-readback и run ledger:
 

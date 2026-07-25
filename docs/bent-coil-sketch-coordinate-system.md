@@ -150,19 +150,7 @@ If future KOMPAS API documentation reveals a supported way to create an angled p
 
 ## Verification
 
-Focused tests:
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/test_parametric.py tests/test_spring_readback.py -q
-```
-
-Full suite:
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/ -q
-```
-
-Last known result at the time of this report:
-
-- `791 passed`
-- `21 subtests passed`
+Compile the modified normalization modules, compare the normalized scenario
+against this coordinate contract, and verify the generated bent-coil sketch in a
+live KOMPAS document. The saved artifact must be reopened before accepting frame,
+axis, or point-order changes.

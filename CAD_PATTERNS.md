@@ -4,6 +4,19 @@ This file is the operational memory for KOMPAS-3D / `kompas-mcp` CAD automation.
 It stores rules that were verified on live models and should be checked before
 guessing COM API behavior.
 
+Only reusable behavior belongs here. A one-model observation stays in its family
+document or local evidence until it has survived rebuild/reopen and applies to at
+least one broader class of operations. Historical implementation plans belong in
+`docs/archive/`, and unfinished prototypes belong in `experiments/spikes/`.
+
+Evidence levels used by this file:
+
+- **live-verified** — confirmed through KOMPAS creation plus readback/reopen;
+- **implementation-backed** — enforced by current source but not yet promoted by
+  repeated family evidence;
+- **provisional** — a warning or hypothesis that must remain explicitly marked
+  and must not be treated as a production invariant.
+
 ## How To Use This File
 
 1. Start with `Quick Index` and choose rules that match the current task.
@@ -37,9 +50,10 @@ guessing COM API behavior.
 | Direction flag works but result is inverted | `DIR-001`, `VERIFY-001` |
 | Spiral direction is confused with spiral construction side | `DIR-001`, `SPIRAL-001`, `VERIFY-001` |
 | Solid body self-intersects at zero gap | `GAP-001` |
-| 2D sketch point cannot be used as 3D operation reference | `EDGE-001` |
+| Resolve a 2D sketch point as a persistent 3D reference | `EDGE-001` |
 | Composite path mixes sketch edges and 3D edges | `EDGE-002` |
 | Sketch cannot be assigned to extrude/revolve/evolution | `OP-001` |
+| Operation uses wrong sketch contour or rejects a valid-looking sketch | `OP-002`, `OP-001` |
 | Bent coil / hook spiral phase is wrong | `SPIRAL-001`, `VAR-001` |
 | Native curve fillet needs a source cut point but raw spiral endpoints cannot be read | `FILLET-003` |
 | Need full bent-coil construction chain | `CASE-001` |
@@ -104,6 +118,9 @@ Symptom:
 - `Update()` and rebuild succeed, but the result is oriented incorrectly.
 - Sketch geometry follows the wrong local axis direction.
 - Arc/curve direction is ambiguous even though points lie on the curve.
+- A boolean arc direction flag is easy to read backwards: for KOMPAS
+  `ICircleArc.Direction`, `false` means counterclockwise start->end and `true`
+  means clockwise start->end.
 - A direction flag works for one model state and fails after parameter changes.
 
 Cause:
@@ -165,6 +182,9 @@ Verification:
 
 Known examples:
 - Arc direction checks after `AddArcBy3Points`.
+- `diaphragm_spring`: inverted `ICircleArc.Direction` values produced a closed
+  endpoint graph that KOMPAS rejected for revolve; fixing the flag semantics made
+  the geometry-only operation pass.
 - Local axis direction checks after switching CS or angled plane.
 - Bent coil spiral direction and construction side checks.
 
@@ -1084,50 +1104,79 @@ Known examples:
 
 ---
 
-### EDGE-001: Sketch 2D Points Cannot Be Passed Directly As 3D References
+### EDGE-001: Resolve Sketch Points Through IFeature7.ModelObjects
 
 Applies when:
 - a 3D operation asks for a reference point;
 - the natural source point exists only inside a sketch;
-- UI accepts a sketch point but COM does not.
+- UI accepts a sketch point as a 3D reference.
 
 Symptom:
-- Passing a 2D sketch point to a field like `reference_point` fails.
-- The API expects a 3D object even though the UI can select the sketch point.
+- Passing the transient `IPoint` or `CastTo(point, "IModelObject")` to
+  `IPoint3DParamProjection.SetAssociationVertex(...)` is accepted by the
+  setter, but `Point3D.Update()` returns `False`.
 
 Cause:
-- KOMPAS COM API does not directly accept a 2D sketch point as a 3D operation
-  reference. It accepts 3D points created in the model container.
+- An `IPoint` obtained inside `BeginEdit()` is a transient drawing wrapper. Its
+  reference becomes invalid after `EndEdit()`.
+- The persistent UI-selectable object is a result vertex owned by the sketch:
+  `IModelObject.Type=11279`, `ModelObjectType=8`.
+- The owner sketch exposes these objects through
+  `IFeature7.ModelObjects(8)`, where `8` selects result vertices.
 
 Rule:
-- Create a model-level 3D point tied to geometry, instead of extracting and
-  passing a sketch point.
+- Create the 2D point normally, finish and update the sketch, then cast the
+  sketch itself to `IFeature7`.
+- Enumerate `ModelObjects(8)` and identify the required `IVertex` by
+  `IVertex.GetPoint()` world coordinates. Do not rely on array order.
+- Pass that `IVertex` directly to `SetAssociationVertex(...)`.
+- Do not create a coordinate-copy `Point3D` or point-on-curve intermediary when
+  the intended source is an explicit sketch point.
+- Verify after reopen that the projection point source has `Type=11279`, its
+  `Owner` is the reference sketch, and its reference matches one of
+  `sketch_feature.ModelObjects(8)`.
 
-Implementation: point on curve
+Implementation: direct sketch point to projection point
 ```python
-point3d = model_container.Points.Add()
-param = point3d.Parameter
-param.Reference = curve_object
-param.Offset = 50.0
-param.Direction = 1.0
-point3d.Parameter = param
-point3d.Update()
+# Add IPoint objects while the sketch is open, then EndEdit()/Update().
+sketch_feature = win32com.client.CastTo(sketch, "IFeature7")
+vertices = list(sketch_feature.ModelObjects(8))
+source_vertex = min(
+    vertices,
+    key=lambda vertex: distance(vertex.GetPoint()[1:4], expected_world_point),
+)
+
+projection = model_container.Points3D.Add()
+projection.ParameterType = 7
+param = win32com.client.CastTo(projection.Parameters, "IPoint3DParamProjection")
+param.SetAssociationVertex(source_vertex)
+param.SetSurfaceObject(tangent_plane)
+param.SetGuidingObject(axis_edge)
+assert projection.Update()
 ```
 
-Implementation: displacement from existing 3D point
+For a revolve sketch with one axis line, a verified way to recover the actual
+3D-capable axis edge is:
+
 ```python
-point3d = model_container.Points.Add()
-param = point3d.Parameter
-param.Reference = existing_3d_point
-param.Offset = 20.0
-param.Direction = 1.0
-point3d.Parameter = param
-point3d.Update()
+profile_edges = {edge.Reference for edge in sketch.Edges(1)}
+axis_candidates = [
+    edge for edge in sketch.Edges(2)
+    if edge.Reference not in profile_edges
+]
+assert len(axis_candidates) == 1
+axis_edge = axis_candidates[0]
+assert all(abs(value) < 1e-7 for point in (0, 1) for value in axis_edge.GetPoint(point)[2:4])
 ```
+
+Pass this `IEdge`, not the original 2D drawing line wrapper, to
+`IPoint3DParamProjection.SetGuidingObject(...)`.
 
 Known examples:
-- `CASE-001`: UI could use a 2D sketch point as spiral base, but API required a
-  3D point created through `model_container.Points.Add()`.
+- `diaphragm_spring` cut anchors: two explicit points in a `YOZ` reference
+  sketch drive two `ParameterType=7` projection points directly. No source
+  `Point3D` features are created. Radius variables rebuild the sketch vertices
+  and both projection points through the same references.
 
 ---
 
@@ -1221,6 +1270,103 @@ if not assigned:
 
 Known examples:
 - `kompas_bridge.py` evolution/extrusion assignment paths.
+
+---
+
+### OP-002: Use One Operation Sketch With One Operational Contour
+
+Applies when:
+- generating sketches for extrude, revolve, cut, or evolution operations;
+- the sketch contains helper geometry, multiple contours, or multiple axis-like
+  lines;
+- a human could select the intended region manually, but automation must assign
+  the sketch/profile programmatically.
+
+Symptom:
+- KOMPAS accepts the sketch and constraints, but the 3D operation returns false
+  or selects the wrong contour/region.
+- A revolve sketch looks correct, but the operation fails because helper lines
+  are typed as axes or intersect/confuse the intended profile region.
+- The model works manually only after selecting a specific region, face, or
+  contour in the UI.
+
+Cause:
+- KOMPAS can handle complex human-authored sketches with several contours and
+  axes because a user can choose the exact region interactively. Programmatic
+  sketch assignment is much more fragile: the operation may interpret all
+  axis-type lines, construction lines, and all contours in the sketch, not the
+  intended subset.
+
+Rule:
+- Prefer one sketch per operation.
+- Prefer one operational contour per operation sketch.
+- For revolve operations, keep exactly one axis-type line in the sketch: the
+  actual axis of revolution.
+- Helper, anchor, gauge, and construction lines must use construction/helper
+  line styles, not axis styles.
+- If `operation.Profile = sketch` is used and helper geometry intersects or lies
+  inside the candidate region, prefer removing the helper geometry for the
+  operation sketch or assigning an explicit contour/profile object.
+- Parameterize fragile revolve sketches progressively: variables and driving
+  dimensions can be safe while geometric constraints still break automatic
+  region recognition. Enable geometric constraints only after a live probe, or
+  after the operation receives an explicit profile/contour object.
+- Treat "dimension applied" as insufficient for operation sketches. A driving
+  dimension can be syntactically created and still move unconstrained endpoints
+  into a broken contour. Run a primary-profile preflight after parameterization
+  and before `Rotated.Update`.
+- If a part needs multiple operations or regions, split them into separate
+  sketches/operations instead of relying on UI-style contour selection.
+
+Implementation:
+```python
+# Good: one axis line and helper lines with construction style.
+axis_line_style = LINE_STYLES["axis"]          # true revolve axis only
+helper_line_style = LINE_STYLES["construction"]
+
+draw_axis(axis_start, axis_end, style=axis_line_style)
+draw_profile(profile_points, style=LINE_STYLES["solid"])
+draw_helper(anchor_start, anchor_end, style=helper_line_style)
+
+operation.Profile = sketch
+```
+
+Verification:
+- Inspect generated sketches in KOMPAS: a revolve sketch should show only one
+  axis-type line.
+- Run the live operation directly against the constrained sketch. Avoid a clean
+  profile-copy fallback unless the API truly cannot consume the operational
+  sketch.
+- Read back the result and confirm operation success, nonzero body mass, and the
+  expected contour behavior.
+
+Known examples:
+- `disc_spring`: the constrained profile was fully defined, but the revolve
+  operation only accepted it directly after helper anchor lines were changed
+  from axis style to construction style.
+- `diaphragm_spring`: the geometry-only profile rotated after arc directions
+  were corrected, but the constrained sketch failed again when helper lines were
+  added to the same sketch and `operation.Profile = sketch` relied on automatic
+  region selection.
+- `diaphragm_spring`: variables plus 5 driving dimensions (thickness, lip
+  length, inner/outer bend radii) rotated cleanly; adding the current geometric
+  constraint set made the same operation fail, so constraints remain staged for
+  a later explicit-profile pass.
+- `diaphragm_spring`: adding axis-distance/angle dimensions for outer/inner/body
+  radii and cone/lip angles applied successfully, but later readback showed the
+  profile had 4 gaps and 2 sampled self-intersections. The opt-in
+  `profile_preflight` guard now catches that before rotation.
+- `diaphragm_spring`: full parameterization required the actual current contour
+  order (`tip_inner -> outer_bend -> main_inner -> outer_normal -> main_outer ->
+  inner_bend -> tip_outer -> tip_end`) and KOMPAS arc constraint point indices
+  `1=start`, `2=end`. Bend arcs are solver-stable when constrained through their
+  common center helper and endpoints/tangencies; API-created radial dimensions on
+  those arcs were not reliable as persisted solver dimensions.
+
+Related:
+- `OP-001`
+- `SKETCH-004`
+- `SKETCH-005`
 
 ---
 
@@ -1395,8 +1541,9 @@ Verification:
 Known examples:
 - `CASE-001`: center of bent spiral stayed at `15.0` until the offset was bound
   through operation variable expression `(D1 - WD1) / 2`.
-- `sample/live_self_wrapping_phase2_sketch.py`: v60 native curve fillets keep
-  operation variable `Радиус = SFR1` after save and reopen.
+- local v60 live evidence confirmed that native curve fillets keep operation
+  variable `Радиус = SFR1` after save and reopen; the one-off probe is retained
+  only in the ignored experiment quarantine.
 
 ### FILLET-001: Use Native Curve-Fillet Result Edges In Final Contours
 
@@ -1575,7 +1722,7 @@ Rules used:
 - `CS-004`: unstable sketch origin on angled plane.
 - `SKETCH-001`: fully constrained sketch.
 - `DIR-001`: direction verification.
-- `EDGE-001`: 2D sketch point cannot be used directly as 3D reference.
+- `EDGE-001`: resolve a sketch point through `IFeature7.ModelObjects(8)` before using it as a 3D reference.
 - `EDGE-002`: mixed sketch/3D edge composite curve.
 - `OP-001`: sketch assignment fallback.
 - `SPIRAL-001`: initial angle is not positioning orientation.

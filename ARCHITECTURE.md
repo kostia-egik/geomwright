@@ -1,213 +1,197 @@
 # Архитектура kompas-mcp
 
-> TODO: после редактирования этого документа — запусти `python -m pytest tests/smoke/test_readme_links.py` чтобы проверить ссылки.
+Этот документ определяет владельцев runtime-логики и границу между рабочим MCP,
+CAD-side bridge, параметрическими модулями и исследовательскими прототипами.
 
-## Зачем этот документ
+## Runtime-топология
 
-kompas-mcp решает задачу: как нейросеть (LLM) может надёжно управлять
-КОМПАС-3D — десятками инструментов, сотнями параметров, тысячью
-пространственных взаимодействий.
-
-CAD — худшая среда для LLM: состояние меняется скрыто, операции имеют
-побочные эффекты, ошибка на 3-м шаге убивает 10 предыдущих, а одну
-и ту же геометрию можно построить 5 разными способами.
-
-Этот документ описывает архитектуру, которая делает CAD-управление
-предсказуемым для нейросети.
-
----
-
-## Четыре слоя сложности операций
-
-В основе архитектуры — вертикальное разделение по **сложности операции**.
-
-### Layer 1: Атомарные инструменты
-
-**Что это:** прямой вызов COM-метода КОМПАС с контролем до/после.
-
-- Один вызов — одно атомарное действие
-- Контракт: `входные данные → вызов COM → замер состояния → ответ`
-- Никакой логики, никаких цепочек
-- Инструменты категорированы по стабильности (`stable`, `experimental`, `research`)
-
-**Примеры:** создать точку, создать отрезок, наложить ограничение, прочитать дерево модели.
-
-**Где лежит:** `native_tools.py`, `sketch_tools.py`, `workflow_tools.py`, `bridge.py`.
-
-**Проблема текущей реализации:** каждый файл определяет свои модели данных.
-Единый `EntitySpec` не пронизывает все инструменты — это делает Layer 1
-менее предсказуемым для композиции.
-
-### Layer 2: Правила взаимодействий
-
-**Что это:** верификация, коррекция и контекстно-зависимый выбор операций.
-
-- Валидация геометрии: замкнутость контура, ориентация, топология
-- Преобразование координат между системами
-- Правила: "если эскиз незамкнут → нельзя выдавить", "если размер
-  переопределён → конфликт"
-- Контекстная маршрутизация: какой инструмент применить в данной ситуации
-
-**Реализовано:** `sketch_runtime/` — 15 модулей проверки эскизов
-(топология, фреймы, ограничения, касательность, ориентация, замеры).
-
-**Не реализовано:** Rule Engine — движок, который читает правила из
-`rules/default.json` и принимает решения на основе текущего контекста.
-
-### Layer 3: Цепочки операций (Workflow)
-
-**Что это:** последовательности атомарных шагов, собранные в осмысленный модуль.
-
-- Параметризованные заготовки: "построить ступенчатый вал", "нарезать резьбу"
-- Линейный или графовый порядок исполнения
-- Промежуточная проверка после каждого шага
-- Откат при ошибке без потери предыдущих шагов
-
-**Реализовано:** `workflow.py` (линейный раннер), `composition.py` (зачатки
-`ChangeTracking` и `BasicToolComposer`), `native_modules.py` (анализ модулей
-КОМПАС — read-only, без генерации цепочек).
-
-**Не реализовано:** OperationGraph (DAG операций), компенсация ошибок,
-параллельное выполнение независимых веток.
-
-### Layer 4: Конструирование из полуфабрикатов
-
-**Что это:** сборка готовых моделей из параметризованных полуфабрикатов.
-
-- Библиотека полуфабрикатов: вал, отверстие, фаска, резьба, пружина
-- Композиция через точки входа/выхода (как интерфейсы в CAD)
-- Полная документация (спецификация, чертёж)
-
-**Статус:** концептуально не начат.
-
----
-
-## Три сквозные оси
-
-Слои описывают только **операции**. Но CAD-модель — это не операции,
-а данные и состояния. Поэтому в архитектуру заложены три поперечные оси:
-
-### Ось данных (сквозная каноническая модель)
-
-Единая система типов, которая пронизывает все слои:
-
-```
-Point → Curve → Sketch → Part → Assembly
+```text
+MCP client
+    │ JSON/MCP
+    ▼
+src/kompas_mcp/server.py
+    │ tool registration
+    ▼
+KompasAdapter + normalizers/workflows
+    │ JSON request/result files
+    ▼
+BridgeRunner
+    │ launches the KOMPAS-bundled Python runtime
+    ▼
+bridge/kompas_bridge.py
+    │ API7/API5 COM
+    ▼
+KOMPAS-3D document/model
 ```
 
-Каждая сущность имеет каноническое представление (EntitySpec),
-которое используется и на Layer 1 (вход инструмента),
-и на Layer 2 (проверка), и на Layer 3 (промежуточный результат).
+MCP host работает на Python, указанном в `pyproject.toml`. Bridge запускается
+отдельным Python runtime из установки КОМПАС-3D v23 и поэтому не должен получать
+синтаксис или зависимости, недоступные этому runtime.
 
-**Текущее состояние:** типы раздроблены. В `sketch_runtime/entities.py`
-есть хорошие `PointSpec`, `PrimitiveSpec`, `SketchModel`, но они не
-используются в `native_tools.py` и `bridge.py`.
+Канонический исходник bridge находится в `bridge/kompas_bridge.py`. Его packaged
+копия — `src/kompas_mcp/assets/bridge/kompas_bridge.py`. Эти файлы обязаны быть
+byte-identical.
 
-### Ось состояний (сессионность)
+## Четыре слоя
 
-LLM не может держать состояние между вызовами. MCP stateless. Но CAD
-stateful. Решение — сессионная обвязка поверх stateless-инструментов:
+### Layer 1 — атомарные инструменты и readback
 
+Один вызов выполняет одну ограниченную операцию или чтение состояния.
+
+Владельцы:
+
+- `*_tools.py` — MCP schemas и регистрация инструментов;
+- `adapter.py` — host-side orchestration и нормализация ответа;
+- `bridge_runner.py` — изолированный запуск bridge;
+- `bridge/kompas_bridge.py` — COM-вызов и непосредственный CAD readback.
+
+Примеры: открыть документ, получить список features, создать sketch entity,
+прочитать ограничения, сохранить модель.
+
+Layer 1 не выбирает семейство детали и не строит длинную последовательность.
+
+### Layer 2 — детерминированная геометрия и проверки
+
+Этот слой переводит пользовательские размеры в однозначную геометрию и
+проверяет локальные инварианты до COM-вызова.
+
+Владельцы:
+
+- `sketch_runtime/` — сущности, frame mapping, topology, constraints и
+  diagnostics;
+- `sketch.py` — параметрические sketch plans и variable/dimension plans;
+- `connect_curve.py` и `trimmed_curve.py` — правила составных кривых;
+- `parametric.py` и `parametric_extension_legacy.py` — schema normalization,
+  preview и геометрические ограничения;
+- `rules/default.json` — текущие статические правила для существующих batch и
+  quality workflows, но не универсальный Rule Engine.
+
+Layer 2 не владеет документом КОМПАС и не должен сам выполнять COM.
+
+### Layer 3 — управляемые workflows
+
+Layer 3 собирает атомарные операции в последовательность с явными references,
+preflight, snapshot/readback и fail-fast поведением.
+
+Владельцы:
+
+- `workflow.py`, `workflow_tools.py`, `composition.py`;
+- managed parametric workflow в `parametric.py` и bridge executor;
+- `spring_tools.py`, `spring_catalog.py`, `size_catalog.py`;
+- scenario-specific orchestration в adapter/bridge.
+
+Базовый цикл:
+
+```text
+Plan → Execute → Verify → Correct
 ```
-Session → Transaction → Checkpoint → Commit
-```
 
-- `begin()` — начать сессию, зафиксировать начальное состояние
-- `checkpoint()` — сохранить точку восстановления
-- `rollback()` — откатиться к последней удачной точке
-- `commit()` — применить изменения
+`Correct` означает ограниченную детерминированную коррекцию либо остановку с
+диагностикой. Универсального OperationGraph, транзакционного rollback между MCP
+вызовами и автоматической компенсации сейчас нет.
 
-**Текущее состояние:** `changesets.py` — зачаток трекинга изменений,
-но без транзакционной обвязки.
+### Layer 4 — законченные семейства деталей
 
-### Ось верификации (Plan → Execute → Verify → Correct)
+Layer 4 задаёт публичный контракт целого CAD-модуля: параметры, дерево операций,
+формулы, readback и канонические варианты.
 
-Каждая операция проходит четырёхфазный цикл:
+Текущие семейства:
 
-1. **Plan** — спланировать шаги на основе правил Layer 2
-2. **Execute** — выполнить через Layer 1
-3. **Verify** — проверить результат (snapshot, preflight report)
-4. **Correct** — если verify упал, применить коррекцию или откатиться
+- ступенчатые/конические и thread-related parametric parts;
+- compression, conical, torsion и extension springs;
+- disc/Belleville springs;
+- diaphragm spring: flat, single-bend и S-bend, circle/oval relief, through-all
+  cuts и multi-source circular pattern.
 
-**Реализовано:** `sketch_runtime` (SketchPreflightPlan → SketchPreflightReport),
-но только для эскизов и не связано с общим циклом.
+Подробные контракты находятся в `docs/`; runtime tool catalog остаётся источником
+истины для фактически зарегистрированных MCP names.
 
----
+## Сквозные оси
 
-## Ключевые проектные решения
+### Данные
 
-### Bridge-изоляция COM
+Публичная граница использует JSON-совместимые dictionaries/lists/scalars.
+Внутренние dataclasses и typed specs допустимы внутри владельца слоя, но нельзя
+создавать второй публичный schema-contract для того же MCP tool.
 
-КОМПАС живёт в своём процессе со встроенным Python 2.7.
-kompas-mcp (внешний Python 3.x) общается с ним через `bridge/kompas_bridge.py` —
-скрипт, который загружается и исполняется внутри КОМПАС.
+Единый глобальный `EntitySpec` для всего проекта пока не является production
+контрактом. Экспериментальные реализации не должны оборачивать существующие tool
+responses или менять их shape без отдельной миграции.
 
-Внешняя сторона (`bridge.py`) посылает JSON-команды и получает JSON-ответы.
-Это единственный канал связи. Всё остальное — логика на внешней стороне.
+### Состояние документа
 
-### Snapshot-верификация записи
+Документ адресуется стабильным `document_id`; операции записи сопровождаются
+snapshot/readback там, где это поддержано. KOMPAS остаётся stateful, но MCP не
+предоставляет универсальную multi-call transaction/session abstraction.
 
-Любая операция записи (create, modify, delete) измеряет состояние ДО и ПОСЛЕ
-и сравнивает. Если ожидаемое изменение не совпало с фактическим — ошибка.
+Правила безопасности:
 
-Это защита от:
-- неявных изменений со стороны КОМПАС (авто-ограничения, авто-замыкания)
-- побочных эффектов соседних операций
-- багов самого bridge
+- preflight перед записью;
+- явный target document/feature/sketch;
+- fail-fast при невалидном COM-результате;
+- сохранение и reopen-readback для законченного workflow;
+- отсутствие скрытого fallback на другой документ или entity.
 
-### Композируемые проверки (Preflight)
+### Верификация
 
-`sketch_runtime/` реализует паттерн цепочки проверок:
-каждый валидатор — независимый модуль, они собираются в цепочку
-по необходимости. Результат — отчёт с диагностиками (severity, код, сообщение).
+Уровень проверки выбирается по риску:
 
-Этот же паттерн планируется для всех Layer 2 правил.
+- нормализованный preview и инварианты Layer 2;
+- operation/model-object readback;
+- snapshot delta;
+- body/topology/formula inspection;
+- reopen-readback сохранённой модели;
+- визуальная проверка только там, где B-Rep и COM readback не выражают нужный
+  критерий.
 
----
+## Production boundary
+
+Production surface состоит только из модулей, импортируемых зарегистрированным
+MCP server и описанных канонической документацией.
+
+Незаконченные OperationGraph, universal rule engine, template library, session
+tracking и spring-readback prototypes помещаются в ignored-зону
+`experiments/spikes/`. Они не являются частью package, tool catalog или roadmap,
+пока не выполнены одновременно:
+
+- один явный owner layer;
+- package-data contract;
+- корректная propagation ошибок и зависимостей;
+- schemas, выведенные из реальных MCP tools;
+- Verify/Correct semantics;
+- документация публичной миграции.
+
+Исторические task briefs также не являются roadmap.
 
 ## Текущее состояние
 
-| Компонент | Слой | Статус | Зависит от |
-|---|---|---|---|
-| bridge.py / kompas_bridge.py | L1 | стабильно | живой КОМПАС |
-| native_tools.py | L1 | экспериментально | bridge |
-| sketch_tools.py | L1 | стабильно | bridge, sketch_runtime |
-| sketch_runtime/ | L2 | стабильно | нет (чистый Python) |
-| rules/default.json | L2 | каркас без движка | нет |
-| workflow.py | L3 | черновик | bridge |
-| composition.py | L3 | черновик | bridge, workflow |
-| native_modules.py | L3 | read-only анализ | установка КОМПАС |
-| sketch.py | L1–L2 | перегружен | bridge, sketch_runtime |
-| sketch-derived 3D references | L1–L3 | live-verified: sketch point → `IFeature7.ModelObjects(8)` vertex → projected point; association readback обязателен | bridge, API7 |
-| diaphragm cut profile workflow | L2–L4 | live-verified: no/single/S-bend, main-cone face selection, DIA_IR1 cut start, circle/oval relief, multi-source pattern, ordered variables, hidden auxiliaries, body-volume readback | parametric.py, bridge, API5/API7 |
+| Компонент | Слой | Статус |
+| --- | --- | --- |
+| session/document lifecycle | L1 | stable |
+| specifications, relinking, composition | L1–L3 | stable |
+| low-level sketch/feature runtime | L1–L2 | experimental |
+| `sketch_runtime/` | L2 | current deterministic core |
+| parametric part workflows | L2–L4 | experimental, family-specific live evidence |
+| managed spring families | L2–L4 | implemented, see family contracts |
+| diaphragm module | L2–L4 | complete and live-verified |
+| native module inspection/launch | L1–L3 | research, explicit opt-in for launch |
+| universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |
 
----
+## Документационная иерархия
 
-## Почему не монолит
-
-Попытка описать CAD одной нейросетевой командой ("построй деталь")
-обречена: LLM либо забудет половину параметров, либо ошибётся
-в последовательности.
-
-Разделение на слои решает эту проблему через **удержание контекста**:
-
-- Layer 1 удерживает только один COM-вызов (легко)
-- Layer 2 удерживает одно правило (легко)
-- Layer 3 удерживает последовательность из 3–10 шагов (умеренно)
-- Layer 4 удерживает схему сборки из модулей (сложно, но структурно)
-
-LLM никогда не прыгает сразу на Layer 4. Каждый уровень —
-это предсказуемый, проверяемый шаг вниз по сложности.
-
----
+1. `README.md` — установка, runtime status и первый workflow;
+2. этот файл — ownership и production boundaries;
+3. `CAD_PATTERNS.md` — переносимые CAD-инварианты;
+4. `docs/README.md` — индекс тематических контрактов;
+5. `docs/archive/` — только исторические freezes, backlogs и evidence.
 
 ## Связанные документы
 
-- [README.md](README.md) — краткое введение, установка, запуск
-- [docs/low-level-runtime.md](docs/low-level-runtime.md) — контракт runtime/readback
-- [docs/write_operations.md](docs/write_operations.md) — контракт write-операций
-- [docs/sketch-runtime-strategy.md](docs/sketch-runtime-strategy.md) — стратегия runtime-проверок эскизов
-- [docs/parametric-workflows.md](docs/parametric-workflows.md) — параметрические сценарии
-- [docs/curve-trimming-contract.md](docs/curve-trimming-contract.md) — контракт обрезки кривых
-- [docs/native-spring-strategy.md](docs/native-spring-strategy.md) — стратегия native-модулей
-- [docs/archive/](docs/archive/) — экспериментальные контракты и бэклоги (spring-специфичные)
+- [Documentation index](docs/README.md)
+- [Reusable CAD patterns](CAD_PATTERNS.md)
+- [Low-level runtime](docs/low-level-runtime.md)
+- [Write operations](docs/write_operations.md)
+- [Sketch authoring agent protocol](docs/sketch-authoring-agent-protocol.md)
+- [Parametric workflows](docs/parametric-workflows.md)
+- [Spring workflows](docs/spring-workflows.md)
+- [Diaphragm spring](docs/diaphragm-spring.md)

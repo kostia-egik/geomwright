@@ -27,6 +27,9 @@ Use these tools for read-only diagnostics:
 - `probe_document_readback`: builds a COM readback manifest for an active
   document or a read-only opened file. When `model_path` is used, the file is
   closed by default after probing.
+- `probe_model_formulas`: walks live sketches/features for formula-bearing
+  dimensions, constraints, and feature variables, and can optionally merge that
+  with offline `.m3d` `Contents` extraction in one bounded report.
 - `probe_model_object_collections`: probes known model-object surfaces. It keeps
   the original model-container collection summary for compatibility, and also
   reports bounded `surfaces` for top part, model container, and auxiliary
@@ -198,13 +201,10 @@ The sample runs this sequence and writes artifacts under `sample/generated/`:
 Only after this read-only audit passes should snapshot delta verification be
 used around write operations.
 
-## Test Commands
+## Maintenance Checks
 
-From a source checkout without editable install:
-
-```powershell
-$env:PYTHONPATH='src'
-python -m unittest discover -s tests
-```
-
-After `python -m pip install -e .`, `PYTHONPATH` is not required.
+Keep the adapter/bridge request and response keys aligned, compile the modified
+host modules with the project Python, and compile both bridge copies with the
+KOMPAS-bundled Python. The two bridge files must remain byte-identical. For CAD
+behavior, use the read-only audit above and a saved-document reopen check rather
+than treating a synthetic response as live evidence.
