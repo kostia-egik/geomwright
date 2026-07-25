@@ -60,8 +60,18 @@ SUPPORTED_PART_SCENARIOS = (
     "compression_spring",
     "extension_spring",
     "torsion_spring",
+    "disc_spring",
+    "diaphragm_spring",
     "point",
+    "projection_point",
+    "projection_anchor_sketch",
+    "diaphragm_cut_profile_sketch",
+    "diaphragm_terminal_relief_sketch",
+    "cut_extrusion",
+    "circular_pattern",
+    "cut_reference_points_sketch",
     "lcs",
+    "tangent_plane",
     "workflow",
 )
 
@@ -74,11 +84,43 @@ POINT_SCENARIO_ALIASES = {
 }
 
 
+PROJECTION_POINT_SCENARIO_ALIASES = {
+    "projection_point": "projection_point",
+    "projected_point": "projection_point",
+    "point_projection": "projection_point",
+    "point3d_projection": "projection_point",
+}
+
+
+PROJECTION_ANCHOR_SKETCH_SCENARIO_ALIASES = {
+    "projection_anchor_sketch": "projection_anchor_sketch",
+    "anchor_projection_sketch": "projection_anchor_sketch",
+    "projection_sketch": "projection_anchor_sketch",
+    "projected_anchor_sketch": "projection_anchor_sketch",
+}
+
+
+CUT_REFERENCE_POINTS_SKETCH_SCENARIO_ALIASES = {
+    "cut_reference_points_sketch": "cut_reference_points_sketch",
+    "cut_reference_points": "cut_reference_points_sketch",
+    "radial_reference_points_sketch": "cut_reference_points_sketch",
+    "reference_cut_points_sketch": "cut_reference_points_sketch",
+}
+
+
 LCS_SCENARIO_ALIASES = {
     "lcs": "lcs",
     "csys": "lcs",
     "local_coordinate_system": "lcs",
     "coordinate_system": "lcs",
+}
+
+
+TANGENT_PLANE_SCENARIO_ALIASES = {
+    "tangent_plane": "tangent_plane",
+    "tangent_to_face_plane": "tangent_plane",
+    "plane_tangent_to_face": "tangent_plane",
+    "kasatelnaya_ploskost": "tangent_plane",
 }
 
 
@@ -215,6 +257,22 @@ COMPRESSION_SPRING_SCENARIO_ALIASES = {
     "spring": "compression_spring",
     "coil_spring": "compression_spring",
     "cylindrical_spring": "compression_spring",
+}
+
+
+DISC_SPRING_SCENARIO_ALIASES = {
+    "disc_spring": "disc_spring",
+    "disc": "disc_spring",
+    "belleville": "disc_spring",
+    "belleville_spring": "disc_spring",
+}
+
+
+DIAPHRAGM_SPRING_SCENARIO_ALIASES = {
+    "diaphragm_spring": "diaphragm_spring",
+    "diaphragm": "diaphragm_spring",
+    "clutch_diaphragm_spring": "diaphragm_spring",
+    "clutch_spring": "diaphragm_spring",
 }
 
 
@@ -4246,6 +4304,10 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
         return preview_bolt_circle_holes(params)
     if normalized_scenario == "compression_spring":
         return _attach_catalog_provenance(_preview_part_scenario_legacy("compression_spring", params, scenario), params)
+    if normalized_scenario == "disc_spring":
+        return _preview_part_scenario_legacy("disc_spring", params, scenario)
+    if normalized_scenario == "diaphragm_spring":
+        return _preview_part_scenario_legacy("diaphragm_spring", params, scenario)
     if normalized_scenario == "extension_spring":
         return _attach_catalog_provenance(preview_extension_spring(params), params)
     if normalized_scenario == "torsion_spring":
@@ -4804,9 +4866,15 @@ def _normalize_scenario(scenario: str) -> str:
     aliases.update(FACE_RING_GROOVE_SCENARIO_ALIASES)
     aliases.update(BOLT_CIRCLE_HOLES_SCENARIO_ALIASES)
     aliases.update(COMPRESSION_SPRING_SCENARIO_ALIASES)
+    aliases.update(DISC_SPRING_SCENARIO_ALIASES)
+    aliases.update(DIAPHRAGM_SPRING_SCENARIO_ALIASES)
     aliases.update({"extension_spring": "extension_spring", "tension_spring": "extension_spring"})
     aliases.update(POINT_SCENARIO_ALIASES)
+    aliases.update(PROJECTION_POINT_SCENARIO_ALIASES)
+    aliases.update(PROJECTION_ANCHOR_SKETCH_SCENARIO_ALIASES)
+    aliases.update(CUT_REFERENCE_POINTS_SKETCH_SCENARIO_ALIASES)
     aliases.update(LCS_SCENARIO_ALIASES)
+    aliases.update(TANGENT_PLANE_SCENARIO_ALIASES)
     aliases.update(WORKFLOW_SCENARIO_ALIASES)
     return aliases.get(value, value)
 
@@ -5018,10 +5086,495 @@ def _normalize_workflow_operation(
                 )
     if scenario == "point":
         preview = preview_point(params)
+    elif scenario == "projection_point":
+        surface_reference = params.get("surface") or params.get("plane") or params.get("target")
+        surface_resolved = _resolve_workflow_output_reference_any(
+            context,
+            surface_reference,
+            default_output=str(params.get("surface_output") or params.get("plane_output") or "plane"),
+        )
+        if surface_resolved is None or str((surface_resolved.get("output") or {}).get("type") or "") not in {"plane", "face"}:
+            _raise_invalid_workflow_output_reference(surface_reference, path="operations[%s].params.surface" % (index - 1))
+        surface_ref = _build_workflow_output_token(surface_resolved["operation_id"], surface_resolved["output_key"])
+        source_reference = params.get("source") or params.get("source_point") or params.get("association_vertex")
+        source_ref = None
+        if source_reference not in (None, "", "origin", "global_origin"):
+            source_resolved = _resolve_workflow_output_reference_any(context, source_reference, default_output=str(params.get("source_output") or "point"))
+            if source_resolved is None or str((source_resolved.get("output") or {}).get("type") or "") != "point":
+                _raise_invalid_workflow_output_reference(source_reference, path="operations[%s].params.source" % (index - 1))
+            source_ref = _build_workflow_output_token(source_resolved["operation_id"], source_resolved["output_key"])
+            depends_on.append(source_resolved["operation_id"])
+        params["surface"] = {"output_ref": surface_ref}
+        if source_ref is not None:
+            params["source"] = {"output_ref": source_ref}
+        params["axis"] = str(params.get("axis") or params.get("guide_axis") or "X")
+        axis_key = params["axis"].strip().upper().replace("GLOBAL_", "").replace("AXIS", "").replace("O", "")
+        if axis_key not in {"", "X", "Y", "Z"}:
+            axis_resolved = _resolve_workflow_output_reference_any(context, params["axis"], default_output=str(params.get("axis_output") or "axis"))
+            if axis_resolved is None or str((axis_resolved.get("output") or {}).get("type") or "") != "axis":
+                _raise_invalid_workflow_output_reference(params["axis"], path="operations[%s].params.axis" % (index - 1))
+            params["axis"] = _build_workflow_output_token(axis_resolved["operation_id"], axis_resolved["output_key"])
+            bindings["guide_operation"] = axis_resolved["operation_id"]
+            bindings["guide_output"] = axis_resolved["output_key"]
+            depends_on.append(axis_resolved["operation_id"])
+        bindings["surface_operation"] = surface_resolved["operation_id"]
+        bindings["surface_output"] = surface_resolved["output_key"]
+        depends_on.append(surface_resolved["operation_id"])
+        preview = {
+            "scenario": "projection_point",
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "surface_reference": surface_ref,
+                "source_reference": source_ref or "origin",
+                "axis": params["axis"],
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "point": {"type": "point", "description": "3D point projected from source to surface along guiding axis"},
+                }
+            },
+        }
+    elif scenario == "projection_anchor_sketch":
+        plane_reference = params.get("plane") or params.get("sketch_plane") or params.get("surface")
+        plane_resolved = _resolve_workflow_output_reference_any(
+            context,
+            plane_reference,
+            default_output=str(params.get("plane_output") or params.get("surface_output") or "plane"),
+        )
+        if plane_resolved is None or str((plane_resolved.get("output") or {}).get("type") or "") != "plane":
+            _raise_invalid_workflow_output_reference(plane_reference, path="operations[%s].params.plane" % (index - 1))
+        point_reference = params.get("point") or params.get("anchor_point") or params.get("projection_point")
+        point_resolved = _resolve_workflow_output_reference_any(
+            context,
+            point_reference,
+            default_output=str(params.get("point_output") or "point"),
+        )
+        if point_resolved is None or str((point_resolved.get("output") or {}).get("type") or "") != "point":
+            _raise_invalid_workflow_output_reference(point_reference, path="operations[%s].params.point" % (index - 1))
+        end_point_reference = params.get("end_point") or params.get("point2") or params.get("second_point")
+        end_point_ref = None
+        end_point_resolved = None
+        if end_point_reference is not None:
+            end_point_resolved = _resolve_workflow_output_reference_any(
+                context,
+                end_point_reference,
+                default_output=str(params.get("end_point_output") or params.get("point2_output") or "point"),
+            )
+            if end_point_resolved is None or str((end_point_resolved.get("output") or {}).get("type") or "") != "point":
+                _raise_invalid_workflow_output_reference(end_point_reference, path="operations[%s].params.end_point" % (index - 1))
+        plane_ref = _build_workflow_output_token(plane_resolved["operation_id"], plane_resolved["output_key"])
+        point_ref = _build_workflow_output_token(point_resolved["operation_id"], point_resolved["output_key"])
+        if end_point_resolved is not None:
+            end_point_ref = _build_workflow_output_token(end_point_resolved["operation_id"], end_point_resolved["output_key"])
+        params["plane"] = {"output_ref": plane_ref}
+        params["point"] = {"output_ref": point_ref}
+        if end_point_ref is not None:
+            params["end_point"] = {"output_ref": end_point_ref}
+        axis_value = params.get("axis") or params.get("guide_axis")
+        if axis_value not in (None, ""):
+            params["axis"] = str(axis_value)
+            axis_key = params["axis"].strip().upper().replace("GLOBAL_", "").replace("AXIS", "").replace("O", "")
+            if axis_key not in {"", "X", "Y", "Z"}:
+                axis_resolved = _resolve_workflow_output_reference_any(context, params["axis"], default_output=str(params.get("axis_output") or "axis"))
+                if axis_resolved is None or str((axis_resolved.get("output") or {}).get("type") or "") != "axis":
+                    _raise_invalid_workflow_output_reference(params["axis"], path="operations[%s].params.axis" % (index - 1))
+                params["axis"] = _build_workflow_output_token(axis_resolved["operation_id"], axis_resolved["output_key"])
+                bindings["axis_operation"] = axis_resolved["operation_id"]
+                bindings["axis_output"] = axis_resolved["output_key"]
+                depends_on.append(axis_resolved["operation_id"])
+        bindings["plane_operation"] = plane_resolved["operation_id"]
+        bindings["plane_output"] = plane_resolved["output_key"]
+        bindings["point_operation"] = point_resolved["operation_id"]
+        bindings["point_output"] = point_resolved["output_key"]
+        if end_point_resolved is not None:
+            bindings["end_point_operation"] = end_point_resolved["operation_id"]
+            bindings["end_point_output"] = end_point_resolved["output_key"]
+            depends_on.append(end_point_resolved["operation_id"])
+        depends_on.extend([plane_resolved["operation_id"], point_resolved["operation_id"]])
+        preview = {
+            "scenario": "projection_anchor_sketch",
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "plane_reference": plane_ref,
+                "point_reference": point_ref,
+                "end_point_reference": end_point_ref,
+                "axis": params.get("axis"),
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "sketch": {"type": "sketch", "description": "Sketch on plane with projected point and axis anchors"},
+                }
+            },
+        }
+    elif scenario == "diaphragm_cut_profile_sketch":
+        plane_reference = params.get("plane") or params.get("sketch_plane")
+        start_reference = params.get("start_point") or params.get("point")
+        end_reference = params.get("end_point") or params.get("point2")
+        plane_resolved = _resolve_workflow_output_reference_any(context, plane_reference, default_output="plane")
+        start_resolved = _resolve_workflow_output_reference_any(context, start_reference, default_output="point")
+        end_resolved = _resolve_workflow_output_reference_any(context, end_reference, default_output="point")
+        if plane_resolved is None or str((plane_resolved.get("output") or {}).get("type") or "") != "plane":
+            _raise_invalid_workflow_output_reference(plane_reference, path="operations[%s].params.plane" % (index - 1))
+        for label, reference, resolved in (
+            ("start_point", start_reference, start_resolved),
+            ("end_point", end_reference, end_resolved),
+        ):
+            if resolved is None or str((resolved.get("output") or {}).get("type") or "") != "point":
+                _raise_invalid_workflow_output_reference(reference, path="operations[%s].params.%s" % (index - 1, label))
+        plane_ref = _build_workflow_output_token(plane_resolved["operation_id"], plane_resolved["output_key"])
+        start_ref = _build_workflow_output_token(start_resolved["operation_id"], start_resolved["output_key"])
+        end_ref = _build_workflow_output_token(end_resolved["operation_id"], end_resolved["output_key"])
+        params["plane"] = {"output_ref": plane_ref}
+        params["start_point"] = {"output_ref": start_ref}
+        params["end_point"] = {"output_ref": end_ref}
+        start_width_value = params.get("start_width")
+        if start_width_value is None:
+            start_width_value = params.get("slot_start_width")
+        start_width = float(start_width_value or 0.0)
+        end_width_value = params.get("end_width")
+        if end_width_value is None:
+            end_width_value = params.get("slot_end_width")
+        if end_width_value is None:
+            end_width_value = start_width
+        end_width = float(end_width_value or 0.0)
+        fillet_radius_value = params.get("fillet_radius")
+        if fillet_radius_value is None:
+            fillet_radius_value = params.get("end_fillet_radius")
+        fillet_radius = float(fillet_radius_value or 0.0)
+        if start_width <= 0.0 or end_width <= 0.0 or fillet_radius <= 0.0:
+            raise ValueError("diaphragm_cut_profile_sketch requires positive start_width, end_width, and fillet_radius")
+        if fillet_radius * 2.0 >= end_width:
+            raise ValueError("diaphragm_cut_profile_sketch requires 2 * fillet_radius < end_width")
+        terminal_setback = float(params.get("terminal_setback") or params.get("relief_radius") or 0.0)
+        if terminal_setback < 0.0:
+            raise ValueError("diaphragm_cut_profile_sketch terminal_setback must be >= 0")
+        if terminal_setback > 0.0 and terminal_setback <= (end_width / 2.0):
+            raise ValueError("diaphragm_cut_profile_sketch terminal_setback must exceed end_width / 2")
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        params["start_width"] = start_width
+        params["end_width"] = end_width
+        params["fillet_radius"] = fillet_radius
+        params["terminal_setback"] = terminal_setback
+        params["parameter_prefix"] = parameter_prefix
+        params["start_width_variable"] = str(params.get("start_width_variable") or f"{parameter_prefix}_SLOT_START_W1")
+        params["end_width_variable"] = str(params.get("end_width_variable") or f"{parameter_prefix}_SLOT_END_W1")
+        params["fillet_radius_variable"] = str(params.get("fillet_radius_variable") or f"{parameter_prefix}_SLOT_END_R1")
+        params["terminal_setback_variable"] = str(params.get("terminal_setback_variable") or f"{parameter_prefix}_RELIEF_R1")
+        params["parameterization_level"] = str(params.get("parameterization_level") or "constrained").strip().lower()
+        if params["parameterization_level"] not in {"geometry_only", "constrained"}:
+            raise ValueError("diaphragm_cut_profile_sketch parameterization_level must be geometry_only or constrained")
+        bindings["plane_operation"] = plane_resolved["operation_id"]
+        bindings["plane_output"] = plane_resolved["output_key"]
+        bindings["start_point_operation"] = start_resolved["operation_id"]
+        bindings["start_point_output"] = start_resolved["output_key"]
+        bindings["end_point_operation"] = end_resolved["operation_id"]
+        bindings["end_point_output"] = end_resolved["output_key"]
+        depends_on.extend([plane_resolved["operation_id"], start_resolved["operation_id"], end_resolved["operation_id"]])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "start_width": start_width,
+                "end_width": end_width,
+                "fillet_radius": fillet_radius,
+                "terminal_setback": terminal_setback,
+                "parameterization_level": params["parameterization_level"],
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "sketch": {"type": "sketch", "description": "Parameterized diaphragm cut profile sketch"},
+                }
+            },
+        }
+    elif scenario == "diaphragm_terminal_relief_sketch":
+        plane_reference = params.get("plane") or params.get("surface") or params.get("target")
+        start_point_reference = params.get("start_point") or params.get("start")
+        end_point_reference = params.get("end_point") or params.get("end")
+        plane_resolved = _resolve_workflow_output_reference_any(context, plane_reference, default_output="plane")
+        start_resolved = _resolve_workflow_output_reference_any(context, start_point_reference, default_output="point")
+        end_resolved = _resolve_workflow_output_reference_any(context, end_point_reference, default_output="point")
+        if plane_resolved is None or str((plane_resolved.get("output") or {}).get("type") or "") not in {"plane", "surface"}:
+            _raise_invalid_workflow_output_reference(plane_reference, path="operations[%s].params.plane" % (index - 1))
+        if start_resolved is None or str((start_resolved.get("output") or {}).get("type") or "") != "point":
+            _raise_invalid_workflow_output_reference(start_point_reference, path="operations[%s].params.start_point" % (index - 1))
+        if end_resolved is None or str((end_resolved.get("output") or {}).get("type") or "") != "point":
+            _raise_invalid_workflow_output_reference(end_point_reference, path="operations[%s].params.end_point" % (index - 1))
+        variant = str(params.get("variant") or "circle").strip().lower().replace("-", "_")
+        if variant not in {"circle", "oval"}:
+            raise ValueError("diaphragm_terminal_relief_sketch variant must be circle or oval")
+        radius = float(params.get("radius") or params.get("relief_radius") or 0.0)
+        if radius <= 0.0:
+            raise ValueError("diaphragm_terminal_relief_sketch radius must be > 0")
+        slot_end_width = float(params.get("slot_end_width") or 0.0)
+        if slot_end_width > 0.0 and radius <= (slot_end_width / 2.0):
+            raise ValueError("diaphragm_terminal_relief_sketch radius must exceed slot_end_width / 2")
+        straight_length = float(params.get("straight_length") or params.get("oval_straight_length") or 0.0)
+        if variant == "oval" and straight_length <= 0.0:
+            raise ValueError("diaphragm_terminal_relief_sketch oval straight_length must be > 0")
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        params["plane"] = plane_reference
+        params["start_point"] = start_point_reference
+        params["end_point"] = end_point_reference
+        params["variant"] = variant
+        params["radius"] = radius
+        params["slot_end_width"] = slot_end_width
+        params["straight_length"] = straight_length
+        params["parameter_prefix"] = parameter_prefix
+        params["radius_variable"] = str(params.get("radius_variable") or f"{parameter_prefix}_RELIEF_R1")
+        params["straight_length_variable"] = str(params.get("straight_length_variable") or f"{parameter_prefix}_RELIEF_L1")
+        params["parameterization_level"] = "constrained"
+        params["name"] = str(params.get("name") or "Terminal relief sketch")
+        bindings["plane_operation"] = plane_resolved["operation_id"]
+        bindings["plane_output"] = plane_resolved["output_key"]
+        bindings["start_operation"] = start_resolved["operation_id"]
+        bindings["start_output"] = start_resolved["output_key"]
+        bindings["end_operation"] = end_resolved["operation_id"]
+        bindings["end_output"] = end_resolved["output_key"]
+        depends_on.extend([plane_resolved["operation_id"], start_resolved["operation_id"], end_resolved["operation_id"]])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {"variant": variant, "radius": radius, "straight_length": straight_length, "creation_status": "available", "live_support": "available"},
+            "interface": {"outputs": {"sketch": {"type": "sketch", "description": "Terminal relief operation sketch"}}},
+        }
+    elif scenario == "cut_extrusion":
+        sketch_reference = params.get("sketch") or params.get("profile")
+        sketch_resolved = _resolve_workflow_output_reference_any(context, sketch_reference, default_output="sketch")
+        if sketch_resolved is None or str((sketch_resolved.get("output") or {}).get("type") or "") != "sketch":
+            _raise_invalid_workflow_output_reference(sketch_reference, path="operations[%s].params.sketch" % (index - 1))
+        direction = str(params.get("direction") or "both").strip().lower().replace("-", "_")
+        direction = {
+            "forward": "normal",
+            "backward": "reverse",
+            "bidirectional": "both",
+            "two_sided": "both",
+            "symmetric": "both",
+        }.get(direction, direction)
+        if direction not in {"normal", "reverse", "both"}:
+            raise ValueError("cut_extrusion direction must be normal, reverse, or both")
+        end_condition = str(params.get("end_condition") or "through_all").strip().lower().replace("-", "_")
+        end_condition = {"through": "through_all", "all": "through_all"}.get(end_condition, end_condition)
+        if end_condition != "through_all":
+            raise ValueError("cut_extrusion currently supports only end_condition=through_all")
+        params["sketch"] = sketch_reference
+        params["direction"] = direction
+        params["end_condition"] = end_condition
+        params["name"] = str(params.get("name") or "Cut extrusion")
+        params["require_fully_defined"] = True
+        bindings["sketch_operation"] = sketch_resolved["operation_id"]
+        bindings["sketch_output"] = sketch_resolved["output_key"]
+        depends_on.append(sketch_resolved["operation_id"])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "direction": direction,
+                "end_condition": end_condition,
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "feature": {"type": "feature", "description": "Cut extrusion feature"},
+                    "cut": {"type": "feature", "description": "Alias for the cut extrusion feature"},
+                }
+            },
+        }
+    elif scenario == "circular_pattern":
+        source_references = params.get("sources")
+        if source_references is None:
+            source_references = [params.get("source") or params.get("feature") or params.get("operation")]
+        if not isinstance(source_references, list) or not source_references:
+            raise ValueError("circular_pattern sources must be a non-empty list")
+        source_resolved_items = []
+        for source_index, source_reference in enumerate(source_references):
+            source_resolved = _resolve_workflow_output_reference_any(context, source_reference, default_output="feature")
+            if source_resolved is None or str((source_resolved.get("output") or {}).get("type") or "") != "feature":
+                _raise_invalid_workflow_output_reference(source_reference, path="operations[%s].params.sources[%s]" % (index - 1, source_index))
+            source_resolved_items.append(source_resolved)
+        axis_reference = params.get("axis")
+        axis_resolved = _resolve_workflow_output_reference_any(context, axis_reference, default_output="axis")
+        axis_type = str((axis_resolved.get("output") or {}).get("type") or "") if axis_resolved is not None else ""
+        if axis_resolved is None or axis_type not in {"axis", "edge"}:
+            _raise_invalid_workflow_output_reference(axis_reference, path="operations[%s].params.axis" % (index - 1))
+        count_value = float(params.get("count") or params.get("instances") or 0.0)
+        count = int(round(count_value))
+        if count < 2 or abs(count_value - count) > 1e-9:
+            raise ValueError("circular_pattern count must be an integer >= 2")
+        span_angle = float(params.get("span_angle") or params.get("angle") or 360.0)
+        if abs(span_angle - 360.0) > 1e-9:
+            raise ValueError("circular_pattern currently supports only span_angle=360")
+        angle_step = span_angle / float(count)
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        params["source"] = source_references[0]
+        params["sources"] = list(source_references)
+        params["axis"] = axis_reference
+        params["count"] = count
+        params["span_angle"] = span_angle
+        params["angle_step"] = angle_step
+        params["parameter_prefix"] = parameter_prefix
+        params["count_variable"] = str(params.get("count_variable") or f"{parameter_prefix}_CUT_COUNT1")
+        params["span_angle_variable"] = str(params.get("span_angle_variable") or f"{parameter_prefix}_CUT_SPAN_A1")
+        params["angle_step_variable"] = str(params.get("angle_step_variable") or f"{parameter_prefix}_CUT_STEP_A1")
+        params["pattern_operation_variable_bindings"] = _build_circular_pattern_variable_bindings(
+            params["count_variable"],
+            params["angle_step_variable"],
+        )
+        params["name"] = str(params.get("name") or "Circular cut pattern")
+        bindings["source_operation"] = source_resolved_items[0]["operation_id"]
+        bindings["source_output"] = source_resolved_items[0]["output_key"]
+        bindings["source_operations"] = [item["operation_id"] for item in source_resolved_items]
+        bindings["source_outputs"] = [item["output_key"] for item in source_resolved_items]
+        bindings["axis_operation"] = axis_resolved["operation_id"]
+        bindings["axis_output"] = axis_resolved["output_key"]
+        depends_on.extend([item["operation_id"] for item in source_resolved_items] + [axis_resolved["operation_id"]])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "count": count,
+                "source_count": len(source_resolved_items),
+                "span_angle": span_angle,
+                "angle_step": angle_step,
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "feature": {"type": "feature", "description": "Circular pattern feature"},
+                    "pattern": {"type": "feature", "description": "Alias for the circular pattern feature"},
+                }
+            },
+        }
+    elif scenario == "cut_reference_points_sketch":
+        start_radius = params.get("start_radius")
+        if start_radius is None:
+            start_radius = float(params.get("start_diameter", 0.0)) / 2.0
+        start_radius = float(start_radius or 0.0)
+        nominal_start_radius = start_radius
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        inner_radius_variable = str(params.get("inner_radius_variable") or f"{parameter_prefix}_IR1").strip()
+        sketch_reference = params.get("sketch") or params.get("source_sketch")
+        sketch_resolved = _resolve_workflow_output_reference_any(context, sketch_reference, default_output="sketch")
+        source_operation = context.get(sketch_resolved["operation_id"]) if sketch_resolved is not None else None
+        source_inner_diameter = float(((source_operation or {}).get("params") or {}).get("inner_diameter") or 0.0)
+        if source_inner_diameter > 0.0:
+            nominal_start_radius = source_inner_diameter / 2.0
+            start_radius = nominal_start_radius
+        auto_entry_clearance = bool(params.get("auto_entry_clearance", False))
+        slot_start_width = float(params.get("slot_start_width") or params.get("start_width") or 0.0)
+        entry_clearance = float(params.get("entry_clearance") or 0.0)
+        if auto_entry_clearance:
+            available_radius = nominal_start_radius - entry_clearance
+            if slot_start_width <= 0.0 or available_radius <= slot_start_width / 2.0:
+                raise ValueError("cut_reference_points_sketch auto entry clearance requires valid slot_start_width and clearance")
+            start_radius = math.sqrt(available_radius * available_radius - (slot_start_width / 2.0) ** 2)
+        end_radius = params.get("end_radius")
+        if end_radius is None:
+            end_radius = float(params.get("end_diameter", 0.0)) / 2.0
+        end_radius = float(end_radius or 0.0)
+        if start_radius <= 0.0 or end_radius <= 0.0:
+            raise ValueError("cut_reference_points_sketch requires positive start/end radius or diameter")
+        params["start_radius"] = start_radius
+        params["nominal_start_radius"] = nominal_start_radius
+        params["end_radius"] = end_radius
+        params["reference_plane"] = str(params.get("reference_plane") or params.get("base_plane") or "YOZ")
+        params["contact_plane"] = str(params.get("contact_plane") or params.get("tangent_base_plane") or "XOY")
+        params["parameter_prefix"] = parameter_prefix
+        params["start_radius_variable"] = str(params.get("start_radius_variable") or f"{parameter_prefix}_CUT_START_R1").strip()
+        params["end_radius_variable"] = str(params.get("end_radius_variable") or f"{parameter_prefix}_CUT_END_R1").strip()
+        params["parameterize_points"] = bool(params.get("parameterize_points", True))
+        params["auto_entry_clearance"] = auto_entry_clearance
+        params["slot_start_width"] = slot_start_width
+        params["entry_clearance"] = entry_clearance
+        params["slot_start_width_variable"] = str(params.get("slot_start_width_variable") or f"{parameter_prefix}_SLOT_START_W1")
+        params["entry_clearance_variable"] = str(params.get("entry_clearance_variable") or f"{parameter_prefix}_SLOT_ENTRY_CLR1")
+        params["inner_radius_variable"] = inner_radius_variable
+        preview = {
+            "scenario": "cut_reference_points_sketch",
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "reference_plane": params["reference_plane"],
+                "contact_plane": params["contact_plane"],
+                "start_radius": start_radius,
+                "end_radius": end_radius,
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "sketch": {"type": "sketch", "description": "Reference sketch containing cut start/end radial points"},
+                    "start_point": {"type": "point", "description": "Cut start reference point"},
+                    "end_point": {"type": "point", "description": "Cut end reference point"},
+                }
+            },
+        }
     elif scenario == "lcs":
         preview = preview_lcs(params)
+    elif scenario == "tangent_plane":
+        face_reference = params.get("face") or params.get("surface") or params.get("reference")
+        default_output = str(params.get("face_output") or params.get("surface_output") or "face").strip() or "face"
+        resolved_reference = None
+        if _looks_like_workflow_output_reference(face_reference):
+            resolved_reference = _resolve_workflow_output_reference(
+                context,
+                face_reference,
+                expected_output_type="face",
+                allowed_scenarios=_REVOLVED_FACE_REFERENCE_SCENARIOS,
+                default_output=default_output,
+            )
+        elif bindings.get("reference_operation"):
+            reference_operation = str(bindings["reference_operation"])
+            reference_output = str(bindings.get("reference_output") or default_output)
+            resolved_reference = {
+                "operation_id": reference_operation,
+                "output_key": reference_output,
+            }
+        else:
+            _raise_invalid_workflow_output_reference(face_reference, path="operations[%s].params.face" % (index - 1))
+        output_ref = _build_workflow_output_token(resolved_reference["operation_id"], resolved_reference["output_key"])
+        params["face"] = {"output_ref": output_ref}
+        params["base_plane"] = str(params.get("base_plane") or "XOY")
+        params["angle"] = float(params.get("angle") or params.get("angle_degrees") or 0.0)
+        params["orientation"] = bool(params.get("orientation") or params.get("side") or params.get("reverse"))
+        bindings["reference_operation"] = resolved_reference["operation_id"]
+        bindings["reference_output"] = resolved_reference["output_key"]
+        depends_on.append(resolved_reference["operation_id"])
+        preview = {
+            "scenario": "tangent_plane",
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "face_reference": output_ref,
+                "base_plane": params["base_plane"],
+                "angle": params["angle"],
+                "orientation": params["orientation"],
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "plane": {"type": "plane", "description": "Tangent plane to the referenced face"},
+                }
+            },
+        }
     elif scenario == "stepped_shaft":
         preview = preview_stepped_shaft(params)
+    elif scenario in {"disc_spring", "diaphragm_spring"}:
+        preview = preview_part_scenario(scenario, params)
     elif scenario == "external_conical_step":
         preview = preview_external_conical_step(params)
     elif scenario == "internal_conical_step":
@@ -5200,8 +5753,16 @@ def _default_operation_output_key(scenario: str) -> str:
         return "body"
     if normalized_scenario == "point":
         return "point"
+    if normalized_scenario == "projection_point":
+        return "point"
+    if normalized_scenario == "projection_anchor_sketch":
+        return "sketch"
+    if normalized_scenario == "cut_reference_points_sketch":
+        return "sketch"
     if normalized_scenario == "lcs":
         return "lcs"
+    if normalized_scenario == "tangent_plane":
+        return "plane"
     return "result"
 
 
@@ -5477,6 +6038,7 @@ def _build_circular_pattern_variable_bindings(
             "parameter_note": "Count",
             "parameter_note_aliases": [
                 "Count",
+                "N 2",
                 "Instance count",
                 "Instances",
                 "Количество",
@@ -5491,10 +6053,12 @@ def _build_circular_pattern_variable_bindings(
             "parameter_note_aliases": [
                 "Angle",
                 "Step",
+                "Step 2",
                 "Angular step",
                 "Angle step",
                 "Угол",
                 "Шаг",
+                "Шаг 2",
                 "Угловой шаг",
             ],
             "expression": angle_step_expression,
@@ -10607,6 +11171,8 @@ def _normalize_stepped_shaft_reference_preview(reference: dict[str, Any], *, fie
 
 _REVOLVED_FACE_REFERENCE_SCENARIOS = (
     "stepped_shaft",
+    "disc_spring",
+    "diaphragm_spring",
     "external_conical_step",
     "internal_conical_step",
     "internal_cylindrical_step",

@@ -10,7 +10,14 @@ from .connect_curve import normalize_connect_curve_params
 from .materials import resolve_material_payload
 from .sketch import apply_dimension_display_mode
 from .sketch import apply_placement_to_points
+from .sketch import build_disc_spring_constraint_plan
+from .sketch import build_disc_spring_dimension_plan
+from .sketch import build_disc_spring_variable_plan
+from .sketch import build_diaphragm_spring_dimension_plan
+from .sketch import build_diaphragm_spring_constraint_plan
+from .sketch import build_diaphragm_spring_variable_plan
 from .sketch import build_operation_label
+from .sketch import build_parameter_name
 from .sketch import build_external_conical_step_constraint_plan
 from .sketch import build_external_conical_step_dimension_plan
 from .sketch import build_external_conical_step_variable_plan
@@ -57,8 +64,18 @@ SUPPORTED_PART_SCENARIOS = (
     "bolt_circle_holes",
     "compression_spring",
     "compression_spring_variable_pitch",
+    "disc_spring",
+    "diaphragm_spring",
     "point",
+    "projection_point",
+    "projection_anchor_sketch",
+    "diaphragm_cut_profile_sketch",
+    "diaphragm_terminal_relief_sketch",
+    "cut_extrusion",
+    "circular_pattern",
+    "cut_reference_points_sketch",
     "lcs",
+    "tangent_plane",
     "workflow",
 )
 
@@ -71,11 +88,43 @@ POINT_SCENARIO_ALIASES = {
 }
 
 
+PROJECTION_POINT_SCENARIO_ALIASES = {
+    "projection_point": "projection_point",
+    "projected_point": "projection_point",
+    "point_projection": "projection_point",
+    "point3d_projection": "projection_point",
+}
+
+
+PROJECTION_ANCHOR_SKETCH_SCENARIO_ALIASES = {
+    "projection_anchor_sketch": "projection_anchor_sketch",
+    "anchor_projection_sketch": "projection_anchor_sketch",
+    "projection_sketch": "projection_anchor_sketch",
+    "projected_anchor_sketch": "projection_anchor_sketch",
+}
+
+
+CUT_REFERENCE_POINTS_SKETCH_SCENARIO_ALIASES = {
+    "cut_reference_points_sketch": "cut_reference_points_sketch",
+    "cut_reference_points": "cut_reference_points_sketch",
+    "radial_reference_points_sketch": "cut_reference_points_sketch",
+    "reference_cut_points_sketch": "cut_reference_points_sketch",
+}
+
+
 LCS_SCENARIO_ALIASES = {
     "lcs": "lcs",
     "csys": "lcs",
     "local_coordinate_system": "lcs",
     "coordinate_system": "lcs",
+}
+
+
+TANGENT_PLANE_SCENARIO_ALIASES = {
+    "tangent_plane": "tangent_plane",
+    "tangent_to_face_plane": "tangent_plane",
+    "plane_tangent_to_face": "tangent_plane",
+    "kasatelnaya_ploskost": "tangent_plane",
 }
 
 
@@ -229,6 +278,22 @@ COMPRESSION_SPRING_SCENARIO_ALIASES = {
 }
 
 
+DISC_SPRING_SCENARIO_ALIASES = {
+    "disc_spring": "disc_spring",
+    "disc": "disc_spring",
+    "belleville": "disc_spring",
+    "belleville_spring": "disc_spring",
+}
+
+
+DIAPHRAGM_SPRING_SCENARIO_ALIASES = {
+    "diaphragm_spring": "diaphragm_spring",
+    "diaphragm": "diaphragm_spring",
+    "clutch_diaphragm_spring": "diaphragm_spring",
+    "clutch_spring": "diaphragm_spring",
+}
+
+
 
 
 EXTERNAL_CONICAL_STEP_DEFINITION_MODE_ALIASES = {
@@ -344,6 +409,821 @@ def preview_stepped_shaft(params: dict[str, Any]) -> dict[str, Any]:
         },
         "interface": _build_stepped_shaft_interface(normalized, profile_points),
         "operations": operations,
+    }
+
+
+def _solve_disc_spring_center_radial_span(radial_width: float, cone_height: float, thickness: float) -> float:
+    height = abs(float(cone_height))
+    width = float(radial_width)
+    thickness_value = float(thickness)
+    if height <= 1e-12:
+        return width
+    if width <= 0.0:
+        raise ValueError("disc_spring radial width must be positive")
+
+    def residual(center_span: float) -> float:
+        return center_span + thickness_value * height / math.hypot(height, center_span) - width
+
+    if residual(0.0) > 0.0:
+        raise ValueError("disc_spring thickness/cone_height do not fit between inner and outer diameters")
+    low = 0.0
+    high = width
+    for _ in range(64):
+        mid = (low + high) / 2.0
+        if residual(mid) > 0.0:
+            high = mid
+        else:
+            low = mid
+    return (low + high) / 2.0
+
+
+def _left_normal(vector: list[float]) -> list[float]:
+    return [-float(vector[1]), float(vector[0])]
+
+
+def _unit(vector: list[float]) -> list[float]:
+    length = math.hypot(float(vector[0]), float(vector[1]))
+    if length <= 1e-12:
+        raise ValueError("zero-length vector cannot be normalized")
+    return [float(vector[0]) / length, float(vector[1]) / length]
+
+
+def _offset_point(point: list[float], normal: list[float], side: float, distance: float) -> list[float]:
+    return [float(point[0]) + float(normal[0]) * float(side) * float(distance), float(point[1]) + float(normal[1]) * float(side) * float(distance)]
+
+
+def _signed_angle_between(unit_a: list[float], unit_b: list[float]) -> float:
+    cross = float(unit_a[0]) * float(unit_b[1]) - float(unit_a[1]) * float(unit_b[0])
+    dot = float(unit_a[0]) * float(unit_b[0]) + float(unit_a[1]) * float(unit_b[1])
+    return math.atan2(cross, dot)
+
+
+def _solve_s_bend_final_segment(
+    *,
+    first_inner_end: list[float],
+    first_direction: list[float],
+    second_bend_inner_radius: float,
+    thickness: float,
+    target_outer_x: float,
+    target_inner_y: float,
+) -> tuple[list[float], list[float], list[float], list[float], list[float], list[float]]:
+    """Solve reverse bend plus final line for an S-shaped diaphragm lip."""
+
+    d1 = _unit(first_direction)
+    n1 = _left_normal(d1)
+    center = _offset_point(first_inner_end, n1, -1.0, second_bend_inner_radius)
+    theta1 = math.atan2(d1[1], d1[0])
+    if not (-math.pi / 2.0 < theta1 < 0.0):
+        raise ValueError("first lip segment must point forward and toward the axis")
+
+    low = -math.pi / 2.0 + 1e-6
+    high = theta1 - 1e-6
+
+    def geometry(theta: float) -> tuple[float, float, list[float], list[float], list[float], list[float], list[float]]:
+        d2 = [math.cos(theta), math.sin(theta)]
+        n2 = _left_normal(d2)
+        start_inner = _offset_point(center, n2, 1.0, second_bend_inner_radius)
+        start_outer = _offset_point(center, n2, 1.0, second_bend_inner_radius + thickness)
+        end_inner = [float(target_outer_x) + math.sin(theta) * thickness, float(target_inner_y)]
+        end_outer = _offset_point(end_inner, n2, 1.0, thickness)
+        vec = [end_inner[0] - start_inner[0], end_inner[1] - start_inner[1]]
+        cross = vec[0] * d2[1] - vec[1] * d2[0]
+        dot = vec[0] * d2[0] + vec[1] * d2[1]
+        return cross, dot, start_inner, start_outer, end_inner, end_outer, d2
+
+    brackets: list[tuple[float, float]] = []
+    previous_theta = low
+    previous_cross, previous_dot, *_ = geometry(previous_theta)
+    for index in range(1, 241):
+        theta = low + (high - low) * index / 240.0
+        cross, dot, *_ = geometry(theta)
+        if dot > 1e-6 and abs(cross) < 1e-7:
+            brackets.append((theta, theta))
+        if previous_dot > 1e-6 and dot > 1e-6 and previous_cross * cross <= 0.0:
+            brackets.append((previous_theta, theta))
+        previous_theta = theta
+        previous_cross = cross
+        previous_dot = dot
+    if not brackets:
+        raise ValueError("could not solve s_bend final segment from requested height/diameter/radius")
+
+    bracket_low, bracket_high = brackets[-1]
+    if bracket_low == bracket_high:
+        theta = bracket_low
+    else:
+        f_low = geometry(bracket_low)[0]
+        theta = (bracket_low + bracket_high) * 0.5
+        for _ in range(96):
+            theta = (bracket_low + bracket_high) * 0.5
+            f_mid = geometry(theta)[0]
+            if f_low * f_mid <= 0.0:
+                bracket_high = theta
+            else:
+                bracket_low = theta
+                f_low = f_mid
+
+    cross, dot, start_inner, start_outer, end_inner, end_outer, d2 = geometry(theta)
+    if dot <= 1e-6 or abs(cross) > 1e-5:
+        raise ValueError("s_bend final segment solution is degenerate")
+    if math.atan2(d2[1], d2[0]) >= theta1 - 1e-6:
+        raise ValueError("s_bend final segment must bend back toward the axis")
+    return center, start_inner, start_outer, end_inner, end_outer, d2
+
+
+def preview_disc_spring(params: dict[str, Any]) -> dict[str, Any]:
+    name = str(params.get("name") or "disc_spring").strip() or "disc_spring"
+    outer_diameter = float(params.get("outer_diameter") or params.get("outside_diameter") or 0.0)
+    inner_diameter = float(params.get("inner_diameter") or params.get("bore_diameter") or 0.0)
+    thickness = float(params.get("thickness") or 0.0)
+    if params.get("cone_height") is not None:
+        cone_height = float(params.get("cone_height") or 0.0)
+        cone_height_source = "cone_height"
+    elif params.get("free_height") is not None:
+        free_height = float(params.get("free_height") or 0.0)
+        cone_height = free_height - thickness
+        cone_height_source = "free_height"
+    else:
+        cone_height = 0.0
+        cone_height_source = "cone_height"
+    cone_direction = str(params.get("cone_direction") or "up").strip().lower()
+    if outer_diameter <= 0.0 or inner_diameter <= 0.0 or thickness <= 0.0:
+        raise ValueError("disc_spring requires positive outer_diameter, inner_diameter, and thickness")
+    if outer_diameter <= inner_diameter:
+        raise ValueError("disc_spring outer_diameter must exceed inner_diameter")
+    if cone_height <= 0.0:
+        raise ValueError("disc_spring requires positive cone_height or free_height greater than thickness")
+    if cone_direction not in {"up", "down"}:
+        raise ValueError("disc_spring cone_direction must be up or down")
+    outer_radius = outer_diameter / 2.0
+    inner_radius = inner_diameter / 2.0
+    radial_width = outer_radius - inner_radius
+    direction_sign = 1.0 if cone_direction == "up" else -1.0
+    signed_cone_height = direction_sign * cone_height
+    center_radial_span = _solve_disc_spring_center_radial_span(radial_width, cone_height, thickness)
+    centerline_length = math.hypot(signed_cone_height, center_radial_span)
+    tangent_unit = [signed_cone_height / centerline_length, center_radial_span / centerline_length]
+    normal_unit = [-tangent_unit[1], tangent_unit[0]]
+    normal_radial_margin = abs(normal_unit[1]) * thickness / 2.0
+    inner_center = [-signed_cone_height / 2.0, inner_radius + normal_radial_margin]
+    outer_center = [signed_cone_height / 2.0, outer_radius - normal_radial_margin]
+
+    def _normal_offset(point: list[float], scale: float) -> list[float]:
+        return [point[0] + normal_unit[0] * scale, point[1] + normal_unit[1] * scale]
+
+    inner_lower = _normal_offset(inner_center, -thickness / 2.0)
+    outer_lower = _normal_offset(outer_center, -thickness / 2.0)
+    outer_upper = _normal_offset(outer_center, thickness / 2.0)
+    inner_upper = _normal_offset(inner_center, thickness / 2.0)
+    if cone_direction == "up":
+        profile_points = [inner_lower, outer_lower, outer_upper, inner_upper]
+    else:
+        profile_points = [inner_upper, outer_upper, outer_lower, inner_lower]
+    x_shift = -profile_points[0][0]
+    for point in profile_points:
+        point[0] += x_shift
+    profile_points.append(list(profile_points[0]))
+    cone_angle_degrees = math.degrees(math.atan2(abs(signed_cone_height), center_radial_span))
+    outer_gauge_point = profile_points[2]
+    outer_gauge_offset = outer_gauge_point[0]
+    sketch = normalize_sketch_options(params.get("sketch"))
+    parameter_prefix = normalize_parameter_prefix(
+        sketch.get("parameter_prefix")
+        or params.get("parameter_prefix")
+        or params.get("parameter_namespace")
+        or "DS"
+    )
+    operation_label = build_operation_label(name, parameter_prefix=parameter_prefix)
+    variable_plan = build_disc_spring_variable_plan(
+        outer_radius=outer_radius,
+        inner_radius=inner_radius,
+        thickness=thickness,
+        cone_height=cone_height,
+        radial_width=radial_width,
+        center_radial_span=center_radial_span,
+        normal_radial_margin=normal_radial_margin,
+        cone_angle_degrees=cone_angle_degrees,
+        outer_gauge_offset=outer_gauge_offset,
+        parameter_prefix=parameter_prefix,
+        operation_label=operation_label,
+    )
+    constraint_plan = build_disc_spring_constraint_plan()
+    dimension_plan = apply_dimension_display_mode(
+        build_disc_spring_dimension_plan(
+            outer_radius_variable=build_parameter_name("OR", 1, prefix=parameter_prefix),
+            inner_radius_variable=build_parameter_name("IR", 1, prefix=parameter_prefix),
+            thickness_variable=build_parameter_name("T", 1, prefix=parameter_prefix),
+            outer_gauge_offset_variable=build_parameter_name("OGO", 1, prefix=parameter_prefix),
+        ),
+        [{"diameter": inner_diameter}, {"diameter": outer_diameter}],
+        mode=sketch["dimension_display"],
+    )
+    axis_padding = max(thickness, abs(cone_height), radial_width * 0.05, 1.0)
+    axis_start = [min(min(point[0] for point in profile_points), 0.0) - axis_padding, 0.0]
+    axis_end = [max(max(point[0] for point in profile_points), 0.0) + axis_padding, 0.0]
+    construction_line_style = normalize_sketch_options({"profile_line_style": "construction"})["profile_line_style"]
+    construction_lines = [
+        {
+            "target": "inner_radius_anchor",
+            "start": [0.0, 0.0],
+            "end": [profile_points[0][0], profile_points[0][1]],
+            "line_style": construction_line_style,
+        },
+        {
+            "target": "outer_gauge_offset_anchor",
+            "start": [0.0, 0.0],
+            "end": [outer_gauge_point[0], 0.0],
+            "line_style": construction_line_style,
+        },
+        {
+            "target": "outer_radius_anchor",
+            "start": [outer_gauge_point[0], 0.0],
+            "end": [outer_gauge_point[0], outer_gauge_point[1]],
+            "line_style": construction_line_style,
+        }
+    ]
+    normalized = {
+        "name": name,
+        "outer_diameter": outer_diameter,
+        "inner_diameter": inner_diameter,
+        "thickness": thickness,
+        "cone_height": cone_height,
+        "cone_height_source": cone_height_source,
+        "cone_direction": cone_direction,
+        "radial_width": radial_width,
+        "center_radial_span": center_radial_span,
+        "normal_radial_margin": normal_radial_margin,
+        "cone_angle_degrees": cone_angle_degrees,
+        "outer_gauge_offset": outer_gauge_offset,
+        "parameter_prefix": parameter_prefix,
+        "operation_label": operation_label,
+        "sketch": sketch,
+        "construction_line_style": construction_line_style,
+        "profile_points": profile_points,
+        "construction_lines": construction_lines,
+        "axis_start": axis_start,
+        "axis_end": axis_end,
+        "angle_degrees": 360.0,
+        "plane": "XOY",
+    }
+    return {
+        "scenario": "disc_spring",
+        "ok": True,
+        "params": normalized,
+        "summary": {
+            "profile_point_count": len(profile_points),
+            "outer_diameter": outer_diameter,
+            "inner_diameter": inner_diameter,
+            "outer_radius": outer_radius,
+            "inner_radius": inner_radius,
+            "thickness": thickness,
+            "cone_height": cone_height,
+            "cone_height_source": cone_height_source,
+            "cone_direction": cone_direction,
+            "radial_width": radial_width,
+            "center_radial_span": center_radial_span,
+            "normal_radial_margin": normal_radial_margin,
+            "cone_angle_degrees": cone_angle_degrees,
+            "outer_gauge_offset": outer_gauge_offset,
+            "planned_dimension_count": len(dimension_plan),
+            "planned_constraint_count": len(constraint_plan),
+            "planned_variable_count": len(variable_plan),
+            "parameter_prefix": parameter_prefix,
+            "operation_label": operation_label,
+            "creation_status": "available",
+            "live_support": "available",
+        },
+        "operations": [
+            {"operation": "create_part_document"},
+            {
+                "operation": "add_variables",
+                "enabled": True,
+                "variable_count": len(variable_plan),
+                "variables": variable_plan,
+                "live_status": "planned",
+            },
+            {"operation": "create_sketch", "plane": "XOY", "description": "Create constrained disc spring section"},
+            {
+                "operation": "draw_axis",
+                "start": normalized["axis_start"],
+                "end": normalized["axis_end"],
+                "line_style": sketch["axis_line_style"],
+            },
+            {
+                "operation": "draw_profile",
+                "profile_points": profile_points,
+                "construction_lines": construction_lines,
+                "entity_map": {
+                    "profile_line_1": "lower_conical_face",
+                    "profile_line_2": "outer_normal_face",
+                    "profile_line_3": "upper_conical_face",
+                    "profile_line_4": "inner_normal_face",
+                    "inner_radius_anchor": "vertical_inner_radius_anchor",
+                    "outer_radius_anchor": "vertical_outer_radius_anchor",
+                    "outer_gauge_offset_anchor": "horizontal_outer_gauge_offset_anchor",
+                },
+                "line_style": sketch["profile_line_style"],
+                "closed": True,
+            },
+            {
+                "operation": "apply_constraints",
+                "enabled": True,
+                "constraint_count": len(constraint_plan),
+                "constraints": constraint_plan,
+                "live_status": "planned",
+            },
+            {
+                "operation": "add_dimensions",
+                "enabled": True,
+                "dimension_count": len(dimension_plan),
+                "dimensions": dimension_plan,
+                "live_status": "planned",
+            },
+            {"operation": "base_rotation", "angle_degrees": 360.0},
+        ],
+    }
+
+
+def _diaphragm_spring_interface(axis_start: list[float], axis_end: list[float]) -> dict[str, Any]:
+    return {
+        "feature_type": "revolved_body.diaphragm_spring",
+        "outputs": {
+            "body": {"type": "body", "name": "body", "live_supported": True},
+            "sketch": {"type": "sketch", "name": "sketch", "live_supported": True},
+            "axis": {
+                "type": "axis",
+                "name": "axis",
+                "start": list(axis_start),
+                "end": list(axis_end),
+                "live_supported": True,
+            },
+            "start_face": {"type": "face", "selector": "start_face", "live_supported": True},
+            "end_face": {"type": "face", "selector": "end_face", "live_supported": True},
+            "outer_face": {"type": "face", "selector": "outer_face", "live_supported": True},
+            "conical_face": {"type": "face", "selector": "outer_face", "live_supported": True},
+        },
+    }
+
+
+def _preview_diaphragm_spring_no_bend(
+    params: dict[str, Any],
+    *,
+    name: str,
+    outer_diameter: float,
+    inner_diameter: float,
+    thickness: float,
+    cone_height: float,
+    cone_direction: str,
+    parameterization_level: str,
+) -> dict[str, Any]:
+    outer_radius = outer_diameter / 2.0
+    inner_radius = inner_diameter / 2.0
+    radial_width = outer_radius - inner_radius
+    center_radial_span = _solve_disc_spring_center_radial_span(
+        radial_width=radial_width,
+        cone_height=cone_height,
+        thickness=thickness,
+    )
+    body_length = math.hypot(cone_height, center_radial_span)
+    direction_sign = 1.0 if cone_direction == "up" else -1.0
+    body_normal = [
+        direction_sign * center_radial_span / body_length,
+        cone_height / body_length,
+    ]
+
+    main_inner_start = [0.0, outer_radius - body_normal[1] * thickness]
+    main_inner_end = [direction_sign * cone_height, inner_radius]
+    main_outer_start = [
+        main_inner_end[0] + body_normal[0] * thickness,
+        main_inner_end[1] + body_normal[1] * thickness,
+    ]
+    main_outer_end = [
+        main_inner_start[0] + body_normal[0] * thickness,
+        main_inner_start[1] + body_normal[1] * thickness,
+    ]
+    profile_entities = [
+        {"kind": "line", "target": "main_inner_face", "start": main_inner_start, "end": main_inner_end},
+        {"kind": "line", "target": "inner_normal_face", "start": main_inner_end, "end": main_outer_start},
+        {"kind": "line", "target": "main_outer_face", "start": main_outer_start, "end": main_outer_end},
+        {"kind": "line", "target": "outer_normal_face", "start": main_outer_end, "end": main_inner_start},
+    ]
+    profile_points = [
+        list(main_inner_start),
+        list(main_inner_end),
+        list(main_outer_start),
+        list(main_outer_end),
+        list(main_inner_start),
+    ]
+
+    sketch = normalize_sketch_options(params.get("sketch"))
+    sketch.setdefault("parameterization_order", "constraints_first")
+    construction_style = normalize_sketch_options({"profile_line_style": "construction"})["profile_line_style"]
+    inner_gauge_offset = main_inner_end[0]
+    outer_gauge_offset = main_outer_end[0]
+    construction_lines: list[dict[str, object]] = [
+        {"target": "base_height_zero_anchor", "start": [0.0, 0.0], "end": main_inner_start, "line_style": construction_style},
+        {"target": "inner_gauge_offset_anchor", "start": [0.0, 0.0], "end": [inner_gauge_offset, 0.0], "line_style": construction_style},
+        {"target": "inner_radius_anchor", "start": [inner_gauge_offset, 0.0], "end": main_inner_end, "line_style": construction_style},
+        {"target": "outer_gauge_offset_anchor", "start": [0.0, 0.0], "end": [outer_gauge_offset, 0.0], "line_style": construction_style},
+        {"target": "outer_radius_anchor", "start": [outer_gauge_offset, 0.0], "end": main_outer_end, "line_style": construction_style},
+    ]
+
+    axis_padding = max(thickness, cone_height, radial_width * 0.05, 1.0)
+    axis_start = [min(min(point[0] for point in profile_points), 0.0) - axis_padding, 0.0]
+    axis_end = [max(max(point[0] for point in profile_points), 0.0) + axis_padding, 0.0]
+    parameter_prefix = normalize_parameter_prefix(sketch.get("parameter_prefix") or params.get("parameter_prefix") or "DIA")
+    operation_label = build_operation_label(name, parameter_prefix=parameter_prefix)
+    variable_plan = build_diaphragm_spring_variable_plan(
+        outer_radius=outer_radius,
+        body_inner_radius=inner_radius,
+        inner_radius=inner_radius,
+        thickness=thickness,
+        free_height=cone_height,
+        cone_height=cone_height,
+        tip_bend_inner_radius=0.0,
+        tip_bend_outer_radius=0.0,
+        tip_variant="no_bend",
+        parameter_prefix=parameter_prefix,
+        operation_label=operation_label,
+    )
+    constraint_plan: list[dict[str, object]] = build_diaphragm_spring_constraint_plan(tip_variant="no_bend")
+    dimension_plan = build_diaphragm_spring_dimension_plan(
+        outer_radius_variable=build_parameter_name("OR", 1, prefix=parameter_prefix),
+        inner_radius_variable=build_parameter_name("IR", 1, prefix=parameter_prefix),
+        body_inner_radius_variable=build_parameter_name("IR", 1, prefix=parameter_prefix),
+        cone_height_variable=build_parameter_name("CH", 1, prefix=parameter_prefix),
+        free_height_variable=build_parameter_name("CH", 1, prefix=parameter_prefix),
+        thickness_variable=build_parameter_name("T", 1, prefix=parameter_prefix),
+        bend_inner_radius_variable=build_parameter_name("T", 1, prefix=parameter_prefix),
+        tip_variant="no_bend",
+    )
+    if parameterization_level == "geometry_only":
+        construction_lines = []
+        constraint_plan = []
+        dimension_plan = []
+
+    scenario_params = {
+        "name": name,
+        "outer_diameter": outer_diameter,
+        "body_inner_diameter": inner_diameter,
+        "inner_diameter": inner_diameter,
+        "thickness": thickness,
+        "cone_height": cone_height,
+        "cone_direction": cone_direction,
+        "tip_variant": "no_bend",
+        "tip_parameters_used": False,
+        "parameterization_level": parameterization_level,
+        "profile_points": profile_points,
+        "profile_entities": profile_entities,
+        "construction_lines": construction_lines,
+        "axis_start": axis_start,
+        "axis_end": axis_end,
+        "angle_degrees": 360.0,
+        "plane": "XOY",
+        "sketch": sketch,
+        "parameter_prefix": parameter_prefix,
+        "operation_label": operation_label,
+        "verify_profile_after_parameterization": True,
+    }
+    summary = {
+        "profile_entity_count": len(profile_entities),
+        "outer_diameter": outer_diameter,
+        "inner_diameter": inner_diameter,
+        "thickness": thickness,
+        "cone_height": cone_height,
+        "tip_variant": "no_bend",
+        "tip_parameters_used": False,
+        "parameterization_level": parameterization_level,
+        "planned_variable_count": len(variable_plan),
+        "planned_constraint_count": len(constraint_plan),
+        "planned_dimension_count": len(dimension_plan),
+        "creation_status": "available",
+        "live_support": "available",
+    }
+    return {
+        "scenario": "diaphragm_spring",
+        "ok": True,
+        "params": scenario_params,
+        "summary": summary,
+        "interface": _diaphragm_spring_interface(axis_start, axis_end),
+        "operations": [
+            {"operation": "create_part_document"},
+            {"operation": "add_variables", "enabled": True, "variables": variable_plan},
+            {"operation": "create_sketch", "plane": "XOY", "description": "Create constrained diaphragm spring base section without bend"},
+            {"operation": "draw_axis", "start": axis_start, "end": axis_end, "line_style": sketch["axis_line_style"]},
+            {"operation": "draw_profile", "profile_points": profile_points, "profile_entities": profile_entities, "construction_lines": construction_lines, "closed": True},
+            {"operation": "apply_constraints", "enabled": True, "constraints": constraint_plan},
+            {"operation": "add_dimensions", "enabled": True, "dimensions": dimension_plan},
+            {"operation": "base_rotation", "angle_degrees": 360.0},
+        ],
+    }
+
+
+def preview_diaphragm_spring(params: dict[str, Any]) -> dict[str, Any]:
+    """Preview a continuous diaphragm spring with an optional axisymmetric tip bend."""
+
+    name = str(params.get("name") or "Diaphragm spring")
+    outer_diameter = float(params.get("outer_diameter") or 0.0)
+    thickness = float(params.get("thickness") or 0.0)
+    free_height = params.get("free_height")
+    cone_height = float(params.get("cone_height") if params.get("cone_height") is not None else float(free_height or 0.0) - thickness)
+    cone_direction = str(params.get("cone_direction") or "up").strip().lower()
+    tip_variant = str(params.get("tip_variant") or "single_bend").strip().lower()
+    tip_variant = {
+        "no-bend": "no_bend",
+        "without_bend": "no_bend",
+        "unbent": "no_bend",
+        "plain": "no_bend",
+        "base": "no_bend",
+        "one_bend": "single_bend",
+        "double_bend": "s_bend",
+        "return_bend": "s_bend",
+        "s-bend": "s_bend",
+    }.get(tip_variant, tip_variant)
+    parameterization_level = str(params.get("parameterization_level") or "constrained").strip().lower()
+    if parameterization_level not in {"geometry_only", "constrained"}:
+        raise ValueError("diaphragm_spring parameterization_level must be geometry_only or constrained")
+    if cone_direction not in {"up", "down"}:
+        raise ValueError("diaphragm_spring cone_direction must be up or down")
+    if tip_variant == "no_bend":
+        inner_diameter = float(
+            params.get("inner_diameter")
+            or params.get("body_inner_diameter")
+            or params.get("bend_start_diameter")
+            or 0.0
+        )
+        if outer_diameter <= inner_diameter or inner_diameter <= 0.0:
+            raise ValueError("diaphragm_spring no_bend requires outer_diameter > inner_diameter > 0")
+        if thickness <= 0.0 or cone_height <= 0.0:
+            raise ValueError("diaphragm_spring no_bend requires positive thickness and cone_height")
+        if (outer_diameter - inner_diameter) / 2.0 <= thickness:
+            raise ValueError("diaphragm_spring no_bend radial width must exceed thickness")
+        return _preview_diaphragm_spring_no_bend(
+            params,
+            name=name,
+            outer_diameter=outer_diameter,
+            inner_diameter=inner_diameter,
+            thickness=thickness,
+            cone_height=cone_height,
+            cone_direction=cone_direction,
+            parameterization_level=parameterization_level,
+        )
+
+    body_inner_diameter = float(params.get("body_inner_diameter") or params.get("bend_start_diameter") or 0.0)
+    tip_angle_degrees = float(params.get("tip_angle_degrees") or params.get("tip_bend_angle") or 60.0)
+    bend_inner_radius = float(params.get("tip_bend_inner_radius") or params.get("tip_bend_radius") or 0.0)
+    second_bend_inner_radius = float(params.get("second_tip_bend_inner_radius") or params.get("second_tip_bend_radius") or params.get("second_bend_inner_radius") or 0.0)
+    tip_length = float(params.get("tip_length") or 0.0)
+    if outer_diameter <= body_inner_diameter or body_inner_diameter <= 0.0:
+        raise ValueError("diaphragm_spring requires outer_diameter > body_inner_diameter > 0")
+    if thickness <= 0.0 or cone_height <= 0.0:
+        raise ValueError("diaphragm_spring requires positive thickness and cone_height")
+    if tip_variant not in {"single_bend", "s_bend"}:
+        raise ValueError("diaphragm_spring supports tip_variant=no_bend/single_bend/s_bend")
+    if bend_inner_radius <= 0.0:
+        raise ValueError("diaphragm_spring requires positive tip_bend_inner_radius")
+    if tip_variant == "single_bend" and not 0.0 < tip_angle_degrees <= 90.0:
+        raise ValueError("single_bend diaphragm_spring requires 0 < tip_angle_degrees <= 90")
+    if tip_variant == "s_bend" and second_bend_inner_radius <= 0.0:
+        raise ValueError("s_bend diaphragm_spring requires positive second_tip_bend_inner_radius")
+    if free_height is None and tip_length <= 0.0:
+        raise ValueError("diaphragm_spring requires free_height or positive tip_length")
+    outer_radius = outer_diameter / 2.0
+    body_inner_radius = body_inner_diameter / 2.0
+    radial_width = outer_radius - body_inner_radius
+    bend_neutral_radius = bend_inner_radius + thickness / 2.0
+    bend_outer_radius = bend_inner_radius + thickness
+    second_bend_outer_radius = second_bend_inner_radius + thickness if tip_variant == "s_bend" else 0.0
+
+    tip_right_start = [cone_height, body_inner_radius]
+    if tip_variant == "s_bend":
+        if free_height is None:
+            raise ValueError("s_bend diaphragm_spring requires free_height")
+        final_inner_diameter = float(params.get("inner_diameter") or params.get("final_inner_diameter") or 0.0)
+        first_tip_inner_diameter = float(params.get("first_tip_inner_diameter") or params.get("intermediate_inner_diameter") or 0.0)
+        first_tip_height = float(params.get("first_tip_height") or params.get("intermediate_height") or 0.0)
+        if final_inner_diameter <= 0.0 or first_tip_inner_diameter <= 0.0 or first_tip_height <= 0.0:
+            raise ValueError("s_bend diaphragm_spring requires inner_diameter, first_tip_inner_diameter, and first_tip_height")
+        final_inner_radius = final_inner_diameter / 2.0
+        first_tip_inner_radius = first_tip_inner_diameter / 2.0
+        if not (0.0 < final_inner_radius <= first_tip_inner_radius < body_inner_radius):
+            raise ValueError("s_bend diaphragm_spring requires 0 < inner_diameter <= first_tip_inner_diameter < body_inner_diameter")
+        if not (cone_height < first_tip_height < float(free_height)):
+            raise ValueError("s_bend diaphragm_spring requires cone_height < first_tip_height < free_height")
+        first_tip_right_end = [first_tip_height, first_tip_inner_radius]
+        tip_direction = _unit([first_tip_right_end[0] - tip_right_start[0], first_tip_right_end[1] - tip_right_start[1]])
+        tip_normal = _left_normal(tip_direction)
+        first_tip_left_end = _offset_point(first_tip_right_end, tip_normal, 1.0, thickness)
+    else:
+        first_tip_inner_radius = None
+        first_tip_height = None
+        tip_angle = math.radians(tip_angle_degrees)
+        tip_direction = [math.sin(tip_angle), -math.cos(tip_angle)]
+        if abs(tip_direction[0]) <= 1e-9:
+            raise ValueError("diaphragm_spring tip angle must allow a positive axial lip height")
+        tip_normal = _left_normal(tip_direction)
+    bend_center = [tip_right_start[0] + bend_outer_radius * tip_normal[0], tip_right_start[1] + bend_outer_radius * tip_normal[1]]
+
+    def tangent_points_from_point_to_circle(point: list[float], center: list[float], radius: float) -> list[list[float]]:
+        vx, vy = point[0] - center[0], point[1] - center[1]
+        distance_sq = vx * vx + vy * vy
+        if distance_sq <= radius * radius:
+            raise ValueError("diaphragm_spring bend radius is too large for the base and bend-start geometry")
+        distance = math.sqrt(distance_sq)
+        tangent_span = math.sqrt(distance_sq - radius * radius)
+        perpendicular = [-vy, vx]
+        return [
+            [
+                center[0] + (radius * radius * vx + sign * radius * tangent_span * perpendicular[0]) / distance_sq,
+                center[1] + (radius * radius * vy + sign * radius * tangent_span * perpendicular[1]) / distance_sq,
+            ]
+            for sign in (1.0, -1.0)
+        ]
+
+    def build_main_geometry(base_outer_x: float) -> tuple[list[float], list[float], list[float], list[float], list[float], list[float]]:
+        base_outer_point = [base_outer_x, outer_radius]
+        tangent_candidates = tangent_points_from_point_to_circle(base_outer_point, bend_center, bend_inner_radius)
+        tangent_point = min(tangent_candidates, key=lambda point: point[0])
+        main_to_base = [base_outer_point[0] - tangent_point[0], base_outer_point[1] - tangent_point[1]]
+        main_length = math.hypot(main_to_base[0], main_to_base[1])
+        if main_length <= 1e-9:
+            raise ValueError("diaphragm_spring main cone tangent is degenerate")
+        direction = [main_to_base[0] / main_length, main_to_base[1] / main_length]
+        normal = _left_normal(direction)
+        inner_tangent = _offset_point(tangent_point, normal, 1.0, thickness)
+        base_inner_point = _offset_point(base_outer_point, normal, 1.0, thickness)
+        return base_outer_point, tangent_point, inner_tangent, base_inner_point, direction, normal
+
+    base_outer_x = 0.0
+    for _ in range(20):
+        _, _, _, trial_inner_base, _, _ = build_main_geometry(base_outer_x)
+        if abs(trial_inner_base[0]) <= 1e-9:
+            break
+        base_outer_x -= trial_inner_base[0]
+    main_left_end, main_left_start, main_right_start, main_right_end, main_direction, main_normal = build_main_geometry(base_outer_x)
+    tip_left_start = _offset_point(tip_right_start, tip_normal, 1.0, thickness)
+    if tip_variant == "s_bend":
+        assert first_tip_inner_radius is not None
+        assert first_tip_height is not None
+        second_bend_center, second_tip_right_start, second_tip_left_start, tip_right_end, tip_left_end, final_tip_direction = _solve_s_bend_final_segment(
+            first_inner_end=first_tip_right_end,
+            first_direction=tip_direction,
+            second_bend_inner_radius=second_bend_inner_radius,
+            thickness=thickness,
+            target_outer_x=float(free_height),
+            target_inner_y=final_inner_radius,
+        )
+        second_bend_delta = _signed_angle_between(tip_direction, final_tip_direction)
+        if second_bend_delta >= -1e-6:
+            raise ValueError("s_bend diaphragm_spring requires the second bend to turn back toward the axis")
+        tip_length = math.hypot(first_tip_right_end[0] - tip_right_start[0], first_tip_right_end[1] - tip_right_start[1]) + math.hypot(tip_right_end[0] - second_tip_right_start[0], tip_right_end[1] - second_tip_right_start[1])
+    else:
+        if free_height is None:
+            tip_length = float(params.get("tip_length") or 0.0)
+            if tip_length <= 0.0:
+                raise ValueError("diaphragm_spring requires free_height or positive tip_length")
+            tip_left_end = [tip_left_start[0] + tip_direction[0] * tip_length, tip_left_start[1] + tip_direction[1] * tip_length]
+        else:
+            tip_length = (float(free_height) - tip_left_start[0]) / tip_direction[0]
+            if tip_length <= 0.0:
+                raise ValueError("diaphragm_spring free_height must be greater than the bend/lip start height")
+            tip_left_end = [float(free_height), tip_left_start[1] + tip_direction[1] * tip_length]
+        tip_right_end = _offset_point(tip_left_end, tip_normal, -1.0, thickness)
+        final_inner_radius = min(tip_right_end[1], tip_left_end[1])
+    bend_delta = _signed_angle_between(tip_direction, main_direction)
+    if abs(bend_delta) <= 1e-6 or abs(bend_delta) >= math.pi - 1e-6:
+        raise ValueError("diaphragm_spring tip angle must form a valid bend with the main body")
+    center_span = abs(main_left_end[1] - main_left_start[1])
+    signed_cone_height = abs(main_left_start[0] - main_left_end[0])
+    if final_inner_radius <= 0.0:
+        raise ValueError("diaphragm_spring tip_length produces a nonpositive final inner radius")
+
+    if tip_variant == "s_bend":
+        profile_entities = [
+            {"kind": "line", "target": "tip_inner_face", "start": tip_right_end, "end": second_tip_right_start},
+            {"kind": "arc", "target": "second_inner_bend_arc", "center": second_bend_center, "radius": second_bend_inner_radius, "start": second_tip_right_start, "end": first_tip_right_end, "direction": False},
+            {"kind": "line", "target": "first_tip_inner_face", "start": first_tip_right_end, "end": tip_right_start},
+            {"kind": "arc", "target": "outer_bend_arc", "center": bend_center, "radius": bend_outer_radius, "start": tip_right_start, "end": main_right_start, "direction": bend_delta > 0.0},
+            {"kind": "line", "target": "main_inner_face", "start": main_right_start, "end": main_right_end},
+            {"kind": "line", "target": "outer_normal_face", "start": main_right_end, "end": main_left_end},
+            {"kind": "line", "target": "main_outer_face", "start": main_left_end, "end": main_left_start},
+            {"kind": "arc", "target": "inner_bend_arc", "center": bend_center, "radius": bend_inner_radius, "start": main_left_start, "end": tip_left_start, "direction": bend_delta < 0.0},
+            {"kind": "line", "target": "first_tip_outer_face", "start": tip_left_start, "end": first_tip_left_end},
+            {"kind": "arc", "target": "second_outer_bend_arc", "center": second_bend_center, "radius": second_bend_outer_radius, "start": first_tip_left_end, "end": second_tip_left_start, "direction": True},
+            {"kind": "line", "target": "tip_outer_face", "start": second_tip_left_start, "end": tip_left_end},
+            {"kind": "line", "target": "tip_end_face", "start": tip_left_end, "end": tip_right_end},
+        ]
+        profile_points = [
+            tip_right_end,
+            second_tip_right_start,
+            first_tip_right_end,
+            tip_right_start,
+            main_right_start,
+            main_right_end,
+            main_left_end,
+            main_left_start,
+            tip_left_start,
+            first_tip_left_end,
+            second_tip_left_start,
+            tip_left_end,
+            list(tip_right_end),
+        ]
+    else:
+        profile_entities = [
+            {"kind": "line", "target": "tip_inner_face", "start": tip_right_end, "end": tip_right_start},
+            {"kind": "arc", "target": "outer_bend_arc", "center": bend_center, "radius": bend_outer_radius, "start": tip_right_start, "end": main_right_start, "direction": bend_delta > 0.0},
+            {"kind": "line", "target": "main_inner_face", "start": main_right_start, "end": main_right_end},
+            {"kind": "line", "target": "outer_normal_face", "start": main_right_end, "end": main_left_end},
+            {"kind": "line", "target": "main_outer_face", "start": main_left_end, "end": main_left_start},
+            {"kind": "arc", "target": "inner_bend_arc", "center": bend_center, "radius": bend_inner_radius, "start": main_left_start, "end": tip_left_start, "direction": bend_delta < 0.0},
+            {"kind": "line", "target": "tip_outer_face", "start": tip_left_start, "end": tip_left_end},
+            {"kind": "line", "target": "tip_end_face", "start": tip_left_end, "end": tip_right_end},
+        ]
+        profile_points = [tip_right_end, tip_right_start, main_right_start, main_right_end, main_left_end, main_left_start, tip_left_start, tip_left_end, list(tip_right_end)]
+    sketch = normalize_sketch_options(params.get("sketch"))
+    transition_gauge_offset = tip_right_start[0]
+    outer_gauge_offset = main_left_end[0]
+    inner_gauge_offset = tip_right_end[0]
+    full_height_gauge_offset = tip_left_end[0]
+    axis_padding = max(thickness, cone_height, radial_width * 0.05, 1.0)
+    axis_start = [min(min(point[0] for point in profile_points), 0.0) - axis_padding, 0.0]
+    axis_end = [max(max(point[0] for point in profile_points), 0.0) + axis_padding, 0.0]
+    sketch.setdefault("parameterization_order", "constraints_first")
+    construction_style = normalize_sketch_options({"profile_line_style": "construction"})["profile_line_style"]
+    construction_lines: list[dict[str, object]] = [
+        {"target": "base_height_zero_anchor", "start": [0.0, 0.0], "end": main_right_end, "line_style": construction_style},
+        {"target": "inner_gauge_offset_anchor", "start": [0.0, 0.0], "end": [inner_gauge_offset, 0.0], "line_style": construction_style},
+        {"target": "inner_radius_anchor", "start": [inner_gauge_offset, 0.0], "end": tip_right_end, "line_style": construction_style},
+        {"target": "transition_gauge_offset_anchor", "start": [0.0, 0.0], "end": [transition_gauge_offset, 0.0], "line_style": construction_style},
+        {"target": "transition_radius_anchor", "start": [transition_gauge_offset, 0.0], "end": tip_right_start, "line_style": construction_style},
+        {"target": "outer_gauge_offset_anchor", "start": [0.0, 0.0], "end": [outer_gauge_offset, 0.0], "line_style": construction_style},
+        {"target": "outer_radius_anchor", "start": [outer_gauge_offset, 0.0], "end": main_left_end, "line_style": construction_style},
+        {"target": "full_height_gauge_offset_anchor", "start": [0.0, 0.0], "end": [full_height_gauge_offset, 0.0], "line_style": construction_style},
+        {"target": "full_height_radius_anchor", "start": [full_height_gauge_offset, 0.0], "end": tip_left_end, "line_style": construction_style},
+        {"target": "bend_inner_radius_line", "start": bend_center, "end": main_left_start, "line_style": construction_style},
+    ]
+    if tip_variant == "s_bend":
+        first_tip_inner_gauge_offset = first_tip_right_end[0]
+        first_tip_height_gauge_offset = first_tip_right_end[0]
+        construction_lines.extend([
+            {"target": "first_tip_inner_gauge_offset_anchor", "start": [0.0, 0.0], "end": [first_tip_inner_gauge_offset, 0.0], "line_style": construction_style},
+            {"target": "first_tip_inner_radius_anchor", "start": [first_tip_inner_gauge_offset, 0.0], "end": first_tip_right_end, "line_style": construction_style},
+            {"target": "first_tip_height_gauge_offset_anchor", "start": [0.0, 0.0], "end": [first_tip_height_gauge_offset, 0.0], "line_style": construction_style},
+            {"target": "first_tip_height_radius_anchor", "start": [first_tip_height_gauge_offset, 0.0], "end": first_tip_right_end, "line_style": construction_style},
+            {"target": "second_bend_inner_radius_line", "start": second_bend_center, "end": first_tip_right_end, "line_style": construction_style},
+        ])
+    parameter_prefix = normalize_parameter_prefix(sketch.get("parameter_prefix") or params.get("parameter_prefix") or "DIA")
+    operation_label = build_operation_label(name, parameter_prefix=parameter_prefix)
+    variable_plan = build_diaphragm_spring_variable_plan(
+        outer_radius=outer_radius, body_inner_radius=body_inner_radius, inner_radius=final_inner_radius,
+        thickness=thickness, free_height=full_height_gauge_offset, cone_height=cone_height,
+        tip_bend_inner_radius=bend_inner_radius,
+        tip_bend_outer_radius=bend_outer_radius,
+        tip_variant=tip_variant,
+        first_tip_inner_radius=first_tip_inner_radius,
+        first_tip_height=first_tip_height,
+        second_tip_bend_inner_radius=second_bend_inner_radius if tip_variant == "s_bend" else None,
+        second_tip_bend_outer_radius=second_bend_outer_radius if tip_variant == "s_bend" else None,
+        parameter_prefix=parameter_prefix, operation_label=operation_label,
+    )
+    constraint_plan: list[dict[str, object]] = build_diaphragm_spring_constraint_plan(tip_variant=tip_variant)
+    dimension_plan = build_diaphragm_spring_dimension_plan(
+        outer_radius_variable=build_parameter_name("OR", 1, prefix=parameter_prefix),
+        inner_radius_variable=build_parameter_name("IR", 1, prefix=parameter_prefix),
+        body_inner_radius_variable=build_parameter_name("BODY_IR", 1, prefix=parameter_prefix),
+        cone_height_variable=build_parameter_name("CH", 1, prefix=parameter_prefix),
+        free_height_variable=build_parameter_name("FH", 1, prefix=parameter_prefix),
+        thickness_variable=build_parameter_name("T", 1, prefix=parameter_prefix),
+        bend_inner_radius_variable=build_parameter_name("BEND_RI", 1, prefix=parameter_prefix),
+        tip_variant=tip_variant,
+        first_tip_inner_radius_variable=build_parameter_name("FIRST_TIP_IR", 1, prefix=parameter_prefix) if tip_variant == "s_bend" else None,
+        first_tip_height_variable=build_parameter_name("FIRST_TIP_H", 1, prefix=parameter_prefix) if tip_variant == "s_bend" else None,
+        second_bend_inner_radius_variable=build_parameter_name("BEND2_RI", 1, prefix=parameter_prefix) if tip_variant == "s_bend" else None,
+    )
+    if parameterization_level == "geometry_only":
+        construction_lines = []
+        constraint_plan = []
+        dimension_plan = []
+    scenario_params = {"name": name, "outer_diameter": outer_diameter, "body_inner_diameter": body_inner_diameter, "inner_diameter": final_inner_radius * 2.0, "thickness": thickness, "cone_height": cone_height, "cone_direction": cone_direction, "tip_variant": tip_variant, "tip_angle_degrees": tip_angle_degrees, "tip_length": tip_length, "tip_bend_inner_radius": bend_inner_radius, "tip_bend_neutral_radius": bend_neutral_radius, "tip_bend_outer_radius": bend_outer_radius, "transition_gauge_offset": transition_gauge_offset, "parameterization_level": parameterization_level, "profile_points": profile_points, "profile_entities": profile_entities, "construction_lines": construction_lines, "axis_start": axis_start, "axis_end": axis_end, "angle_degrees": 360.0, "plane": "XOY", "sketch": sketch, "parameter_prefix": parameter_prefix, "operation_label": operation_label, "verify_profile_after_parameterization": True}
+    summary = {"profile_entity_count": len(profile_entities), "outer_diameter": outer_diameter, "body_inner_diameter": body_inner_diameter, "inner_diameter": final_inner_radius * 2.0, "thickness": thickness, "cone_height": cone_height, "tip_variant": tip_variant, "tip_angle_degrees": tip_angle_degrees, "tip_length": tip_length, "tip_bend_inner_radius": bend_inner_radius, "tip_bend_outer_radius": bend_outer_radius, "parameterization_level": parameterization_level, "planned_variable_count": len(variable_plan), "planned_constraint_count": len(constraint_plan), "planned_dimension_count": len(dimension_plan), "creation_status": "available", "live_support": "available"}
+    if tip_variant == "s_bend":
+        scenario_params.update({"tip_angle_degrees": None, "tip_angle_degrees_used": False, "first_tip_inner_diameter": (first_tip_inner_radius or 0.0) * 2.0, "first_tip_height": first_tip_height, "second_tip_bend_inner_radius": second_bend_inner_radius, "second_tip_bend_outer_radius": second_bend_outer_radius})
+        summary.update({"tip_angle_degrees": None, "tip_angle_degrees_used": False, "first_tip_inner_diameter": (first_tip_inner_radius or 0.0) * 2.0, "first_tip_height": first_tip_height, "second_tip_bend_inner_radius": second_bend_inner_radius, "second_tip_bend_outer_radius": second_bend_outer_radius})
+    return {
+        "scenario": "diaphragm_spring",
+        "ok": True,
+        "params": scenario_params,
+        "summary": summary,
+        "interface": _diaphragm_spring_interface(axis_start, axis_end),
+        "operations": [
+            {"operation": "create_part_document"},
+            {"operation": "add_variables", "enabled": True, "variables": variable_plan},
+            {"operation": "create_sketch", "plane": "XOY", "description": "Create constrained diaphragm spring flange section"},
+            {"operation": "draw_axis", "start": axis_start, "end": axis_end, "line_style": sketch["axis_line_style"]},
+            {"operation": "draw_profile", "profile_points": profile_points, "profile_entities": profile_entities, "construction_lines": construction_lines, "closed": True},
+            {"operation": "apply_constraints", "enabled": True, "constraints": constraint_plan},
+            {"operation": "add_dimensions", "enabled": True, "dimensions": dimension_plan},
+            {"operation": "base_rotation", "angle_degrees": 360.0},
+        ],
     }
 
 
@@ -7585,6 +8465,10 @@ def preview_part_scenario(scenario: str, params: dict[str, Any]) -> dict[str, An
     normalized_scenario = _normalize_scenario(scenario)
     if normalized_scenario == "stepped_shaft":
         return preview_stepped_shaft(params)
+    if normalized_scenario == "disc_spring":
+        return preview_disc_spring(params)
+    if normalized_scenario == "diaphragm_spring":
+        return preview_diaphragm_spring(params)
     if normalized_scenario == "external_conical_step":
         return preview_external_conical_step(params)
     if normalized_scenario == "internal_conical_step":
@@ -7653,8 +8537,14 @@ def _normalize_scenario(scenario: str) -> str:
     aliases.update(FACE_RING_GROOVE_SCENARIO_ALIASES)
     aliases.update(BOLT_CIRCLE_HOLES_SCENARIO_ALIASES)
     aliases.update(COMPRESSION_SPRING_SCENARIO_ALIASES)
+    aliases.update(DISC_SPRING_SCENARIO_ALIASES)
+    aliases.update(DIAPHRAGM_SPRING_SCENARIO_ALIASES)
     aliases.update(POINT_SCENARIO_ALIASES)
+    aliases.update(PROJECTION_POINT_SCENARIO_ALIASES)
+    aliases.update(PROJECTION_ANCHOR_SKETCH_SCENARIO_ALIASES)
+    aliases.update(CUT_REFERENCE_POINTS_SKETCH_SCENARIO_ALIASES)
     aliases.update(LCS_SCENARIO_ALIASES)
+    aliases.update(TANGENT_PLANE_SCENARIO_ALIASES)
     aliases.update(WORKFLOW_SCENARIO_ALIASES)
     return aliases.get(value, value)
 
@@ -7753,6 +8643,427 @@ def _normalize_workflow_operation(
                     path="operations[%s].params.reference" % (index - 1),
                 )
         preview = preview_point(params)
+    elif scenario == "projection_point":
+        surface_reference = params.get("surface") or params.get("plane") or params.get("target")
+        surface_resolved = _resolve_workflow_output_reference_any(
+            context,
+            surface_reference,
+            default_output=str(params.get("surface_output") or params.get("plane_output") or "plane"),
+        )
+        if surface_resolved is None or str((surface_resolved.get("output") or {}).get("type") or "") not in {"plane", "face"}:
+            _raise_invalid_workflow_output_reference(surface_reference, path="operations[%s].params.surface" % (index - 1))
+        surface_ref = _build_workflow_output_token(surface_resolved["operation_id"], surface_resolved["output_key"])
+        source_reference = params.get("source") or params.get("source_point") or params.get("association_vertex")
+        source_ref = None
+        if source_reference not in (None, "", "origin", "global_origin"):
+            source_resolved = _resolve_workflow_output_reference_any(context, source_reference, default_output=str(params.get("source_output") or "point"))
+            if source_resolved is None or str((source_resolved.get("output") or {}).get("type") or "") != "point":
+                _raise_invalid_workflow_output_reference(source_reference, path="operations[%s].params.source" % (index - 1))
+            source_ref = _build_workflow_output_token(source_resolved["operation_id"], source_resolved["output_key"])
+            depends_on.append(source_resolved["operation_id"])
+        params["surface"] = {"output_ref": surface_ref}
+        if source_ref is not None:
+            params["source"] = {"output_ref": source_ref}
+        params["axis"] = str(params.get("axis") or params.get("guide_axis") or "X")
+        axis_key = params["axis"].strip().upper().replace("GLOBAL_", "").replace("AXIS", "").replace("O", "")
+        if axis_key not in {"", "X", "Y", "Z"}:
+            axis_resolved = _resolve_workflow_output_reference_any(context, params["axis"], default_output=str(params.get("axis_output") or "axis"))
+            if axis_resolved is None or str((axis_resolved.get("output") or {}).get("type") or "") != "axis":
+                _raise_invalid_workflow_output_reference(params["axis"], path="operations[%s].params.axis" % (index - 1))
+            params["axis"] = _build_workflow_output_token(axis_resolved["operation_id"], axis_resolved["output_key"])
+            bindings["guide_operation"] = axis_resolved["operation_id"]
+            bindings["guide_output"] = axis_resolved["output_key"]
+            depends_on.append(axis_resolved["operation_id"])
+        bindings["surface_operation"] = surface_resolved["operation_id"]
+        bindings["surface_output"] = surface_resolved["output_key"]
+        depends_on.append(surface_resolved["operation_id"])
+        preview = {
+            "scenario": "projection_point",
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "surface_reference": surface_ref,
+                "source_reference": source_ref or "origin",
+                "axis": params["axis"],
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "point": {"type": "point", "description": "3D point projected from source to surface along guiding axis"},
+                }
+            },
+        }
+    elif scenario == "projection_anchor_sketch":
+        plane_reference = params.get("plane") or params.get("sketch_plane") or params.get("surface")
+        plane_resolved = _resolve_workflow_output_reference_any(
+            context,
+            plane_reference,
+            default_output=str(params.get("plane_output") or params.get("surface_output") or "plane"),
+        )
+        if plane_resolved is None or str((plane_resolved.get("output") or {}).get("type") or "") != "plane":
+            _raise_invalid_workflow_output_reference(plane_reference, path="operations[%s].params.plane" % (index - 1))
+        point_reference = params.get("point") or params.get("anchor_point") or params.get("projection_point")
+        point_resolved = _resolve_workflow_output_reference_any(
+            context,
+            point_reference,
+            default_output=str(params.get("point_output") or "point"),
+        )
+        if point_resolved is None or str((point_resolved.get("output") or {}).get("type") or "") != "point":
+            _raise_invalid_workflow_output_reference(point_reference, path="operations[%s].params.point" % (index - 1))
+        end_point_reference = params.get("end_point") or params.get("point2") or params.get("second_point")
+        end_point_ref = None
+        end_point_resolved = None
+        if end_point_reference is not None:
+            end_point_resolved = _resolve_workflow_output_reference_any(
+                context,
+                end_point_reference,
+                default_output=str(params.get("end_point_output") or params.get("point2_output") or "point"),
+            )
+            if end_point_resolved is None or str((end_point_resolved.get("output") or {}).get("type") or "") != "point":
+                _raise_invalid_workflow_output_reference(end_point_reference, path="operations[%s].params.end_point" % (index - 1))
+        plane_ref = _build_workflow_output_token(plane_resolved["operation_id"], plane_resolved["output_key"])
+        point_ref = _build_workflow_output_token(point_resolved["operation_id"], point_resolved["output_key"])
+        if end_point_resolved is not None:
+            end_point_ref = _build_workflow_output_token(end_point_resolved["operation_id"], end_point_resolved["output_key"])
+        params["plane"] = {"output_ref": plane_ref}
+        params["point"] = {"output_ref": point_ref}
+        if end_point_ref is not None:
+            params["end_point"] = {"output_ref": end_point_ref}
+        axis_value = params.get("axis") or params.get("guide_axis")
+        if axis_value not in (None, ""):
+            params["axis"] = str(axis_value)
+            axis_key = params["axis"].strip().upper().replace("GLOBAL_", "").replace("AXIS", "").replace("O", "")
+            if axis_key not in {"", "X", "Y", "Z"}:
+                axis_resolved = _resolve_workflow_output_reference_any(context, params["axis"], default_output=str(params.get("axis_output") or "axis"))
+                if axis_resolved is None or str((axis_resolved.get("output") or {}).get("type") or "") != "axis":
+                    _raise_invalid_workflow_output_reference(params["axis"], path="operations[%s].params.axis" % (index - 1))
+                params["axis"] = _build_workflow_output_token(axis_resolved["operation_id"], axis_resolved["output_key"])
+                bindings["axis_operation"] = axis_resolved["operation_id"]
+                bindings["axis_output"] = axis_resolved["output_key"]
+                depends_on.append(axis_resolved["operation_id"])
+        bindings["plane_operation"] = plane_resolved["operation_id"]
+        bindings["plane_output"] = plane_resolved["output_key"]
+        bindings["point_operation"] = point_resolved["operation_id"]
+        bindings["point_output"] = point_resolved["output_key"]
+        if end_point_resolved is not None:
+            bindings["end_point_operation"] = end_point_resolved["operation_id"]
+            bindings["end_point_output"] = end_point_resolved["output_key"]
+            depends_on.append(end_point_resolved["operation_id"])
+        depends_on.extend([plane_resolved["operation_id"], point_resolved["operation_id"]])
+        preview = {
+            "scenario": "projection_anchor_sketch",
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "plane_reference": plane_ref,
+                "point_reference": point_ref,
+                "end_point_reference": end_point_ref,
+                "axis": params.get("axis"),
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "sketch": {"type": "sketch", "description": "Sketch on plane with projected point and axis anchors"},
+                    }
+                },
+            }
+    elif scenario == "diaphragm_cut_profile_sketch":
+        plane_reference = params.get("plane") or params.get("sketch_plane")
+        start_reference = params.get("start_point") or params.get("point")
+        end_reference = params.get("end_point") or params.get("point2")
+        plane_resolved = _resolve_workflow_output_reference_any(context, plane_reference, default_output="plane")
+        start_resolved = _resolve_workflow_output_reference_any(context, start_reference, default_output="point")
+        end_resolved = _resolve_workflow_output_reference_any(context, end_reference, default_output="point")
+        if plane_resolved is None or str((plane_resolved.get("output") or {}).get("type") or "") != "plane":
+            _raise_invalid_workflow_output_reference(plane_reference, path="operations[%s].params.plane" % (index - 1))
+        for label, reference, resolved in (("start_point", start_reference, start_resolved), ("end_point", end_reference, end_resolved)):
+            if resolved is None or str((resolved.get("output") or {}).get("type") or "") != "point":
+                _raise_invalid_workflow_output_reference(reference, path="operations[%s].params.%s" % (index - 1, label))
+        plane_ref = _build_workflow_output_token(plane_resolved["operation_id"], plane_resolved["output_key"])
+        start_ref = _build_workflow_output_token(start_resolved["operation_id"], start_resolved["output_key"])
+        end_ref = _build_workflow_output_token(end_resolved["operation_id"], end_resolved["output_key"])
+        params["plane"] = {"output_ref": plane_ref}
+        params["start_point"] = {"output_ref": start_ref}
+        params["end_point"] = {"output_ref": end_ref}
+        start_width_value = params.get("start_width")
+        if start_width_value is None:
+            start_width_value = params.get("slot_start_width")
+        start_width = float(start_width_value or 0.0)
+        end_width_value = params.get("end_width")
+        if end_width_value is None:
+            end_width_value = params.get("slot_end_width")
+        if end_width_value is None:
+            end_width_value = start_width
+        end_width = float(end_width_value or 0.0)
+        fillet_radius_value = params.get("fillet_radius")
+        if fillet_radius_value is None:
+            fillet_radius_value = params.get("end_fillet_radius")
+        fillet_radius = float(fillet_radius_value or 0.0)
+        if start_width <= 0.0 or end_width <= 0.0 or fillet_radius <= 0.0:
+            raise ValueError("diaphragm_cut_profile_sketch requires positive start_width, end_width, and fillet_radius")
+        if fillet_radius * 2.0 >= end_width:
+            raise ValueError("diaphragm_cut_profile_sketch requires 2 * fillet_radius < end_width")
+        terminal_setback = float(params.get("terminal_setback") or params.get("relief_radius") or 0.0)
+        if terminal_setback < 0.0:
+            raise ValueError("diaphragm_cut_profile_sketch terminal_setback must be >= 0")
+        if terminal_setback > 0.0 and terminal_setback <= (end_width / 2.0):
+            raise ValueError("diaphragm_cut_profile_sketch terminal_setback must exceed end_width / 2")
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        params["start_width"] = start_width
+        params["end_width"] = end_width
+        params["fillet_radius"] = fillet_radius
+        params["terminal_setback"] = terminal_setback
+        params["parameter_prefix"] = parameter_prefix
+        params["start_width_variable"] = str(params.get("start_width_variable") or f"{parameter_prefix}_SLOT_START_W1")
+        params["end_width_variable"] = str(params.get("end_width_variable") or f"{parameter_prefix}_SLOT_END_W1")
+        params["fillet_radius_variable"] = str(params.get("fillet_radius_variable") or f"{parameter_prefix}_SLOT_END_R1")
+        params["terminal_setback_variable"] = str(params.get("terminal_setback_variable") or f"{parameter_prefix}_RELIEF_R1")
+        params["parameterization_level"] = str(params.get("parameterization_level") or "constrained").strip().lower()
+        if params["parameterization_level"] not in {"geometry_only", "constrained"}:
+            raise ValueError("diaphragm_cut_profile_sketch parameterization_level must be geometry_only or constrained")
+        bindings["plane_operation"] = plane_resolved["operation_id"]
+        bindings["plane_output"] = plane_resolved["output_key"]
+        bindings["start_point_operation"] = start_resolved["operation_id"]
+        bindings["start_point_output"] = start_resolved["output_key"]
+        bindings["end_point_operation"] = end_resolved["operation_id"]
+        bindings["end_point_output"] = end_resolved["output_key"]
+        depends_on.extend([plane_resolved["operation_id"], start_resolved["operation_id"], end_resolved["operation_id"]])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {"start_width": start_width, "end_width": end_width, "fillet_radius": fillet_radius, "terminal_setback": terminal_setback, "parameterization_level": params["parameterization_level"], "creation_status": "available", "live_support": "available"},
+            "interface": {"outputs": {"sketch": {"type": "sketch", "description": "Parameterized diaphragm cut profile sketch"}}},
+        }
+    elif scenario == "diaphragm_terminal_relief_sketch":
+        plane_reference = params.get("plane") or params.get("surface") or params.get("target")
+        start_point_reference = params.get("start_point") or params.get("start")
+        end_point_reference = params.get("end_point") or params.get("end")
+        plane_resolved = _resolve_workflow_output_reference_any(context, plane_reference, default_output="plane")
+        start_resolved = _resolve_workflow_output_reference_any(context, start_point_reference, default_output="point")
+        end_resolved = _resolve_workflow_output_reference_any(context, end_point_reference, default_output="point")
+        if plane_resolved is None or str((plane_resolved.get("output") or {}).get("type") or "") not in {"plane", "surface"}:
+            _raise_invalid_workflow_output_reference(plane_reference, path="operations[%s].params.plane" % (index - 1))
+        if start_resolved is None or str((start_resolved.get("output") or {}).get("type") or "") != "point":
+            _raise_invalid_workflow_output_reference(start_point_reference, path="operations[%s].params.start_point" % (index - 1))
+        if end_resolved is None or str((end_resolved.get("output") or {}).get("type") or "") != "point":
+            _raise_invalid_workflow_output_reference(end_point_reference, path="operations[%s].params.end_point" % (index - 1))
+        variant = str(params.get("variant") or "circle").strip().lower().replace("-", "_")
+        if variant not in {"circle", "oval"}:
+            raise ValueError("diaphragm_terminal_relief_sketch variant must be circle or oval")
+        radius = float(params.get("radius") or params.get("relief_radius") or 0.0)
+        if radius <= 0.0:
+            raise ValueError("diaphragm_terminal_relief_sketch radius must be > 0")
+        slot_end_width = float(params.get("slot_end_width") or 0.0)
+        if slot_end_width > 0.0 and radius <= (slot_end_width / 2.0):
+            raise ValueError("diaphragm_terminal_relief_sketch radius must exceed slot_end_width / 2")
+        straight_length = float(params.get("straight_length") or params.get("oval_straight_length") or 0.0)
+        if variant == "oval" and straight_length <= 0.0:
+            raise ValueError("diaphragm_terminal_relief_sketch oval straight_length must be > 0")
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        params["plane"] = plane_reference
+        params["start_point"] = start_point_reference
+        params["end_point"] = end_point_reference
+        params["variant"] = variant
+        params["radius"] = radius
+        params["slot_end_width"] = slot_end_width
+        params["straight_length"] = straight_length
+        params["parameter_prefix"] = parameter_prefix
+        params["radius_variable"] = str(params.get("radius_variable") or f"{parameter_prefix}_RELIEF_R1")
+        params["straight_length_variable"] = str(params.get("straight_length_variable") or f"{parameter_prefix}_RELIEF_L1")
+        params["parameterization_level"] = "constrained"
+        params["name"] = str(params.get("name") or "Terminal relief sketch")
+        bindings["plane_operation"] = plane_resolved["operation_id"]
+        bindings["plane_output"] = plane_resolved["output_key"]
+        bindings["start_operation"] = start_resolved["operation_id"]
+        bindings["start_output"] = start_resolved["output_key"]
+        bindings["end_operation"] = end_resolved["operation_id"]
+        bindings["end_output"] = end_resolved["output_key"]
+        depends_on.extend([plane_resolved["operation_id"], start_resolved["operation_id"], end_resolved["operation_id"]])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {"variant": variant, "radius": radius, "straight_length": straight_length, "creation_status": "available", "live_support": "available"},
+            "interface": {"outputs": {"sketch": {"type": "sketch", "description": "Terminal relief operation sketch"}}},
+        }
+    elif scenario == "cut_extrusion":
+        sketch_reference = params.get("sketch") or params.get("profile")
+        sketch_resolved = _resolve_workflow_output_reference_any(context, sketch_reference, default_output="sketch")
+        if sketch_resolved is None or str((sketch_resolved.get("output") or {}).get("type") or "") != "sketch":
+            _raise_invalid_workflow_output_reference(sketch_reference, path="operations[%s].params.sketch" % (index - 1))
+        direction = str(params.get("direction") or "both").strip().lower().replace("-", "_")
+        direction = {
+            "forward": "normal",
+            "backward": "reverse",
+            "bidirectional": "both",
+            "two_sided": "both",
+            "symmetric": "both",
+        }.get(direction, direction)
+        if direction not in {"normal", "reverse", "both"}:
+            raise ValueError("cut_extrusion direction must be normal, reverse, or both")
+        end_condition = str(params.get("end_condition") or "through_all").strip().lower().replace("-", "_")
+        end_condition = {"through": "through_all", "all": "through_all"}.get(end_condition, end_condition)
+        if end_condition != "through_all":
+            raise ValueError("cut_extrusion currently supports only end_condition=through_all")
+        params["sketch"] = sketch_reference
+        params["direction"] = direction
+        params["end_condition"] = end_condition
+        params["name"] = str(params.get("name") or "Cut extrusion")
+        params["require_fully_defined"] = True
+        bindings["sketch_operation"] = sketch_resolved["operation_id"]
+        bindings["sketch_output"] = sketch_resolved["output_key"]
+        depends_on.append(sketch_resolved["operation_id"])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "direction": direction,
+                "end_condition": end_condition,
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "feature": {"type": "feature", "description": "Cut extrusion feature"},
+                    "cut": {"type": "feature", "description": "Alias for the cut extrusion feature"},
+                }
+            },
+        }
+    elif scenario == "circular_pattern":
+        source_references = params.get("sources")
+        if source_references is None:
+            source_references = [params.get("source") or params.get("feature") or params.get("operation")]
+        if not isinstance(source_references, list) or not source_references:
+            raise ValueError("circular_pattern sources must be a non-empty list")
+        source_resolved_items = []
+        for source_index, source_reference in enumerate(source_references):
+            source_resolved = _resolve_workflow_output_reference_any(context, source_reference, default_output="feature")
+            if source_resolved is None or str((source_resolved.get("output") or {}).get("type") or "") != "feature":
+                _raise_invalid_workflow_output_reference(source_reference, path="operations[%s].params.sources[%s]" % (index - 1, source_index))
+            source_resolved_items.append(source_resolved)
+        axis_reference = params.get("axis")
+        axis_resolved = _resolve_workflow_output_reference_any(context, axis_reference, default_output="axis")
+        axis_type = str((axis_resolved.get("output") or {}).get("type") or "") if axis_resolved is not None else ""
+        if axis_resolved is None or axis_type not in {"axis", "edge"}:
+            _raise_invalid_workflow_output_reference(axis_reference, path="operations[%s].params.axis" % (index - 1))
+        count_value = float(params.get("count") or params.get("instances") or 0.0)
+        count = int(round(count_value))
+        if count < 2 or abs(count_value - count) > 1e-9:
+            raise ValueError("circular_pattern count must be an integer >= 2")
+        span_angle = float(params.get("span_angle") or params.get("angle") or 360.0)
+        if abs(span_angle - 360.0) > 1e-9:
+            raise ValueError("circular_pattern currently supports only span_angle=360")
+        angle_step = span_angle / float(count)
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        params["source"] = source_references[0]
+        params["sources"] = list(source_references)
+        params["axis"] = axis_reference
+        params["count"] = count
+        params["span_angle"] = span_angle
+        params["angle_step"] = angle_step
+        params["parameter_prefix"] = parameter_prefix
+        params["count_variable"] = str(params.get("count_variable") or f"{parameter_prefix}_CUT_COUNT1")
+        params["span_angle_variable"] = str(params.get("span_angle_variable") or f"{parameter_prefix}_CUT_SPAN_A1")
+        params["angle_step_variable"] = str(params.get("angle_step_variable") or f"{parameter_prefix}_CUT_STEP_A1")
+        params["pattern_operation_variable_bindings"] = _build_circular_pattern_variable_bindings(
+            params["count_variable"],
+            params["angle_step_variable"],
+        )
+        params["name"] = str(params.get("name") or "Circular cut pattern")
+        bindings["source_operation"] = source_resolved_items[0]["operation_id"]
+        bindings["source_output"] = source_resolved_items[0]["output_key"]
+        bindings["source_operations"] = [item["operation_id"] for item in source_resolved_items]
+        bindings["source_outputs"] = [item["output_key"] for item in source_resolved_items]
+        bindings["axis_operation"] = axis_resolved["operation_id"]
+        bindings["axis_output"] = axis_resolved["output_key"]
+        depends_on.extend([item["operation_id"] for item in source_resolved_items] + [axis_resolved["operation_id"]])
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "count": count,
+                "source_count": len(source_resolved_items),
+                "span_angle": span_angle,
+                "angle_step": angle_step,
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "feature": {"type": "feature", "description": "Circular pattern feature"},
+                    "pattern": {"type": "feature", "description": "Alias for the circular pattern feature"},
+                }
+            },
+        }
+    elif scenario == "cut_reference_points_sketch":
+        start_radius = params.get("start_radius")
+        if start_radius is None:
+            start_radius = float(params.get("start_diameter", 0.0)) / 2.0
+        start_radius = float(start_radius or 0.0)
+        nominal_start_radius = start_radius
+        parameter_prefix = normalize_parameter_prefix(params.get("parameter_prefix") or "DIA") or "DIA"
+        inner_radius_variable = str(params.get("inner_radius_variable") or f"{parameter_prefix}_IR1").strip()
+        sketch_reference = params.get("sketch") or params.get("source_sketch")
+        sketch_resolved = _resolve_workflow_output_reference_any(context, sketch_reference, default_output="sketch")
+        source_operation = context.get(sketch_resolved["operation_id"]) if sketch_resolved is not None else None
+        source_inner_diameter = float(((source_operation or {}).get("params") or {}).get("inner_diameter") or 0.0)
+        if source_inner_diameter > 0.0:
+            nominal_start_radius = source_inner_diameter / 2.0
+            start_radius = nominal_start_radius
+        auto_entry_clearance = bool(params.get("auto_entry_clearance", False))
+        slot_start_width = float(params.get("slot_start_width") or params.get("start_width") or 0.0)
+        entry_clearance = float(params.get("entry_clearance") or 0.0)
+        if auto_entry_clearance:
+            available_radius = nominal_start_radius - entry_clearance
+            if slot_start_width <= 0.0 or available_radius <= slot_start_width / 2.0:
+                raise ValueError("cut_reference_points_sketch auto entry clearance requires valid slot_start_width and clearance")
+            start_radius = math.sqrt(available_radius * available_radius - (slot_start_width / 2.0) ** 2)
+        end_radius = params.get("end_radius")
+        if end_radius is None:
+            end_radius = float(params.get("end_diameter", 0.0)) / 2.0
+        end_radius = float(end_radius or 0.0)
+        if start_radius <= 0.0 or end_radius <= 0.0:
+            raise ValueError("cut_reference_points_sketch requires positive start/end radius or diameter")
+        params["start_radius"] = start_radius
+        params["nominal_start_radius"] = nominal_start_radius
+        params["end_radius"] = end_radius
+        params["reference_plane"] = str(params.get("reference_plane") or params.get("base_plane") or "YOZ")
+        params["contact_plane"] = str(params.get("contact_plane") or params.get("tangent_base_plane") or "XOY")
+        params["parameter_prefix"] = parameter_prefix
+        params["start_radius_variable"] = str(params.get("start_radius_variable") or f"{parameter_prefix}_CUT_START_R1").strip()
+        params["end_radius_variable"] = str(params.get("end_radius_variable") or f"{parameter_prefix}_CUT_END_R1").strip()
+        params["parameterize_points"] = bool(params.get("parameterize_points", True))
+        params["auto_entry_clearance"] = auto_entry_clearance
+        params["slot_start_width"] = slot_start_width
+        params["entry_clearance"] = entry_clearance
+        params["slot_start_width_variable"] = str(params.get("slot_start_width_variable") or f"{parameter_prefix}_SLOT_START_W1")
+        params["entry_clearance_variable"] = str(params.get("entry_clearance_variable") or f"{parameter_prefix}_SLOT_ENTRY_CLR1")
+        params["inner_radius_variable"] = inner_radius_variable
+        preview = {
+            "scenario": "cut_reference_points_sketch",
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "reference_plane": params["reference_plane"],
+                "contact_plane": params["contact_plane"],
+                "start_radius": start_radius,
+                "end_radius": end_radius,
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "sketch": {"type": "sketch", "description": "Reference sketch containing cut start/end radial points"},
+                    "start_point": {"type": "point", "description": "Cut start reference point"},
+                    "end_point": {"type": "point", "description": "Cut end reference point"},
+                }
+            },
+        }
     elif scenario == "lcs":
         mode = _normalize_lcs_mode(params.get("mode") or params.get("type") or "global")
         reference_payload = params.get("reference") or params.get("base") or params.get("ref")
@@ -7864,8 +9175,57 @@ def _normalize_workflow_operation(
                     reference,
                     path="operations[%s].params.placement.base.reference" % (index - 1),
                 )
-        if scenario == "stepped_shaft":
+        if scenario == "tangent_plane":
+            face_reference = params.get("face") or params.get("surface") or params.get("reference")
+            default_output = str(params.get("face_output") or params.get("surface_output") or "face").strip() or "face"
+            resolved_reference = None
+            if _looks_like_workflow_output_reference(face_reference):
+                resolved_reference = _resolve_workflow_output_reference(
+                    context,
+                    face_reference,
+                    expected_output_type="face",
+                    allowed_scenarios=_REVOLVED_FACE_REFERENCE_SCENARIOS,
+                    default_output=default_output,
+                )
+            elif bindings.get("reference_operation"):
+                reference_operation = str(bindings["reference_operation"])
+                reference_output = str(bindings.get("reference_output") or default_output)
+                resolved_reference = {
+                    "operation_id": reference_operation,
+                    "output_key": reference_output,
+                }
+            else:
+                _raise_invalid_workflow_output_reference(face_reference, path="operations[%s].params.face" % (index - 1))
+            output_ref = _build_workflow_output_token(resolved_reference["operation_id"], resolved_reference["output_key"])
+            params["face"] = {"output_ref": output_ref}
+            params["base_plane"] = str(params.get("base_plane") or "XOY")
+            params["angle"] = float(params.get("angle") or params.get("angle_degrees") or 0.0)
+            params["orientation"] = bool(params.get("orientation") or params.get("side") or params.get("reverse"))
+            bindings["reference_operation"] = resolved_reference["operation_id"]
+            bindings["reference_output"] = resolved_reference["output_key"]
+            depends_on.append(resolved_reference["operation_id"])
+            preview = {
+                "scenario": "tangent_plane",
+                "ok": True,
+                "params": dict(params),
+                "summary": {
+                    "face_reference": output_ref,
+                    "base_plane": params["base_plane"],
+                    "angle": params["angle"],
+                    "orientation": params["orientation"],
+                    "creation_status": "available",
+                    "live_support": "available",
+                },
+                "interface": {
+                    "outputs": {
+                        "plane": {"type": "plane", "description": "Tangent plane to the referenced face"},
+                    }
+                },
+            }
+        elif scenario == "stepped_shaft":
             preview = preview_stepped_shaft(params)
+        elif scenario in {"disc_spring", "diaphragm_spring"}:
+            preview = preview_part_scenario(scenario, params)
         elif scenario == "external_conical_step":
             preview = preview_external_conical_step(params)
         elif scenario == "internal_conical_step":
@@ -8042,8 +9402,16 @@ def _default_operation_output_key(scenario: str) -> str:
         return "body"
     if normalized_scenario == "point":
         return "point"
+    if normalized_scenario == "projection_point":
+        return "point"
+    if normalized_scenario == "projection_anchor_sketch":
+        return "sketch"
+    if normalized_scenario == "cut_reference_points_sketch":
+        return "sketch"
     if normalized_scenario == "lcs":
         return "lcs"
+    if normalized_scenario == "tangent_plane":
+        return "plane"
     return "result"
 
 
@@ -8319,6 +9687,7 @@ def _build_circular_pattern_variable_bindings(
             "parameter_note": "Count",
             "parameter_note_aliases": [
                 "Count",
+                "N 2",
                 "Instance count",
                 "Instances",
                 "Количество",
@@ -8333,10 +9702,12 @@ def _build_circular_pattern_variable_bindings(
             "parameter_note_aliases": [
                 "Angle",
                 "Step",
+                "Step 2",
                 "Angular step",
                 "Angle step",
                 "Угол",
                 "Шаг",
+                "Шаг 2",
                 "Угловой шаг",
             ],
             "expression": angle_step_expression,
@@ -13485,6 +14856,8 @@ def _normalize_stepped_shaft_reference_preview(reference: dict[str, Any], *, fie
 
 _REVOLVED_FACE_REFERENCE_SCENARIOS = (
     "stepped_shaft",
+    "disc_spring",
+    "diaphragm_spring",
     "external_conical_step",
     "internal_conical_step",
     "internal_cylindrical_step",

@@ -29,6 +29,7 @@ The README intentionally stays shorter and points here for details.
 - `bolt_circle_holes` — отверстия по диаметру через базовое отверстие + концентрический массив;
 - `compression_spring` — пружина сжатия через segmented spiral path + staged profile sketch;
 - `extension_spring` — пружина растяжения с machine hooks через sketch path зацепы, ассоциативную правую плоскость и clearance-based hook ends;
+- `diaphragm_spring` — осесимметричная диафрагменная пружина с базовым профилем без отгиба или одним из двух вариантов отогнутой внутренней части;
 - `external_polygonal_step` / `internal_polygonal_step` — многогранные ступени через выдавливание/вырезание;
 - `external_threaded_step` / `internal_threaded_step` — внешняя и внутренняя native-резьба по каталогу КОМПАС;
 - `external_helical_thread` / `internal_helical_thread` — физическая винтовая резьба на существующем цилиндре/отверстии через спираль и кинематический вырез;
@@ -59,6 +60,120 @@ The README intentionally stays shorter and points here for details.
 координатную точку. Эта sketch-hook схема подходит для близких hook-end
 пружин, но support для 3D-кривых оставляем: другие типы пружин могут требовать
 прямых 3D траекторий.
+
+`diaphragm_spring` принимает три значения `tip_variant`: `no_bend`,
+`single_bend` и `s_bend`. Базовый `no_bend` строит замкнутый профиль из двух
+параллельных конических поверхностей и двух нормальных торцов; для него нужны
+только `outer_diameter`, `inner_diameter`, `thickness` и `cone_height`.
+Параметры отдельного диаметра тела, свободной высоты и радиусов отгиба в этом
+варианте не используются. Алиасы `no-bend`, `without_bend`, `unbent`, `plain`
+и `base` нормализуются в `no_bend`.
+
+Для bent-вариантов `conical_face` означает только основную наружную конусную
+грань тела. Bridge выбирает non-planar/non-cylindrical face с максимальным
+радиальным диапазоном относительно оси вращения, а не face с максимальным
+осевым span: это исключает касание tangent plane к тору/поверхности отгиба.
+Начало прорези всегда выводится из фактического внутреннего отверстия
+`DIA_IR1 = DIA_ID1 / 2`; `DIA_BODY_IR1` описывает переход основного тела и не
+используется как cut start. Normalizer берёт numeric start radius из
+`base.inner_diameter / 2`, затем auto-entry expression остаётся связанной с
+`DIA_IR1`.
+
+Для базирования выреза `cut_reference_points_sketch` строит на `YOZ` две
+обычные 2D-точки. Их радиусы задаются размерами с переменными
+`DIA_CUT_START_R1` и `DIA_CUT_END_R1`, а выравнивание с origin выполняется
+ограничениями точек. После обновления эскиза bridge получает постоянные
+`IVertex` через `IFeature7.ModelObjects(8)` и передаёт их непосредственно в
+`projection_point`. Промежуточные source `Point3D` и вспомогательные линии в
+этой цепочке не создаются; направляющей остаётся реальный `IEdge` осевой
+первого эскиза.
+
+Если указан `auto_entry_clearance`, начальный радиус выводится из ширины входа:
+`DIA_CUT_START_R1 = sqrt((DIA_IR1 - DIA_SLOT_ENTRY_CLR1)^2 -
+(DIA_SLOT_START_W1 / 2)^2)`. Последующий `diaphragm_cut_profile_sketch`
+проецирует start/end vertices в касательный эскиз и строит один замкнутый
+рабочий контур из четырёх линий и двух наружных fillet-дуг. Его независимые
+параметры — `DIA_SLOT_START_W1`, `DIA_SLOT_END_W1` и `DIA_SLOT_END_R1`:
+равные ширины дают прямоугольный вырез, разные — симметричную трапецию.
+Centerline, end-width gauge и две side extensions имеют construction style;
+они несут симметрию и размеры, но не входят в operational contour. В каждом
+трёхстороннем узле `side line — fillet — extension` используется отдельная
+construction point: все три endpoint независимо merge-привязаны к ней. Это
+устраняет свободный конец extension без циклической pairwise-привязки одного
+endpoint. Перед созданием 3D-операции bridge должен подтвердить состояние
+`fully_defined`, один component, замкнутость, нулевые gaps, branches и
+self-intersections.
+
+Следующий шаг `cut_extrusion` принимает существующий operation sketch через
+`sketch: "profile.sketch"`. Для диафрагмы используется
+`end_condition: "through_all"` и `direction: "both"`: API7 создаёт
+`Extrusions.Add(26)`, связывает `IExtrusion.Sketch` с исходным эскизом и задаёт
+`etThroughAll` для normal/reverse сторон. Перед Update bridge проверяет
+`fully_defined` и primary closure; после Update сверяет `Valid`, direction/end
+conditions и API5 body metrics. Операция считается состоявшейся только если
+body count не изменился, а объём тела измеримо уменьшился. Outputs `feature` и
+`cut` указывают на одну cut-extrusion feature и могут использоваться следующим
+шагом кругового массива.
+
+В cut-profile sketch только centerline имеет осевой стиль `3`. End-width gauge
+и обе side extensions имеют вспомогательный стиль `6`; primary contour остаётся
+стилем `1`.
+
+`circular_pattern` размножает готовую 3D feature, а не operation sketch. Для
+диафрагмы используются `source: "cut.feature"`, `axis: "base.axis"`, количество
+экземпляров `count` и полный угол `span_angle: 360`. `Count2` означает общее
+число экземпляров вместе с исходным вырезом; при `count=12` операция добавляет
+11 новых вырезов с шагом `30°`. `SaveInitialOrientation=false`, поэтому профиль
+каждой прорези поворачивается вместе с массивом и остаётся радиальным.
+
+Параметры массива хранятся в `DIA_CUT_COUNT1`, `DIA_CUT_SPAN_A1` и
+`DIA_CUT_STEP_A1`, где `DIA_CUT_STEP_A1 = DIA_CUT_SPAN_A1 /
+DIA_CUT_COUNT1`. API7 pattern сначала создаётся с числовыми `Count2/Step2`,
+затем его operation variables (`N 2`, `Шаг 2`) связываются с этими expressions.
+После Update bridge сверяет source/axis associations, количество, шаг,
+сохранение одного solid body и измеримое дополнительное уменьшение объёма.
+Output `feature`/`pattern` указывает на созданную circular-pattern feature.
+
+Для расширенного окончания `end.point` остаётся фактической крайней точкой
+составного выреза. Узкая прорезь получает `terminal_setback`, связанный с
+`DIA_RELIEF_R1`: её внутренний конец `C` смещается от `end.point` назад по
+центральной оси на радиус relief. Construction segment `C–E` коллинеарен оси,
+имеет driving length `DIA_RELIEF_R1`, а его конец связан с projected `E`
+горизонтальным и вертикальным point-alignment. Для гарантированного перекрытия
+плоского торца требуется `DIA_RELIEF_R1 > DIA_SLOT_END_W1 / 2`.
+
+`diaphragm_terminal_relief_sketch` создаёт отдельный fully-defined operation
+sketch на той же tangent plane:
+
+- `variant: "circle"` — одна окружность радиуса `DIA_RELIEF_R1`; projected
+  `end.point` лежит на окружности и является точкой касания с perpendicular
+  construction gauge;
+- `variant: "oval"` — две равные полуокружности радиуса `DIA_RELIEF_R1` и две
+  касательные прямые длиной `DIA_RELIEF_L1`. Front arc позиционируется как
+  круглый вариант, rear arc остаётся на центральной оси.
+
+Relief sketch вырезается отдельным `cut_extrusion` в обе стороны через всё.
+`circular_pattern.sources` может содержать несколько features, например
+`["slot_cut.feature", "relief_cut.feature"]`: обе исходные операции добавляются
+в один `ICircularPattern` и размножаются как единая группа. Verification требует
+два initial objects, один solid body, valid pattern и измеримое дополнительное
+уменьшение объёма.
+
+Перед созданием features diaphragm workflow предобъявляет основные variables в
+пользовательском порядке: размеры базовой пружины и отгибов, cut end/width,
+relief radius/length и pattern count/span. Последующие операции переиспользуют
+эти variables; производные радиусы и formula variables добавляются ниже.
+После завершения workflow выставляет `IModelObject.Hidden=True` для reference,
+profile и relief sketches, tangent plane и двух projection points. Save/reopen
+readback обязан сохранить hidden state.
+
+Финальная live-матрица включает `single_bend` и `s_bend`, каждый с circle и
+oval relief, `end_radius=100`, `R=6`, `count=12`. Во всех четырёх случаях
+выбирается main external cone, start radius выводится из `DIA_IR1`, pattern
+получает две initial features и сохраняет один solid body. Нулевая relief-cut
+операция отклоняется по body-volume readback, например если пользовательский
+`end_radius` фактически выводит relief за область пересечения tangent plane с
+телом.
 
 Детали anchor rotation, backlog и планы V2 — в
 [`docs/archive/`](archive/).

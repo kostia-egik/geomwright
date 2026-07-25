@@ -628,6 +628,627 @@ def _format_expression_number(value: float) -> str:
     return ("%0.12f" % float(value)).rstrip("0").rstrip(".")
 
 
+def build_disc_spring_variable_plan(
+    *,
+    outer_radius: float,
+    inner_radius: float,
+    thickness: float,
+    free_height: float,
+    cone_height: float,
+    radial_width: float,
+    center_radial_span: float,
+    normal_radial_margin: float,
+    cone_angle_degrees: float,
+    outer_gauge_offset: float,
+    parameter_prefix: str | None = "DS",
+    operation_label: str = "Disc spring",
+) -> list[dict[str, Any]]:
+    outer_radius_name = build_parameter_name("OR", 1, prefix=parameter_prefix)
+    inner_radius_name = build_parameter_name("IR", 1, prefix=parameter_prefix)
+    outer_diameter_name = build_parameter_name("OD", 1, prefix=parameter_prefix)
+    inner_diameter_name = build_parameter_name("ID", 1, prefix=parameter_prefix)
+    thickness_name = build_parameter_name("T", 1, prefix=parameter_prefix)
+    cone_height_name = build_parameter_name("CH", 1, prefix=parameter_prefix)
+    free_height_name = build_parameter_name("FH", 1, prefix=parameter_prefix)
+    radial_width_name = build_parameter_name("RW", 1, prefix=parameter_prefix)
+    center_span_name = build_parameter_name("CRS", 1, prefix=parameter_prefix)
+    normal_margin_name = build_parameter_name("NRM", 1, prefix=parameter_prefix)
+    cone_angle_name = build_parameter_name("CA", 1, prefix=parameter_prefix)
+    outer_gauge_offset_name = build_parameter_name("OGO", 1, prefix=parameter_prefix)
+
+    return [
+        {
+            "name": outer_radius_name,
+            "value": float(outer_radius),
+            "expression": _format_expression_number(outer_radius),
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", outer_radius_name, "Outer radius"),
+            "kind": "driving_outer_radius",
+        },
+        {
+            "name": inner_radius_name,
+            "value": float(inner_radius),
+            "expression": _format_expression_number(inner_radius),
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", inner_radius_name, "Inner radius"),
+            "kind": "driving_inner_radius",
+        },
+        {
+            "name": outer_diameter_name,
+            "value": float(outer_radius) * 2.0,
+            "expression": f"2*{outer_radius_name}",
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", outer_diameter_name, "Outer diameter"),
+            "kind": "derived_outer_diameter",
+        },
+        {
+            "name": inner_diameter_name,
+            "value": float(inner_radius) * 2.0,
+            "expression": f"2*{inner_radius_name}",
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", inner_diameter_name, "Inner diameter"),
+            "kind": "derived_inner_diameter",
+        },
+        {
+            "name": thickness_name,
+            "value": float(thickness),
+            "expression": _format_expression_number(thickness),
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", thickness_name, "Normal thickness"),
+            "kind": "driving_thickness",
+        },
+        {
+            "name": cone_height_name,
+            "value": float(cone_height),
+            "expression": _format_expression_number(cone_height),
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", cone_height_name, "Cone rise"),
+            "kind": "driving_cone_height",
+        },
+        {
+            "name": free_height_name,
+            "value": float(cone_height) + float(thickness),
+            "expression": f"{cone_height_name}+{thickness_name}",
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", free_height_name, "Free height"),
+            "kind": "derived_free_height",
+        },
+        {
+            "name": radial_width_name,
+            "value": float(radial_width),
+            "expression": f"{outer_radius_name}-{inner_radius_name}",
+            "external": False,
+            "note": build_parameter_note(operation_label, "profile", radial_width_name, "Radial width"),
+            "kind": "derived_radial_width",
+        },
+        {
+            "name": center_span_name,
+            "value": float(center_radial_span),
+            "expression": _format_expression_number(center_radial_span),
+            "external": False,
+            "note": build_parameter_note(operation_label, "profile", center_span_name, "Center radial span"),
+            "kind": "derived_center_radial_span",
+        },
+        {
+            "name": normal_margin_name,
+            "value": float(normal_radial_margin),
+            "expression": _format_expression_number(normal_radial_margin),
+            "external": False,
+            "note": build_parameter_note(operation_label, "profile", normal_margin_name, "Normal radial margin"),
+            "kind": "derived_normal_radial_margin",
+        },
+        {
+            "name": cone_angle_name,
+            "value": float(cone_angle_degrees),
+            "expression": _format_expression_number(cone_angle_degrees),
+            "external": True,
+            "note": build_parameter_note(operation_label, "profile", cone_angle_name, "Cone angle"),
+            "kind": "derived_cone_angle",
+        },
+        {
+            "name": outer_gauge_offset_name,
+            "value": abs(float(outer_gauge_offset)),
+            "expression": _format_expression_number(abs(float(outer_gauge_offset))),
+            "external": False,
+            "note": build_parameter_note(operation_label, "profile", outer_gauge_offset_name, "Outer gauge offset"),
+            "kind": "derived_outer_gauge_offset",
+        },
+    ]
+
+
+def build_disc_spring_constraint_plan() -> list[dict[str, Any]]:
+    return [
+        {"kind": "horizontal", "target": "axis", "stage": "anchor"},
+        {"kind": "fixed_point", "target": "origin", "stage": "anchor"},
+        {"kind": "fixed_point", "target": "axis", "index": 1, "stage": "anchor"},
+        {"kind": "vertical", "target": "inner_radius_anchor", "stage": "anchor"},
+        {"kind": "fixed_point", "target": "inner_radius_anchor", "index": 0, "stage": "anchor"},
+        {"kind": "vertical", "target": "outer_radius_anchor", "stage": "anchor"},
+        {
+            "kind": "merge_points",
+            "target": "inner_radius_anchor",
+            "index": 1,
+            "partner": "profile_line_1",
+            "partner_index": 0,
+            "stage": "pre_dimension",
+        },
+        {
+            "kind": "merge_points",
+            "target": "outer_radius_anchor",
+            "index": 1,
+            "partner": "profile_line_2",
+            "partner_index": 1,
+            "stage": "pre_dimension",
+        },
+        {
+            "kind": "merge_points",
+            "target": "outer_radius_anchor",
+            "index": 0,
+            "partner": "outer_gauge_offset_anchor",
+            "partner_index": 1,
+            "stage": "pre_dimension",
+        },
+        {
+            "kind": "merge_points",
+            "target": "profile_line_1",
+            "index": 1,
+            "partner": "profile_line_2",
+            "partner_index": 0,
+            "stage": "pre_dimension",
+        },
+        {
+            "kind": "merge_points",
+            "target": "profile_line_2",
+            "index": 1,
+            "partner": "profile_line_3",
+            "partner_index": 0,
+            "stage": "pre_dimension",
+        },
+        {
+            "kind": "merge_points",
+            "target": "profile_line_3",
+            "index": 1,
+            "partner": "profile_line_4",
+            "partner_index": 0,
+            "stage": "pre_dimension",
+        },
+        {
+            "kind": "merge_points",
+            "target": "profile_line_4",
+            "index": 1,
+            "partner": "profile_line_1",
+            "partner_index": 0,
+            "stage": "pre_dimension",
+        },
+        {"kind": "parallel", "target": "profile_line_1", "partner": "profile_line_3", "stage": "pre_dimension"},
+        {"kind": "perpendicular", "target": "profile_line_1", "partner": "profile_line_2", "stage": "pre_dimension"},
+        {"kind": "perpendicular", "target": "profile_line_1", "partner": "profile_line_4", "stage": "pre_dimension"},
+    ]
+
+
+def build_disc_spring_dimension_plan(
+    *,
+    outer_radius_variable: str,
+    inner_radius_variable: str,
+    thickness_variable: str,
+    outer_gauge_offset_variable: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "line_length",
+            "target": "profile_line_2",
+            "expression": thickness_variable,
+            "driving": True,
+            "allow_variable_only": True,
+            "label": "outer normal thickness",
+        },
+        {
+            "kind": "line_length",
+            "target": "profile_line_4",
+            "expression": thickness_variable,
+            "driving": True,
+            "label": "inner normal thickness",
+        },
+        {
+            "kind": "line_length",
+            "target": "outer_radius_anchor",
+            "expression": outer_radius_variable,
+            "driving": True,
+            "label": "outer radius",
+        },
+        {
+            "kind": "line_length",
+            "target": "inner_radius_anchor",
+            "expression": inner_radius_variable,
+            "driving": True,
+            "label": "inner radius",
+        },
+        {
+            "kind": "line_length",
+            "target": "outer_gauge_offset_anchor",
+            "expression": outer_gauge_offset_variable,
+            "driving": True,
+            "label": "outer gauge offset",
+        },
+    ]
+
+
+def build_diaphragm_spring_variable_plan(
+    *,
+    outer_radius: float,
+    body_inner_radius: float,
+    inner_radius: float,
+    thickness: float,
+    free_height: float,
+    cone_height: float,
+    tip_bend_inner_radius: float,
+    tip_bend_outer_radius: float,
+    tip_variant: str = "single_bend",
+    first_tip_inner_radius: float | None = None,
+    first_tip_height: float | None = None,
+    second_tip_bend_inner_radius: float | None = None,
+    second_tip_bend_outer_radius: float | None = None,
+    parameter_prefix: str | None = "DIA",
+    operation_label: str = "Diaphragm spring",
+) -> list[dict[str, Any]]:
+    def variable(
+        kind: str,
+        value: float,
+        label: str,
+        *,
+        expression: str | None = None,
+        external: bool = True,
+        section: str = "main geometry",
+    ) -> dict[str, Any]:
+        name = build_parameter_name(kind, 1, prefix=parameter_prefix)
+        note = f"{label}. {operation_label}; {section}; variable {name}."
+        return {
+            "name": name,
+            "value": float(value),
+            "expression": expression or _format_expression_number(value),
+            "external": external,
+            "note": note,
+            "kind": "driving_%s" % str(kind).lower(),
+        }
+
+    outer_diameter_name = build_parameter_name("OD", 1, prefix=parameter_prefix)
+    body_inner_diameter_name = build_parameter_name("BODY_ID", 1, prefix=parameter_prefix)
+    inner_diameter_name = build_parameter_name("ID", 1, prefix=parameter_prefix)
+    thickness_name = build_parameter_name("T", 1, prefix=parameter_prefix)
+    bend_inner_name = build_parameter_name("BEND_RI", 1, prefix=parameter_prefix)
+    first_tip_inner_diameter_name = build_parameter_name("FIRST_TIP_ID", 1, prefix=parameter_prefix)
+    second_bend_inner_name = build_parameter_name("BEND2_RI", 1, prefix=parameter_prefix)
+
+    if tip_variant == "no_bend":
+        return [
+            variable("OD", outer_radius * 2.0, "Outer diameter"),
+            variable("ID", inner_radius * 2.0, "Inner diameter"),
+            variable("T", thickness, "Normal thickness"),
+            variable("CH", cone_height, "Cone height"),
+            variable("OR", outer_radius, "Outer radius", expression="%s/2" % outer_diameter_name, external=False, section="derived geometry"),
+            variable("IR", inner_radius, "Inner radius", expression="%s/2" % inner_diameter_name, external=False, section="derived geometry"),
+        ]
+
+    variables = [
+        variable("OD", outer_radius * 2.0, "Outer diameter"),
+        variable("BODY_ID", body_inner_radius * 2.0, "Body inner diameter"),
+        variable("ID", inner_radius * 2.0, "Final inner diameter"),
+        variable("T", thickness, "Normal thickness"),
+        variable("FH", free_height, "Free height"),
+        variable("CH", cone_height, "Bend/lip junction height"),
+        variable("BEND_RI", tip_bend_inner_radius, "Tip bend inner radius", external=True),
+        variable("BEND_RO", tip_bend_outer_radius, "Tip bend outer radius", expression="%s+%s" % (bend_inner_name, thickness_name), external=False),
+        variable("OR", outer_radius, "Outer radius", expression="%s/2" % outer_diameter_name, external=False, section="derived geometry"),
+        variable("BODY_IR", body_inner_radius, "Body inner radius", expression="%s/2" % body_inner_diameter_name, external=False, section="derived geometry"),
+        variable("IR", inner_radius, "Final inner radius", expression="%s/2" % inner_diameter_name, external=False, section="derived geometry"),
+    ]
+
+    if tip_variant == "s_bend":
+        if (
+            first_tip_inner_radius is None
+            or first_tip_height is None
+            or second_tip_bend_inner_radius is None
+            or second_tip_bend_outer_radius is None
+        ):
+            raise ValueError("s_bend diaphragm variable plan requires first tip and second bend values")
+        variables[7:7] = [
+            variable("FIRST_TIP_ID", first_tip_inner_radius * 2.0, "Inner diameter after first straight lip segment"),
+            variable("FIRST_TIP_H", first_tip_height, "Height after first straight lip segment"),
+            variable("BEND2_RI", second_tip_bend_inner_radius, "Second bend inner radius"),
+        ]
+        variables.extend([
+            variable("FIRST_TIP_IR", first_tip_inner_radius, "Inner radius after first straight lip segment", expression="%s/2" % first_tip_inner_diameter_name, external=False, section="derived geometry"),
+            variable("BEND2_RO", second_tip_bend_outer_radius, "Second bend outer radius", expression="%s+%s" % (second_bend_inner_name, thickness_name), external=False, section="derived geometry"),
+        ])
+    elif tip_variant != "single_bend":
+        raise ValueError("Unsupported diaphragm spring tip_variant for variable plan: %s" % tip_variant)
+
+    return variables
+
+
+def build_diaphragm_spring_constraint_plan(*, tip_variant: str = "single_bend") -> list[dict[str, Any]]:
+    if tip_variant == "no_bend":
+        constraints: list[dict[str, Any]] = [
+            {"kind": "fixed_point", "target": "axis", "index": 0, "stage": "anchor"},
+            {"kind": "fixed_point", "target": "axis", "index": 1, "stage": "anchor"},
+            {"kind": "horizontal", "target": "axis", "stage": "anchor"},
+            {"kind": "vertical", "target": "base_height_zero_anchor", "stage": "anchor"},
+            {"kind": "horizontal", "target": "inner_gauge_offset_anchor", "stage": "anchor"},
+            {"kind": "horizontal", "target": "outer_gauge_offset_anchor", "stage": "anchor"},
+            {"kind": "vertical", "target": "inner_radius_anchor", "stage": "anchor"},
+            {"kind": "vertical", "target": "outer_radius_anchor", "stage": "anchor"},
+            {"kind": "fixed_point", "target": "base_height_zero_anchor", "index": 0, "stage": "anchor"},
+            {"kind": "fixed_point", "target": "inner_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+            {"kind": "fixed_point", "target": "outer_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+            {"kind": "merge_points", "target": "base_height_zero_anchor", "index": 1, "partner": "main_inner_face", "partner_index": 0, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "inner_radius_anchor", "index": 0, "partner": "inner_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "inner_radius_anchor", "index": 1, "partner": "main_inner_face", "partner_index": 1, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "outer_radius_anchor", "index": 0, "partner": "outer_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "outer_radius_anchor", "index": 1, "partner": "main_outer_face", "partner_index": 1, "stage": "pre_dimension"},
+            {"kind": "parallel", "target": "main_inner_face", "partner": "main_outer_face", "stage": "pre_dimension"},
+            {"kind": "perpendicular", "target": "main_inner_face", "partner": "inner_normal_face", "stage": "pre_dimension"},
+            {"kind": "perpendicular", "target": "main_inner_face", "partner": "outer_normal_face", "stage": "pre_dimension"},
+        ]
+        sequence = [
+            ("main_inner_face", 1, "inner_normal_face", 0),
+            ("inner_normal_face", 1, "main_outer_face", 0),
+            ("main_outer_face", 1, "outer_normal_face", 0),
+            ("outer_normal_face", 1, "main_inner_face", 0),
+        ]
+        for target, index, partner, partner_index in sequence:
+            constraints.append(
+                {
+                    "kind": "merge_points",
+                    "target": target,
+                    "index": index,
+                    "partner": partner,
+                    "partner_index": partner_index,
+                    "stage": "pre_dimension",
+                }
+            )
+        return constraints
+
+    constraints: list[dict[str, Any]] = [
+        {"kind": "fixed_point", "target": "axis", "index": 0, "stage": "anchor"},
+        {"kind": "fixed_point", "target": "axis", "index": 1, "stage": "anchor"},
+        {"kind": "horizontal", "target": "axis", "stage": "anchor"},
+        {"kind": "vertical", "target": "base_height_zero_anchor", "stage": "anchor"},
+        {"kind": "horizontal", "target": "inner_gauge_offset_anchor", "stage": "anchor"},
+        {"kind": "horizontal", "target": "transition_gauge_offset_anchor", "stage": "anchor"},
+        {"kind": "horizontal", "target": "outer_gauge_offset_anchor", "stage": "anchor"},
+        {"kind": "horizontal", "target": "full_height_gauge_offset_anchor", "stage": "anchor"},
+        {"kind": "vertical", "target": "inner_radius_anchor", "stage": "anchor"},
+        {"kind": "vertical", "target": "transition_radius_anchor", "stage": "anchor"},
+        {"kind": "vertical", "target": "outer_radius_anchor", "stage": "anchor"},
+        {"kind": "vertical", "target": "full_height_radius_anchor", "stage": "anchor"},
+        {"kind": "fixed_point", "target": "base_height_zero_anchor", "index": 0, "stage": "anchor"},
+        {"kind": "fixed_point", "target": "inner_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+        {"kind": "fixed_point", "target": "transition_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+        {"kind": "fixed_point", "target": "outer_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+        {"kind": "fixed_point", "target": "full_height_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+        {"kind": "merge_points", "target": "base_height_zero_anchor", "index": 1, "partner": "main_inner_face", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "inner_radius_anchor", "index": 0, "partner": "inner_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "inner_radius_anchor", "index": 1, "partner": "tip_inner_face", "partner_index": 0, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "transition_radius_anchor", "index": 0, "partner": "transition_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "transition_radius_anchor", "index": 1, "partner": "first_tip_inner_face" if tip_variant == "s_bend" else "tip_inner_face", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "outer_radius_anchor", "index": 0, "partner": "outer_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "outer_radius_anchor", "index": 1, "partner": "main_outer_face", "partner_index": 0, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "full_height_radius_anchor", "index": 0, "partner": "full_height_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "full_height_radius_anchor", "index": 1, "partner": "tip_outer_face", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "bend_inner_radius_line", "index": 0, "partner": "inner_bend_arc", "partner_index": 0, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "bend_inner_radius_line", "index": 0, "partner": "outer_bend_arc", "partner_index": 0, "stage": "pre_dimension"},
+        {"kind": "merge_points", "target": "bend_inner_radius_line", "index": 1, "partner": "inner_bend_arc", "partner_index": 1, "stage": "pre_dimension"},
+        {"kind": "parallel", "target": "main_inner_face", "partner": "main_outer_face", "stage": "pre_dimension"},
+        {"kind": "parallel", "target": "tip_inner_face", "partner": "tip_outer_face", "stage": "pre_dimension"},
+        {"kind": "perpendicular", "target": "main_inner_face", "partner": "outer_normal_face", "stage": "pre_dimension"},
+        {"kind": "perpendicular", "target": "tip_inner_face", "partner": "tip_end_face", "stage": "pre_dimension"},
+        {"kind": "tangent", "target": "first_tip_inner_face" if tip_variant == "s_bend" else "tip_inner_face", "partner": "outer_bend_arc", "stage": "pre_dimension"},
+        {"kind": "tangent", "target": "main_inner_face", "partner": "outer_bend_arc", "stage": "pre_dimension"},
+        {"kind": "tangent", "target": "main_outer_face", "partner": "inner_bend_arc", "stage": "pre_dimension"},
+        {"kind": "tangent", "target": "first_tip_outer_face" if tip_variant == "s_bend" else "tip_outer_face", "partner": "inner_bend_arc", "stage": "pre_dimension"},
+    ]
+    if tip_variant == "s_bend":
+        constraints.extend([
+            {"kind": "horizontal", "target": "first_tip_height_gauge_offset_anchor", "stage": "anchor"},
+            {"kind": "vertical", "target": "first_tip_height_radius_anchor", "stage": "anchor"},
+            {"kind": "vertical", "target": "first_tip_inner_radius_anchor", "stage": "anchor"},
+            {"kind": "fixed_point", "target": "first_tip_height_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+            {"kind": "merge_points", "target": "first_tip_height_radius_anchor", "index": 0, "partner": "first_tip_height_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "first_tip_height_radius_anchor", "index": 1, "partner": "first_tip_inner_face", "partner_index": 0, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "first_tip_inner_radius_anchor", "index": 0, "partner": "first_tip_inner_gauge_offset_anchor", "partner_index": 1, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "first_tip_inner_radius_anchor", "index": 1, "partner": "first_tip_inner_face", "partner_index": 0, "stage": "pre_dimension"},
+            {"kind": "horizontal", "target": "first_tip_inner_gauge_offset_anchor", "stage": "anchor"},
+            {"kind": "fixed_point", "target": "first_tip_inner_gauge_offset_anchor", "index": 0, "stage": "anchor"},
+            {"kind": "merge_points", "target": "second_bend_inner_radius_line", "index": 0, "partner": "second_inner_bend_arc", "partner_index": 0, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "second_bend_inner_radius_line", "index": 0, "partner": "second_outer_bend_arc", "partner_index": 0, "stage": "pre_dimension"},
+            {"kind": "merge_points", "target": "second_bend_inner_radius_line", "index": 1, "partner": "second_inner_bend_arc", "partner_index": 2, "stage": "pre_dimension"},
+            {"kind": "parallel", "target": "first_tip_inner_face", "partner": "first_tip_outer_face", "stage": "pre_dimension"},
+            {"kind": "tangent", "target": "first_tip_inner_face", "partner": "second_inner_bend_arc", "stage": "pre_dimension"},
+            {"kind": "tangent", "target": "tip_inner_face", "partner": "second_inner_bend_arc", "stage": "pre_dimension"},
+            {"kind": "tangent", "target": "first_tip_outer_face", "partner": "second_outer_bend_arc", "stage": "pre_dimension"},
+            {"kind": "tangent", "target": "tip_outer_face", "partner": "second_outer_bend_arc", "stage": "pre_dimension"},
+        ])
+        sequence = [
+            ("tip_inner_face", 1, "second_inner_bend_arc", 1),
+            ("second_inner_bend_arc", 2, "first_tip_inner_face", 0),
+            ("first_tip_inner_face", 1, "outer_bend_arc", 1),
+            ("outer_bend_arc", 2, "main_inner_face", 0),
+            ("main_inner_face", 1, "outer_normal_face", 0),
+            ("outer_normal_face", 1, "main_outer_face", 0),
+            ("main_outer_face", 1, "inner_bend_arc", 1),
+            ("inner_bend_arc", 2, "first_tip_outer_face", 0),
+            ("first_tip_outer_face", 1, "second_outer_bend_arc", 1),
+            ("second_outer_bend_arc", 2, "tip_outer_face", 0),
+            ("tip_outer_face", 1, "tip_end_face", 0),
+            ("tip_end_face", 1, "tip_inner_face", 0),
+        ]
+    elif tip_variant == "single_bend":
+        sequence = [
+            ("tip_inner_face", 1, "outer_bend_arc", 1),
+            ("outer_bend_arc", 2, "main_inner_face", 0),
+            ("main_inner_face", 1, "outer_normal_face", 0),
+            ("outer_normal_face", 1, "main_outer_face", 0),
+            ("main_outer_face", 1, "inner_bend_arc", 1),
+            ("inner_bend_arc", 2, "tip_outer_face", 0),
+            ("tip_outer_face", 1, "tip_end_face", 0),
+            ("tip_end_face", 1, "tip_inner_face", 0),
+        ]
+    else:
+        raise ValueError("Unsupported diaphragm spring tip_variant for constraint plan: %s" % tip_variant)
+    for target, index, partner, partner_index in sequence:
+        constraints.append(
+            {
+                "kind": "merge_points",
+                "target": target,
+                "index": index,
+                "partner": partner,
+                "partner_index": partner_index,
+                "stage": "pre_dimension",
+            }
+        )
+    return constraints
+
+
+def build_diaphragm_spring_dimension_plan(
+    *,
+    outer_radius_variable: str,
+    inner_radius_variable: str,
+    body_inner_radius_variable: str,
+    cone_height_variable: str,
+    free_height_variable: str,
+    thickness_variable: str,
+    bend_inner_radius_variable: str,
+    tip_variant: str = "single_bend",
+    first_tip_inner_radius_variable: str | None = None,
+    first_tip_height_variable: str | None = None,
+    second_bend_inner_radius_variable: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return driving dimensions for the fully-defined diaphragm profile.
+
+    Bend arcs are fixed through their common center, endpoints, and tangencies
+    rather than direct radial dimensions: API-created radial dimensions for
+    these arcs do not persist as solver-defining dimensions after save/reopen.
+    """
+
+    if tip_variant == "no_bend":
+        return [
+            {
+                "kind": "line_length",
+                "target": "inner_radius_anchor",
+                "expression": inner_radius_variable,
+                "driving": True,
+                "label": "inner radius",
+            },
+            {
+                "kind": "line_length",
+                "target": "outer_radius_anchor",
+                "expression": outer_radius_variable,
+                "driving": True,
+                "label": "outer radius",
+            },
+            {
+                "kind": "line_length",
+                "target": "outer_normal_face",
+                "expression": thickness_variable,
+                "driving": True,
+                "label": "normal thickness",
+            },
+            {
+                "kind": "line_length",
+                "target": "inner_gauge_offset_anchor",
+                "expression": cone_height_variable,
+                "driving": True,
+                "label": "cone height",
+            },
+        ]
+
+    dimensions = [
+        {
+            "kind": "line_length",
+            "target": "inner_radius_anchor",
+            "expression": inner_radius_variable,
+            "driving": True,
+            "label": "final inner radius",
+        },
+        {
+            "kind": "line_length",
+            "target": "transition_gauge_offset_anchor",
+            "expression": cone_height_variable,
+            "driving": True,
+            "label": "transition gauge offset",
+        },
+        {
+            "kind": "line_length",
+            "target": "transition_radius_anchor",
+            "expression": body_inner_radius_variable,
+            "driving": True,
+            "label": "body inner radius",
+        },
+        {
+            "kind": "line_length",
+            "target": "outer_radius_anchor",
+            "expression": outer_radius_variable,
+            "driving": True,
+            "label": "outer radius",
+        },
+        {
+            "kind": "line_length",
+            "target": "full_height_gauge_offset_anchor",
+            "expression": free_height_variable,
+            "driving": True,
+            "label": "free height",
+        },
+        {
+            "kind": "line_length",
+            "target": "outer_normal_face",
+            "expression": thickness_variable,
+            "driving": True,
+            "allow_variable_only": True,
+            "label": "outer normal thickness",
+        },
+        {
+            "kind": "line_length",
+            "target": "bend_inner_radius_line",
+            "expression": bend_inner_radius_variable,
+            "driving": True,
+            "allow_variable_only": True,
+            "label": "bend inner radius",
+        },
+    ]
+
+    if tip_variant == "s_bend":
+        if first_tip_inner_radius_variable is None or first_tip_height_variable is None or second_bend_inner_radius_variable is None:
+            raise ValueError("s_bend diaphragm dimension plan requires first tip and second bend variables")
+        dimensions.extend([
+            {
+                "kind": "line_length",
+                "target": "first_tip_inner_radius_anchor",
+                "expression": first_tip_inner_radius_variable,
+                "driving": True,
+                "label": "first tip inner radius",
+            },
+            {
+                "kind": "line_length",
+                "target": "first_tip_height_gauge_offset_anchor",
+                "expression": first_tip_height_variable,
+                "driving": True,
+                "label": "first tip height",
+            },
+            {
+                "kind": "line_length",
+                "target": "second_bend_inner_radius_line",
+                "expression": second_bend_inner_radius_variable,
+                "driving": True,
+                "allow_variable_only": True,
+                "label": "second bend inner radius",
+            },
+        ])
+    elif tip_variant != "single_bend":
+        raise ValueError("Unsupported diaphragm spring tip_variant for dimension plan: %s" % tip_variant)
+
+    return dimensions
+
+
 def build_polygonal_step_dimension_plan(
     normalized: dict[str, Any],
     vertices: list[list[float]],
