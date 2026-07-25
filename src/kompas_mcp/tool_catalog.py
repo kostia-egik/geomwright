@@ -99,6 +99,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "inspect_feature",
             "repair_feature",
             "list_sketch_entities",
+            "inspect_sketch_full",
             "inspect_sketch_entity",
             "probe_document_readback",
             "probe_model_formulas",

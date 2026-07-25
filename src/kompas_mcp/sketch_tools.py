@@ -326,6 +326,57 @@ def register_sketch_tools(mcp: Any, adapter: Any) -> None:
         )
 
     @mcp.tool()
+    def inspect_sketch_full(
+        document_id: str | None = None,
+        sketch_ref: str | None = None,
+        include_dimensions: bool = True,
+        include_constraints: bool = True,
+        include_diagnostics: bool = True,
+        max_items: int = 100,
+    ) -> dict:
+        """Full dump of an existing sketch: entities, dimensions, constraints, status.
+
+        Parameters
+        ----------
+        document_id : str | None
+            Document ID. None = active document.
+        sketch_ref : str
+            Sketch reference (name or reference ID).
+        include_dimensions : bool
+            If True, read dimensions with values and entity refs.
+        include_constraints : bool
+            If True, read constraints via API5 ksGetObjConstraints
+            (22 types: horizontal, vertical, parallel, perpendicular,
+            merge_points, tangent, fixed_length, concentricity, etc.).
+        include_diagnostics : bool
+            If True, include COM/API5 diagnostic blocks such as projection
+            classification, variable surfaces, available properties, and
+            begin-edit fallback data.
+        max_items : int
+            Max entities per collection.
+
+        Returns
+        -------
+        dict with:
+            entities — list of {kind, index, geometry, reference, constraints_state}
+                       geometry: segments get start/end; arcs get start/end/center/radius/direction;
+                       circles get center/radius; points get point coordinates.
+            dimensions — dimensions.items plus api5.dimension_variable_name and linked variable Expression when available.
+            constraints — constraints.items/api5_items/all_items/projection_items with owner_object/partner_object links.
+            status — sketch definition status (0=not_defined, 1=under, 2=fully, 3=over)
+            collections — entity collections metadata
+            projection — per-entity projection classification and UI-like projection constraints when detected.
+        """
+        return adapter.inspect_sketch_full(
+            document_id=document_id,
+            sketch_ref=sketch_ref,
+            include_dimensions=include_dimensions,
+            include_constraints=include_constraints,
+            include_diagnostics=include_diagnostics,
+            max_items=max_items,
+        )
+
+    @mcp.tool()
     def rename_sketch(
         document_id: str | None = None,
         sketch_ref: str | None = None,

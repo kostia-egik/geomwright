@@ -21,6 +21,7 @@ from .document_snapshot_diff import diff_document_snapshots as build_document_sn
 from .document_snapshot_verify import verify_document_snapshot_delta as build_document_snapshot_delta_verification
 from .document_stability import verify_document_readback_stability as build_document_readback_stability
 from .document_state import get_active_document_state as build_active_document_state
+from .formula_probe import probe_model_formulas as build_model_formula_probe
 from .native_module_result import capture_native_module_result as build_native_module_result
 from .native_module_result import diff_native_module_results as build_native_module_result_diff
 from .native_module_result import start_native_module_result_probe as build_native_module_result_probe
@@ -1598,6 +1599,30 @@ class KompasAdapter:
             payload["kinds"] = normalized_kinds
         return self.runner.call("list_sketch_entities", payload)
 
+    def inspect_sketch_full(
+        self,
+        document_id: str | None = None,
+        *,
+        sketch_ref: str | int | None = None,
+        include_dimensions: bool = True,
+        include_constraints: bool = True,
+        include_diagnostics: bool = True,
+        max_items: int = 100,
+    ) -> dict[str, Any]:
+        if sketch_ref in (None, ""):
+            raise ValueError("sketch_ref is required")
+        if int(max_items) < 1:
+            raise ValueError("max_items must be greater than zero")
+        payload: dict[str, Any] = {
+            "document_id": document_id,
+            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+            "include_dimensions": bool(include_dimensions),
+            "include_constraints": bool(include_constraints),
+            "include_diagnostics": bool(include_diagnostics),
+            "max_items": int(max_items),
+        }
+        return self.runner.call("inspect_sketch_full", payload)
+
     def list_sketch_dimensions(
         self,
         document_id: str | None = None,
@@ -2619,6 +2644,8 @@ class KompasAdapter:
         output_path: str | None = None,
         visible: bool = False,
         close_after_save: bool | None = None,
+        save_partial_on_error: bool = False,
+        return_partial_result_on_error: bool = False,
     ) -> dict[str, Any]:
         preview = self.preview_part_scenario(scenario, params)
         if preview.get("params", {}).get("live_supported") is False:
@@ -2633,6 +2660,10 @@ class KompasAdapter:
             normalized_params["output_path"] = self._normalize_target_path_for_kompas(normalized_params["output_path"])
         if close_after_save is not None:
             normalized_params["close_after_save"] = bool(close_after_save)
+        if save_partial_on_error:
+            normalized_params["save_partial_on_error"] = True
+        if return_partial_result_on_error:
+            normalized_params["return_partial_result_on_error"] = True
 
         result = self.runner.call(
             "create_part_from_scenario",
@@ -2734,6 +2765,28 @@ class KompasAdapter:
             visible=visible,
             read_only=read_only,
             close_after_probe=close_after_probe,
+        )
+
+    def probe_model_formulas(
+        self,
+        model_path: str | None = None,
+        *,
+        document_id: str | None = None,
+        output_path: str | None = None,
+        visible: bool = False,
+        read_only: bool = True,
+        close_after_probe: bool = True,
+        include_contents_fallback: bool = True,
+    ) -> dict[str, Any]:
+        return build_model_formula_probe(
+            self,
+            model_path=model_path,
+            document_id=document_id,
+            output_path=output_path,
+            visible=visible,
+            read_only=read_only,
+            close_after_probe=close_after_probe,
+            include_contents_fallback=include_contents_fallback,
         )
 
     def get_item_properties(self, document_id: str | None = None, item_ids: list[str] | None = None) -> dict[str, Any]:
