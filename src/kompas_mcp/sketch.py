@@ -960,6 +960,40 @@ def build_diaphragm_spring_variable_plan(
             variable("FIRST_TIP_IR", first_tip_inner_radius, "Inner radius after first straight lip segment", expression="%s/2" % first_tip_inner_diameter_name, external=False, section="derived geometry"),
             variable("BEND2_RO", second_tip_bend_outer_radius, "Second bend outer radius", expression="%s+%s" % (second_bend_inner_name, thickness_name), external=False, section="derived geometry"),
         ])
+        cone_radial_span = outer_radius - body_inner_radius
+        tangent_axial_at_inner = cone_height * (outer_radius - inner_radius) / cone_radial_span
+        slot_entry_shift = max(
+            0.0,
+            (free_height - tangent_axial_at_inner) * cone_height / cone_radial_span,
+        )
+        cone_height_name = build_parameter_name("CH", 1, prefix=parameter_prefix)
+        free_height_name = build_parameter_name("FH", 1, prefix=parameter_prefix)
+        outer_radius_name = build_parameter_name("OR", 1, prefix=parameter_prefix)
+        body_inner_radius_name = build_parameter_name("BODY_IR", 1, prefix=parameter_prefix)
+        inner_radius_name = build_parameter_name("IR", 1, prefix=parameter_prefix)
+        variables.append(
+            variable(
+                "SLOT_ENTRY_SHIFT",
+                slot_entry_shift,
+                "S-bend cut-entry tangent-plane runout compensation",
+                expression=(
+                    "%s*(%s-%s*(%s-%s)/(%s-%s))/(%s-%s)"
+                    % (
+                        cone_height_name,
+                        free_height_name,
+                        cone_height_name,
+                        outer_radius_name,
+                        inner_radius_name,
+                        outer_radius_name,
+                        body_inner_radius_name,
+                        outer_radius_name,
+                        body_inner_radius_name,
+                    )
+                ),
+                external=False,
+                section="derived geometry",
+            )
+        )
     elif tip_variant != "single_bend":
         raise ValueError("Unsupported diaphragm spring tip_variant for variable plan: %s" % tip_variant)
 

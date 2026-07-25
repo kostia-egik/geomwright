@@ -22611,10 +22611,6 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
             raise RuntimeError("cut_reference_points_sketch requires positive start/end radius or diameter")
         if end_radius <= start_radius + 1e-9:
             raise RuntimeError("cut_reference_points_sketch requires end_radius > start_radius")
-        start_point_xy = [direction[0] * start_radius, direction[1] * start_radius]
-        end_point_xy = [direction[0] * end_radius, direction[1] * end_radius]
-        start_point_3d = [direction_3d[0] * start_radius, direction_3d[1] * start_radius, direction_3d[2] * start_radius]
-        end_point_3d = [direction_3d[0] * end_radius, direction_3d[1] * end_radius, direction_3d[2] * end_radius]
         parameterize_points = bool(params.get("parameterize_points", True))
         start_radius_variable = str(params.get("start_radius_variable") or "DIA_CUT_START_R1").strip()
         end_radius_variable = str(params.get("end_radius_variable") or "DIA_CUT_END_R1").strip()
@@ -22624,12 +22620,34 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         slot_start_width_variable = str(params.get("slot_start_width_variable") or "DIA_SLOT_START_W1").strip()
         entry_clearance_variable = str(params.get("entry_clearance_variable") or "DIA_SLOT_ENTRY_CLR1").strip()
         inner_radius_variable = str(params.get("inner_radius_variable") or "DIA_IR1").strip()
+        if inner_radius_variable.endswith("_IR1"):
+            entry_shift_variable = inner_radius_variable[:-4] + "_SLOT_ENTRY_SHIFT1"
+        else:
+            entry_shift_variable = "DIA_SLOT_ENTRY_SHIFT1"
+        entry_shift_object = _find_operation_variable(part, entry_shift_variable)
+        entry_plane_shift = float(safe_get(entry_shift_object, "Value", 0.0) or 0.0)
+        if entry_plane_shift < -1e-9:
+            raise RuntimeError("cut_reference_points_sketch entry-plane shift must be >= 0")
+        entry_plane_shift = max(0.0, entry_plane_shift)
         if auto_entry_clearance:
-            start_radius_expression = "sqrt((%s-%s)^2-(%s/2)^2)" % (
-                inner_radius_variable,
-                entry_clearance_variable,
-                slot_start_width_variable,
-            )
+            if entry_plane_shift > 1e-9:
+                target_edge_radius = math.sqrt(start_radius * start_radius + (slot_start_width / 2.0) ** 2)
+                shifted_edge_radius = target_edge_radius - entry_plane_shift
+                if shifted_edge_radius <= (slot_start_width / 2.0) + 1e-9:
+                    raise RuntimeError("S-bend cut-entry compensation leaves no valid start radius")
+                start_radius = math.sqrt(shifted_edge_radius * shifted_edge_radius - (slot_start_width / 2.0) ** 2)
+                start_radius_expression = "sqrt((%s-%s-%s)^2-(%s/2)^2)" % (
+                    inner_radius_variable,
+                    entry_clearance_variable,
+                    entry_shift_variable,
+                    slot_start_width_variable,
+                )
+            else:
+                start_radius_expression = "sqrt((%s-%s)^2-(%s/2)^2)" % (
+                    inner_radius_variable,
+                    entry_clearance_variable,
+                    slot_start_width_variable,
+                )
             point_variable_specs = [
                 {"name": slot_start_width_variable, "value": slot_start_width, "external": True, "note": "Cut start width"},
                 {"name": entry_clearance_variable, "value": entry_clearance, "external": True, "note": "Cut entry clearance"},
@@ -22642,6 +22660,12 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                 {"name": start_radius_variable, "value": start_radius, "external": True, "note": "Cut start radius"},
                 {"name": end_radius_variable, "value": end_radius, "external": True, "note": "Cut end radius"},
             ]
+        if start_radius <= 0.0 or end_radius <= start_radius + 1e-9:
+            raise RuntimeError("cut_reference_points_sketch compensation produced invalid start/end radii")
+        start_point_xy = [direction[0] * start_radius, direction[1] * start_radius]
+        end_point_xy = [direction[0] * end_radius, direction[1] * end_radius]
+        start_point_3d = [direction_3d[0] * start_radius, direction_3d[1] * start_radius, direction_3d[2] * start_radius]
+        end_point_3d = [direction_3d[0] * end_radius, direction_3d[1] * end_radius, direction_3d[2] * end_radius]
         existing_variable_names = set(str(safe_get(variable, "Name") or "") for variable in _iter_operation_variables(part))
         variable_report = _apply_part_variables(
             part,
@@ -22768,6 +22792,8 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                 "end_association": end_association,
                 "variables": variable_report,
                 "start_radius_expression": start_radius_expression,
+                "entry_plane_shift": entry_plane_shift,
+                "entry_shift_variable": entry_shift_variable if entry_plane_shift > 1e-9 else None,
                 "point_constraints": point_constraint_report,
                 "point_dimensions": point_dimension_report,
             }

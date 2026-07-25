@@ -90,7 +90,14 @@ The README intentionally stays shorter and points here for details.
 
 Если указан `auto_entry_clearance`, начальный радиус выводится из ширины входа:
 `DIA_CUT_START_R1 = sqrt((DIA_IR1 - DIA_SLOT_ENTRY_CLR1)^2 -
-(DIA_SLOT_START_W1 / 2)^2)`. Последующий `diaphragm_cut_profile_sketch`
+(DIA_SLOT_START_W1 / 2)^2)`. Для `s_bend` базовый эскиз дополнительно создаёт
+derived-variable `DIA_SLOT_ENTRY_SHIFT1`: она компенсирует радиальный runout
+нормали между продолжением tangent plane основной конусной грани и вынесенной
+вверх внутренней S-губой. В этом варианте формула становится
+`sqrt((DIA_IR1 - DIA_SLOT_ENTRY_CLR1 - DIA_SLOT_ENTRY_SHIFT1)^2 -
+(DIA_SLOT_START_W1 / 2)^2)`. Для `no_bend` и `single_bend` shift-variable не
+создаётся и прежняя геометрия остаётся неизменной. Последующий
+`diaphragm_cut_profile_sketch`
 проецирует start/end vertices в касательный эскиз и строит один замкнутый
 рабочий контур из четырёх линий и двух наружных fillet-дуг. Его независимые
 параметры — `DIA_SLOT_START_W1`, `DIA_SLOT_END_W1` и `DIA_SLOT_END_R1`:
