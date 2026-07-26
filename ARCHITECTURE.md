@@ -103,6 +103,12 @@ Layer 4 задаёт публичный контракт целого CAD-мод
 - diaphragm spring: flat, single-bend и S-bend, circle/oval relief, through-all
   cuts и multi-source circular pattern.
 
+Mechanical transmissions have an approved concept but no production Layer 4
+family yet. Their architecture is defined in
+`docs/transmission-platform-concept.md`: functional members compose with generic
+hub/bore/keyway modules through semantic references, while native Shaft/GEARS
+commands remain black-box research oracles.
+
 Подробные контракты находятся в `docs/`; runtime tool catalog остаётся источником
 истины для фактически зарегистрированных MCP names.
 
@@ -174,6 +180,7 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | parametric part workflows | L2–L4 | experimental, family-specific live evidence |
 | managed spring families | L2–L4 | implemented, see family contracts |
 | diaphragm module | L2–L4 | complete and live-verified |
+| mechanical-transmission platform | L2–L4 | approved concept; native audit started; no public family yet |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |
 

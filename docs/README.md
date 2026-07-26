@@ -33,6 +33,13 @@ confused with research evidence or historical implementation plans.
 | [Diaphragm spring workflow](diaphragm-spring.md) | current | Implemented workflow and S-bend cut compensation |
 | [Spring workflows](spring-workflows.md) | current | Spring-family status and navigation |
 
+## Mechanical transmissions
+
+| Document | Status | Purpose |
+| --- | --- | --- |
+| [Transmission platform concept](transmission-platform-concept.md) | approved concept | Composition contract, family map, cutter-aware geometry, and delivery phases |
+| [Native transmission audit](native-transmission-audit.md) | research evidence | Installed Shaft command map and interactive automation boundary |
+
 ## Spring-family documents
 
 - [Compression spring](compression-spring.md)
