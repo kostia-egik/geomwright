@@ -219,20 +219,43 @@ trusted oracle or licensed worked example.
 
 ## 5. Native KOMPAS baseline
 
-Official ASCON documentation describes the following workflow:
+Official ASCON documentation and the installed Shaft manifest describe two host
+workflows plus one standalone calculation path.
 
 ```text
-KOMPAS-GEARS calculation
-        ↓
-calculation document
-        ↓
-2D mechanical model with hidden attributes/graph
-        ↓
-3D generation by Shaft 2D/3D
+2D drawing/fragment
+    ↓ command 201: Shaft 3D+2D model designer
+2D shaft/transmission assembly model
+    ↓ select a calculated member
+GEARS calculation backend
+    ↓ result returns to the Shaft owner
+updated 2D mechanical model
+    ↓
+3D member/model generation
 ```
 
-The visible drawing is not the complete source of truth. Internal model data
-stores calculation objects, generation settings, hierarchy, and update links.
+```text
+3D part
+    ↓ command 206: Shaft 3D model designer
+select a concrete member
+    ↓ GEARS when that member requires calculation
+calculation result returns to the 3D host
+    ↓
+one 3D member is generated in the part context
+```
+
+```text
+command 202: standalone GEARS
+    ↓
+calculation UI/result file
+    ↓
+no Shaft owner, therefore no automatic drawing or 3D result
+```
+
+In the first workflow, the visible drawing is not the complete source of truth.
+Internal model data stores calculation objects, generation settings, hierarchy,
+and update links. GEARS is the calculation backend; Shaft 3D+2D or Shaft 3D owns
+the generated CAD result.
 
 Officially documented families include:
 
@@ -258,8 +281,15 @@ Official sources:
 
 No public headless calculation API or documented COM object model for GEARS was
 found. Command dispatch is available through the registered native application,
-but form parameters remain an interactive black-box boundary. See
-`native-transmission-audit.md`.
+but the caller context is essential. Direct command 202 dispatch is useful only
+for standalone calculations or saved calculation files; it is not a model-build
+workflow. See `native-transmission-audit.md`.
+
+Native UI experiments are never run in a shared working KOMPAS session. Command
+206 successfully opened the Shaft 3D host during the first pulley audit, but the
+manual workflow produced repeated native errors and required an operator restart.
+Future experiments therefore require a dedicated disposable process with all
+user documents saved and closed.
 
 ## 6. Belt-drive modules
 
@@ -426,13 +456,16 @@ standard or manufacturing process.
 
 ## 14. Delivery sequence
 
-### Phase 0 — contracts and native audit
+### Phase 0 — contracts and pulley-oriented native audit
 
 - composition contract;
 - catalog provenance;
 - pitch/tool/profile-shift schemas;
-- native Shaft command/interface map;
-- one manually completed external cylindrical pair with before/after evidence.
+- native Shaft command/context map;
+- one V-belt pulley through the normal manual Shaft 3D UI in a dedicated process;
+- command 206 comparison only after the manual route is understood;
+- the same pulley through command 201 in a disposable 2D mechanical model;
+- comparison of catalog parameters, operation trees, and generated geometry.
 
 ### Phase 1 — belt feature modules
 
