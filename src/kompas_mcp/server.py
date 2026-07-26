@@ -19,6 +19,7 @@ from .spring_tools import register_spring_tools
 from .native_tools import register_native_tools
 from .thread_tools import register_thread_tools
 from .tool_catalog import get_mcp_tool_catalog as build_mcp_tool_catalog
+from .transmission_tools import register_transmission_tools
 from .workflow_tools import register_workflow_tools
 
 
@@ -38,6 +39,7 @@ def get_mcp_tool_catalog(category: str | None = None, stability: str | None = No
 
 register_native_tools(mcp, adapter)
 register_thread_tools(mcp)
+register_transmission_tools(mcp)
 register_session_tools(mcp, adapter)
 register_runtime_tools(mcp, adapter)
 register_section_tools(mcp)

@@ -180,7 +180,7 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | parametric part workflows | L2–L4 | experimental, family-specific live evidence |
 | managed spring families | L2–L4 | implemented, see family contracts |
 | diaphragm module | L2–L4 | complete and live-verified |
-| mechanical-transmission platform | L2–L4 | approved concept; native audit started; no public family yet |
+| mechanical-transmission platform | L2–L4 | Layer 2 V-belt catalog/preview exposed; no CAD family yet |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |
 

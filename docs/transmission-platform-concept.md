@@ -4,6 +4,10 @@ Status: approved architecture concept. No transmission family is exposed as a
 production MCP module until its family contract and live KOMPAS evidence are
 complete.
 
+Current implementation status: the first Layer 2 vertical slice is available as
+the experimental V-belt profile catalog and geometry preview documented in
+`v-belt-groove.md`. It is not a Layer 4 CAD family and does not create models.
+
 This document defines the planned mechanical-transmission platform for
 `kompas-mcp`. The goal is not to copy one native KOMPAS application as a
 monolith. The platform separates catalogs, deterministic geometry, pair
@@ -469,7 +473,7 @@ standard or manufacturing process.
 
 ### Phase 1 — belt feature modules
 
-- V-belt groove;
+- V-belt groove — Layer 2 catalog/preview implemented; CAD builder pending;
 - poly-V groove;
 - flat pulley;
 - timing pulley.

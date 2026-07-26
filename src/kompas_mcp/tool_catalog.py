@@ -44,6 +44,16 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
         ],
     },
     {
+        "name": "transmission_design",
+        "stability": "experimental",
+        "purpose": "Resolve and preview composable mechanical-transmission functional geometry.",
+        "tools": [
+            "list_v_belt_profiles",
+            "resolve_v_belt_profile",
+            "preview_v_belt_groove",
+        ],
+    },
+    {
         "name": "session_lifecycle",
         "stability": "stable",
         "purpose": "Check, open, close, save, and smoke-test KOMPAS documents.",
