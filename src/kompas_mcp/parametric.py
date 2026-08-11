@@ -2034,9 +2034,16 @@ def normalize_stepped_shaft_params(params: dict[str, Any]) -> dict[str, Any]:
         params.get("parameter_prefix") or params.get("parameter_namespace")
     )
     material_payload = resolve_material_payload(params.get("material"), params.get("density"))
+    operation_name = str(params.get("name") or "Stepped shaft").strip()
+    if not operation_name:
+        raise ValueError("name must not be empty")
+    sketch_name = str(params.get("sketch_name") or (operation_name + " profile")).strip()
+    if not sketch_name:
+        raise ValueError("sketch_name must not be empty")
 
     return {
-        "name": str(params.get("name") or "Stepped shaft"),
+        "name": operation_name,
+        "sketch_name": sketch_name,
         "designation": str(params.get("designation") or ""),
         "material": material_payload["material"],
         "density": material_payload["density"],

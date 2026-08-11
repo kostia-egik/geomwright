@@ -4,9 +4,10 @@ Status: approved architecture concept. No transmission family is exposed as a
 production MCP module until its family contract and live KOMPAS evidence are
 complete.
 
-Current implementation status: the first Layer 2 vertical slice is available as
-the experimental V-belt profile catalog and geometry preview documented in
-`v-belt-groove.md`. It is not a Layer 4 CAD family and does not create models.
+Current implementation status: focused Layer 2 catalogs and Layer 3
+cut-from-body builders are available for V-belt and Poly-V grooves as documented
+in `v-belt-groove.md` and `poly-v-groove.md`. Neither is a complete Layer 4
+pulley family.
 
 This document defines the planned mechanical-transmission platform for
 `kompas-mcp`. The goal is not to copy one native KOMPAS application as a
@@ -70,6 +71,7 @@ Layer 3 converts a normalized transmission plan into operations such as:
 - circular pattern;
 - sweep or loft a helical member;
 - attach to an existing body;
+- append verified fillet/chamfer manufacturing features to semantic edges;
 - name variables and semantic references;
 - hide auxiliary geometry;
 - collect snapshot and readback evidence.
@@ -307,8 +309,12 @@ user documents saved and closed.
 These modules either cut functional grooves into an existing rotational body or
 create only the functional rim. They do not create hubs or bores.
 
-V and poly-V are separate families. Planned poly-V profiles include PH, PJ, PK,
-PL, and PM when legally sourced catalog data is available.
+V and Poly-V are separate families. Poly-V PH, PJ, PK, PL, and PM profiles are
+implemented from ISO 9982:2021 Table 2 evidence. The managed profile uses nominal
+`rt`, maximum `rb`, one exact rounded sketch boundary, and a body-clipped closure
+overshoot. Its master groove drives pitch, radii, and angle while repeated grooves
+inherit equal/parallel/tangent relations; it does not reuse straight-sided V-belt
+geometry or fixed copies of the profile points.
 
 Timing-pulley construction uses a blank plus one tooth-space cut and a circular
 pattern. Profile families remain separate catalog entries because some shapes
@@ -473,7 +479,8 @@ standard or manufacturing process.
 
 ### Phase 1 — belt feature modules
 
-- V-belt groove — Layer 2 catalog/preview implemented; CAD builder pending;
+- V-belt groove — Layer 2 catalog/preview and focused Layer 3 cut-from-body
+  builder implemented and live-verified;
 - poly-V groove;
 - flat pulley;
 - timing pulley.

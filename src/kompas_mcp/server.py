@@ -39,7 +39,7 @@ def get_mcp_tool_catalog(category: str | None = None, stability: str | None = No
 
 register_native_tools(mcp, adapter)
 register_thread_tools(mcp)
-register_transmission_tools(mcp)
+register_transmission_tools(mcp, adapter)
 register_session_tools(mcp, adapter)
 register_runtime_tools(mcp, adapter)
 register_section_tools(mcp)

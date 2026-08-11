@@ -46,6 +46,7 @@ Evidence levels used by this file:
 | Need visible projection of a 3D point in a sketch | `SKETCH-006`, `SKETCH-005` |
 | Need to edit or inspect an existing sketch after reopening | `SKETCH-007`, `SKETCH-002` |
 | Generated model file misses late-created sketches | `SKETCH-008` |
+| Symmetric/repeated copies accumulate duplicate dimensions or skipped constraints | `SKETCH-009`, `VAR-001` |
 | Sketch arc, line, axis, or curve has wrong direction | `VERIFY-001`, `ARC-001`, `CS-002` |
 | Direction flag works but result is inverted | `DIR-001`, `VERIFY-001` |
 | Spiral direction is confused with spiral construction side | `DIR-001`, `SPIRAL-001`, `VERIFY-001` |
@@ -1020,6 +1021,95 @@ Related:
 
 ---
 
+### SKETCH-009: Model Symmetric And Repeated Elements As Master/Dependent Families
+
+Applies when:
+- a sketch contains mirrored features, repeated grooves, holes, teeth, slots, or
+  other equal-shape elements;
+- multiple elements share center axes, radial/axial levels, widths, radii, or
+  edge/pitch spacing;
+- copied geometry looks correct but should remain associative after parameter
+  changes.
+
+Symptom:
+- every copy has its own duplicate dimensions and variables;
+- the sketch contains display-only dimensions or helper geometry that does not
+  influence the consumer profile;
+- an equal/merge/symmetry relation is planned but reported as skipped or
+  redundant;
+- dependent copies drift independently or remain visually equal only because
+  their seed coordinates were copied.
+
+Cause:
+- copies were treated as independent profiles instead of one parametric family;
+- master ownership and symmetry/repetition axes were not declared before
+  constraints/dimensions;
+- initially coincident/equal seed geometry made the intended family relation a
+  no-op for the solver;
+- compatibility fallback dimensions were numeric rather than formula-linked to
+  a master variable.
+
+Rule:
+- Choose one master element and dimension its independent shape parameters.
+- Position dependents through named midpoint/symmetry, edge-offset, and pitch
+  relations.
+- Inherit dependent shape through equal length/radius, parallel, collinear, and
+  shared-level constraints.
+- An explicitly declared graphical symmetry axis may use axis style when no
+  consumer ambiguity exists. Keep multiple family center/symmetry lines
+  auxiliary inside an operational sketch; a revolve sketch still has exactly
+  one axis-style consumer axis.
+- A dependent driving dimension is allowed only when independently meaningful or
+  when KOMPAS rejects the native family relation. In the latter case its
+  expression must reference the master semantic variable.
+- Use a bounded seed offset when necessary so an intended merge/equal relation is
+  actually created, then verify that the final readback contains the exact
+  relation and no seed offset.
+- Do not accept skipped family constraints. Remove a truly redundant relation or
+  move it to a pre-constraint phase where it owns the intended datum.
+- Keep no orphan per-copy variables: every published variable binds a surviving
+  dimension or is consumed by another kept formula.
+
+Implementation shape:
+```text
+declare master profile and dependent family
+create auxiliary center/symmetry axes
+anchor global/base datum
+apply master topology and shape constraints
+apply edge/pitch placement and midpoint relations
+apply equal/collinear/shared-level inheritance
+dimension master
+if native inheritance is unstable:
+    bind dependent_dimension.Expression = master_variable_name
+assert applied_pre == planned_pre and skipped_pre == 0
+assert applied_final == planned_final and skipped_final == 0
+assert applied_dimensions == planned_dimensions
+assert every surviving dimension has a valid semantic expression
+```
+
+Verification:
+- `ConstraintsState == 2` after solver settle and save/reopen.
+- Intended component count and profile topology are unchanged.
+- Master/dependent centers and shared levels match readback.
+- Applied counts equal planned counts; skipped/failed counts are zero.
+- No duplicate reference-only dimensions, unused helper constructions, or orphan
+  family variables remain.
+
+Known example:
+- The two-groove V-belt cut uses one dimensioned master groove, auxiliary groove
+  axes, midpoint/shared-level relations, edge/pitch placement, and one
+  formula-linked dependent top-width dimension. Cleanup reduced the operational
+  sketch from 13 to 8 dimensions and from 20 to 10 semantic variables while
+  preserving exact volume and fully-defined readback.
+
+Related:
+- `SKETCH-001`
+- `SKETCH-005`
+- `VAR-001`
+- `OP-002`
+
+---
+
 ### DIR-001: Direction Parameters And Sketch Directions Require Verification
 
 Applies when:
@@ -1273,7 +1363,7 @@ Known examples:
 
 ---
 
-### OP-002: Use One Operation Sketch With One Operational Contour
+### OP-002: Bound Every Operational Contour Explicitly
 
 Applies when:
 - generating sketches for extrude, revolve, cut, or evolution operations;
@@ -1299,7 +1389,10 @@ Cause:
 
 Rule:
 - Prefer one sketch per operation.
-- Prefer one operational contour per operation sketch.
+- Prefer one operational contour per operation sketch. Multiple disjoint closed
+  contours are allowed only when that exact operation has live evidence for
+  consuming them together and the builder declares and preflights the expected
+  component count.
 - For revolve operations, keep exactly one axis-type line in the sketch: the
   actual axis of revolution.
 - Helper, anchor, gauge, and construction lines must use construction/helper
@@ -1315,8 +1408,9 @@ Rule:
   dimension can be syntactically created and still move unconstrained endpoints
   into a broken contour. Run a primary-profile preflight after parameterization
   and before `Rotated.Update`.
-- If a part needs multiple operations or regions, split them into separate
-  sketches/operations instead of relying on UI-style contour selection.
+- If a part needs multiple unrelated operations or ambiguous regions, split
+  them into separate sketches/operations instead of relying on UI-style contour
+  selection.
 
 Implementation:
 ```python
@@ -1341,6 +1435,47 @@ Verification:
   expected contour behavior.
 
 Known examples:
+- `V-belt groove`: one rotational cut safely consumes one closed component per
+  groove after exact component-count, gap, branch, and self-intersection
+  preflight; this is the bounded multi-contour exception to the default rule.
+- `V-belt groove`: standard/native upper-edge rounding is a separate post-cut
+  `IFillet` feature, not sketch arcs. Resolve exactly two circular top edges per
+  groove from semantic probe points, verify uniqueness, rebuild, and require one
+  body plus a measurable additional volume decrease. Keep the sharp-cut volume
+  check separate from fillet volume.
+- `V-belt groove`: select a named standard system before resolving dimensions.
+  Keep DIN/ISO manufacturer data and GOST 20889-88 geometry/angle/radius tables
+  in separate catalogs; an explicit radius override may cross systems, but a
+  default resolver must never create a hybrid profile silently.
+- `V-belt groove`: a clean revolved cylinder does not expose a stable straight
+  silhouette source for `ISketch.AddProjectionOf(...)`. The accepted composed
+  workflow therefore uses origin mode linked to the blank's operation variables
+  (`VB_OR=R1`, `VB_FACE_W=L1`), a fixed global axis, and pre-merge datum anchors
+  with no copied/fixed profile-point chain. Audit settled style-1 profile entities
+  only; `Sketch.Edges(1)` may also return style-2/3 helper geometry.
+- `V-belt groove`: keep only driving dimensions with semantic expressions. The
+  accepted two-groove sketch has 8 dimensions/8 links; diameter and angle
+  annotations without geometric influence, plus their datum-only construction,
+  are omitted from the operational sketch.
+- `Poly-V groove`: build the periodic functional boundary from nominal tip
+  transition arcs, tangent flanks, and deterministic root arcs in one sketch.
+  A top closure at the blank radius intersects every intermediate tip and makes
+  a non-simple region. Close the operation profile above the blank with two
+  bounded radial overshoots; the target body clips that non-functional material.
+- `Poly-V groove`: keep nominal `rt` and selected `rb` as independent driving
+  sketch-arc radii, not a post-cut full-round/edge-fillet feature. Drive one
+  master groove by pitch, both radii, and one flank angle; derive its opposite
+  flank by equal length, and derive repeated grooves through equal pitch/radius,
+  parallel-flank, and tangent contracts. Fix only the global-axis endpoints.
+  For the generic stepped-shaft blank, link `PV_OR=D1/2` and `PV_FACE_W=L1`.
+- `Poly-V groove`: after direct COM mutation of operation variables, settle the
+  solver with sketch update, one edit cycle, another update, and document
+  rebuild before reading `ConstraintsState`; save/reopen mutation of `PV_E`,
+  `PV_RT`, and `PV_ALPHA` retained a fully defined closed PH profile.
+- `Poly-V groove`: require exactly one closed component, zero gaps, branches,
+  and self-intersections, `ConstraintsState=2`, one unchanged body, and an
+  actual/analytical removed-volume check. The PH/PJ/PK/PL/PM live matrix retained
+  these properties after save/reopen.
 - `disc_spring`: the constrained profile was fully defined, but the revolve
   operation only accepted it directly after helper anchor lines were changed
   from axis style to construction style.
@@ -1367,6 +1502,51 @@ Related:
 - `OP-001`
 - `SKETCH-004`
 - `SKETCH-005`
+
+---
+
+### OP-003: Keep English Operation Descriptors In Canonical Model-Tree Names
+
+Applies when:
+- a Layer 2 plan creates named sketches and 3D features;
+- a request accepts a user label for an operation;
+- downstream verification must find exact model-tree entities after reopen.
+
+Symptom:
+- model trees contain build-run markers such as `FINAL`, timestamps, or an
+  arbitrary request label instead of the operation type;
+- the bridge reconstructs sketch or child-feature names differently from the
+  host plan;
+- two successful operations are difficult to distinguish in readback.
+
+Rule:
+- Use English canonical names that combine a short semantic object description
+  with its native KOMPAS operation descriptor.
+- Name sketches by the geometry they define, not by the script or build run that
+  created them.
+- Treat a user-supplied label as an optional suffix; it must not replace the
+  canonical operation descriptor.
+- Compute exact sketch/feature/dependent-feature names in Layer 2 and carry them
+  through the execution plan. The bridge applies those names verbatim.
+- Do not include `FINAL`, dates, timestamps, UUIDs, or output filenames in model
+  tree names. Keep run identity in the artifact manifest.
+
+Verification:
+- Assert exact planned names in deterministic host-side tests.
+- After save/reopen, inspect the model tree and operation readback by exact name.
+- For operation variables, preserve dependency-reading order: external links,
+  independent inputs, derived formulas, then dependent copies.
+
+Known example:
+- `V-belt groove`: `V-belt grooves A x2 profile`,
+  `V-belt grooves A x2 cut rotation`, and
+  `V-belt grooves A x2 top edge fillets R1`.
+- `Poly-V groove`: `Poly-V grooves PJ x6 profile` and
+  `Poly-V grooves PJ x6 cut rotation`.
+
+Related:
+- `OP-001`
+- `VAR-001`
 
 ---
 

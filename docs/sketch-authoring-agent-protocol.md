@@ -18,7 +18,8 @@ the human protocol when deciding whether the rules themselves need to change.
 Before creating or changing a complex sketch, consult these project rules:
 
 - `CAD_PATTERNS.md`, especially `SKETCH-001`, `SKETCH-002`, `SKETCH-003`,
-  `SKETCH-004`, `SKETCH-005`, `SKETCH-006`, `SKETCH-008`, `OP-001`, `OP-002`,
+  `SKETCH-004`, `SKETCH-005`, `SKETCH-006`, `SKETCH-008`, `SKETCH-009`,
+  `OP-001`, `OP-002`,
   `PROFILE-001`, `VAR-001`, `VERIFY-001`.
 - `docs/sketch-authoring-protocol.md` for human rationale.
 - `docs/sketch-diagnostics.md` and `docs/inspect-sketch-full-report.md` for
@@ -72,6 +73,11 @@ Projection results:
 Projection constraints/readback plan:
 Coordinate system / plane assumptions:
 Semantic points:
+Symmetry/repetition class: none | mirror pair | repeated family | shared-level family
+Master element:
+Symmetry/repetition axes (auxiliary unless they are the consumer axis):
+Inherited relations: midpoint | symmetric | equal | parallel | collinear | shared level | pitch chain | formula-linked dimension
+Dependent elements and allowed independent dimensions:
 Primary contour order:
 Open path start/end/direction:
 Axis ownership:
@@ -128,6 +134,31 @@ Variables are interface elements, not debug dumps.
 - Hidden calculation: internal generator value; do not expose as a KOMPAS
   variable only because it was convenient to compute.
 
+Symmetric and repeated geometry is a family, not a set of independently
+dimensioned copies.
+
+- Select one master element and dimension its independent shape parameters.
+- Place each dependent element through named family relations: symmetry about a
+  declared axis, midpoint-to-axis, equal length/radius, parallel/collinear or
+  shared-level constraints, and edge/pitch chains.
+- A declared graphical symmetry axis may use axis style when it cannot be
+  confused with a consumer-operation axis. When several family axes share an
+  operational sketch, keep them auxiliary/thin. A revolve sketch still has
+  exactly one axis-style operation axis.
+- Do not repeat the same independent driving dimension on every copy. If KOMPAS
+  rejects a native equal/symmetric relation as redundant, a dependent dimension
+  is allowed only as a formula-linked fallback whose expression references the
+  master semantic variable.
+- Seed initially coincident/equal helper geometry with a bounded non-degenerate
+  offset when needed so the intended merge/equal relation is actually created.
+  The final readback must show the intended exact relation, not the seed offset.
+- Planned family constraints must be applied, not merely skipped as redundant.
+  Remove a truly redundant relation or move it to an earlier pre-constraint
+  phase where it carries the intended ownership.
+- Every family variable must either bind a surviving driving dimension or be
+  referenced by another published formula. Do not keep per-copy coordinate,
+  count, datum-display, or debug variables with no downstream consumer.
+
 ## State machine
 
 Follow phases in order. Do not advance with a failed gate unless the exception is
@@ -164,6 +195,8 @@ Pass criteria:
 - every axis/helper element has declared style and purpose;
 - base anchor is one of the named base modes;
 - projection-based sketch declares source/result/constraint plan.
+- symmetric/repeated geometry declares its master, family axes, inherited
+  relations, and any justified independent dependent-element dimensions.
 
 Stop if:
 
@@ -182,6 +215,8 @@ Pass criteria for closed profile:
 - no gaps, branches, extra main-style components, or self-intersections;
 - auxiliary/thin geometry does not pollute main profile;
 - revolve sketches have exactly one declared axis-style operation axis.
+- repeated elements are present as the intended number of clean components, but
+  no family relation is assumed merely from equal seed coordinates.
 
 Pass criteria for open path:
 
@@ -204,12 +239,17 @@ Pass criteria:
   (`SKETCH-005`, `SKETCH-006`);
 - constraint application does not change contour class or operation target;
 - `ConstraintsState`/`sketch_state` is read when available.
+- master constraints are applied before dependent-family inheritance;
+- midpoint/symmetry/equal/collinear/pitch relations use semantic element names;
+- applied count equals planned count and skipped family constraints equal zero.
 
 Stop if:
 
 - a constraint exists only “to calm solver” with no named relation;
 - projection source cannot be confirmed and matters to model intent;
 - constraints move the contour into a different semantic state.
+- a repeated element is positioned by copied coordinates or duplicate fixed
+  points instead of a named family relation.
 
 ### Phase 4: dimensions
 
@@ -223,6 +263,9 @@ Pass criteria:
 - closed profile remains closed and clean;
 - open path keeps expected start/end/direction;
 - readback/preflight confirms no hidden contour damage.
+- master dimensions are created once; every dependent dimension is either
+  independently meaningful or formula-linked to a named master variable;
+- every surviving driving dimension reports a valid variable expression.
 
 Stop if:
 
@@ -230,6 +273,8 @@ Stop if:
 - applied dimension creates gap, branch, extra component, self-intersection, or
   wrong direction;
 - a dimension formula needs a variable that is not in the variable policy.
+- the same family parameter is independently driven on multiple copies without
+  an explicit engineering reason.
 
 ### Phase 5: full definition
 
@@ -264,6 +309,8 @@ Pass criteria:
 - complex formulas are verified or hidden inside generator;
 - formula binding uses known project pattern when COM rejects direct formula
   fields (`VAR-001`).
+- no family variable is orphaned: each binds a surviving dimension or is used by
+  another kept formula.
 
 Stop if:
 
@@ -364,6 +411,36 @@ Required:
 
 Stop if projection relation is inferred only from coincident coordinates.
 
+### Symmetric or repeated profile family
+
+Required:
+
+- one named master profile/feature element;
+- one declared auxiliary axis per symmetry center or repeated-element center as
+  needed;
+- dependent placement through midpoint/symmetry and edge/pitch relations;
+- dependent shape inherited through equal, parallel, collinear, shared-level, or
+  formula-linked dimensions;
+- no duplicate display-only dimensions or datum constructions in the operational
+  sketch;
+- exact readback: all planned pre/final constraints and dimensions applied,
+  skipped count zero, intended component count preserved.
+
+Preferred order:
+
+1. anchor the global/base datum;
+2. constrain and dimension the master element;
+3. place dependent axes/centers through edge and pitch chains;
+4. apply midpoint/symmetry and shared-level relations;
+5. inherit dependent shape through equal/collinear relations;
+6. use a formula-linked dependent dimension only when the native relation is
+   unstable or rejected by KOMPAS;
+7. update, settle once if required, then verify full definition and family
+   topology from readback.
+
+Stop if a visually symmetric result is produced by independently fixed copies,
+duplicate numeric dimensions, or skipped family constraints.
+
 ### Auxiliary/reference sketch
 
 Required:
@@ -412,6 +489,7 @@ Contour class:
 Line styles verified:
 Base mode:
 Projection status:
+Symmetry/repetition status:
 Geometry-only gate:
 Constraints gate:
 Dimensions gate:
@@ -439,6 +517,9 @@ Use this compact checklist when the task is moving fast:
 [ ] Base mode declared
 [ ] Projection sources/results declared or N/A
 [ ] Semantic points named
+[ ] Master/dependent symmetry or repetition plan declared or N/A
+[ ] Symmetry/repetition axes use intentional line styles
+[ ] No duplicate family dimensions; any fallback is formula-linked
 [ ] Driving variables named
 [ ] Derived variables justified
 [ ] Geometry-only gate planned

@@ -108,6 +108,21 @@ family yet. Their architecture is defined in
 `docs/transmission-platform-concept.md`: functional members compose with generic
 hub/bore/keyway modules through semantic references, while native Shaft/GEARS
 commands remain black-box research oracles.
+The implemented V-belt Layer 3 member may append an optional post-cut `IFillet`
+manufacturing feature for upper groove edges; the functional cut sketch and its
+sharp-profile analytical verification remain separate from that feature.
+Its Layer 2 catalog keeps `din_iso` and `gost_20889_88` as independent standard
+systems; dimensions, angle schedules, and standard fillet radii are never mixed
+implicitly across systems.
+The separate Poly-V Layer 2/3 member owns ISO 9982:2021 PH/PJ/PK/PL/PM data and
+builds nominal `rt` plus deterministic maximum-`rb` rounded profiles directly in
+one fully defined master/dependent cut sketch. Pitch, both radii, angle, linked
+blank radius/width, axial center, and closure overshoot are live dimensions;
+dependent grooves use equal/parallel/tangent contracts rather than fixed copied
+points. Its CAD closure overshoots the blank only outside the material envelope
+so the operational contour remains one simple component; the functional rim
+geometry is unchanged. V-belt and Poly-V schemas and catalogs must not be merged
+into one implicit family.
 
 Подробные контракты находятся в `docs/`; runtime tool catalog остаётся источником
 истины для фактически зарегистрированных MCP names.
@@ -180,7 +195,7 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | parametric part workflows | L2–L4 | experimental, family-specific live evidence |
 | managed spring families | L2–L4 | implemented, see family contracts |
 | diaphragm module | L2–L4 | complete and live-verified |
-| mechanical-transmission platform | L2–L4 | Layer 2 V-belt catalog/preview exposed; no CAD family yet |
+| mechanical-transmission platform | L2–L4 | V-belt and Poly-V Layers 2/3 exposed and live-verified; complete Layer 4 pulley family pending |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |
 

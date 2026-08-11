@@ -2928,7 +2928,15 @@ def _inspect_sketch_full(model_container, payload):
     return _sketch_full_json_safe(result)
 
 
-def _audit_sketch_profile_preflight(model_container, sketch, *, closure_style=1, closure_tolerance=1e-5):
+def _audit_sketch_profile_preflight(
+    model_container,
+    sketch,
+    *,
+    closure_style=1,
+    closure_tolerance=1e-5,
+    expected_component_count=1,
+    profile_entities=None
+):
     """Verify that the primary operation profile is still valid after parameterization."""
 
     sketch_ref = safe_get(sketch, "Reference") or safe_get(sketch, "Name")
@@ -2936,24 +2944,58 @@ def _audit_sketch_profile_preflight(model_container, sketch, *, closure_style=1,
     if sketch_ref in (None, ""):
         result["error"] = "sketch_ref_unavailable"
         return result
-    try:
-        snapshot = _inspect_sketch_full(
-            model_container,
-            {
-                "sketch_ref": sketch_ref,
-                "include_dimensions": False,
-                "include_constraints": False,
-                "include_diagnostics": False,
-                "closure_style": closure_style,
-                "closure_tolerance": closure_tolerance,
-                "max_items": 500,
-            },
+    if profile_entities is not None:
+        try:
+            snapshot = _inspect_sketch_full(
+                model_container,
+                {
+                    "sketch_ref": sketch_ref,
+                    "include_dimensions": False,
+                    "include_constraints": False,
+                    "include_diagnostics": False,
+                    "closure_style": closure_style,
+                    "closure_tolerance": closure_tolerance,
+                    "max_items": 500,
+                },
+            )
+        except Exception as exc:
+            result["error"] = str(exc)
+            return result
+        settled_profile_entities = [
+            item
+            for item in (snapshot.get("entities") or [])
+            if _entity_style_id(item) == int(closure_style)
+        ]
+        primary = _build_sketch_closure_audit(
+            settled_profile_entities,
+            tolerance=closure_tolerance,
+            style_filter=None,
+            label="planned_profile_entities",
         )
-    except Exception as exc:
-        result["error"] = str(exc)
-        return result
-    closure_audit = snapshot.get("closure_audit") or {}
-    primary = closure_audit.get("primary_style") or {}
+        snapshot_summary = {
+            "planned_profile_entity_count": len(profile_entities),
+            "settled_profile_entity_count": len(settled_profile_entities),
+        }
+    else:
+        try:
+            snapshot = _inspect_sketch_full(
+                model_container,
+                {
+                    "sketch_ref": sketch_ref,
+                    "include_dimensions": False,
+                    "include_constraints": False,
+                    "include_diagnostics": False,
+                    "closure_style": closure_style,
+                    "closure_tolerance": closure_tolerance,
+                    "max_items": 500,
+                },
+            )
+        except Exception as exc:
+            result["error"] = str(exc)
+            return result
+        closure_audit = snapshot.get("closure_audit") or {}
+        primary = closure_audit.get("primary_style") or {}
+        snapshot_summary = snapshot.get("summary")
     failures = []
     if not primary.get("closed"):
         failures.append("primary contour is not closed")
@@ -2963,9 +3005,14 @@ def _audit_sketch_profile_preflight(model_container, sketch, *, closure_style=1,
         failures.append("primary contour has %s branch point(s)" % primary.get("branch_count"))
     if int(primary.get("self_intersection_count") or 0):
         failures.append("primary contour has %s sampled self-intersection(s)" % primary.get("self_intersection_count"))
-    if int(primary.get("component_count") or 0) != 1:
-        failures.append("primary contour has %s component(s)" % primary.get("component_count"))
-    result.update({"ok": not failures, "failures": failures, "closure_primary": primary, "summary": snapshot.get("summary")})
+    actual_component_count = int(primary.get("component_count") or 0)
+    expected_component_count = max(1, int(expected_component_count or 1))
+    if actual_component_count != expected_component_count:
+        failures.append(
+            "primary contour has %s component(s); expected %s"
+            % (primary.get("component_count"), expected_component_count)
+        )
+    result.update({"ok": not failures, "failures": failures, "closure_primary": primary, "summary": snapshot_summary})
     return _sketch_full_json_safe(result)
 
 
@@ -3281,6 +3328,7 @@ FEATURE_COLLECTION_SPECS = [
     ("extrusion", "extrusions", ("Extrusions", "GetExtrusions")),
     ("evolution", "evolutions", ("Evolutions", "GetEvolutions")),
     ("feature_pattern", "feature_patterns", ("FeaturePatterns", "GetFeaturePatterns")),
+    ("fillet", "fillets", ("Fillets", "GetFillets")),
 ]
 
 
@@ -3297,6 +3345,9 @@ def _normalize_feature_kind(kind):
         "pattern": "feature_pattern",
         "circular_pattern": "feature_pattern",
         "feature_patterns": "feature_pattern",
+        "round": "fillet",
+        "rounding": "fillet",
+        "fillets": "fillet",
     }
     return aliases.get(value, value)
 
@@ -3373,6 +3424,19 @@ def _feature_list_item(feature, kind, collection_name, index, include_details=Fa
         variables = _feature_variables_payload(feature)
         item["variables"] = variables
         item["variable_count"] = len(variables)
+    if kind == "fillet":
+        import win32com.client
+
+        try:
+            fillet_feature = win32com.client.CastTo(feature, "IFillet")
+        except Exception:
+            fillet_feature = feature
+        item["fillet"] = {
+            "radius1": _json_safe_scalar(safe_get(fillet_feature, "Radius1")),
+            "radius2": _json_safe_scalar(safe_get(fillet_feature, "Radius2")),
+            "building_type": _json_safe_scalar(safe_get(fillet_feature, "BuildingType")),
+            "tangent": _json_safe_scalar(safe_get(fillet_feature, "Tangent")),
+        }
     return item
 
 
@@ -3557,6 +3621,8 @@ def _repair_existing_features(model_container, payload):
         operation = _normalize_feature_repair_operation(raw_operation.get("operation") or raw_operation.get("type"))
         spec = raw_operation.get("feature") or raw_operation.get("selector")
         feature, kind, collection_name, collection_index = _select_existing_feature(model_container, spec)
+        if kind == "fillet":
+            raise RuntimeError("fillet features are read-only through the generic repair_feature action")
         collection, _kind, _collection_name = _collection_for_feature_kind(model_container, kind)
         before = _feature_list_item(feature, kind, collection_name, collection_index, include_details=True)
         result = {
@@ -12516,6 +12582,24 @@ def _apply_sketch_constraints(sketch_entities, planned_constraints, options):
                             continue
                     except Exception:
                         pass
+                if kind in {"horizontal", "vertical"}:
+                    try:
+                        point_1 = _constraint_point_coordinates(entity, 0)
+                        point_2 = _constraint_point_coordinates(entity, 1)
+                        already_satisfied = (
+                            abs(point_2[1] - point_1[1]) <= 1e-6
+                            if kind == "horizontal"
+                            else abs(point_2[0] - point_1[0]) <= 1e-6
+                        )
+                        if already_satisfied:
+                            skipped_item = dict(item)
+                            skipped_item["reason"] = "redundant_" + kind
+                            report["skipped_count"] += 1
+                            report["skipped"].append(skipped_item)
+                            progress_made = True
+                            continue
+                    except Exception:
+                        pass
                 next_pending.append((plan, dict(item, error="constraint_create_returned_false")))
             except Exception as exc:
                 next_pending.append((plan, {"constraint": plan, "pass": pass_index, "error": str(exc)}))
@@ -12671,6 +12755,8 @@ def _finalize_driving_dimension(dimension_object, dimension):
     fixed_result = _create_dimension_constraint(dimension_object, 14)
     variable_name = dimension.get("variable") or dimension.get("name")
     expression = dimension.get("expression")
+    if expression in (None, "") and dimension.get("variable_name") not in (None, ""):
+        expression = str(dimension.get("variable_name"))
     if expression in (None, "") and dimension.get("value") not in (None, ""):
         expression = _format_dimension_expression(dimension.get("value"))
     variable_result = _create_dimension_constraint(
@@ -12681,11 +12767,23 @@ def _finalize_driving_dimension(dimension_object, dimension):
         value=dimension.get("value"),
     )
     allow_variable_only = bool(dimension.get("allow_variable_only")) or str(dimension.get("kind") or "") in {"angle_between_lines"}
+    semantic_variable_name = dimension.get("variable_name")
+    semantic_link_valid = True
+    if semantic_variable_name not in (None, ""):
+        semantic_link_valid = bool(variable_result.get("valid")) and str(
+            variable_result.get("expression") or ""
+        ).strip() == str(semantic_variable_name).strip()
     result = {
         "associated": associated,
         "fixed_constraint": fixed_result,
         "variable_constraint": variable_result,
-        "driving_created": bool(variable_result["created"] and (fixed_result["created"] or allow_variable_only)),
+        "semantic_variable_name": semantic_variable_name,
+        "semantic_link_valid": semantic_link_valid,
+        "driving_created": bool(
+            variable_result["created"]
+            and (fixed_result["created"] or allow_variable_only)
+            and semantic_link_valid
+        ),
     }
     result.update(_apply_dimension_display(dimension_object, dimension))
     return result
@@ -12699,6 +12797,7 @@ def _add_line_dimension(line_dimensions, dimension, sketch_entities):
     dim = line_dimensions.Add()
     if dim is None:
         raise RuntimeError("LineDimensions.Add returned None")
+    dim = _cast_to_com_interface(dim, "ILineDimension")
     x1, y1, x2, y2 = _line_geometry(target)
     placement_index = int(dimension.get("placement_index") or 0)
     dim.X1 = x1
@@ -12721,8 +12820,12 @@ def _add_line_dimension(line_dimensions, dimension, sketch_entities):
 
 
 def _add_point_coordinate_dimension(line_dimensions, point, dimension):
-    point_x = float(safe_get(point, "X", 0.0))
-    point_y = float(safe_get(point, "Y", 0.0))
+    if isinstance(point, dict):
+        point_x = float(point.get("x", point.get("X", 0.0)) or 0.0)
+        point_y = float(point.get("y", point.get("Y", 0.0)) or 0.0)
+    else:
+        point_x = float(safe_get(point, "X", 0.0) or 0.0)
+        point_y = float(safe_get(point, "Y", 0.0) or 0.0)
     orientation_name = str(dimension.get("orientation") or "vertical").strip().lower()
     orientation = LINE_DIMENSION_ORIENTATIONS.get(orientation_name)
     if orientation is None:
@@ -12753,6 +12856,42 @@ def _add_point_coordinate_dimension(line_dimensions, point, dimension):
     if not updated:
         return result
     result.update(_finalize_driving_dimension(dim, dimension))
+    return result
+
+
+def _add_point_distance_dimension(line_dimensions, dimension, sketch_entities):
+    target = sketch_entities.get(str(dimension.get("target")))
+    partner = sketch_entities.get(str(dimension.get("partner")))
+    if target is None or partner is None:
+        raise RuntimeError("target_or_partner_line_not_found")
+    target_index = int(dimension.get("support_point_index", 0))
+    partner_index = int(dimension.get("partner_point_index", 0))
+    x1, y1 = _constraint_point_coordinates(target, target_index)
+    x2, y2 = _constraint_point_coordinates(partner, partner_index)
+    dim = line_dimensions.Add()
+    if dim is None:
+        raise RuntimeError("LineDimensions.Add returned None")
+    dim = _cast_to_com_interface(dim, "ILineDimension")
+    dim.X1 = x1
+    dim.Y1 = y1
+    dim.X2 = x2
+    dim.Y2 = y2
+    orientation = LINE_DIMENSION_ORIENTATIONS.get(
+        str(dimension.get("orientation") or "horizontal"),
+        LINE_DIMENSION_ORIENTATIONS["horizontal"],
+    )
+    dim.Orientation = int(orientation)
+    dim.X3 = (x1 + x2) / 2.0
+    dim.Y3 = min(y1, y2) - 10.0 - int(dimension.get("placement_index") or 0) * 5.0
+    updated = bool(dim.Update())
+    result = {
+        "updated": updated,
+        "reference": safe_get(dim, "Reference"),
+        "orientation": orientation,
+        "driving_created": False,
+    }
+    if updated and bool(dimension.get("driving", True)):
+        result.update(_finalize_driving_dimension(dim, dimension))
     return result
 
 
@@ -12911,7 +13050,6 @@ def _add_angle_dimension(angle_dimensions, dimension, sketch_entities):
             default_point_y = vertex[1] + bisector[1] * placement_distance * direction
         dim.X3 = float(dimension.get("point_x", default_point_x))
         dim.Y3 = float(dimension.get("point_y", default_point_y))
-
     updated = bool(dim.Update())
     result = {
         "updated": updated,
@@ -13137,6 +13275,23 @@ def _apply_sketch_dimensions(view, sketch_entities, planned_dimensions, options)
                     result = _add_break_line_dimension(break_line_dimensions, axis_line, dimension_payload, sketch_entities)
                 else:
                     result = _add_axis_distance_dimension(line_dimensions, axis_line, dimension_payload, sketch_entities)
+            elif kind == "point_coordinate":
+                target_record = sketch_entities.get(str(dimension_payload.get("target")))
+                if target_record is None:
+                    raise RuntimeError("target_line_not_found")
+                point_index = int(dimension_payload.get("point_index", 0))
+                point_x, point_y = _constraint_point_coordinates(target_record, point_index)
+                result = _add_point_coordinate_dimension(
+                    line_dimensions,
+                    {"x": point_x, "y": point_y},
+                    dimension_payload,
+                )
+            elif kind == "point_distance":
+                result = _add_point_distance_dimension(
+                    line_dimensions,
+                    dimension_payload,
+                    sketch_entities,
+                )
             elif kind == "angle_between_lines":
                 if angle_dimensions is None or not callable(safe_get(angle_dimensions, "Add")):
                     raise RuntimeError("view does not expose ISymbols2DContainer.AngleDimensions.Add")
@@ -13191,7 +13346,12 @@ def _apply_sketch_parameterization(view, sketch_entities, planned_constraints, p
     constraints = sketch_options.get("constraints") or {}
     dimensions = sketch_options.get("dimensions") or {}
     parameterization_order = str(sketch_options.get("parameterization_order") or "dimensions_first").strip().lower()
-    deferred_dimension_kinds = {"angle_between_lines"}
+    deferred_dimension_kind_values = sketch_options.get("deferred_dimension_kinds")
+    deferred_dimension_kinds = (
+        {"angle_between_lines"}
+        if deferred_dimension_kind_values is None
+        else {str(item).strip().lower() for item in list(deferred_dimension_kind_values or [])}
+    )
     primary_dimensions = [dimension for dimension in planned_dimensions if str(dimension.get("kind") or "") not in deferred_dimension_kinds]
     deferred_dimensions = [dimension for dimension in planned_dimensions if str(dimension.get("kind") or "") in deferred_dimension_kinds]
     if parameterization_order in {"anchored_dimensions_then_constraints", "staged"}:
@@ -13225,10 +13385,31 @@ def _apply_sketch_parameterization(view, sketch_entities, planned_constraints, p
         planned_constraints,
         tolerance=float(sketch_options.get("readback_tolerance") or 1e-6),
     ) if bool(sketch_options.get("readback_geometry", False)) else {"ok": True, "checked_count": 0, "failed_count": 0}
+    exact_counts = {"required": bool(sketch_options.get("require_exact_counts", False)), "ok": True}
+    if exact_counts["required"]:
+        expected_constraint_count = int(sketch_options.get("expected_constraint_count") or 0)
+        expected_dimension_count = int(sketch_options.get("expected_dimension_count") or 0)
+        applied_constraint_count = int(constraints_report.get("applied_count") or 0)
+        applied_dimension_count = int(dimensions_report.get("applied_count") or 0)
+        exact_counts.update(
+            {
+                "expected_constraint_count": expected_constraint_count,
+                "applied_constraint_count": applied_constraint_count,
+                "expected_dimension_count": expected_dimension_count,
+                "applied_dimension_count": applied_dimension_count,
+                "ok": (
+                    applied_constraint_count == expected_constraint_count
+                    and applied_dimension_count == expected_dimension_count
+                    and int(constraints_report.get("failed_count") or 0) == 0
+                    and int(dimensions_report.get("failed_count") or 0) == 0
+                ),
+            }
+        )
     ok = (
         constraints_report["live_status"] in ("disabled", "applied", "partial")
         and dimensions_report["live_status"] in ("disabled", "applied", "partial")
         and bool(geometry_checks.get("ok", True))
+        and bool(exact_counts.get("ok"))
     )
     return {
         "step": "sketch_parameterization",
@@ -13237,6 +13418,7 @@ def _apply_sketch_parameterization(view, sketch_entities, planned_constraints, p
         "constraints": constraints_report,
         "dimensions": dimensions_report,
         "geometry_checks": geometry_checks,
+        "exact_counts": exact_counts,
         "line_readback": _snapshot_sketch_line_entities(sketch_entities) if bool(sketch_options.get("readback_geometry", False)) else {},
     }
 
@@ -14155,8 +14337,20 @@ def _extract_stepped_shaft_preview_data(preview, params):
         elif operation.get("operation") == "draw_axis":
             axis_start = operation.get("start")
             axis_end = operation.get("end")
-    if len(profile_points) < 4:
+    if len(profile_points) < 4 and not profile_entities:
         raise RuntimeError("Invalid stepped_shaft profile")
+    if not profile_points and profile_entities:
+        profile_points = [
+            list(entity.get("start") or [])
+            for entity in profile_entities
+            if isinstance(entity.get("start"), list) and len(entity.get("start")) == 2
+        ]
+        if profile_entities:
+            final_end = profile_entities[-1].get("end") or []
+            if isinstance(final_end, list) and len(final_end) == 2:
+                profile_points.append(list(final_end))
+        if len(profile_points) < 2:
+            raise RuntimeError("Invalid stepped_shaft profile entities")
     if not isinstance(axis_start, list) or len(axis_start) != 2:
         axis_start = [float(profile_points[0][0]), float(profile_points[0][1])]
     if not isinstance(axis_end, list) or len(axis_end) != 2:
@@ -14172,6 +14366,231 @@ def _extract_stepped_shaft_preview_data(preview, params):
         "axis_start": axis_start,
         "axis_end": axis_end,
     }
+
+
+def _prepare_parameterization_projection_sources(model_container, target_sketch, specs):
+    prepared = []
+    for raw_spec in specs or []:
+        spec = dict(raw_spec or {})
+        label = str(spec.get("label") or "").strip()
+        source_ref = int(spec.get("source_sketch_ref") or 0)
+        source_index = int(spec.get("source_entity_index") or 0)
+        if not label or source_ref <= 0 or source_index <= 0:
+            raise RuntimeError("Projection anchor requires label, source sketch reference, and entity index")
+        source_sketch = _resolve_existing_sketch(model_container, source_ref)
+        edge_collection = source_sketch.Edges(1)
+        edge_count = collection_count(edge_collection)
+        if source_index <= edge_count:
+            source_object = get_collection_item(edge_collection, source_index - 1)
+            source_collection = "edges"
+        else:
+            probe_point = spec.get("probe_point") or []
+            if len(probe_point) != 3:
+                raise RuntimeError("Projection anchor probe_point must contain three coordinates: " + label)
+            part7 = _cast_to_com_interface(model_container, "IPart7")
+            if part7 is None:
+                raise RuntimeError("IPart7 is unavailable for projection anchor: " + label)
+            found = part7.FindObjectsByPointEx(
+                float(probe_point[0]),
+                float(probe_point[1]),
+                float(probe_point[2]),
+                True,
+                1e-6,
+            )
+            unique_matches = {}
+            source_feature_ref = int(spec.get("source_feature_ref") or 0)
+            if source_feature_ref > 0:
+                source_features = iter_collection(safe_get(model_container, "Rotateds"))
+                for source_feature in source_features:
+                    if int(safe_get(source_feature, "Reference") or 0) == source_feature_ref:
+                        unique_matches[("feature", source_feature_ref)] = source_feature
+                        break
+                if not any(key[0] == "feature" for key in unique_matches) and len(source_features) == 1:
+                    unique_matches[("feature", source_feature_ref)] = source_features[0]
+            for item in _ensure_dispatch_sequence(found):
+                reference = safe_get(item, "Reference")
+                key = ("reference", int(reference)) if reference is not None else ("dispatch", str(item))
+                unique_matches[key] = item
+            expected_orientation = str(spec.get("expected_orientation") or "").strip().lower()
+            expected_coordinate = spec.get("expected_coordinate")
+            attempts = []
+            source_object = None
+            projection_result = None
+            for candidate in unique_matches.values():
+                candidate_type = int(safe_get(candidate, "Type") or 0)
+                if candidate_type == 11197:  # Default planes returned by point queries.
+                    continue
+                try:
+                    candidate_result = target_sketch.AddProjectionOf(candidate)
+                except Exception as exc:
+                    attempts.append({"type": candidate_type, "error": str(exc)})
+                    continue
+                if isinstance(candidate_result, (list, tuple)):
+                    candidate_items = list(candidate_result)
+                elif collection_count(candidate_result):
+                    candidate_items = iter_collection(candidate_result)
+                else:
+                    candidate_items = [candidate_result]
+                candidate_items = [item for item in candidate_items if item is not None]
+                semantic_match = False
+                for projected_candidate in candidate_items:
+                    try:
+                        px1 = float(safe_get(projected_candidate, "X1"))
+                        py1 = float(safe_get(projected_candidate, "Y1"))
+                        px2 = float(safe_get(projected_candidate, "X2"))
+                        py2 = float(safe_get(projected_candidate, "Y2"))
+                    except Exception:
+                        continue
+                    orientation_matches = (
+                        (expected_orientation == "vertical" and abs(px2 - px1) <= 1e-6)
+                        or (expected_orientation == "horizontal" and abs(py2 - py1) <= 1e-6)
+                    )
+                    coordinate = (px1 + px2) / 2.0 if expected_orientation == "vertical" else (py1 + py2) / 2.0
+                    coordinate_matches = expected_coordinate is None or abs(coordinate - float(expected_coordinate)) <= 1e-6
+                    if orientation_matches and coordinate_matches:
+                        semantic_match = True
+                        break
+                attempts.append({"type": candidate_type, "count": len(candidate_items), "match": semantic_match})
+                if semantic_match:
+                    source_object = candidate
+                    projection_result = candidate_items
+                    break
+                for projected_candidate in candidate_items:
+                    delete_candidate = safe_get(projected_candidate, "Delete")
+                    if callable(delete_candidate):
+                        delete_candidate()
+            if source_object is None:
+                raise RuntimeError(
+                    "Projection anchor %s found no projectable semantic object at %s; attempts=%s"
+                    % (label, probe_point, attempts)
+                )
+            source_collection = "api7_point_query"
+        if source_object is None:
+            raise RuntimeError("Projection anchor source object is unavailable: " + label)
+        if source_collection == "edges":
+            projection_result = target_sketch.AddProjectionOf(source_object)
+        if isinstance(projection_result, (list, tuple)):
+            projected_items = list(projection_result)
+        elif collection_count(projection_result):
+            projected_items = iter_collection(projection_result)
+        else:
+            projected_items = [projection_result]
+        projected_items = [item for item in projected_items if item is not None]
+        if not projected_items:
+            raise RuntimeError(
+                "Projection anchor %s produced %s objects"
+                % (label, len(projected_items))
+            )
+        spec["_source_object"] = source_object
+        spec["_source_collection"] = source_collection
+        spec["_projected_objects"] = projected_items
+        prepared.append(spec)
+    return prepared
+
+
+def _project_parameterization_anchors(model_container, sketch, specs, sketch_entities):
+    reports = []
+    for raw_spec in specs or []:
+        spec = raw_spec or {}
+        label = str(spec.get("label") or "").strip()
+        if not label:
+            raise RuntimeError("Projection anchor label is required")
+        if label in sketch_entities:
+            raise RuntimeError("Duplicate projection anchor label: " + label)
+        source_ref = int(spec.get("source_sketch_ref") or 0)
+        source_index = int(spec.get("source_entity_index") or 0)
+        if source_ref <= 0 or source_index <= 0:
+            raise RuntimeError("Projection anchor requires positive source sketch reference and entity index: " + label)
+        source_sketch = _resolve_existing_sketch(model_container, source_ref)
+        if int(safe_get(source_sketch, "Reference") or 0) == int(safe_get(sketch, "Reference") or 0):
+            raise RuntimeError("Projection anchor source and target sketches must differ: " + label)
+        source_edge = spec.get("_source_object")
+        source_collection = str(spec.get("_source_collection") or "prepared")
+        if source_edge is None:
+            raise RuntimeError("Projection anchor source edge is unavailable: " + label)
+        if safe_get(source_edge, "IsStraight") is False:
+            raise RuntimeError("Projection anchor source edge is not straight: " + label)
+        projected_candidates = list(spec.get("_projected_objects") or [])
+        expected_orientation = str(spec.get("expected_orientation") or "").strip().lower()
+        expected_coordinate = spec.get("expected_coordinate")
+        style = int(spec.get("style", 2))
+        projected = None
+        for candidate in projected_candidates:
+            try:
+                candidate.Style = style
+            except Exception:
+                set_candidate_style = safe_get(candidate, "SetStyle")
+                if callable(set_candidate_style):
+                    set_candidate_style(style)
+            try:
+                x1 = float(safe_get(candidate, "X1"))
+                y1 = float(safe_get(candidate, "Y1"))
+                x2 = float(safe_get(candidate, "X2"))
+                y2 = float(safe_get(candidate, "Y2"))
+            except Exception:
+                continue
+            orientation_matches = (
+                (expected_orientation == "vertical" and abs(x2 - x1) <= 1e-6)
+                or (expected_orientation == "horizontal" and abs(y2 - y1) <= 1e-6)
+            )
+            coordinate = (x1 + x2) / 2.0 if expected_orientation == "vertical" else (y1 + y2) / 2.0
+            coordinate_matches = expected_coordinate is None or abs(coordinate - float(expected_coordinate)) <= 1e-6
+            if orientation_matches and coordinate_matches:
+                projected = candidate
+                break
+        if projected is None:
+            raise RuntimeError("Prepared projections do not contain the required semantic line: " + label)
+        x1 = float(safe_get(projected, "X1"))
+        y1 = float(safe_get(projected, "Y1"))
+        x2 = float(safe_get(projected, "X2"))
+        y2 = float(safe_get(projected, "Y2"))
+        expected_orientation = str(spec.get("expected_orientation") or "").strip().lower()
+        tolerance = 1e-6
+        if expected_orientation == "vertical" and abs(x2 - x1) > tolerance:
+            raise RuntimeError("Projected axial datum is not vertical: " + label)
+        if expected_orientation == "horizontal" and abs(y2 - y1) > tolerance:
+            raise RuntimeError("Projected radial datum is not horizontal: " + label)
+        expected_coordinate = spec.get("expected_coordinate")
+        if expected_coordinate is not None:
+            actual_coordinate = (x1 + x2) / 2.0 if expected_orientation == "vertical" else (y1 + y2) / 2.0
+            if abs(actual_coordinate - float(expected_coordinate)) > tolerance:
+                raise RuntimeError(
+                    "Projection anchor %s coordinate mismatch: expected %.9g, got %.9g"
+                    % (label, float(expected_coordinate), actual_coordinate)
+                )
+        try:
+            projected.Style = style
+        except Exception:
+            set_style = safe_get(projected, "SetStyle")
+            if not callable(set_style):
+                raise
+            set_style(style)
+        update = safe_get(projected, "Update")
+        if callable(update) and not update():
+            raise RuntimeError("Projected anchor Update returned False: " + label)
+        sketch_entities[label] = _sketch_line_entry(
+            projected,
+            x1,
+            y1,
+            x2,
+            y2,
+            role="projection",
+            target=label,
+        )
+        reports.append(
+            {
+                "label": label,
+                "role": spec.get("role"),
+                "source_sketch_ref": source_ref,
+                "source_entity_index": source_index,
+                "source_collection": source_collection,
+                "source_edge_reference": safe_get(source_edge, "Reference"),
+                "projected_reference": safe_get(projected, "Reference"),
+                "geometry": {"start": [x1, y1], "end": [x2, y2]},
+                "style": safe_get(projected, "Style"),
+            }
+        )
+    return reports
 
 
 def _build_stepped_shaft_feature(part, model_container, params, preview, steps_report, coordinate_system=None, operation_kind="boss"):
@@ -14207,25 +14626,53 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
     sketch = sketchs.Add()
     if sketch is None:
         raise RuntimeError("Sketchs.Add returned None")
-    sketch.Plane = plane
+    try:
+        sketch.Plane = plane
+    except Exception as exc:
+        raise RuntimeError("Failed to assign stepped-shaft sketch plane: " + str(exc))
+    if bool(params.get("fix_sketch_placement", False)):
+        try:
+            sketch.Fixed = True
+        except Exception as exc:
+            raise RuntimeError("Failed to fix stepped-shaft sketch placement: " + str(exc))
     if coordinate_system is not None:
-        sketch.CoordinateSystem = coordinate_system
+        try:
+            sketch.CoordinateSystem = coordinate_system
+        except Exception as exc:
+            raise RuntimeError("Failed to assign stepped-shaft coordinate system: " + str(exc))
     if params.get("name"):
         try:
-            sketch.Name = "%s profile" % params.get("name")
+            sketch.Name = str(params.get("sketch_name") or ("%s profile" % params.get("name")))
         except Exception:
             pass
-    if not sketch.Update():
+    try:
+        sketch_created = sketch.Update()
+    except Exception as exc:
+        raise RuntimeError("Failed to create stepped-shaft sketch: " + str(exc))
+    if not sketch_created:
         raise RuntimeError("Sketch Update returned False")
     steps_report.append({"step": "create_sketch", "ok": True, "api": "api7_sketchs_add", "plane": params.get("plane") or "XOY"})
 
-    steps_report.append(_apply_part_variables(part, planned_variables))
+    variable_report = _apply_part_variables(part, planned_variables)
+    steps_report.append(variable_report)
+    if bool(params.get("require_parameterization", False)) and not bool(variable_report.get("ok")):
+        raise RuntimeError("Failed to create all planned stepped-shaft variables")
 
-    sketch_doc = sketch.BeginEdit()
+    prepared_projection_specs = _prepare_parameterization_projection_sources(
+        model_container,
+        sketch,
+        params.get("projections") or [],
+    )
+
+    try:
+        sketch_doc = sketch.BeginEdit()
+    except Exception as exc:
+        raise RuntimeError("Failed to begin stepped-shaft sketch edit: " + str(exc))
     if sketch_doc is None:
         raise RuntimeError("BeginEdit returned None")
     line_count = 0
     line_style_report = []
+    projection_report = []
     sketch_entities = {}
     parameterization_report = None
     try:
@@ -14272,13 +14719,16 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
         profile_line_style = int(sketch_options.get("profile_line_style", 1))
 
         def add_line(x1, y1, x2, y2, style, role):
-            line = line_segments.Add()
-            if line is None:
-                raise RuntimeError("LineSegments.Add returned None")
-            line.X1 = float(x1)
-            line.Y1 = float(y1)
-            line.X2 = float(x2)
-            line.Y2 = float(y2)
+            try:
+                line = line_segments.Add()
+                if line is None:
+                    raise RuntimeError("LineSegments.Add returned None")
+                line.X1 = float(x1)
+                line.Y1 = float(y1)
+                line.X2 = float(x2)
+                line.Y2 = float(y2)
+            except Exception as exc:
+                raise RuntimeError("Failed to define " + role + " sketch line: " + str(exc))
             requested_style = int(style)
             style_setter = "Style"
             try:
@@ -14328,6 +14778,14 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
             )
             return arc
 
+        projection_report = _project_parameterization_anchors(
+            model_container,
+            sketch,
+            prepared_projection_specs,
+            sketch_entities,
+        )
+        line_count += len(projection_report)
+
         axis_start_x = float(axis_start[0])
         axis_start_y = float(axis_start[1])
         axis_end_x = float(axis_end[0])
@@ -14355,7 +14813,7 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
                 float(start[1]),
                 float(end[0]),
                 float(end[1]),
-                int(construction.get("line_style", axis_line_style)),
+                int(construction.get("line_style", construction.get("style", axis_line_style))),
                 "construction",
             )
             sketch_entities[target] = _sketch_line_entry(
@@ -14404,6 +14862,23 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
                 sketch_entities[target] = _sketch_line_entry(line, float(x1), float(y1), float(x2), float(y2), role="profile", target=target)
                 line_count += 1
 
+        pre_constraint_report = None
+        planned_pre_constraints = list(params.get("pre_constraints") or [])
+        if planned_pre_constraints:
+            pre_constraint_report = _apply_sketch_constraints(
+                sketch_entities,
+                planned_pre_constraints,
+                {"enabled": True, "max_passes": 3},
+            )
+            if (
+                int(pre_constraint_report.get("failed_count") or 0) != 0
+                or int(pre_constraint_report.get("applied_count") or 0) != len(planned_pre_constraints)
+                or int(pre_constraint_report.get("skipped_count") or 0) != 0
+            ):
+                raise RuntimeError(
+                    "Failed to apply stepped-shaft pre-constraints: " + str(pre_constraint_report)
+                )
+            steps_report.append(pre_constraint_report)
         parameterization_report = _apply_sketch_parameterization(
             view,
             sketch_entities,
@@ -14413,12 +14888,90 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
             steps,
             params.get("total_length") or (axis_end_x - axis_start_x),
         )
+        if pre_constraint_report is not None:
+            parameterization_report["pre_constraints"] = pre_constraint_report
+        parameterization_report["projections"] = projection_report
+        if bool(params.get("require_parameterization", False)) and not bool(parameterization_report.get("ok")):
+            raise RuntimeError(
+                "Stepped-shaft parameterization execution was incomplete: "
+                + json.dumps(parameterization_report, ensure_ascii=True)
+            )
+        if bool(params.get("require_parameterization", False)):
+            constraints_report = parameterization_report.get("constraints") or {}
+            dimensions_report = parameterization_report.get("dimensions") or {}
+            if bool(params.get("require_all_constraints_applied", False)):
+                constraints_complete = (
+                    int(constraints_report.get("failed_count") or 0) == 0
+                    and int(constraints_report.get("skipped_count") or 0) == 0
+                    and int(constraints_report.get("applied_count") or 0) == len(planned_constraints)
+                )
+            else:
+                constraints_complete = (
+                    int(constraints_report.get("failed_count") or 0) == 0
+                    and int(constraints_report.get("applied_count") or 0)
+                    + int(constraints_report.get("skipped_count") or 0)
+                    == len(planned_constraints)
+                )
+            if not constraints_complete:
+                constraint_failures = [
+                    str(item.get("constraint") or {}) + ": " + str(item.get("error") or "not applied")
+                    for item in list(constraints_report.get("failed") or [])
+                ]
+                raise RuntimeError(
+                    "Failed to apply all planned stepped-shaft constraints: "
+                    + ("; ".join(constraint_failures) if constraint_failures else str(constraints_report))
+                )
+            if int(dimensions_report.get("applied_count") or 0) != len(planned_dimensions):
+                dimension_failures = [
+                    str(item.get("dimension") or {}) + ": " + str(item.get("error") or "not applied")
+                    for item in list(dimensions_report.get("failed") or [])
+                ]
+                raise RuntimeError(
+                    "Failed to apply all planned stepped-shaft dimensions: "
+                    + ("; ".join(dimension_failures) if dimension_failures else str(dimensions_report))
+                )
     finally:
-        sketch.EndEdit()
-    if not sketch.Update():
+        try:
+            sketch.EndEdit()
+        except Exception as exc:
+            raise RuntimeError("Failed to finish stepped-shaft sketch edit: " + str(exc))
+    if bool(params.get("fix_sketch_placement", False)):
+        try:
+            sketch.Fixed = True
+        except Exception as exc:
+            raise RuntimeError("Failed to keep stepped-shaft sketch placement fixed: " + str(exc))
+    try:
+        sketch_updated = sketch.Update()
+    except Exception as exc:
+        raise RuntimeError("Failed to update stepped-shaft sketch: " + str(exc))
+    if not sketch_updated:
         raise RuntimeError("Sketch Update after edit returned False")
     if parameterization_report is not None:
         parameterization_report["sketch_state"] = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
+        if (
+            bool(params.get("require_fully_defined", False))
+            and (parameterization_report.get("sketch_state") or {}).get("code") != 2
+        ):
+            parameterization_report["initial_sketch_state"] = parameterization_report["sketch_state"]
+            settle_doc = None
+            try:
+                settle_doc = sketch.BeginEdit()
+            finally:
+                if settle_doc is not None:
+                    sketch.EndEdit()
+            if not sketch.Update():
+                raise RuntimeError("Sketch Update after solver settle retry returned False")
+            parameterization_report["sketch_state"] = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
+        if (
+            bool(params.get("require_fully_defined", False))
+            and (parameterization_report.get("sketch_state") or {}).get("code") != 2
+        ):
+            raise RuntimeError(
+                "Stepped-shaft sketch is not fully defined: "
+                + str((parameterization_report.get("sketch_state") or {}).get("name") or "unknown")
+                + "; constraints="
+                + str(parameterization_report.get("constraints") or {})
+            )
     steps_report.append(
         {
             "step": "draw_profile",
@@ -14428,17 +14981,60 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
             "line_count": line_count,
             "step_count": len(steps),
             "line_styles": line_style_report,
+            "projections": projection_report,
             "coordinate_system": safe_get(coordinate_system, "Name") if coordinate_system is not None else None,
         }
     )
     steps_report.append(parameterization_report or {"step": "sketch_parameterization", "ok": False, "error": "not_run"})
 
     if bool(params.get("verify_profile_after_parameterization")):
+        live_profile_entities = []
+        for entity_label, entity_entry in sketch_entities.items():
+            if entity_entry.get("role") != "profile":
+                continue
+            entity_object = entity_entry.get("object")
+            if entity_object is None:
+                continue
+            if "radius" in entity_entry:
+                geometry = {
+                    "center": [
+                        float(safe_get(entity_object, "Xc", entity_entry["xc"])),
+                        float(safe_get(entity_object, "Yc", entity_entry["yc"])),
+                    ],
+                    "radius": float(safe_get(entity_object, "Radius", entity_entry["radius"])),
+                    "start": [
+                        float(safe_get(entity_object, "X1", entity_entry["x1"])),
+                        float(safe_get(entity_object, "Y1", entity_entry["y1"])),
+                    ],
+                    "end": [
+                        float(safe_get(entity_object, "X2", entity_entry["x2"])),
+                        float(safe_get(entity_object, "Y2", entity_entry["y2"])),
+                    ],
+                    "direction": bool(safe_get(entity_object, "Direction", entity_entry.get("direction"))),
+                }
+                entity_kind = "arc"
+            else:
+                geometry = {
+                    "start": [float(safe_get(entity_object, "X1")), float(safe_get(entity_object, "Y1"))],
+                    "end": [float(safe_get(entity_object, "X2")), float(safe_get(entity_object, "Y2"))],
+                }
+                entity_kind = "segment"
+            live_profile_entities.append(
+                {
+                    "kind": entity_kind,
+                    "index": len(live_profile_entities) + 1,
+                    "reference": safe_get(entity_object, "Reference"),
+                    "style": 1,
+                    "geometry": geometry,
+                }
+            )
         preflight_report = _audit_sketch_profile_preflight(
             model_container,
             sketch,
             closure_style=int((params.get("sketch") or {}).get("closure_style") or 1),
             closure_tolerance=float((params.get("sketch") or {}).get("closure_tolerance") or 1e-5),
+            expected_component_count=params.get("expected_profile_component_count") or 1,
+            profile_entities=live_profile_entities,
         )
         steps_report.append(preflight_report)
         if not preflight_report.get("ok"):
@@ -14453,15 +15049,36 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
     if rotateds is None or not callable(safe_get(rotateds, "Add")):
         raise RuntimeError("Part does not expose Rotateds.Add")
     rotated_type = 28 if str(operation_kind or "boss").strip().lower() != "cut" else 29
-    rotated = rotateds.Add(rotated_type)
+    try:
+        rotated = rotateds.Add(rotated_type)
+    except Exception as exc:
+        raise RuntimeError("Failed to create rotated feature: " + str(exc))
     if rotated is None:
         if rotated_type == 29:
             raise RuntimeError("Rotateds.Add(o3d_cutRotated) returned None")
         raise RuntimeError("Rotateds.Add(o3d_bossRotated) returned None")
-    rotated.Profile = sketch
+    rotation_axis = None
+    rotation_axis_type = params.get("rotation_axis_default_object_type")
+    if rotation_axis_type is not None:
+        rotation_axis = _safe_call(part, "DefaultObject", int(rotation_axis_type))
+        if rotation_axis is None:
+            if bool(params.get("require_explicit_rotation_axis", False)):
+                raise RuntimeError("Failed to resolve the requested default rotation axis")
+        else:
+            try:
+                rotated.Axis = rotation_axis
+            except Exception as exc:
+                raise RuntimeError("Failed to assign the explicit rotation axis: " + str(exc))
+    try:
+        rotated.Profile = sketch
+    except Exception as exc:
+        raise RuntimeError("Failed to assign rotated feature profile: " + str(exc))
     set_profile = safe_get(rotated, "SetProfile")
     if callable(set_profile):
-        set_profile(sketch)
+        try:
+            set_profile(sketch)
+        except Exception as exc:
+            raise RuntimeError("Failed to call rotated SetProfile: " + str(exc))
     try:
         rotated.Direction = 0
     except Exception:
@@ -14472,13 +15089,26 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
         pass
     set_angle = safe_get(rotated, "SetAngle")
     if callable(set_angle):
-        set_angle(True, float(params.get("angle_degrees") or 360))
+        try:
+            set_angle(True, float(params.get("angle_degrees") or 360))
+        except Exception as exc:
+            raise RuntimeError("Failed to set rotated feature angle: " + str(exc))
     else:
-        rotated.Angle(True, float(params.get("angle_degrees") or 360))
+        try:
+            rotated.Angle(True, float(params.get("angle_degrees") or 360))
+        except Exception as exc:
+            raise RuntimeError("Failed to call rotated feature Angle: " + str(exc))
     set_rotated_type = safe_get(rotated, "SetRotatedType")
     if callable(set_rotated_type):
-        set_rotated_type(True, 0)
-    if not rotated.Update():
+        try:
+            set_rotated_type(True, 0)
+        except Exception as exc:
+            raise RuntimeError("Failed to set rotated feature type: " + str(exc))
+    try:
+        rotated_updated = rotated.Update()
+    except Exception as exc:
+        raise RuntimeError("Failed to update rotated feature: " + str(exc))
+    if not rotated_updated:
         if rotated_type == 29:
             raise RuntimeError("Cut Rotated Update returned False")
         raise RuntimeError("Rotated Update returned False")
@@ -14496,6 +15126,9 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
         "rotated": rotated,
         "axis": axis_line,
         "axis_end": axis_end,
+        "rotation_axis": rotation_axis,
+        "variables": variable_report,
+        "parameterization": parameterization_report,
     }
 
 
@@ -23482,14 +24115,14 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
             bool(item.get("updated")) and bool(item.get("driving_created"))
             for item in source_dimensions
         )
-        if constraints_state_code != 1:
+        if constraints_state_code != 2:
             deferred_constraints_state = (
                 sketch_runtime.get("scenario") in ("diaphragm_cut_profile_sketch", "diaphragm_terminal_relief_sketch")
                 and sketch_step is not None
                 and source_constraints_ok
                 and source_dimensions_ok
             )
-        if bool(params.get("require_fully_defined", True)) and constraints_state_code != 1 and not deferred_constraints_state:
+        if bool(params.get("require_fully_defined", True)) and constraints_state_code != 2 and not deferred_constraints_state:
             raise RuntimeError(
                 "cut_extrusion sketch must be fully defined; constraints_state=%s; deferred_diagnostics=%s"
                 % (
@@ -24738,8 +25371,8 @@ def _describe_constraints_state(state):
         return {"code": None, "name": "unknown", "label": "unknown"}
     mapping = {
         0: ("unknown", "unknown"),
-        1: ("well_constrained", "fully_defined"),
-        2: ("under_constrained", "has_degrees_of_freedom"),
+        1: ("under_constrained", "has_degrees_of_freedom"),
+        2: ("well_constrained", "fully_defined"),
         3: ("unresolved_redundancy", "has_conflicting_constraints"),
     }
     name, label = mapping.get(code, ("unknown", "unknown"))
@@ -25024,7 +25657,7 @@ def _sketch_diagnostics_focus(constraint_state_summary, closure_audit, sketch_co
         focus.append({"kind": "multiple_primary_contours", "severity": "medium", "count": primary.get("component_count")})
     if all_geometry.get("gap_count") and not primary.get("gap_count"):
         focus.append({"kind": "helper_or_axis_open_endpoints", "severity": "info", "count": all_geometry.get("gap_count"), "items": all_geometry.get("gaps")})
-    sketch_is_fully_defined = (sketch_constraints_state or {}).get("code") == 1
+    sketch_is_fully_defined = (sketch_constraints_state or {}).get("code") == 2
     not_full = (constraint_state_summary or {}).get("not_full") or []
     if not_full and not sketch_is_fully_defined:
         focus.append({"kind": "not_fully_parametric_entities", "severity": "medium", "count": len(not_full), "items": not_full[:20]})
@@ -25124,7 +25757,29 @@ def handle_create_part_from_scenario(payload):
 
         current_stage = "base_rotation"
         if scenario == "stepped_shaft":
-            _build_stepped_shaft_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
+            build_result = _build_stepped_shaft_feature(
+                part,
+                model_container,
+                params,
+                payload.get("preview") or {},
+                steps_report,
+            )
+            created_feature = build_result.get("rotated")
+            feature_name = str(params.get("name") or "Stepped shaft").strip()
+            try:
+                feature_reference = int(safe_get(created_feature, "Reference"))
+            except Exception:
+                feature_reference = None
+            if not feature_reference:
+                raise RuntimeError("Stepped-shaft operation did not return a stable feature reference")
+            model_feature, _feature_kind, _collection_name, _feature_index = _select_existing_feature(
+                model_container,
+                {"kind": "rotated", "reference": feature_reference},
+            )
+            model_feature.Name = feature_name
+            _update_feature_object(model_feature)
+            if str(safe_get(model_feature, "Name") or "") != feature_name:
+                raise RuntimeError("Stepped-shaft operation name did not persist")
         elif scenario == "disc_spring":
             _build_disc_spring_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
         elif scenario == "diaphragm_spring":
@@ -25326,6 +25981,499 @@ def _close_generated_document(doc3, app):
                     pass
 
 
+def _v_belt_object_reference(model_object, role):
+    if model_object is None:
+        return {"role": role, "available": False}
+    return {
+        "role": role,
+        "available": True,
+        "name": str(safe_get(model_object, "Name", "") or ""),
+        "reference": safe_get(model_object, "Reference"),
+        "hidden": safe_get(model_object, "Hidden"),
+        "valid": safe_get(model_object, "Valid"),
+    }
+
+
+def _resolve_v_belt_circular_edge(part, edge_spec, tolerance):
+    import win32com.client
+
+    point = list((edge_spec or {}).get("point") or [])
+    role = str((edge_spec or {}).get("role") or "").strip()
+    if len(point) != 3:
+        raise RuntimeError("V-belt fillet edge probe point must contain three coordinates: " + role)
+    found = part.FindObjectsByPointEx(
+        float(point[0]), float(point[1]), float(point[2]), True, float(tolerance)
+    )
+    candidates = []
+    seen = set()
+    diagnostics = []
+    for item in _ensure_dispatch_sequence(found):
+        reference = safe_get(item, "Reference")
+        diagnostic = {
+            "reference": reference,
+            "type": safe_get(item, "Type"),
+            "name": safe_get(item, "Name"),
+        }
+        try:
+            edge = win32com.client.CastTo(item, "IEdge")
+            math_curve = safe_get(edge, "MathCurve")
+            body = safe_get(edge, "Body")
+            is_circle = bool(safe_get(edge, "IsCircle"))
+            diagnostic.update(
+                {
+                    "valid": bool(safe_get(edge, "Valid")),
+                    "has_math_curve": math_curve is not None,
+                    "has_body": body is not None,
+                    "is_circle": is_circle,
+                    "curve_type": safe_get(edge, "Curve3DType"),
+                }
+            )
+            if not diagnostic["valid"] or math_curve is None or body is None or not is_circle:
+                continue
+        except Exception as exc:
+            diagnostic["error"] = str(exc)
+            continue
+        finally:
+            diagnostics.append(diagnostic)
+        key = int(reference) if reference is not None else str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(item)
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "Expected one circular V-belt fillet edge for %s at %s, got %s; candidates=%s"
+            % (role, point, len(candidates), diagnostics)
+        )
+    edge = candidates[0]
+    return edge, {
+        "role": role,
+        "probe_point": point,
+        "reference": safe_get(edge, "Reference"),
+        "type": safe_get(edge, "Type"),
+        "candidate_count": len(candidates),
+    }
+
+
+def _build_v_belt_top_edge_fillet(model_container, part, document3d, config, sharp_body_after):
+    radius = float((config or {}).get("radius") or 0.0)
+    if radius <= 0.0:
+        raise RuntimeError("V-belt top-edge fillet radius must be positive")
+    edge_specs = list((config or {}).get("edge_probe_points") or [])
+    expected_edge_count = int((config or {}).get("expected_edge_count") or len(edge_specs))
+    if expected_edge_count <= 0 or len(edge_specs) != expected_edge_count:
+        raise RuntimeError("V-belt top-edge fillet probe count does not match expected_edge_count")
+    tolerance = float((config or {}).get("probe_tolerance") or 1e-5)
+
+    edges = []
+    edge_reports = []
+    for edge_spec in edge_specs:
+        edge, report = _resolve_v_belt_circular_edge(part, edge_spec, tolerance)
+        edges.append(edge)
+        edge_reports.append(report)
+    references = [safe_get(edge, "Reference") for edge in edges]
+    unique_keys = {
+        int(reference) if reference is not None else str(edge)
+        for edge, reference in zip(edges, references)
+    }
+    if len(unique_keys) != expected_edge_count:
+        raise RuntimeError("V-belt top-edge fillet edge references are not unique")
+
+    fillets = safe_get(model_container, "Fillets")
+    if fillets is None:
+        raise RuntimeError("IModelContainer.Fillets is unavailable")
+    fillet = fillets.Add()
+    if fillet is None:
+        raise RuntimeError("IFillets.Add returned no feature")
+    fillet.Name = str((config or {}).get("name") or "V-belt top edge fillets")
+    fillet.BaseObjects = tuple(edges)
+    fillet.Radius1 = radius
+    fillet.Radius2 = radius
+    fillet.AutoSaveEdge = True
+    if not fillet.Update():
+        raise RuntimeError("V-belt top-edge fillet Update returned False")
+    rebuild = document3d.RebuildDocument()
+    if rebuild is False:
+        raise RuntimeError("Document rebuild after V-belt top-edge fillet returned False")
+    fillet_valid = safe_get(fillet, "Valid")
+    radius1 = safe_get(fillet, "Radius1")
+    radius2 = safe_get(fillet, "Radius2")
+    if fillet_valid is False:
+        raise RuntimeError("V-belt top-edge fillet is invalid after rebuild")
+    if radius1 is None or radius2 is None or abs(float(radius1) - radius) > 1e-9 or abs(float(radius2) - radius) > 1e-9:
+        raise RuntimeError("V-belt top-edge fillet radius readback mismatch")
+
+    final_body_after = _active_api5_primary_body_metrics()
+    before_count = int(sharp_body_after.get("body_count") or 0)
+    after_count = int(final_body_after.get("body_count") or 0)
+    sharp_volume = sharp_body_after.get("volume")
+    final_volume = final_body_after.get("volume")
+    if before_count != after_count:
+        raise RuntimeError("V-belt top-edge fillet changed body count")
+    if sharp_volume is None or final_volume is None:
+        raise RuntimeError("V-belt top-edge fillet volume readback is unavailable")
+    fillet_removed_volume = float(sharp_volume) - float(final_volume)
+    if fillet_removed_volume <= 1e-9:
+        raise RuntimeError("V-belt top-edge fillet did not remove measurable material")
+
+    return fillet, {
+        "enabled": True,
+        "name": safe_get(fillet, "Name"),
+        "reference": safe_get(fillet, "Reference"),
+        "valid": fillet_valid,
+        "radius1": radius1,
+        "radius2": radius2,
+        "building_type": safe_get(fillet, "BuildingType"),
+        "tangent": safe_get(fillet, "Tangent"),
+        "base_objects_count": expected_edge_count,
+        "edges": edge_reports,
+        "sharp_volume_cm3": float(sharp_volume),
+        "final_volume_cm3": float(final_volume),
+        "fillet_removed_volume_cm3": fillet_removed_volume,
+        "rebuild": rebuild,
+    }, final_body_after
+
+
+def handle_apply_v_belt_grooves(payload):
+    document_id = payload.get("document_id")
+    execute = bool(payload.get("execute", False))
+    if not document_id:
+        raise ValueError("document_id is required")
+    if execute and payload.get("confirm_write") is not True:
+        raise ValueError("confirm_write=true is required when execute=true")
+
+    preview = payload.get("preview") or {}
+    plan = payload.get("plan") or {}
+    target = payload.get("target") or {}
+    if preview.get("operation") != "v_belt_groove" or not preview.get("success"):
+        raise ValueError("A successful v_belt_groove preview is required")
+    if plan.get("stage") != "v_belt_groove_cad_plan" or plan.get("operation") != "cut_rotation":
+        raise ValueError("A v_belt_groove_cad_plan cut_rotation plan is required")
+    if plan.get("axis") != "global_x" or target.get("axis") != "global_x":
+        raise ValueError("Only the global_x target axis is supported")
+    if int(target.get("body_count") or 0) != 1:
+        raise ValueError("target.body_count must be 1")
+
+    required = plan.get("preflight") or {}
+    required_diameter = float(required.get("required_outer_diameter") or 0.0)
+    target_diameter = float(target.get("outer_diameter") or 0.0)
+    if required_diameter <= 0.0 or abs(required_diameter - target_diameter) > 1e-6:
+        raise ValueError("target outer_diameter does not match the V-groove plan")
+    required_interval = list(required.get("required_axial_interval") or [])
+    if len(required_interval) != 2:
+        raise ValueError("plan required_axial_interval is invalid")
+    target_axial_min = float(target.get("axial_min"))
+    target_axial_max = float(target.get("axial_max"))
+    if (
+        target_axial_min > float(required_interval[0]) + 1e-6
+        or target_axial_max < float(required_interval[1]) - 1e-6
+    ):
+        raise ValueError("target axial interval does not contain the planned groove interval")
+
+    app = make_app()
+    document = resolve_document(app, document_id)
+    if document is None:
+        raise RuntimeError("Target document was not found")
+    target_description = describe_document(document, app)
+    requested_document_id = str(document_id)
+    resolved_document_ids = {
+        str(target_description.get(key) or "")
+        for key in ("id", "path", "name")
+        if target_description.get(key)
+    }
+    if requested_document_id not in resolved_document_ids:
+        raise RuntimeError("Target document identifier did not resolve exactly")
+    doc3 = cast_document_3d(document)
+    if doc3 is None:
+        raise RuntimeError("V-belt grooves require a 3D document")
+
+    active_document = safe_get(app, "ActiveDocument")
+    active_description = describe_document(active_document, app) if active_document is not None else None
+    if active_description is None or active_description.get("id") != target_description.get("id"):
+        activate = safe_get(document, "Activate")
+        if callable(activate):
+            activate()
+        active_document = safe_get(app, "ActiveDocument")
+        active_description = describe_document(active_document, app) if active_document is not None else None
+    if active_description is None or active_description.get("id") != target_description.get("id"):
+        raise RuntimeError("Refusing to modify a document that could not be activated exactly")
+
+    part = safe_get(doc3, "TopPart") if doc3 is not None else None
+    model_container = cast_model_container(part) if part is not None else None
+    if doc3 is None or part is None or model_container is None:
+        raise RuntimeError("Target document does not expose a writable 3D top part")
+
+    body_before = _active_api5_primary_body_metrics()
+    if int(body_before.get("body_count") or 0) != 1:
+        raise RuntimeError("V-belt groove cut requires exactly one existing solid body")
+
+    preflight = {
+        "ok": True,
+        "document": target_description,
+        "body_before": body_before,
+        "host_preflight": payload.get("host_preflight") or {},
+        "plan": {
+            "name": plan.get("name"),
+            "axis": plan.get("axis"),
+            "groove_count": plan.get("groove_count"),
+            "profile_entity_count": plan.get("profile_entity_count"),
+            "expected_removed_volume_mm3": plan.get("expected_removed_volume_mm3"),
+            "expected_removed_volume_cm3": plan.get("expected_removed_volume_cm3"),
+            "required_outer_diameter": required_diameter,
+            "required_axial_interval": required_interval,
+        },
+        "runtime_unverified": [
+            "actual body axis is global X",
+            "actual outer-cylinder diameter matches the declared target",
+            "declared axial interval contains material",
+        ],
+    }
+    if not execute:
+        return {
+            "ok": True,
+            "success": True,
+            "stage": "preflight",
+            "executed": False,
+            "preflight": preflight,
+        }
+
+    params = dict(plan.get("params") or {})
+    bridge_preview = dict(plan.get("bridge_preview") or {})
+    if not params or not bridge_preview:
+        raise ValueError("V-belt groove plan is missing bridge params or preview")
+    entity_names = dict(plan.get("entity_names") or {})
+    feature_name = str(entity_names.get("cut") or plan.get("name") or "V-belt grooves")
+    sketch_name = str(entity_names.get("sketch") or (feature_name + " profile"))
+    steps_report = []
+    result = _build_stepped_shaft_feature(
+        part,
+        model_container,
+        params,
+        bridge_preview,
+        steps_report,
+        coordinate_system=None,
+        operation_kind="cut",
+    )
+    feature = result.get("rotated")
+    sketch = result.get("sketch")
+    if feature is None or sketch is None:
+        raise RuntimeError("V-belt groove cut did not return its feature and sketch")
+    try:
+        feature_reference = int(safe_get(feature, "Reference"))
+    except Exception:
+        feature_reference = None
+    if not feature_reference:
+        raise RuntimeError("V-belt groove cut did not return a stable feature reference")
+    feature, _feature_kind, _collection_name, _feature_index = _select_existing_feature(
+        model_container,
+        {"kind": "rotated", "reference": feature_reference},
+    )
+    feature.Name = feature_name
+    _update_feature_object(feature)
+    if str(safe_get(feature, "Name") or "") != feature_name:
+        raise RuntimeError("V-belt groove cut feature name did not persist")
+    try:
+        sketch.Name = sketch_name
+    except Exception as exc:
+        raise RuntimeError("V-belt groove sketch name could not be applied: " + str(exc))
+    if str(safe_get(sketch, "Name") or "") != sketch_name:
+        raise RuntimeError("V-belt groove sketch name did not persist")
+    visibility = _set_model_object_hidden(
+        sketch,
+        not bool(params.get("keep_sketch_visible", False)),
+        role="V-belt groove profile",
+    )
+    rebuild = safe_get(doc3, "RebuildDocument")
+    rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+    if rebuild_ok is False:
+        raise RuntimeError("V-belt groove document rebuild returned False")
+    if bool(params.get("fix_sketch_after_rebuild", False)):
+        try:
+            sketch.Fixed = True
+        except Exception as exc:
+            raise RuntimeError("Failed to fix V-belt sketch after rebuild: " + str(exc))
+        sketch_update = safe_get(sketch, "Update")
+        if callable(sketch_update) and sketch_update() is False:
+            raise RuntimeError("V-belt sketch update after fixing returned False")
+        if callable(rebuild) and rebuild() is False:
+            raise RuntimeError("V-belt document rebuild after fixing sketch returned False")
+    post_rebuild_sketch_state = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
+    if bool(params.get("require_fully_defined", False)) and post_rebuild_sketch_state.get("code") != 2:
+        raise RuntimeError(
+            "V-belt groove sketch is not fully defined after rebuild: "
+            + str(post_rebuild_sketch_state.get("name") or "unknown")
+        )
+
+    active_document = safe_get(app, "ActiveDocument")
+    active_description = describe_document(active_document, app) if active_document is not None else None
+    if active_description is None or active_description.get("id") != target_description.get("id"):
+        activate = safe_get(document, "Activate")
+        if callable(activate):
+            activate()
+        active_document = safe_get(app, "ActiveDocument")
+        active_description = describe_document(active_document, app) if active_document is not None else None
+    if active_description is None or active_description.get("id") != target_description.get("id"):
+        raise RuntimeError("Target document lost activation before body verification")
+
+    body_after = _active_api5_primary_body_metrics()
+    before_volume = float(body_before.get("volume") or 0.0)
+    after_volume = float(body_after.get("volume") or 0.0)
+    removed_volume = before_volume - after_volume
+    expected_volume = float(plan.get("expected_removed_volume_cm3") or 0.0)
+    ratio = removed_volume / expected_volume if expected_volume > 1e-12 else None
+    ratio_error = abs(ratio - 1.0) if ratio is not None else None
+    max_ratio_error = float(params.get("max_removed_volume_error_ratio") or 0.25)
+    body_count_unchanged = int(body_after.get("body_count") or 0) == 1
+    volume_decreased = removed_volume > 1e-9
+    operation_valid = safe_get(feature, "Valid") is not False
+    verification_ok = bool(
+        body_count_unchanged
+        and volume_decreased
+        and operation_valid
+        and rebuild_ok is not False
+        and post_rebuild_sketch_state.get("code") == 2
+    )
+    warnings = []
+    if ratio_error is not None and ratio_error > max_ratio_error:
+        raise RuntimeError(
+            "Actual removed volume differs from the analytical preview by more than "
+            + str(round(max_ratio_error * 100.0, 3))
+            + "%"
+        )
+    sharp_body_after = dict(body_after)
+    fillet_feature = None
+    fillet_report = {"enabled": False}
+    fillet_config = params.get("top_edge_fillet")
+    if isinstance(fillet_config, dict) and bool(fillet_config.get("enabled", True)):
+        fillet_feature, fillet_report, body_after = _build_v_belt_top_edge_fillet(
+            model_container,
+            part,
+            doc3,
+            fillet_config,
+            sharp_body_after,
+        )
+        steps_report.append({"step": "top_edge_fillet", "ok": True, "result": fillet_report})
+        final_volume = float(body_after.get("volume") or 0.0)
+        if final_volume <= 0.0 or final_volume >= after_volume - 1e-9:
+            raise RuntimeError("V-belt top-edge fillet final volume verification failed")
+        body_count_unchanged = int(body_after.get("body_count") or 0) == 1
+        verification_ok = bool(verification_ok and body_count_unchanged)
+    if ratio_error is not None and ratio_error > 0.05:
+        warnings.append(
+            "Actual removed volume differs from the sharp-profile analytical preview by more than 5%"
+        )
+    if not visibility.get("ok"):
+        warnings.append("The profile sketch could not be confirmed hidden")
+
+    semantic_outputs = {
+        "member.axis": {"kind": "global_axis", "name": "X", "reference": "global_x"},
+        "member.functional_feature": _v_belt_object_reference(
+            feature, "member.functional_feature"
+        ),
+        "member.profile_sketch": _v_belt_object_reference(sketch, "member.profile_sketch"),
+        "member.pitch_surface": {
+            "kind": "analytic_cylinder",
+            "diameter": preview.get("derived", {}).get("datum_diameter"),
+            "model_object_reference": None,
+        },
+        "member.outer_rim": {
+            "kind": "analytic_cylinder",
+            "diameter": preview.get("derived", {}).get("outer_diameter"),
+            "model_object_reference": None,
+        },
+        "member.parameters": {
+            "kind": "variable_set",
+            "names": [
+                str(item.get("name"))
+                for item in list(((result.get("variables") or {}).get("applied") or []))
+                if item.get("name")
+            ],
+        },
+    }
+    if fillet_feature is not None:
+        semantic_outputs["member.edge_fillet_feature"] = {
+            "role": "manufacturing_feature",
+            "kind": "fillet",
+            "reference": safe_get(fillet_feature, "Reference"),
+            "name": safe_get(fillet_feature, "Name"),
+            "radius": fillet_report.get("radius1"),
+            "edge_count": fillet_report.get("base_objects_count"),
+        }
+
+    return {
+        "ok": verification_ok,
+        "success": verification_ok,
+        "stage": "executed",
+        "executed": True,
+        "document": describe_document(document, app),
+        "preflight": preflight,
+        "operation": _v_belt_object_reference(feature, "member.functional_feature"),
+        "sketch": _v_belt_object_reference(sketch, "member.profile_sketch"),
+        "semantic_outputs": semantic_outputs,
+        "visibility": visibility,
+        "steps": steps_report,
+        "parameterization": {
+            "planned": dict(plan.get("parameterization") or {}),
+            "variables": result.get("variables"),
+            "execution": result.get("parameterization"),
+        },
+        "body_before": body_before,
+        "sharp_cut_body_after": sharp_body_after,
+        "body_after": body_after,
+        "top_edge_fillet": fillet_report,
+        "verification": {
+            "ok": verification_ok,
+            "body_count_unchanged": body_count_unchanged,
+            "volume_decreased": volume_decreased,
+            "operation_valid": operation_valid,
+            "rebuild_ok": rebuild_ok,
+            "sketch_state": post_rebuild_sketch_state,
+            "removed_volume": removed_volume,
+            "final_removed_volume": before_volume - float(body_after.get("volume") or 0.0),
+            "top_edge_fillet_enabled": bool(fillet_report.get("enabled")),
+            "top_edge_fillet_removed_volume": fillet_report.get("fillet_removed_volume_cm3"),
+            "expected_removed_volume_cm3": expected_volume,
+            "actual_to_expected_volume_ratio": ratio,
+            "relative_volume_error": ratio_error,
+            "max_relative_volume_error": max_ratio_error,
+        },
+        "warnings": warnings,
+    }
+
+
+def handle_apply_poly_v_grooves(payload):
+    preview = payload.get("preview") or {}
+    plan = payload.get("plan") or {}
+    if preview.get("operation") != "poly_v_groove" or not preview.get("success"):
+        raise ValueError("A successful poly_v_groove preview is required")
+    if plan.get("stage") != "poly_v_groove_cad_plan" or plan.get("operation") != "cut_rotation":
+        raise ValueError("A poly_v_groove_cad_plan cut_rotation plan is required")
+    if int(plan.get("profile_component_count") or 0) != 1:
+        raise ValueError("Poly-V groove plan must contain exactly one closed profile component")
+    rounding = plan.get("profile_rounding") or {}
+    if rounding.get("mode") != "sketch_arcs":
+        raise ValueError("Poly-V groove plan must use exact sketch-arc rounding")
+
+    mapped_payload = dict(payload)
+    mapped_preview = dict(preview)
+    mapped_preview["operation"] = "v_belt_groove"
+    mapped_plan = dict(plan)
+    mapped_plan["stage"] = "v_belt_groove_cad_plan"
+    mapped_payload["preview"] = mapped_preview
+    mapped_payload["plan"] = mapped_plan
+    result = handle_apply_v_belt_grooves(mapped_payload)
+    result["family"] = "poly_v"
+    result["profile_rounding"] = dict(rounding)
+    result.pop("top_edge_fillet", None)
+    verification = dict(result.get("verification") or {})
+    verification.pop("top_edge_fillet_enabled", None)
+    verification.pop("top_edge_fillet_removed_volume", None)
+    verification["profile_component_count"] = 1
+    verification["profile_rounding_mode"] = "sketch_arcs"
+    result["verification"] = verification
+    return result
+
+
 def dispatch(request):
     action = request.get("action")
     payload = request.get("payload") or {}
@@ -25420,6 +26568,10 @@ def dispatch(request):
         return handle_create_spw_from_rows(payload)
     if action == "create_part_from_scenario":
         return handle_create_part_from_scenario(payload)
+    if action == "apply_v_belt_grooves":
+        return handle_apply_v_belt_grooves(payload)
+    if action == "apply_poly_v_grooves":
+        return handle_apply_poly_v_grooves(payload)
     raise RuntimeError("Unsupported action: %s" % action)
 
 

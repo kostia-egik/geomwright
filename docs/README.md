@@ -39,7 +39,8 @@ confused with research evidence or historical implementation plans.
 | --- | --- | --- |
 | [Transmission platform concept](transmission-platform-concept.md) | approved concept | Composition contract, family map, cutter-aware geometry, and delivery phases |
 | [Native transmission audit](native-transmission-audit.md) | research evidence | Installed Shaft command map and interactive automation boundary |
-| [V-belt groove profile and preview](v-belt-groove.md) | Layer 2 implemented | Profile catalog, deterministic groove geometry, and planned composition contract |
+| [V-belt groove profile and CAD builder](v-belt-groove.md) | Layers 2/3 implemented | Profile catalog, deterministic groove geometry, and verified cut-from-body workflow |
+| [Poly-V groove profile and CAD builder](poly-v-groove.md) | Layers 2/3 implemented | ISO 9982 catalog, live master/dependent rounded profile, and mutation/save/reopen-verified cut workflow |
 
 ## Spring-family documents
 

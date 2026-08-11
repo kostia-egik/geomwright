@@ -269,6 +269,8 @@ python sample/create_metric_helical_thread_parameter_bound_2026_05_18.py
 Базовый сценарий остаётся `stepped_shaft`. Он уже умеет:
 
 - строить живой параметрический эскиз и операцию вращения;
+- применять `name` к model-tree операции вращения и отдельный `sketch_name` к
+  её исходному эскизу с проверкой сохранения operation name;
 - выводить наружу пользовательские параметры `D*` и `L*`;
 - держать внутренние переменные эскиза отдельно от внешних параметров;
 - перестраиваться от изменения значений в таблице функций;
@@ -300,7 +302,8 @@ Preview для `stepped_shaft`:
   "arguments": {
     "scenario": "stepped_shaft",
     "params": {
-      "name": "Вал",
+      "name": "Shaft",
+      "sketch_name": "Shaft profile",
       "designation": "SHAFT-001",
       "material": "Сталь 45",
       "steps": [

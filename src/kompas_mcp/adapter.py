@@ -37,6 +37,12 @@ from .specification import build_specification_preview
 from .specification import resolve_spw_columns
 from .specification import preview_specification_changes as build_specification_changes_preview
 from .specification import SPW_ENGINEERING_FIELDS
+from .transmissions import build_v_belt_cut_plan
+from .transmissions import build_poly_v_cut_plan
+from .transmissions import preview_poly_v_groove
+from .transmissions import preview_v_belt_groove
+from .transmissions import validate_poly_v_cut_target
+from .transmissions import validate_v_belt_cut_target
 from .vbs_relink import run_vbs_file_relink
 
 
@@ -454,7 +460,8 @@ def _normalize_sketch_constraint_selector(value: Any, *, name: str) -> dict[str,
     return row
 
 
-_FEATURE_KINDS = {"rotated", "extrusion", "evolution", "feature_pattern"}
+_FEATURE_KINDS = {"rotated", "extrusion", "evolution", "feature_pattern", "fillet"}
+_REPAIRABLE_FEATURE_KINDS = {"rotated", "extrusion", "evolution", "feature_pattern"}
 
 
 def _normalize_feature_kind(value: Any) -> str:
@@ -470,6 +477,9 @@ def _normalize_feature_kind(value: Any) -> str:
         "pattern": "feature_pattern",
         "circular_pattern": "feature_pattern",
         "feature_patterns": "feature_pattern",
+        "round": "fillet",
+        "rounding": "fillet",
+        "fillets": "fillet",
     }
     return aliases.get(kind, kind)
 
@@ -488,12 +498,17 @@ def _normalize_feature_kinds(value: Any, *, name: str = "kinds") -> list[str]:
     return normalized
 
 
-def _normalize_feature_selector(value: Any, *, name: str) -> dict[str, Any]:
+def _normalize_feature_selector(
+    value: Any,
+    *,
+    name: str,
+    allowed_kinds: set[str] = _FEATURE_KINDS,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be an object")
     row = dict(value)
     kind = _normalize_feature_kind(row.get("kind") or row.get("type") or row.get("collection"))
-    if kind not in _FEATURE_KINDS:
+    if kind not in allowed_kinds:
         raise ValueError(f"{name}.kind is unsupported")
     row["kind"] = kind
     if "reference" in row and row["reference"] not in (None, ""):
@@ -530,7 +545,11 @@ def _normalize_feature_repair_operation(value: Any, *, name: str) -> dict[str, A
     if operation not in {"rename", "set_suppressed", "delete_feature"}:
         raise ValueError(f"{name}.operation is unsupported")
     row["operation"] = operation
-    row["feature"] = _normalize_feature_selector(row.get("feature") or row.get("selector"), name=f"{name}.feature")
+    row["feature"] = _normalize_feature_selector(
+        row.get("feature") or row.get("selector"),
+        name=f"{name}.feature",
+        allowed_kinds=_REPAIRABLE_FEATURE_KINDS,
+    )
     if operation == "rename":
         new_name = str(row.get("name") or row.get("new_name") or "").strip()
         if not new_name:
@@ -2677,6 +2696,110 @@ class KompasAdapter:
         return {
             **result,
             "preview": preview,
+        }
+
+    def apply_v_belt_grooves(
+        self,
+        *,
+        document_id: str,
+        preview_request: dict[str, Any],
+        target: dict[str, Any],
+        axial_center: float = 0.0,
+        name: str = "V-belt grooves",
+        top_edge_fillet_radius: float | None = None,
+        include_standard_top_edge_fillet: bool = True,
+        execute: bool = False,
+        confirm_write: bool = False,
+        keep_sketch_visible: bool = False,
+        require_fully_constrained: bool = True,
+    ) -> dict[str, Any]:
+        if not str(document_id or "").strip():
+            raise ValueError("document_id is required")
+        if execute and confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+
+        parameter_base = dict(target.get("parameter_base") or {})
+        if not parameter_base:
+            raise ValueError("target.parameter_base is required")
+        preview = preview_v_belt_groove(**dict(preview_request))
+        plan = build_v_belt_cut_plan(
+            preview,
+            axial_center=axial_center,
+            name=name,
+            parameter_base=parameter_base,
+            top_edge_fillet_radius=top_edge_fillet_radius,
+            include_standard_top_edge_fillet=include_standard_top_edge_fillet,
+        )
+        plan["params"]["keep_sketch_visible"] = bool(keep_sketch_visible)
+        plan["params"]["require_fully_defined"] = bool(require_fully_constrained)
+        host_preflight = validate_v_belt_cut_target(plan, dict(target))
+        result = self.runner.call(
+            "apply_v_belt_grooves",
+            {
+                "document_id": document_id,
+                "preview": preview,
+                "plan": plan,
+                "target": dict(target),
+                "host_preflight": host_preflight,
+                "execute": bool(execute),
+                "confirm_write": confirm_write is True,
+            },
+        )
+        return {
+            **result,
+            "preview": preview,
+            "plan": plan,
+            "host_preflight": host_preflight,
+        }
+
+    def apply_poly_v_grooves(
+        self,
+        *,
+        document_id: str,
+        preview_request: dict[str, Any],
+        target: dict[str, Any],
+        axial_center: float = 0.0,
+        name: str = "Poly-V grooves",
+        execute: bool = False,
+        confirm_write: bool = False,
+        keep_sketch_visible: bool = False,
+        require_fully_constrained: bool = True,
+    ) -> dict[str, Any]:
+        if not str(document_id or "").strip():
+            raise ValueError("document_id is required")
+        if execute and confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+
+        parameter_base = dict(target.get("parameter_base") or {})
+        if not parameter_base:
+            raise ValueError("target.parameter_base is required")
+        preview = preview_poly_v_groove(**dict(preview_request))
+        plan = build_poly_v_cut_plan(
+            preview,
+            axial_center=axial_center,
+            name=name,
+            parameter_base=parameter_base,
+        )
+        plan["params"]["keep_sketch_visible"] = bool(keep_sketch_visible)
+        plan["params"]["require_fully_defined"] = bool(require_fully_constrained)
+        host_preflight = validate_poly_v_cut_target(plan, dict(target))
+        result = self.runner.call(
+            "apply_poly_v_grooves",
+            {
+                "document_id": document_id,
+                "preview": preview,
+                "plan": plan,
+                "target": dict(target),
+                "host_preflight": host_preflight,
+                "execute": bool(execute),
+                "confirm_write": confirm_write is True,
+            },
+        )
+        return {
+            **result,
+            "preview": preview,
+            "plan": plan,
+            "host_preflight": host_preflight,
         }
 
     @staticmethod

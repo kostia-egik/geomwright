@@ -816,7 +816,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
 
         result = adapter.list_features(
             document_id="doc-1",
-            kinds=["revolve", "extrude"],
+            kinds=["revolve", "extrude", "round"],
             max_items=10,
         )
 
@@ -827,7 +827,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
                 {
                     "document_id": "doc-1",
                     "max_items": 10,
-                    "kinds": ["rotated", "extrusion"],
+                    "kinds": ["rotated", "extrusion", "fillet"],
                 },
             ),
         )
@@ -916,6 +916,8 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             adapter.repair_feature(operations=[{"operation": "rename", "feature": {"kind": "rotated", "index": 0}}])
         with self.assertRaises(ValueError):
             adapter.repair_feature(operations=[{"operation": "explode", "feature": {"kind": "rotated", "index": 0}}])
+        with self.assertRaises(ValueError):
+            adapter.repair_feature(operations=[{"operation": "delete", "feature": {"kind": "fillet", "index": 0}}])
 
         self.assertEqual(runner.calls, [])
 
@@ -1812,7 +1814,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
         sketch = _FakeSketch("SPRING_PROFILE", 100, sketch_doc)
-        sketch.ConstraintsState = 1
+        sketch.ConstraintsState = 2
         captured: dict[str, Any] = {}
 
         original_apply = bridge._apply_sketch_parameterization
@@ -1904,7 +1906,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
         sketch = _FakeSketch("SPRING_PROFILE", 101, sketch_doc)
-        sketch.ConstraintsState = 2
+        sketch.ConstraintsState = 1
 
         original_apply = bridge._apply_sketch_parameterization
         self.addCleanup(setattr, bridge, "_apply_sketch_parameterization", original_apply)

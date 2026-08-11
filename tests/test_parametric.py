@@ -97,6 +97,8 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["summary"]["creation_status"], "available")
         self.assertEqual(preview["summary"]["axis_line_style"], 3)
         self.assertEqual(preview["params"]["sketch"]["dimension_display"], "radius")
+        self.assertEqual(preview["params"]["name"], "Stepped shaft")
+        self.assertEqual(preview["params"]["sketch_name"], "Stepped shaft profile")
         self.assertEqual(preview["summary"]["dimension_display"], "radius")
         self.assertIsNone(preview["summary"]["parameter_prefix"])
         self.assertEqual(preview["summary"]["placement_mode"], "global")
