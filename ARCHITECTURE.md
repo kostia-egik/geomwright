@@ -1,4 +1,4 @@
-# Архитектура kompas-mcp
+# Архитектура Geomwright
 
 Этот документ определяет владельцев runtime-логики и границу между рабочим MCP,
 CAD-side bridge, параметрическими модулями и исследовательскими прототипами.
@@ -9,10 +9,13 @@ CAD-side bridge, параметрическими модулями и иссле
 MCP client
     │ JSON/MCP
     ▼
-src/kompas_mcp/server.py
+src/geomwright/server.py
+    │ default application facade
+    ▼
+src/geomwright/kompas/server.py
     │ tool registration
     ▼
-KompasAdapter + normalizers/workflows
+src/kompas_mcp/*_tools.py + KompasAdapter implementation
     │ JSON request/result files
     ▼
 BridgeRunner
@@ -27,6 +30,25 @@ KOMPAS-3D document/model
 MCP host работает на Python, указанном в `pyproject.toml`. Bridge запускается
 отдельным Python runtime из установки КОМПАС-3D v23 и поэтому не должен получать
 синтаксис или зависимости, недоступные этому runtime.
+
+Продукт, Python distribution и публичный application namespace называются
+Geomwright. `geomwright.server` предоставляет MCP entry point,
+`geomwright.kompas.server` владеет KOMPAS MCP bootstrap и единым реестром
+инструментов, а `geomwright.studio` владеет presentation layer. Публичные фасады
+адаптера и tool catalog находятся в `geomwright.kompas`; остальные
+KOMPAS-specific implementation modules временно сохраняются в namespace
+`kompas_mcp`. Их массовая замена затронула бы внутренние импорты, packaged bridge
+и пользовательские интеграции без добавления runtime-возможностей.
+`kompas_mcp.server` делегирует каноническому bootstrap и возвращает те же объекты
+`mcp` и `adapter`; старые CLI и import aliases остаются доступными на переходный
+период.
+
+Экспериментальный Geomwright Studio — отдельный host-side presentation adapter.
+Entry point `geomwright.studio` вызывает существующие Layer 2
+preview-функции и адаптирует их результат для HTML5 Canvas. Он не регистрируется
+в MCP tool catalog, не запускает bridge и не выполняет CAD write-операции.
+Старые entry points `kompas_mcp.studio` и `kompas_mcp.mechanics.ui` сохранены
+только как compatibility aliases.
 
 Канонический исходник bridge находится в `bridge/kompas_bridge.py`. Его packaged
 копия — `src/kompas_mcp/assets/bridge/kompas_bridge.py`. Эти файлы обязаны быть
@@ -103,8 +125,8 @@ Layer 4 задаёт публичный контракт целого CAD-мод
 - diaphragm spring: flat, single-bend и S-bend, circle/oval relief, through-all
   cuts и multi-source circular pattern.
 
-Mechanical transmissions have an approved concept but no production Layer 4
-family yet. Their architecture is defined in
+Mechanical transmissions have an approved Layer 4 managed-pulley workflow in
+progress. Its architecture is defined in
 `docs/transmission-platform-concept.md`: functional members compose with generic
 hub/bore/keyway modules through semantic references, while native Shaft/GEARS
 commands remain black-box research oracles.
@@ -123,6 +145,46 @@ points. Its CAD closure overshoots the blank only outside the material envelope
 so the operational contour remains one simple component; the functional rim
 geometry is unchanged. V-belt and Poly-V schemas and catalogs must not be merged
 into one implicit family.
+The Layer 4 pulley workflow creates a new owned rotational blank and applies the
+existing family-specific Layer 3 groove builder inside the same unsaved KOMPAS
+document. Arbitrary pre-existing bodies are intentionally outside this product
+contract. Recognition scans the complete part-variable, sketch, and rotational
+feature collections for a compound ownership fingerprint; it does not require
+the managed groove to remain the last model-tree feature.
+Recognized version-1 blocks support complete profile editing through the same
+Layer 4 plan used for creation. Parameter-only edits update existing
+`PULLEY_*` and family `VB_*`/`PV_*` variables and rebuild in place. Changes to
+groove count, V-belt designation or standard, and standard-fillet presence or
+radius use an owned topology replacement: strict preflight rejects any
+non-owned downstream modeling operation, the bridge deletes only the managed
+fillet/cut/sketch branch, reapplies the existing family-specific Layer 3 builder,
+then verifies ownership, profile readback, and a positive-volume single body.
+The original plan is supplied as rollback data; failed replacement removes a
+partial new branch and recreates the prior managed branch. CUSTOM V-belt fields
+and catalog overrides are stored as managed metadata so save/reopen inspection
+can reconstruct the editable profile without relying on display names.
+
+Geomwright Studio owns document/session navigation above Layer 4 modules. Its
+workspace discovers open KOMPAS documents, opens saved files, presents managed
+blocks together with surrounding unmanaged KOMPAS operations, and routes a
+recognized block to its fixed-family editor. File selection, active-document
+following, safe Save/Discard/Cancel closure, mixed-tree navigation, and editor routing belong to Studio rather
+than to an individual pulley module. The first workspace slice supports one
+managed block per document; multi-block cascade authoring is deliberately
+deferred, while workspace data structures remain lists and carry stable block
+identity so that future cascades do not require another navigation redesign.
+Studio bridge calls attach through the COM Running Object Table to an already
+running KOMPAS application and never create a COM server. If that registered
+instance is hidden, Studio makes it visible and verifies visibility before any
+document operation. If no application is registered, workspace reports a
+recoverable disconnected state and retries after KOMPAS starts; file and CAD
+writes remain unavailable until attachment succeeds.
+Document activation and lifecycle writes resolve the exact current runtime ID;
+they fail on stale IDs and never fall back to another active document. Changed
+untitled documents require an explicit Save As path before close. Save and Save
+As are document-level commands independent of block rebuild. Successful Layer 4
+creation is followed by workspace readback; Studio enters the recognized new
+block's editor only after matching the returned runtime document ID and module.
 
 Подробные контракты находятся в `docs/`; runtime tool catalog остаётся источником
 истины для фактически зарегистрированных MCP names.
@@ -170,6 +232,10 @@ snapshot/readback там, где это поддержано. KOMPAS остаё�
 Production surface состоит только из модулей, импортируемых зарегистрированным
 MCP server и описанных канонической документацией.
 
+Опциональные presentation adapters могут поставляться в том же Python package,
+но не становятся частью MCP production surface автоматически. Их capability
+contract и граница с CAD runtime должны быть описаны отдельно.
+
 Незаконченные OperationGraph, universal rule engine, template library, session
 tracking и spring-readback prototypes помещаются в ignored-зону
 `experiments/spikes/`. Они не являются частью package, tool catalog или roadmap,
@@ -195,7 +261,8 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | parametric part workflows | L2–L4 | experimental, family-specific live evidence |
 | managed spring families | L2–L4 | implemented, see family contracts |
 | diaphragm module | L2–L4 | complete and live-verified |
-| mechanical-transmission platform | L2–L4 | V-belt and Poly-V Layers 2/3 exposed and live-verified; complete Layer 4 pulley family pending |
+| mechanical-transmission platform | L2–L4 | V-belt and Poly-V Layers 2/3 live-verified; managed V-belt Layer 4 create/recognize vertical slice live-verified; edit and full Poly-V Layer 4 acceptance pending |
+| Geomwright Studio | presentation over L2–L4 | experimental; preview plus confirmed creation of a new unsaved managed pulley; no arbitrary-body write path |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |
 
@@ -217,3 +284,4 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 - [Parametric workflows](docs/parametric-workflows.md)
 - [Spring workflows](docs/spring-workflows.md)
 - [Diaphragm spring](docs/diaphragm-spring.md)
+- [Geomwright Studio](docs/geomwright-studio.md)

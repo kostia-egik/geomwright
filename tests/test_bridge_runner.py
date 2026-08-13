@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,16 +55,23 @@ class _BridgeRunnerContext:
         python_path.write_text("", encoding="utf-8")
         bridge_path.write_text("", encoding="utf-8")
 
-        def fake_run(args, **_kwargs):
+        class FakeProcess:
+            def poll(self):
+                return 0
+
+            def communicate(self):
+                return "", ""
+
+        def fake_popen(args, **_kwargs):
             response_path = Path(args[3])
             if isinstance(self.response_payload, str):
                 response_path.write_text(self.response_payload, encoding="utf-8")
             else:
                 response_path.write_text(json.dumps(self.response_payload), encoding="utf-8")
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            return FakeProcess()
 
         self.env_patch = patch.dict("os.environ", {"KOMPAS_MCP_TEMP_DIR": str(root)})
-        self.run_patch = patch("kompas_mcp.bridge_runner.subprocess.run", side_effect=fake_run)
+        self.run_patch = patch("kompas_mcp.bridge_runner.subprocess.Popen", side_effect=fake_popen)
         self.env_patch.start()
         self.run_patch.start()
         self.runner = BridgeRunner(kompas_python=str(python_path), bridge_script=str(bridge_path))

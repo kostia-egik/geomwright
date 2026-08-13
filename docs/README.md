@@ -1,6 +1,6 @@
 # Documentation index
 
-This directory contains the current engineering contracts for `kompas-mcp`.
+This directory contains the current engineering contracts for Geomwright.
 Documents are grouped by authority so that completed runtime behavior is not
 confused with research evidence or historical implementation plans.
 
@@ -41,6 +41,7 @@ confused with research evidence or historical implementation plans.
 | [Native transmission audit](native-transmission-audit.md) | research evidence | Installed Shaft command map and interactive automation boundary |
 | [V-belt groove profile and CAD builder](v-belt-groove.md) | Layers 2/3 implemented | Profile catalog, deterministic groove geometry, and verified cut-from-body workflow |
 | [Poly-V groove profile and CAD builder](poly-v-groove.md) | Layers 2/3 implemented | ISO 9982 catalog, live master/dependent rounded profile, and mutation/save/reopen-verified cut workflow |
+| [Geomwright Studio](geomwright-studio.md) | experimental, managed CAD creation | Local schema-driven UI that previews and creates owned V-belt and Poly-V pulleys |
 
 ## Spring-family documents
 

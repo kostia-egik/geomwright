@@ -39,6 +39,7 @@ from .specification import preview_specification_changes as build_specification_
 from .specification import SPW_ENGINEERING_FIELDS
 from .transmissions import build_v_belt_cut_plan
 from .transmissions import build_poly_v_cut_plan
+from .transmissions import build_managed_pulley_plan
 from .transmissions import preview_poly_v_groove
 from .transmissions import preview_v_belt_groove
 from .transmissions import validate_poly_v_cut_target
@@ -637,6 +638,17 @@ class KompasAdapter:
 
     def list_documents(self) -> dict[str, Any]:
         return self.runner.call("list_documents")
+
+    def activate_document(self, document_id: str, *, strict: bool = False) -> dict[str, Any]:
+        if not str(document_id or "").strip():
+            raise ValueError("document_id is required")
+        return self.runner.call(
+            "activate_document",
+            {"document_id": str(document_id), "strict": strict},
+        )
+
+    def studio_workspace_snapshot(self) -> dict[str, Any]:
+        return self.runner.call("studio_workspace_snapshot")
 
     def launch_native_module_command(
         self,
@@ -2327,10 +2339,16 @@ class KompasAdapter:
         *,
         save: bool = False,
         close_mode: int = 0,
+        strict: bool = False,
     ) -> dict[str, Any]:
         return self.runner.call(
             "close_document",
-            {"document_id": document_id, "save": save, "close_mode": close_mode},
+            {
+                "document_id": document_id,
+                "save": save,
+                "close_mode": close_mode,
+                "strict": strict,
+            },
         )
 
     def shutdown_session(
@@ -2802,6 +2820,109 @@ class KompasAdapter:
             "host_preflight": host_preflight,
         }
 
+    def create_managed_pulley(
+        self,
+        *,
+        family: str,
+        profile_request: dict[str, Any],
+        name: str = "Geomwright pulley",
+        top_edge_fillet_radius: float | None = None,
+        include_standard_top_edge_fillet: bool = True,
+        execute: bool = False,
+        confirm_write: bool = False,
+        visible: bool = True,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        if execute and confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+        plan = build_managed_pulley_plan(
+            family,
+            dict(profile_request),
+            name=name,
+            top_edge_fillet_radius=top_edge_fillet_radius,
+            include_standard_top_edge_fillet=include_standard_top_edge_fillet,
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "success": True,
+                "stage": "planned",
+                "executed": False,
+                "plan": plan,
+            }
+        bridge_payload = {
+            "plan": plan,
+            "execute": True,
+            "confirm_write": True,
+            "visible": bool(visible),
+        }
+        if progress_callback is None:
+            result = self.runner.call("create_managed_pulley", bridge_payload)
+        else:
+            result = self.runner.call(
+                "create_managed_pulley",
+                bridge_payload,
+                progress_callback=progress_callback,
+            )
+        return {**result, "plan": plan}
+
+    def inspect_managed_pulley(self, *, document_id: str) -> dict[str, Any]:
+        if not str(document_id or "").strip():
+            raise ValueError("document_id is required")
+        return self.runner.call(
+            "inspect_managed_pulley",
+            {"document_id": str(document_id)},
+        )
+
+    def update_managed_pulley(
+        self,
+        *,
+        document_id: str,
+        block_id: str,
+        family: str,
+        profile_request: dict[str, Any],
+        previous_profile_request: dict[str, Any] | None = None,
+        name: str = "Geomwright pulley",
+        execute: bool = False,
+        confirm_write: bool = False,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        if not str(document_id or "").strip() or not str(block_id or "").strip():
+            raise ValueError("document_id and block_id are required")
+        if execute and confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+        plan = build_managed_pulley_plan(family, dict(profile_request), name=name)
+        rollback_plan = (
+            build_managed_pulley_plan(family, dict(previous_profile_request), name=name)
+            if previous_profile_request is not None
+            else None
+        )
+        if not execute:
+            return {
+                "ok": True,
+                "success": True,
+                "stage": "planned",
+                "executed": False,
+                "plan": plan,
+            }
+        payload = {
+            "document_id": str(document_id),
+            "block_id": str(block_id),
+            "plan": plan,
+            "rollback_plan": rollback_plan,
+            "execute": True,
+            "confirm_write": True,
+        }
+        if progress_callback is None:
+            result = self.runner.call("update_managed_pulley", payload)
+        else:
+            result = self.runner.call(
+                "update_managed_pulley",
+                payload,
+                progress_callback=progress_callback,
+            )
+        return {**result, "plan": plan}
+
     @staticmethod
     def _normalize_path_for_kompas(path: str) -> str:
         candidate = str(Path(path))
@@ -3000,10 +3121,20 @@ class KompasAdapter:
             },
         )
 
-    def save_document(self, document_id: str | None = None, *, close_after_save: bool = True) -> dict[str, Any]:
+    def save_document(
+        self,
+        document_id: str | None = None,
+        *,
+        close_after_save: bool = True,
+        strict: bool = False,
+    ) -> dict[str, Any]:
         return self.runner.call(
             "save_document",
-            {"document_id": document_id, "close_after_save": close_after_save},
+            {
+                "document_id": document_id,
+                "close_after_save": close_after_save,
+                "strict": strict,
+            },
         )
 
     def save_document_as(
@@ -3012,6 +3143,7 @@ class KompasAdapter:
         document_id: str | None = None,
         *,
         close_after_save: bool = True,
+        strict: bool = False,
     ) -> dict[str, Any]:
         return self.runner.call(
             "save_document",
@@ -3019,6 +3151,7 @@ class KompasAdapter:
                 "document_id": document_id,
                 "path": self._normalize_target_path_for_kompas(path),
                 "close_after_save": close_after_save,
+                "strict": strict,
             },
         )
 

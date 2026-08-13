@@ -6,11 +6,14 @@ complete.
 
 Current implementation status: focused Layer 2 catalogs and Layer 3
 cut-from-body builders are available for V-belt and Poly-V grooves as documented
-in `v-belt-groove.md` and `poly-v-groove.md`. Neither is a complete Layer 4
-pulley family.
+in `v-belt-groove.md` and `poly-v-groove.md`. The first Layer 4 vertical slice
+creates a new owned blank and applies and verifies both V-belt and Poly-V grooves.
+Its ownership inspector recognizes a managed pulley independently of its
+position in the model tree; that path has live V-belt evidence. Edit/rebuild and
+the complete family/profile Layer 4 live matrix remain pending.
 
 This document defines the planned mechanical-transmission platform for
-`kompas-mcp`. The goal is not to copy one native KOMPAS application as a
+Geomwright. The goal is not to copy one native KOMPAS application as a
 monolith. The platform separates catalogs, deterministic geometry, pair
 synthesis, manufacturing-tool envelopes, CAD execution, and optional
 engineering calculations.
@@ -29,6 +32,12 @@ The platform follows these rules:
    large `type` parameter.
 7. Catalog values carry standard edition and provenance.
 8. `preview → execute → verify → reopen` is mandatory for each Layer 4 family.
+9. Pulley families create and own a new parameterized rotational blank; they do
+   not cut grooves into an arbitrary pre-existing body.
+10. Recognition and editing use persistent module ownership plus managed
+    variables and operations. User features created later in the model tree are
+    downstream consumers and must survive a managed pulley rebuild whenever
+    KOMPAS can rebuild that dependency cascade.
 
 Relevant existing CAD rules are `GEOM-006`, `GEOM-009`, `GEOM-010`,
 `GEOM-012`, `GEOM-014`, `EXEC-003`, and `EXEC-004` in `CAD_PATTERNS.md`:
@@ -100,6 +109,20 @@ parameter_prefix      variable namespace
 The family-specific input contains only functional geometry: groove profile,
 tooth system, width, pitch dimensions, hand, representation mode, and relevant
 manufacturing data.
+
+The generic composition contract above remains applicable to transmission
+families as a whole, but the V-belt and Poly-V pulley families deliberately use
+only `new_body`. Their Layer 4 workflow creates the known cylindrical rim blank
+and then applies the managed groove operation to that owned blank. Arbitrary
+`add_to_body` and `cut_from_body` targets are not part of the pulley product
+contract; the existing focused cut builders remain internal composition steps
+and acceptance fixtures.
+
+The owned blank is the stable root of later pulley development. Hub, bore,
+keyway, chamfer, relief, and other operations may be appended by separate
+modules or by the user. Recognition must therefore locate the owned blank,
+groove feature, ownership metadata, and variable namespace without assuming
+that the groove feature is the final item in the model tree.
 
 ### Output
 

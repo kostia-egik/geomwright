@@ -1,7 +1,10 @@
 # Poly-V groove profile, preview, and CAD builder
 
 Status: Layer 2 ISO catalog/preview and the focused Layer 3 cut-from-body builder
-are implemented and live-verified in KOMPAS-3D for PH, PJ, PK, PL, and PM.
+are implemented and live-verified in KOMPAS-3D for PH, PJ, PK, PL, and PM. The
+user-facing Layer 4 pulley workflow is defined to create and own a new blank;
+applying grooves to an arbitrary existing body is not a supported product
+workflow.
 
 The module owns only the functional Poly-V rim geometry. It does not create a
 hub, bore, keyway, thread, chamfer, belt body, route, or rating calculation.
@@ -51,6 +54,11 @@ The target contract requires:
 
 The operation does not save the document. Save explicitly after validating the
 returned execution evidence.
+
+This tool remains the internal Layer 3 composition primitive and a focused
+acceptance surface. Geomwright Studio and the Layer 4 pulley family create a
+known parameterized blank first, then invoke this builder with the blank's
+semantic dimensions and variable links.
 
 ## ISO 9982:2021 catalog
 

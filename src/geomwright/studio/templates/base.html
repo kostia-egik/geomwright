@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Geomwright Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%99%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+  <main id="workspace-shell" class="workspace-shell">
+    <header class="workspace-topbar">
+      <div>
+        <p class="eyebrow">Geomwright Studio</p>
+        <h1 data-i18n="workspace.title">Рабочий стол моделей</h1>
+      </div>
+      <div class="workspace-actions">
+        <div class="language-switch" role="group" aria-label="Язык интерфейса" data-i18n-label="language.label">
+          <button type="button" data-language="ru" aria-pressed="true">RU</button>
+          <button type="button" data-language="en" aria-pressed="false">EN</button>
+        </div>
+        <button id="workspace-open" class="secondary-button" type="button" data-i18n="workspace.open">Открыть .m3d…</button>
+        <button id="workspace-new" class="primary-button" type="button" data-i18n="workspace.new">Новая модель</button>
+      </div>
+    </header>
+    <section class="workspace-body">
+      <aside class="workspace-documents">
+        <div class="workspace-section-heading">
+          <h2 data-i18n="workspace.documents">Документы КОМПАС</h2>
+          <div class="workspace-document-tools">
+            <span id="workspace-connection" class="workspace-connection"></span>
+            <button
+              id="workspace-refresh"
+              class="icon-button"
+              type="button"
+              title="Обновить из КОМПАС"
+              aria-label="Обновить из КОМПАС"
+              data-i18n-title="workspace.refresh"
+              data-i18n-label="workspace.refresh"
+            >↻</button>
+          </div>
+        </div>
+        <div id="workspace-document-list" class="workspace-document-list"></div>
+      </aside>
+      <section class="workspace-model">
+        <div id="workspace-empty" class="workspace-empty" data-i18n="workspace.empty">В КОМПАС нет открытых 3D-моделей</div>
+        <div id="workspace-document" hidden>
+          <div class="workspace-document-header">
+          <div>
+            <p id="workspace-document-path" class="workspace-path"></p>
+            <h2 id="workspace-document-name"></h2>
+          </div>
+          <div class="workspace-document-actions">
+            <span id="workspace-document-state" class="workspace-state"></span>
+            <button id="workspace-save-document" class="icon-button" type="button" title="Сохранить" aria-label="Сохранить" data-i18n-title="workspace.save" data-i18n-label="workspace.save">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v15H5zM8 3v6h8V3M8 21v-8h8v8"/></svg>
+            </button>
+            <button id="workspace-save-as-document" class="icon-button" type="button" title="Сохранить как" aria-label="Сохранить как" data-i18n-title="workspace.save_as" data-i18n-label="workspace.save_as">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h11l3 3v6M7 3v6h8V3M7 20v-7h7M15 18h6M18 15v6"/></svg>
+            </button>
+            <button
+              id="workspace-close-document"
+              class="icon-button danger-icon-button"
+              type="button"
+              title="Закрыть документ"
+              aria-label="Закрыть документ"
+              data-i18n-title="workspace.close"
+              data-i18n-label="workspace.close"
+            ><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"/></svg></button>
+          </div>
+          </div>
+          <div id="workspace-tree" class="workspace-tree"></div>
+        </div>
+      </section>
+      <aside class="workspace-inspector">
+        <div id="workspace-inspector-empty" class="workspace-empty" data-i18n="workspace.select_block">Выберите распознанный блок Studio</div>
+        <div id="workspace-inspector-content" hidden>
+          <p class="eyebrow" data-i18n="workspace.managed_block">Управляемый блок</p>
+          <h2 id="workspace-block-name"></h2>
+          <dl id="workspace-block-summary" class="summary-grid"></dl>
+          <button id="workspace-edit-block" class="primary-button" type="button" data-i18n="workspace.edit">Открыть редактор</button>
+        </div>
+      </aside>
+      <div id="workspace-busy" class="workspace-busy" hidden role="status" aria-live="polite">
+        <span class="workspace-busy-spinner" aria-hidden="true"></span>
+        <strong id="workspace-busy-text"></strong>
+        <time id="workspace-busy-time">0:00</time>
+      </div>
+    </section>
+    <footer id="workspace-status" class="workspace-status" aria-live="polite"></footer>
+  </main>
+
+  <dialog id="workspace-close-dialog" class="workspace-dialog">
+    <form method="dialog">
+      <p class="eyebrow" data-i18n="workspace.close_dialog_eyebrow">Документ КОМПАС</p>
+      <h2 id="workspace-close-dialog-title"></h2>
+      <p id="workspace-close-dialog-message"></p>
+      <div class="workspace-dialog-actions">
+        <button id="workspace-close-cancel" class="secondary-button" value="cancel" type="submit" data-i18n="workspace.cancel">Отмена</button>
+        <button id="workspace-close-discard" class="danger-button" value="discard" type="submit" data-i18n="workspace.discard">Не сохранять</button>
+        <button id="workspace-close-save" class="primary-button" value="save" type="submit" data-i18n="workspace.save_close">Сохранить и закрыть</button>
+      </div>
+    </form>
+  </dialog>
+
+  <main id="editor-shell" class="app-shell" hidden>
+    <section class="preview-panel" aria-label="Предпросмотр профиля">
+      <header class="topbar">
+        <div>
+          <button id="editor-back" class="editor-back" type="button" data-i18n="workspace.back">← К модели</button>
+          <p class="eyebrow" data-i18n="app.eyebrow">Geomwright Studio</p>
+          <h1 data-i18n="app.title">Профиль ременного шкива</h1>
+        </div>
+        <div class="topbar-actions">
+          <div id="editor-document-actions" class="editor-document-actions" hidden>
+            <button id="editor-save-document" class="icon-button" type="button" title="Сохранить" aria-label="Сохранить" data-i18n-title="workspace.save" data-i18n-label="workspace.save">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v15H5zM8 3v6h8V3M8 21v-8h8v8"/></svg>
+            </button>
+            <button id="editor-save-as-document" class="icon-button" type="button" title="Сохранить как" aria-label="Сохранить как" data-i18n-title="workspace.save_as" data-i18n-label="workspace.save_as">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h11l3 3v6M7 3v6h8V3M7 20v-7h7M15 18h6M18 15v6"/></svg>
+            </button>
+          </div>
+          <div class="language-switch" role="group" aria-label="Язык интерфейса" data-i18n-label="language.label">
+            <button type="button" data-language="ru" aria-pressed="true">RU</button>
+            <button type="button" data-language="en" aria-pressed="false">EN</button>
+          </div>
+          <div class="mode-pill" title="Управляемое построение в КОМПАС" data-i18n-title="app.managed_cad_title">
+            <span></span><span data-i18n="app.managed_cad">Управляемый CAD</span>
+          </div>
+        </div>
+      </header>
+      <div class="canvas-wrap">
+        <canvas id="profile-canvas" aria-label="Геометрический предпросмотр"></canvas>
+        <div class="canvas-help" data-i18n="canvas.help">Колесо — масштаб · перетаскивание — панорама · двойной щелчок — сброс вида</div>
+        <div id="canvas-empty" class="canvas-empty" data-i18n="canvas.empty">Выберите модуль и задайте параметры</div>
+      </div>
+      <footer class="statusbar">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-text" data-i18n="status.loading">Загрузка модулей…</span>
+      </footer>
+    </section>
+
+    {% include "fields.html" %}
+  </main>
+
+  <script type="module" src="{{ url_for('static', path='/canvas.js') }}"></script>
+  <script type="module" src="{{ url_for('static', path='/app.js') }}"></script>
+</body>
+</html>

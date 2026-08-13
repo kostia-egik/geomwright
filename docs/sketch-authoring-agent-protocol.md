@@ -5,7 +5,7 @@ readback. Geometry-design guidance remains in the companion draft.
 
 Machine-oriented companion to [`sketch-authoring-protocol.md`](sketch-authoring-protocol.md).
 
-Audience: coding agent working on KOMPAS sketches in `kompas-mcp`.
+Audience: coding agent working on KOMPAS sketches in Geomwright.
 
 Purpose: force a complex sketch to pass through an explicit contract and staged
 verification before implementation grows into debugging by accident.

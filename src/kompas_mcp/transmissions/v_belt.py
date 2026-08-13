@@ -395,8 +395,15 @@ def preview_v_belt_groove(
         },
     ]
 
+    standard_top_edge_radius = profile.get("standard_top_edge_radius")
     warnings = [
-        "The 2D preview remains straight-sided with a flat root; a standard upper-edge radius is applied only as an optional Layer 3 post-cut fillet.",
+        (
+            "The functional cut profile remains straight-sided with a flat root; "
+            "the upper-edge radius R=%g mm is applied as a separate Layer 3 post-cut fillet."
+            % float(standard_top_edge_radius)
+        )
+        if isinstance(standard_top_edge_radius, (int, float))
+        else "The functional cut profile is straight-sided with a flat root; this profile has no configured upper-edge fillet."
     ]
     evidence_level = str(profile.get("source", {}).get("evidence_level") or "")
     if evidence_level == "manufacturer_reference":

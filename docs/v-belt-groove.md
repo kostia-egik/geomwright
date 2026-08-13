@@ -1,7 +1,9 @@
 # V-belt groove profile, preview, and CAD builder
 
 Status: Layer 2 catalog/preview and the focused Layer 3 cut-from-body builder are
-implemented and live-verified in KOMPAS-3D.
+implemented and live-verified in KOMPAS-3D. The user-facing Layer 4 pulley
+workflow is defined to create and own a new blank; applying grooves to an
+arbitrary existing body is not a supported product workflow.
 
 This module defines deterministic functional V-groove geometry without hubs,
 bores, keyways, or threads. Upper groove-edge rounding is an optional managed
@@ -71,6 +73,11 @@ one managed sketch with one closed component per groove, performs a rotational
 cut, hides the sketch, and returns actual feature/sketch references plus
 analytic pitch and outer-rim references. It does not save the document; use the
 normal explicit save workflow after checking the result.
+
+This tool remains the internal Layer 3 composition primitive and a focused
+acceptance surface. Geomwright Studio and the Layer 4 pulley family do not ask a
+user to describe an arbitrary target blank. They create a known parameterized
+blank first and invoke this builder against that owned result.
 
 For `gost_20889_88`, `include_standard_top_edge_fillet=true` (the default)
 automatically applies the catalog radius as a separate 3D fillet. Set the flag to

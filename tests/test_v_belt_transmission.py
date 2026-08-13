@@ -493,6 +493,103 @@ def test_apply_request_requires_confirmation_and_adapter_sends_preflight_plan() 
     }
 
 
+def test_managed_pulley_adapter_owns_blank_and_routes_create_and_inspection() -> None:
+    runner = _RecordingRunner()
+    adapter = KompasAdapter(runner=runner)
+
+    with pytest.raises(ValueError, match="confirm_write"):
+        adapter.create_managed_pulley(
+            family="v_belt",
+            profile_request={"designation": "A", "datum_diameter": 100.0, "groove_count": 2},
+            execute=True,
+        )
+
+    result = adapter.create_managed_pulley(
+        family="v_belt",
+        profile_request={"designation": "A", "datum_diameter": 100.0, "groove_count": 2},
+        name="Owned pulley",
+        execute=True,
+        confirm_write=True,
+    )
+    action, payload = runner.calls[0]
+    assert action == "create_managed_pulley"
+    assert payload["confirm_write"] is True
+    assert "document_id" not in payload
+    assert payload["plan"]["ownership"]["schema"] == "geomwright.managed_pulley"
+    assert payload["plan"]["blank"]["params"]["close_after_save"] is False
+    assert result["plan"] == payload["plan"]
+
+    adapter.inspect_managed_pulley(document_id="pulley.m3d")
+    assert runner.calls[1] == ("inspect_managed_pulley", {"document_id": "pulley.m3d"})
+
+    updated = adapter.update_managed_pulley(
+        document_id="pulley.m3d",
+        block_id="managed-pulley:1-2-3-4",
+        family="v_belt",
+        profile_request={"designation": "A", "datum_diameter": 110.0, "groove_count": 2},
+        previous_profile_request={"designation": "A", "datum_diameter": 100.0, "groove_count": 2},
+        name="Owned pulley",
+        execute=True,
+        confirm_write=True,
+    )
+    update_action, update_payload = runner.calls[2]
+    assert update_action == "update_managed_pulley"
+    assert update_payload["document_id"] == "pulley.m3d"
+    assert update_payload["block_id"] == "managed-pulley:1-2-3-4"
+    assert update_payload["plan"]["target"]["outer_diameter"] == pytest.approx(115.6)
+    assert update_payload["rollback_plan"]["target"]["outer_diameter"] == pytest.approx(105.6)
+    assert updated["plan"] == update_payload["plan"]
+
+    custom_request = {
+        "designation": "CUSTOM",
+        "datum_diameter": 100.0,
+        "groove_count": 3,
+        "standard_system": "din_iso",
+        "custom_profile": {
+            "designation": "CUSTOM",
+            "family": "custom",
+            "datum_width": 11.0,
+            "approximate_top_width": 13.0,
+            "datum_offset": 3.5,
+            "groove_pitch": 16.0,
+            "edge_distance": 11.0,
+            "groove_depth": 13.0,
+            "groove_angle_degrees": 36.0,
+            "minimum_datum_diameter": 70.0,
+            "standard_top_edge_radius": 1.1,
+        },
+    }
+    custom_plan = adapter.update_managed_pulley(
+        document_id="pulley.m3d",
+        block_id="managed-pulley:1-2-3-4",
+        family="v_belt",
+        profile_request=custom_request,
+        previous_profile_request=custom_request,
+        execute=False,
+    )["plan"]
+    assert custom_plan["ownership"]["source_profile"]["custom_profile"] == custom_request["custom_profile"]
+
+
+def test_managed_pulley_adapter_forwards_bridge_progress_callback() -> None:
+    class ProgressRunner:
+        def call(self, action: str, payload: dict, *, progress_callback=None) -> dict:
+            assert action == "create_managed_pulley"
+            assert progress_callback is not None
+            progress_callback({"percent": 12, "operation": "create_blank_sketch"})
+            return {"ok": True, "success": True, "stage": "executed"}
+
+    events: list[dict] = []
+    KompasAdapter(runner=ProgressRunner()).create_managed_pulley(
+        family="v_belt",
+        profile_request={"designation": "A", "datum_diameter": 100.0, "groove_count": 2},
+        execute=True,
+        confirm_write=True,
+        progress_callback=events.append,
+    )
+
+    assert events == [{"percent": 12, "operation": "create_blank_sketch"}]
+
+
 class _RecordingRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []

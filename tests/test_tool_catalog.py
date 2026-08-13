@@ -6,8 +6,9 @@ import unittest
 from kompas_mcp.tool_catalog import get_mcp_tool_catalog
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "kompas_mcp"
-SERVER_PATH = PACKAGE_ROOT / "server.py"
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+PACKAGE_ROOT = SOURCE_ROOT / "kompas_mcp"
+SERVER_PATH = SOURCE_ROOT / "geomwright" / "kompas" / "server.py"
 TOOL_MODULE_PATHS = sorted(PACKAGE_ROOT.glob("*_tools.py"))
 
 
@@ -68,16 +69,35 @@ class ToolCatalogTests(unittest.TestCase):
         )
 
     def test_server_tool_exposes_stability_filter(self) -> None:
-        from kompas_mcp import server
+        from geomwright.kompas import server
 
         catalog = server.get_mcp_tool_catalog(stability="research")
 
         self.assertTrue(catalog["ok"])
         self.assertEqual(catalog["stability"], "research")
 
+    def test_geomwright_server_facade_preserves_the_mcp_contract(self) -> None:
+        from geomwright import server as public_server
+        from geomwright.kompas import KompasAdapter, get_mcp_tool_catalog
+        from geomwright.kompas import server as kompas_server
+        from kompas_mcp import server as legacy_server
+        from kompas_mcp.adapter import KompasAdapter as LegacyKompasAdapter
+
+        self.assertIs(public_server.mcp, kompas_server.mcp)
+        self.assertIs(public_server.mcp, legacy_server.mcp)
+        self.assertIs(public_server.adapter, kompas_server.adapter)
+        self.assertIs(public_server.adapter, legacy_server.adapter)
+        self.assertIs(KompasAdapter, LegacyKompasAdapter)
+        self.assertEqual(public_server.mcp.name, "geomwright")
+        self.assertEqual(get_mcp_tool_catalog(), public_server.get_mcp_tool_catalog())
+        self.assertEqual(
+            public_server.get_mcp_tool_catalog(),
+            legacy_server.get_mcp_tool_catalog(),
+        )
+
     def test_probe_document_readback_surface_closes_model_path_by_default(self) -> None:
-        from kompas_mcp import server
-        from kompas_mcp.adapter import KompasAdapter
+        from geomwright.kompas import server
+        from geomwright.kompas.adapter import KompasAdapter
 
         tool_fn = server.mcp._tool_manager._tools["probe_document_readback"].fn
         server_default = inspect.signature(tool_fn).parameters["close_after_probe"].default
@@ -106,7 +126,7 @@ class ToolCatalogTests(unittest.TestCase):
 
 
 def _registered_tool_names() -> list[str]:
-    from kompas_mcp import server
+    from geomwright.kompas import server
 
     return list(server.mcp._tool_manager._tools)
 

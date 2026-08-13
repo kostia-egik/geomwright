@@ -1,6 +1,6 @@
 # CAD Patterns
 
-This file is the operational memory for KOMPAS-3D / `kompas-mcp` CAD automation.
+This file is the operational memory for Geomwright's KOMPAS-3D CAD automation.
 It stores rules that were verified on live models and should be checked before
 guessing COM API behavior.
 
@@ -58,8 +58,44 @@ Evidence levels used by this file:
 | Bent coil / hook spiral phase is wrong | `SPIRAL-001`, `VAR-001` |
 | Native curve fillet needs a source cut point but raw spiral endpoints cannot be read | `FILLET-003` |
 | Need full bent-coil construction chain | `CASE-001` |
+| UI opens files in a hidden or different KOMPAS instance | `SESSION-001` |
 
 ## Rules
+
+### SESSION-001: Interactive Hosts Must Attach to a Visible Running KOMPAS
+
+Applies when:
+- a user-facing host such as Geomwright Studio operates on documents the user
+  expects to see in the KOMPAS window;
+- bridge calls run in short-lived external Python processes.
+
+Symptom:
+- Studio starts before KOMPAS and later opens documents in an invisible session;
+- opening the same file in the visible KOMPAS reports that it is already in use;
+- restarting Studio and KOMPAS changes which document collection is observed.
+
+Cause:
+- `Dispatch("KOMPAS.Application.5")` may create a COM server when no running
+  object is registered. A later visible KOMPAS process is then a different
+  application instance.
+
+Rule:
+- Interactive hosts must use `GetActiveObject("KOMPAS.Application.5")`, set a
+  hidden registered instance to `Visible = True`, and verify visibility before
+  document reads or writes. KOMPAS may register only one active object even
+  when several process windows exist, so process enumeration cannot select a
+  different visible COM object reliably.
+- Absence of a running object is a recoverable disconnected state, not
+  permission to create an application.
+- Non-interactive MCP workflows retain their explicit existing session policy.
+
+Verification:
+- Start the host before KOMPAS and confirm no KOMPAS process is created.
+- Start visible KOMPAS afterwards and confirm the host discovers its documents
+  without restarting.
+- Open/create from the host and confirm the document appears in that same window.
+
+---
 
 ### ARC-001: Arc Through Three Points Requires Direction Verification
 

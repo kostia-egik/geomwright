@@ -1,12 +1,12 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "kompas": {
+    "geomwright": {
       "type": "local",
       "command": [
-        "C:\\path\\to\\kompas-mcp\\.venv\\Scripts\\python.exe",
+        "C:\\path\\to\\geomwright\\.venv\\Scripts\\python.exe",
         "-m",
-        "kompas_mcp"
+        "geomwright"
       ],
       "enabled": true,
       "timeout": 600000

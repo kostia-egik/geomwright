@@ -3,17 +3,30 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kompas-mcp"
+name = "geomwright"
 version = "0.1.0"
-description = "Practical MCP server for KOMPAS-3D cleanup workflows"
+description = "Local-first CAD automation, parametric modules, and MCP workflows"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "mcp>=1,<2",
 ]
 
+[project.optional-dependencies]
+ui = [
+  "fastapi>=0.115,<1",
+  "jinja2>=3.1,<4",
+  "uvicorn>=0.30,<1",
+]
+
 [project.scripts]
+geomwright-mcp = "geomwright.__main__:main"
+geomwright-studio = "geomwright.studio.__main__:main"
 kompas-mcp = "kompas_mcp.__main__:main"
+kompas-mechanics-ui = "geomwright.studio.__main__:main"
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -25,4 +38,9 @@ where = ["src"]
 kompas_mcp = [
   "assets/rules/*.json",
   "assets/bridge/*.py",
+]
+geomwright = [
+  "studio/static/*.css",
+  "studio/static/*.js",
+  "studio/templates/*.html",
 ]

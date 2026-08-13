@@ -1,0 +1,60 @@
+<aside class="controls-panel" aria-label="Параметры профиля">
+  <div id="module-heading" class="controls-heading">
+    <p class="eyebrow" data-i18n="controls.module">Модуль</p>
+    <select id="module-select" aria-label="Модуль Geomwright Studio"></select>
+    <p id="module-description" class="module-description"></p>
+  </div>
+
+  <form id="preview-form">
+    <div id="dynamic-fields" class="dynamic-fields"></div>
+    <div class="preview-controls">
+      <span id="live-indicator" class="live-indicator" data-state="live">
+        <span></span><span data-i18n="controls.auto_preview">Автопредпросмотр</span>
+      </span>
+      <button id="reset-button" class="secondary-button" type="button" disabled data-i18n="controls.reset">
+        Сбросить изменения
+      </button>
+    </div>
+  </form>
+
+  <section class="cad-controls" aria-labelledby="cad-title">
+    <h2 id="cad-title" data-i18n="cad.title">Построение в КОМПАС</h2>
+    <p id="cad-description" data-i18n="cad.description">Будет создана новая несохранённая деталь с управляемой заготовкой шкива.</p>
+    <div class="cad-actions">
+      <button id="cad-create-button" class="primary-button" type="button" disabled data-i18n="cad.create">Создать в КОМПАС</button>
+    </div>
+    <div id="cad-progress" class="cad-progress" hidden role="status" aria-live="polite">
+      <div
+        id="cad-progress-bar"
+        class="cad-progress-bar"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+      >
+        <span id="cad-progress-fill" class="cad-progress-fill"></span>
+        <span id="cad-progress-percent" class="cad-progress-percent">0%</span>
+      </div>
+      <div class="cad-progress-operation">
+        <span id="cad-progress-stage"></span>
+        <time id="cad-progress-time">0:00</time>
+      </div>
+    </div>
+    <p id="cad-result" class="cad-result" aria-live="polite"></p>
+  </section>
+
+  <section class="result-section" aria-labelledby="summary-title">
+    <div class="section-title-row">
+      <h2 id="summary-title" data-i18n="controls.summary">Сводка</h2>
+      <span id="standard-badge" class="standard-badge"></span>
+    </div>
+    <dl id="summary" class="summary-grid"></dl>
+  </section>
+
+  <section id="warnings-section" class="warnings-section" hidden>
+    <h2 data-i18n="controls.warnings">Предупреждения</h2>
+    <ul id="warnings"></ul>
+  </section>
+
+  <p class="write-note" data-i18n="controls.preview_note">Построение создаёт только новую управляемую деталь. Произвольные существующие тела не изменяются.</p>
+</aside>

@@ -12,6 +12,20 @@ from collections import defaultdict, deque
 from win32com.client import Dispatch
 
 
+def report_progress(percent, operation, **details):
+    path = os.environ.get("KOMPAS_MCP_PROGRESS_FILE")
+    if not path:
+        return
+    event = {"percent": int(percent), "operation": str(operation)}
+    event.update(details)
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            handle.flush()
+    except Exception:
+        pass
+
+
 def read_request(path):
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -1338,12 +1352,26 @@ def iter_collection(collection):
 
 
 _APP5 = None
+_REQUIRE_VISIBLE_KOMPAS = False
 
 
 def make_app():
     import win32com.client
     global _APP5
-    _APP5 = win32com.client.Dispatch("KOMPAS.Application.5")
+    if _REQUIRE_VISIBLE_KOMPAS:
+        try:
+            _APP5 = win32com.client.GetActiveObject("KOMPAS.Application.5")
+        except Exception:
+            raise RuntimeError("No running visible KOMPAS-3D instance. Start KOMPAS-3D and keep its main window open; Studio will reconnect automatically.")
+        if not bool(safe_get(_APP5, "Visible", False)):
+            try:
+                _APP5.Visible = True
+            except Exception:
+                pass
+        if not bool(safe_get(_APP5, "Visible", False)):
+            raise RuntimeError("The running KOMPAS-3D instance could not be made visible. Studio refuses to open documents in a hidden session.")
+    else:
+        _APP5 = win32com.client.Dispatch("KOMPAS.Application.5")
     controller_api = getattr(_APP5, "ActivateControllerAPI", None)
     if callable(controller_api):
         controller_api()
@@ -3872,11 +3900,13 @@ def iter_parts_with_ids(part, node_id):
     return items
 
 
-def describe_document(document, app):
+def describe_document(document, app, runtime_index=None):
     path_name = normalize_display_path(safe_get(document, "PathName", ""))
     name = safe_get(document, "Name", "") or os.path.basename(path_name) or "Untitled"
+    runtime_id = path_name or ("@document:%s" % int(runtime_index) if runtime_index is not None else name)
     return {
         "id": path_name or name,
+        "runtime_id": runtime_id,
         "name": name,
         "path": path_name,
         "type": safe_get(document, "Type"),
@@ -4405,7 +4435,7 @@ def list_documents(app):
     documents = safe_get(app, "Documents")
     if documents is None:
         return []
-    return [describe_document(doc, app) for doc in iter_collection(documents)]
+    return [describe_document(doc, app, index) for index, doc in enumerate(iter_collection(documents))]
 
 
 def resolve_document(app, document_id):
@@ -4418,6 +4448,16 @@ def resolve_document(app, document_id):
             casted = cast_document_3d(document)
             if casted is not None:
                 return casted
+        return None
+
+    if isinstance(document_id, str) and document_id.startswith("@document:"):
+        try:
+            requested_index = int(document_id.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return None
+        documents = list(iter_collection(safe_get(app, "Documents")))
+        if 0 <= requested_index < len(documents):
+            return cast_document_3d(documents[requested_index])
         return None
 
     if active_document is not None:
@@ -4438,6 +4478,17 @@ def resolve_document(app, document_id):
         casted = cast_document_3d(document)
         if casted is not None:
             return casted
+    return None
+
+
+def resolve_document_strict(app, document_id):
+    if not document_id:
+        return None
+    documents = list(iter_collection(safe_get(app, "Documents")))
+    for runtime_index, document in enumerate(documents):
+        description = describe_document(document, app, runtime_index)
+        if document_id == description.get("runtime_id"):
+            return cast_document_3d(document)
     return None
 
 
@@ -4827,6 +4878,31 @@ def get_session_state():
 def handle_list_documents():
     app = make_app()
     return {"documents": list_documents(app)}
+
+
+def handle_activate_document(payload):
+    document_id = payload.get("document_id")
+    if not document_id:
+        raise ValueError("document_id is required")
+    app = make_app()
+    document = (
+        resolve_document_strict(app, document_id)
+        if payload.get("strict")
+        else resolve_document(app, document_id)
+    )
+    if document is None:
+        raise RuntimeError("Document was not found")
+    activate = safe_get(document, "Activate")
+    if callable(activate):
+        activate()
+    else:
+        document.Active = True
+    active = safe_get(app, "ActiveDocument")
+    if active != document:
+        raise RuntimeError("Document activation was not confirmed")
+    documents = list(iter_collection(safe_get(app, "Documents")))
+    runtime_index = next((index for index, item in enumerate(documents) if item == document), None)
+    return {"ok": True, "document": describe_document(document, app, runtime_index)}
 
 
 def handle_launch_native_module_command(payload):
@@ -11086,19 +11162,27 @@ def handle_open_document(payload):
 
 def handle_close_document(payload):
     app = make_app()
-    document = resolve_document(app, payload.get("document_id"))
+    document_id = payload.get("document_id")
+    document = (
+        resolve_document_strict(app, document_id)
+        if payload.get("strict")
+        else resolve_document(app, document_id)
+    )
     if document is None:
         raise RuntimeError("Document not found or no active document")
 
     save = bool(payload.get("save"))
     description = describe_document(document, app)
     document_path = description.get("path")
+    documents_count_before = len(list(iter_collection(safe_get(app, "Documents"))))
     if save:
         document.Save()
 
     close_mode = parse_close_mode(payload.get("close_mode"))
     document.Close(close_mode)
     remaining_documents = list_documents(app)
+    if len(remaining_documents) != documents_count_before - 1:
+        raise RuntimeError("Document close was not confirmed by the open-document count")
 
     return {
         "document": description,
@@ -11230,7 +11314,12 @@ def handle_apply_changeset(payload):
 
 def handle_save_document(payload):
     app = make_app()
-    document = resolve_document(app, payload.get("document_id"))
+    document_id = payload.get("document_id")
+    document = (
+        resolve_document_strict(app, document_id)
+        if payload.get("strict")
+        else resolve_document(app, document_id)
+    )
     if document is None:
         raise RuntimeError("Document not found or no active document")
 
@@ -14604,6 +14693,7 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
     planned_variables = extracted["planned_variables"]
     axis_start = extracted["axis_start"]
     axis_end = extracted["axis_end"]
+    progress = dict(params.get("_progress") or {})
 
     plane_map = {"XOY": 1, "XOZ": 2, "YOZ": 3}
     plane_id = plane_map.get(str(params.get("plane") or "XOY").upper(), 1)
@@ -14623,6 +14713,8 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
             sketchs = get_sketchs()
     if sketchs is None or not callable(safe_get(sketchs, "Add")):
         raise RuntimeError("Part does not expose Sketchs.Add")
+    if progress.get("sketch_percent") is not None:
+        report_progress(progress["sketch_percent"], progress.get("sketch_operation") or "create_sketch", name=str(progress.get("sketch_name") or params.get("sketch_name") or ""))
     sketch = sketchs.Add()
     if sketch is None:
         raise RuntimeError("Sketchs.Add returned None")
@@ -14653,6 +14745,8 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
         raise RuntimeError("Sketch Update returned False")
     steps_report.append({"step": "create_sketch", "ok": True, "api": "api7_sketchs_add", "plane": params.get("plane") or "XOY"})
 
+    if progress.get("variables_percent") is not None:
+        report_progress(progress["variables_percent"], progress.get("variables_operation") or "create_variables", names=[str(item.get("name") or "") for item in planned_variables])
     variable_report = _apply_part_variables(part, planned_variables)
     steps_report.append(variable_report)
     if bool(params.get("require_parameterization", False)) and not bool(variable_report.get("ok")):
@@ -14664,6 +14758,8 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
         params.get("projections") or [],
     )
 
+    if progress.get("profile_percent") is not None:
+        report_progress(progress["profile_percent"], progress.get("profile_operation") or "draw_profile", name=str(progress.get("sketch_name") or params.get("sketch_name") or ""))
     try:
         sketch_doc = sketch.BeginEdit()
     except Exception as exc:
@@ -15049,6 +15145,8 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
     if rotateds is None or not callable(safe_get(rotateds, "Add")):
         raise RuntimeError("Part does not expose Rotateds.Add")
     rotated_type = 28 if str(operation_kind or "boss").strip().lower() != "cut" else 29
+    if progress.get("feature_percent") is not None:
+        report_progress(progress["feature_percent"], progress.get("feature_operation") or ("create_cut_rotation" if rotated_type == 29 else "create_base_rotation"), name=str(progress.get("feature_name") or params.get("name") or ""))
     try:
         rotated = rotateds.Add(rotated_type)
     except Exception as exc:
@@ -26136,8 +26234,9 @@ def _build_v_belt_top_edge_fillet(model_container, part, document3d, config, sha
 
 def handle_apply_v_belt_grooves(payload):
     document_id = payload.get("document_id")
+    internal_document = payload.get("_document")
     execute = bool(payload.get("execute", False))
-    if not document_id:
+    if not document_id and internal_document is None:
         raise ValueError("document_id is required")
     if execute and payload.get("confirm_write") is not True:
         raise ValueError("confirm_write=true is required when execute=true")
@@ -26171,18 +26270,19 @@ def handle_apply_v_belt_grooves(payload):
         raise ValueError("target axial interval does not contain the planned groove interval")
 
     app = make_app()
-    document = resolve_document(app, document_id)
+    document = internal_document if internal_document is not None else resolve_document(app, document_id)
     if document is None:
         raise RuntimeError("Target document was not found")
     target_description = describe_document(document, app)
-    requested_document_id = str(document_id)
-    resolved_document_ids = {
-        str(target_description.get(key) or "")
-        for key in ("id", "path", "name")
-        if target_description.get(key)
-    }
-    if requested_document_id not in resolved_document_ids:
-        raise RuntimeError("Target document identifier did not resolve exactly")
+    if internal_document is None:
+        requested_document_id = str(document_id)
+        resolved_document_ids = {
+            str(target_description.get(key) or "")
+            for key in ("id", "path", "name")
+            if target_description.get(key)
+        }
+        if requested_document_id not in resolved_document_ids:
+            raise RuntimeError("Target document identifier did not resolve exactly")
     doc3 = cast_document_3d(document)
     if doc3 is None:
         raise RuntimeError("V-belt grooves require a 3D document")
@@ -26238,6 +26338,20 @@ def handle_apply_v_belt_grooves(payload):
         }
 
     params = dict(plan.get("params") or {})
+    managed_progress = dict(payload.get("_managed_progress") or {})
+    if managed_progress:
+        params["_progress"] = {
+            "sketch_percent": 50,
+            "sketch_operation": "create_groove_sketch",
+            "sketch_name": str(managed_progress.get("sketch_name") or ""),
+            "variables_percent": 58,
+            "variables_operation": "create_groove_variables",
+            "profile_percent": 66,
+            "profile_operation": "parameterize_groove_sketch",
+            "feature_percent": 76,
+            "feature_operation": "create_groove_cut_rotation",
+            "feature_name": str(managed_progress.get("feature_name") or ""),
+        }
     bridge_preview = dict(plan.get("bridge_preview") or {})
     if not params or not bridge_preview:
         raise ValueError("V-belt groove plan is missing bridge params or preview")
@@ -26283,6 +26397,8 @@ def handle_apply_v_belt_grooves(payload):
         not bool(params.get("keep_sketch_visible", False)),
         role="V-belt groove profile",
     )
+    if managed_progress:
+        report_progress(84, "rebuild_document", name=str(feature_name))
     rebuild = safe_get(doc3, "RebuildDocument")
     rebuild_ok = bool(rebuild()) if callable(rebuild) else None
     if rebuild_ok is False:
@@ -26315,6 +26431,8 @@ def handle_apply_v_belt_grooves(payload):
     if active_description is None or active_description.get("id") != target_description.get("id"):
         raise RuntimeError("Target document lost activation before body verification")
 
+    if managed_progress:
+        report_progress(92, "verify_removed_volume", name=str(feature_name))
     body_after = _active_api5_primary_body_metrics()
     before_volume = float(body_before.get("volume") or 0.0)
     after_volume = float(body_after.get("volume") or 0.0)
@@ -26474,14 +26592,678 @@ def handle_apply_poly_v_grooves(payload):
     return result
 
 
+def handle_create_managed_pulley(payload):
+    if not bool(payload.get("execute", False)):
+        raise ValueError("create_managed_pulley requires execute=true")
+    if payload.get("confirm_write") is not True:
+        raise ValueError("confirm_write=true is required when execute=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "managed_pulley_plan" or int(plan.get("plan_version") or 0) != 1:
+        raise ValueError("A managed_pulley_plan version 1 is required")
+    family = str(plan.get("family") or "")
+    if family not in ("v_belt", "poly_v"):
+        raise ValueError("Managed pulley family must be v_belt or poly_v")
+    blank = plan.get("blank") or {}
+    blank_params = blank.get("params") or {}
+    blank_preview = blank.get("preview") or {}
+    groove_plan = plan.get("grooves") or {}
+    target = plan.get("target") or {}
+    ownership = plan.get("ownership") or {}
+    if blank.get("scenario") != "stepped_shaft":
+        raise ValueError("Managed pulley blank must use the stepped_shaft scenario")
+    if ownership.get("schema") != "geomwright.managed_pulley":
+        raise ValueError("Managed pulley ownership schema is missing")
+
+    app = make_app()
+    doc3 = None
+    steps_report = []
+    current_stage = "create_part_document"
+    try:
+        report_progress(5, "create_part_document", name=str(plan.get("name") or "Geomwright pulley"))
+        doc3, _part_from_helper, _model_container_from_helper = _create_part_document(
+            app, bool(payload.get("visible", True))
+        )
+        part = safe_get(doc3, "TopPart")
+        if part is None:
+            doc3_model = cast_document_3d(doc3)
+            part = safe_get(doc3_model, "TopPart")
+        if part is None:
+            raise RuntimeError("Failed to get top part from managed pulley document")
+        model_container = cast_model_container(part)
+        if model_container is None:
+            raise RuntimeError("Managed pulley top part does not expose a model container")
+        steps_report.append({"step": "create_part_document", "ok": True})
+
+        current_stage = "build_owned_blank"
+        blank_params["_progress"] = {
+            "sketch_percent": 12,
+            "sketch_operation": "create_blank_sketch",
+            "sketch_name": str(ownership.get("blank_sketch_name") or ""),
+            "variables_percent": 20,
+            "variables_operation": "create_blank_variables",
+            "profile_percent": 28,
+            "profile_operation": "parameterize_blank_sketch",
+            "feature_percent": 38,
+            "feature_operation": "create_blank_rotation",
+            "feature_name": str(ownership.get("blank_feature_name") or ""),
+        }
+        blank_result = _build_stepped_shaft_feature(
+            part,
+            model_container,
+            blank_params,
+            blank_preview,
+            steps_report,
+        )
+        blank_feature = blank_result.get("rotated")
+        blank_sketch = blank_result.get("sketch")
+        if blank_feature is None or blank_sketch is None:
+            raise RuntimeError("Managed pulley blank did not return its feature and sketch")
+        blank_feature.Name = str(ownership.get("blank_feature_name") or blank_params.get("name"))
+        _update_feature_object(blank_feature)
+        blank_sketch.Name = str(ownership.get("blank_sketch_name") or blank_params.get("sketch_name"))
+        _set_model_object_hidden(blank_sketch, True, role="managed pulley blank profile")
+        rebuild = safe_get(doc3, "RebuildDocument")
+        rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+        if rebuild_ok is False:
+            raise RuntimeError("Managed pulley blank rebuild returned False")
+        blank_body = _active_api5_primary_body_metrics()
+        if int(blank_body.get("body_count") or 0) != 1:
+            raise RuntimeError("Managed pulley blank must create exactly one solid body")
+
+        source_profile = dict(ownership.get("source_profile") or {})
+        source_variables = [
+            {"name": "GW_PROFILE_COUNT", "value": int(source_profile.get("groove_count") or 1), "expression": None, "note": "Geomwright source groove count"},
+            {"name": "GW_STANDARD_CODE", "value": int(source_profile.get("standard_code") or 1), "expression": None, "note": "Geomwright standard code"},
+            {"name": "GW_CUSTOM_ACTIVE", "value": 1 if source_profile.get("custom_profile") else 0, "expression": None, "note": "Geomwright custom profile metadata flag"},
+            {"name": "GW_OVERRIDE_ACTIVE", "value": 1 if source_profile.get("profile_overrides") else 0, "expression": None, "note": "Geomwright profile override metadata flag"},
+        ]
+        if source_profile.get("datum_diameter") is not None:
+            source_variables.append({"name": "GW_DATUM_D", "value": float(source_profile["datum_diameter"]), "expression": None, "note": "Geomwright source datum diameter"})
+        if source_profile.get("effective_diameter") is not None:
+            source_variables.append({"name": "GW_EFFECTIVE_D", "value": float(source_profile["effective_diameter"]), "expression": None, "note": "Geomwright source effective diameter"})
+        metadata_fields = {
+            "datum_width": "DATUM_W", "approximate_top_width": "TOP_W", "datum_offset": "DATUM_OFF",
+            "groove_pitch": "PITCH", "edge_distance": "EDGE", "groove_depth": "DEPTH",
+            "groove_angle_degrees": "ANGLE", "minimum_datum_diameter": "MIN_D", "standard_top_edge_radius": "FILLET_R",
+        }
+        for prefix, values in (("GW_CUSTOM_", source_profile.get("custom_profile") or {}), ("GW_OVERRIDE_", source_profile.get("profile_overrides") or {})):
+            for field, suffix in metadata_fields.items():
+                if values.get(field) is not None:
+                    source_variables.append({"name": prefix + suffix, "value": float(values[field]), "expression": None, "note": "Geomwright source profile metadata"})
+        source_variable_report = _apply_part_variables(part, source_variables)
+        if not source_variable_report.get("ok"):
+            raise RuntimeError("Managed pulley source metadata variables could not be created")
+
+        current_stage = "apply_managed_grooves"
+        document_description = describe_document(doc3, app)
+        document_id = document_description.get("id") or document_description.get("name")
+        if not document_id:
+            raise RuntimeError("Managed pulley document has no stable runtime identifier")
+        groove_payload = {
+            "document_id": document_id,
+            "_document": doc3,
+            "preview": plan.get("profile_preview") or {},
+            "plan": groove_plan,
+            "target": target,
+            "host_preflight": {"ok": True, "source": "managed_pulley_plan"},
+            "execute": True,
+            "confirm_write": True,
+            "_managed_progress": {
+                "sketch_name": str(ownership.get("groove_sketch_name") or ""),
+                "feature_name": str(ownership.get("groove_feature_name") or ""),
+            },
+        }
+        if family == "v_belt":
+            groove_result = handle_apply_v_belt_grooves(groove_payload)
+        else:
+            groove_result = handle_apply_poly_v_grooves(groove_payload)
+        if not groove_result.get("success"):
+            raise RuntimeError("Managed pulley groove verification failed")
+
+        current_stage = "final_readback"
+        report_progress(96, "verify_result", name=str(plan.get("name") or "Geomwright pulley"))
+        final_body = groove_result.get("body_after") or {}
+        final_rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+        if final_rebuild_ok is False:
+            raise RuntimeError("Managed pulley final rebuild returned False")
+        report_progress(100, "completed", name=str(plan.get("name") or "Geomwright pulley"))
+        semantic_outputs = {
+            "member.blank_feature": _v_belt_object_reference(blank_feature, "member.blank_feature"),
+            "member.blank_sketch": _v_belt_object_reference(blank_sketch, "member.blank_sketch"),
+        }
+        semantic_outputs.update(dict(groove_result.get("semantic_outputs") or {}))
+        return {
+            "ok": True,
+            "success": True,
+            "stage": "executed",
+            "executed": True,
+            "saved": False,
+            "closed": False,
+            "document": describe_document(doc3, app),
+            "ownership": ownership,
+            "blank": {
+                "feature": _v_belt_object_reference(blank_feature, "member.blank_feature"),
+                "sketch": _v_belt_object_reference(blank_sketch, "member.blank_sketch"),
+                "body_after": blank_body,
+                "variables": blank_result.get("variables"),
+            },
+            "grooves": groove_result,
+            "semantic_outputs": semantic_outputs,
+            "verification": {
+                "ok": True,
+                "single_body": int(final_body.get("body_count") or 0) == 1,
+                "blank_rebuild_ok": rebuild_ok,
+                "final_rebuild_ok": final_rebuild_ok,
+                "groove_verification": groove_result.get("verification"),
+            },
+            "steps": steps_report,
+        }
+    except Exception as exc:
+        raise RuntimeError(
+            "create_managed_pulley failed at %s: %s | steps=%s"
+            % (current_stage, exc, json.dumps(steps_report, ensure_ascii=False))
+        )
+
+
+def _managed_pulley_plan_variables(plan):
+    variables = []
+    for operation in (((plan.get("blank") or {}).get("preview") or {}).get("operations") or []):
+        if operation.get("operation") == "add_variables":
+            variables.extend(dict(item) for item in operation.get("variables") or [])
+    variables.extend(
+        dict(item)
+        for item in (((plan.get("grooves") or {}).get("params") or {}).get("variables") or [])
+    )
+    source = dict((plan.get("ownership") or {}).get("source_profile") or {})
+    variables.extend([
+        {"name": "GW_PROFILE_COUNT", "value": int(source.get("groove_count") or 1), "expression": None},
+        {"name": "GW_STANDARD_CODE", "value": int(source.get("standard_code") or 1), "expression": None},
+        {"name": "GW_CUSTOM_ACTIVE", "value": 1 if source.get("custom_profile") else 0, "expression": None},
+        {"name": "GW_OVERRIDE_ACTIVE", "value": 1 if source.get("profile_overrides") else 0, "expression": None},
+    ])
+    if source.get("datum_diameter") is not None:
+        variables.append({"name": "GW_DATUM_D", "value": float(source["datum_diameter"]), "expression": None})
+    if source.get("effective_diameter") is not None:
+        variables.append({"name": "GW_EFFECTIVE_D", "value": float(source["effective_diameter"]), "expression": None})
+    metadata_fields = {
+        "datum_width": "DATUM_W",
+        "approximate_top_width": "TOP_W",
+        "datum_offset": "DATUM_OFF",
+        "groove_pitch": "PITCH",
+        "edge_distance": "EDGE",
+        "groove_depth": "DEPTH",
+        "groove_angle_degrees": "ANGLE",
+        "minimum_datum_diameter": "MIN_D",
+        "standard_top_edge_radius": "FILLET_R",
+    }
+    for prefix, values in (("GW_CUSTOM_", source.get("custom_profile") or {}), ("GW_OVERRIDE_", source.get("profile_overrides") or {})):
+        for field, suffix in metadata_fields.items():
+            if values.get(field) is not None:
+                variables.append({"name": prefix + suffix, "value": float(values[field]), "expression": None})
+    return variables
+
+
+def _managed_pulley_owned_objects(model_container, inspection):
+    references = set(int(value) for value in inspection.get("owned_references") or [])
+    result = []
+    for kind, collection in (
+        ("sketch", safe_get(model_container, "Sketchs")),
+        ("rotated", safe_get(model_container, "Rotateds")),
+        ("fillet", safe_get(model_container, "Fillets")),
+    ):
+        for item in iter_collection(collection):
+            reference = safe_get(item, "Reference")
+            if reference is not None and int(reference) in references:
+                result.append((kind, item, str(safe_get(item, "Name") or "")))
+    return result
+
+
+def _delete_model_object(model_container, kind, target):
+    collection = safe_get(model_container, {"sketch": "Sketchs", "rotated": "Rotateds", "fillet": "Fillets"}[kind])
+    for index in range(collection_count(collection)):
+        item = get_collection_item(collection, index)
+        if item == target:
+            before_count = collection_count(collection)
+            owner = safe_get(item, "Owner")
+            owner_deleter = safe_get(owner, "Delete")
+            if callable(owner_deleter):
+                result = owner_deleter()
+                deleted = result is None or bool(result)
+            else:
+                deleted = _delete_feature_from_collection(collection, item, index)
+            if not deleted:
+                raise RuntimeError("Failed to delete managed pulley " + kind)
+            if collection_count(collection) >= before_count:
+                raise RuntimeError("Managed pulley %s deletion was not confirmed" % kind)
+            return
+    raise RuntimeError("Managed pulley %s was not found for deletion" % kind)
+
+
+def _managed_pulley_topology_preflight(model_container, inspection):
+    owned = set(int(value) for value in inspection.get("owned_references") or [])
+    unsupported = []
+    for kind, collection_name in (
+        ("sketch", "Sketchs"),
+        ("rotated", "Rotateds"),
+        ("fillet", "Fillets"),
+        ("extrusion", "Extrusions"),
+        ("evolution", "Evolutions"),
+        ("feature_pattern", "FeaturePatterns"),
+    ):
+        for item in iter_collection(safe_get(model_container, collection_name)):
+            reference = safe_get(item, "Reference")
+            if reference is None or int(reference) not in owned:
+                unsupported.append({"kind": kind, "name": str(safe_get(item, "Name") or ""), "reference": reference})
+    return {"ok": not unsupported, "unsupported_downstream": unsupported}
+
+
+def _delete_managed_groove_branch(model_container, inspection):
+    objects = _managed_pulley_owned_objects(model_container, inspection)
+    groove_objects = []
+    for kind, item, name in objects:
+        if kind == "fillet" or name.startswith(("V-belt grooves ", "Poly-V grooves ")):
+            groove_objects.append((kind, item, name))
+    deleted = []
+    for kind in ("fillet", "rotated", "sketch"):
+        for object_kind, item, name in list(groove_objects):
+            if object_kind == kind:
+                _delete_model_object(model_container, kind, item)
+                deleted.append({"kind": kind, "name": name})
+    return deleted
+
+
+def _apply_managed_groove_plan(document, plan):
+    target = plan.get("target") or {}
+    groove_payload = {
+        "document_id": describe_document(document, make_app()).get("id"),
+        "_document": document,
+        "preview": plan.get("profile_preview") or {},
+        "plan": plan.get("grooves") or {},
+        "target": target,
+        "host_preflight": {"ok": True, "source": "managed_pulley_topology_replacement"},
+        "execute": True,
+        "confirm_write": True,
+    }
+    if plan.get("family") == "v_belt":
+        return handle_apply_v_belt_grooves(groove_payload)
+    return handle_apply_poly_v_grooves(groove_payload)
+
+
+def handle_update_managed_pulley(payload):
+    if not bool(payload.get("execute", False)) or payload.get("confirm_write") is not True:
+        raise ValueError("execute=true and confirm_write=true are required")
+    document_id = payload.get("document_id")
+    block_id = str(payload.get("block_id") or "")
+    plan = payload.get("plan") or {}
+    if not document_id or not block_id:
+        raise ValueError("document_id and block_id are required")
+    if plan.get("stage") != "managed_pulley_plan" or int(plan.get("plan_version") or 0) != 1:
+        raise ValueError("A managed_pulley_plan version 1 is required")
+
+    app = make_app()
+    document = resolve_document_strict(app, document_id)
+    if document is None:
+        raise RuntimeError("Managed pulley document was not found by its exact runtime ID")
+    activate = safe_get(document, "Activate")
+    if callable(activate):
+        activate()
+    doc3 = cast_document_3d(document)
+    part = safe_get(doc3, "TopPart") if doc3 is not None else None
+    model_container = cast_model_container(part) if part is not None else None
+    if doc3 is None or part is None or model_container is None:
+        raise RuntimeError("Managed pulley update requires a writable 3D top part")
+
+    before = handle_inspect_managed_pulley({"_document": doc3})
+    if not before.get("recognized") or before.get("block_id") != block_id:
+        raise RuntimeError("Managed pulley block is stale or no longer recognized")
+    family = str(plan.get("family") or "")
+    requested = dict(plan.get("profile_request") or {})
+    current = dict(before.get("profile_request") or {})
+    if family != before.get("family"):
+        raise ValueError("Managed pulley family cannot be changed in place")
+    topology_change = int(requested.get("groove_count") or 0) != int(current.get("groove_count") or 0)
+    topology_change = topology_change or (family == "v_belt" and (
+        requested.get("designation") != current.get("designation")
+        or requested.get("standard_system") != current.get("standard_system")
+    ))
+    rollback_plan = payload.get("rollback_plan") or {}
+    if family == "v_belt" and rollback_plan:
+        old_fillet = (rollback_plan.get("grooves") or {}).get("top_edge_fillet") or {}
+        new_fillet = (plan.get("grooves") or {}).get("top_edge_fillet") or {}
+        topology_change = topology_change or bool(old_fillet) != bool(new_fillet)
+        topology_change = topology_change or abs(float(old_fillet.get("radius") or 0.0) - float(new_fillet.get("radius") or 0.0)) > 1e-9
+    if topology_change:
+        if rollback_plan.get("stage") != "managed_pulley_plan" or rollback_plan.get("family") != family:
+            raise ValueError("A matching rollback managed_pulley_plan is required for topology replacement")
+        preflight = _managed_pulley_topology_preflight(model_container, before)
+        if not preflight.get("ok"):
+            raise RuntimeError("Topology replacement is blocked by non-owned downstream operations: " + json.dumps(preflight["unsupported_downstream"], ensure_ascii=False))
+
+    planned = _managed_pulley_plan_variables(plan)
+    existing = {
+        str(safe_get(item, "Name") or ""): item
+        for item in _iter_operation_variables(part)
+        if str(safe_get(item, "Name") or "")
+    }
+    planned_names = set(str(item.get("name") or "") for item in planned)
+    missing = sorted(name for name in planned_names if name not in existing)
+    if missing and not topology_change and any(not name.startswith(("GW_CUSTOM_", "GW_OVERRIDE_")) for name in missing):
+        raise RuntimeError("Managed pulley is missing update variables: " + ", ".join(missing))
+    snapshots = {
+        name: {"expression": safe_get(existing[name], "Expression"), "value": safe_get(existing[name], "Value")}
+        for name in planned_names
+        if name in existing
+    }
+    objects = _managed_pulley_owned_objects(model_container, before)
+    rebuild = safe_get(doc3, "RebuildDocument")
+    try:
+        if topology_change:
+            report_progress(10, "replace_topology", name=str(before.get("display_name") or "Geomwright pulley"))
+            _delete_managed_groove_branch(model_container, before)
+        report_progress(20, "update_variables", names=sorted(planned_names))
+        variable_report = _apply_part_variables(part, planned)
+        if not variable_report.get("ok"):
+            raise RuntimeError("Not all managed pulley variables were updated")
+        if topology_change:
+            live_names = set(
+                str(safe_get(item, "Name") or "")
+                for item in _iter_operation_variables(part)
+                if str(safe_get(item, "Name") or "")
+            )
+            missing_after_delete = [item for item in planned if str(item.get("name") or "") not in live_names]
+            if missing_after_delete:
+                missing_report = _apply_part_variables(part, missing_after_delete)
+                if not missing_report.get("ok"):
+                    raise RuntimeError("Topology replacement variables could not be recreated")
+        ownership = dict(plan.get("ownership") or {})
+        groove_names = dict((plan.get("grooves") or {}).get("entity_names") or {})
+        for kind, item, old_name in objects:
+            if kind == "fillet" or old_name.startswith(("V-belt grooves ", "Poly-V grooves ")):
+                continue
+            new_name = old_name
+            if kind == "sketch" and " blank profile" in old_name.lower():
+                new_name = ownership.get("blank_sketch_name") or old_name
+            elif kind == "rotated" and old_name.lower().endswith(" blank"):
+                new_name = ownership.get("blank_feature_name") or old_name
+            elif kind == "sketch" and old_name.startswith(("V-belt grooves ", "Poly-V grooves ")):
+                new_name = groove_names.get("sketch") or old_name
+            elif kind == "rotated" and old_name.startswith(("V-belt grooves ", "Poly-V grooves ")):
+                new_name = groove_names.get("cut") or old_name
+            item.Name = str(new_name)
+            _update_feature_object(item)
+        replacement_result = None
+        if topology_change:
+            blank_rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+            if blank_rebuild_ok is False:
+                raise RuntimeError("Managed pulley blank rebuild before topology replacement returned False")
+            replacement_result = _apply_managed_groove_plan(doc3, plan)
+            if not replacement_result.get("success"):
+                raise RuntimeError("Replacement managed groove build failed verification")
+        report_progress(70, "rebuild_updated_model", name=str(plan.get("name") or "Geomwright pulley"))
+        rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+        if rebuild_ok is False:
+            raise RuntimeError("Managed pulley rebuild returned False")
+        body = _active_api5_primary_body_metrics()
+        if int(body.get("body_count") or 0) != 1 or float(body.get("volume") or 0.0) <= 0.0:
+            raise RuntimeError("Managed pulley rebuild did not preserve one positive-volume body")
+        after = handle_inspect_managed_pulley({"_document": doc3})
+        if not after.get("recognized") or after.get("family") != family:
+            raise RuntimeError("Managed pulley ownership fingerprint was lost after rebuild")
+        actual = dict(after.get("profile_request") or {})
+        for key, expected in requested.items():
+            value = actual.get(key)
+            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                if value is None or abs(float(value) - float(expected)) > 1e-6:
+                    raise RuntimeError("Managed pulley profile readback mismatch for " + str(key))
+            elif value != expected:
+                raise RuntimeError("Managed pulley profile readback mismatch for " + str(key))
+        report_progress(100, "updated", name=str(after.get("display_name") or plan.get("name") or "Geomwright pulley"))
+        return {"ok": True, "success": True, "stage": "updated", "update_mode": "topology_replacement" if topology_change else "variable_rebuild", "document": describe_document(doc3, app), "before": before, "after": after, "variables": variable_report, "replacement": replacement_result, "body": body, "rebuild_ok": rebuild_ok}
+    except Exception as exc:
+        rollback = {"attempted": True, "ok": False, "error": None}
+        try:
+            if topology_change:
+                partial = handle_inspect_managed_pulley({"_document": doc3})
+                _delete_managed_groove_branch(model_container, partial)
+            restored = _apply_part_variables(part, [dict({"name": name}, **snapshot) for name, snapshot in snapshots.items()])
+            if topology_change:
+                rollback_variables = _managed_pulley_plan_variables(rollback_plan)
+                live_names = set(str(safe_get(item, "Name") or "") for item in _iter_operation_variables(part))
+                missing_rollback = [item for item in rollback_variables if str(item.get("name") or "") not in live_names]
+                if missing_rollback:
+                    _apply_part_variables(part, missing_rollback)
+            for _kind, item, old_name in objects:
+                item.Name = old_name
+                _update_feature_object(item)
+            rollback_rebuild = bool(rebuild()) if callable(rebuild) else None
+            if topology_change:
+                restored_branch = _apply_managed_groove_plan(doc3, rollback_plan)
+                if not restored_branch.get("success"):
+                    raise RuntimeError("Rollback groove branch verification failed")
+                rollback_rebuild = bool(rebuild()) if callable(rebuild) else None
+            rollback.update({"ok": bool(restored.get("ok")) and rollback_rebuild is not False, "rebuild_ok": rollback_rebuild})
+        except Exception as rollback_exc:
+            rollback["error"] = str(rollback_exc)
+        raise RuntimeError("update_managed_pulley failed: %s | rollback=%s" % (exc, json.dumps(rollback, ensure_ascii=False)))
+
+
+def handle_inspect_managed_pulley(payload):
+    document_id = payload.get("document_id")
+    internal_document = payload.get("_document")
+    if not document_id and internal_document is None:
+        raise ValueError("document_id is required")
+    app = make_app()
+    document = internal_document if internal_document is not None else resolve_document(app, document_id)
+    if document is None:
+        raise RuntimeError("Managed pulley document was not found")
+    doc3 = cast_document_3d(document)
+    part = safe_get(doc3, "TopPart") if doc3 is not None else None
+    model_container = cast_model_container(part) if part is not None else None
+    if doc3 is None or part is None or model_container is None:
+        raise RuntimeError("Managed pulley inspection requires a writable 3D top part")
+
+    variables = []
+    for variable in _iter_operation_variables(part):
+        name = str(safe_get(variable, "Name") or "")
+        if not name:
+            continue
+        variables.append(
+            {
+                "name": name,
+                "expression": safe_get(variable, "Expression"),
+                "value": safe_get(variable, "Value"),
+                "note": safe_get(variable, "ParameterNote"),
+                "reference": safe_get(variable, "Reference"),
+            }
+        )
+    variable_names = set(item["name"] for item in variables)
+
+    sketches = [
+        _v_belt_object_reference(item, "sketch")
+        for item in iter_collection(safe_get(model_container, "Sketchs"))
+    ]
+    rotateds = [
+        _v_belt_object_reference(item, "rotated")
+        for item in iter_collection(safe_get(model_container, "Rotateds"))
+    ]
+    fillets = [
+        _v_belt_object_reference(item, "fillet")
+        for item in iter_collection(safe_get(model_container, "Fillets"))
+    ]
+    sketch_names = [str(item.get("name") or "") for item in sketches]
+    feature_names = [str(item.get("name") or "") for item in rotateds]
+    has_blank_variables = {"PULLEY_D1", "PULLEY_L1"}.issubset(variable_names)
+    has_blank_sketch = any(" blank profile" in name.lower() for name in sketch_names)
+    has_blank_feature = any(name.lower().endswith(" blank") for name in feature_names)
+    has_v_belt = any(name.startswith("VB_") for name in variable_names) and any(
+        name.startswith("V-belt grooves ") for name in sketch_names + feature_names
+    )
+    has_poly_v = any(name.startswith("PV_") for name in variable_names) and any(
+        name.startswith("Poly-V grooves ") for name in sketch_names + feature_names
+    )
+    family = "v_belt" if has_v_belt else ("poly_v" if has_poly_v else None)
+    evidence = {
+        "blank_variables": has_blank_variables,
+        "blank_sketch": has_blank_sketch,
+        "blank_feature": has_blank_feature,
+        "family_feature_set": family is not None,
+    }
+    managed = all(evidence.values())
+    values = {item["name"]: item.get("value") for item in variables}
+    metadata_fields = {
+        "datum_width": "DATUM_W",
+        "approximate_top_width": "TOP_W",
+        "datum_offset": "DATUM_OFF",
+        "groove_pitch": "PITCH",
+        "edge_distance": "EDGE",
+        "groove_depth": "DEPTH",
+        "groove_angle_degrees": "ANGLE",
+        "minimum_datum_diameter": "MIN_D",
+        "standard_top_edge_radius": "FILLET_R",
+    }
+    all_names = sketch_names + feature_names
+    profile_request = None
+    display_name = None
+    if family == "v_belt":
+        match = next((re.search(r"V-belt grooves (.+?) x(\d+)", name) for name in all_names if name.startswith("V-belt grooves ")), None)
+        if match:
+            profile_request = {
+                "designation": match.group(1),
+                "datum_diameter": values.get("GW_DATUM_D"),
+                "groove_count": int(round(float(values.get("GW_PROFILE_COUNT") or match.group(2)))),
+                "standard_system": "gost_20889_88" if int(round(float(values.get("GW_STANDARD_CODE") or 1))) == 2 else "din_iso",
+            }
+            custom_profile = {
+                field: values.get("GW_CUSTOM_" + suffix)
+                for field, suffix in metadata_fields.items()
+                if values.get("GW_CUSTOM_" + suffix) is not None
+            }
+            profile_overrides = {
+                field: values.get("GW_OVERRIDE_" + suffix)
+                for field, suffix in metadata_fields.items()
+                if values.get("GW_OVERRIDE_" + suffix) is not None
+            }
+            custom_active = values.get("GW_CUSTOM_ACTIVE")
+            override_active = values.get("GW_OVERRIDE_ACTIVE")
+            if match.group(1) == "CUSTOM" and custom_profile and (custom_active is None or float(custom_active) > 0.5):
+                custom_profile.update({"designation": "CUSTOM", "family": "custom"})
+                profile_request["custom_profile"] = custom_profile
+            if profile_overrides and (override_active is None or float(override_active) > 0.5):
+                profile_request["profile_overrides"] = profile_overrides
+            display_name = "V-belt %s x%s" % (match.group(1), match.group(2))
+    elif family == "poly_v":
+        match = next((re.search(r"Poly-V grooves (.+?) x(\d+)", name) for name in all_names if name.startswith("Poly-V grooves ")), None)
+        if match:
+            profile_request = {
+                "designation": match.group(1),
+                "effective_diameter": values.get("GW_EFFECTIVE_D") or values.get("PV_DE"),
+                "groove_count": int(round(float(values.get("GW_PROFILE_COUNT") or values.get("PV_COUNT") or match.group(2)))),
+            }
+            display_name = "Poly-V %s x%s" % (match.group(1), match.group(2))
+    owned_references = sorted(
+        int(item.get("reference"))
+        for item in sketches + rotateds + fillets
+        if item.get("reference") and (
+            " blank" in str(item.get("name") or "").lower()
+            or str(item.get("name") or "").startswith(("V-belt grooves ", "Poly-V grooves "))
+        )
+    )
+    return {
+        "ok": True,
+        "recognized": managed,
+        "schema": "geomwright.managed_pulley" if managed else None,
+        "version": 1 if managed else None,
+        "family": family,
+        "block_id": ("managed-pulley:" + "-".join(str(item) for item in owned_references)) if managed else None,
+        "display_name": display_name,
+        "profile_request": profile_request,
+        "owned_references": owned_references,
+        "document": describe_document(document, app),
+        "evidence": evidence,
+        "variables": variables,
+        "sketches": sketches,
+        "rotated_features": rotateds,
+        "fillet_features": fillets,
+        "scan_scope": {
+            "all_part_variables": True,
+            "all_sketches": True,
+            "all_rotated_features": True,
+            "requires_last_feature": False,
+        },
+    }
+
+
+def handle_studio_workspace_snapshot(payload):
+    app = make_app()
+    documents = list(iter_collection(safe_get(app, "Documents")))
+    items = []
+    for index, document in enumerate(documents):
+        description = describe_document(document, app, index)
+        entry = {"document": description, "blocks": [], "operations": [], "supported": False}
+        doc3 = cast_document_3d(document)
+        if doc3 is None or int(description.get("type") or 0) != 10024:
+            items.append(entry)
+            continue
+        entry["supported"] = True
+        try:
+            inspection = handle_inspect_managed_pulley({"_document": doc3})
+            if inspection.get("recognized"):
+                entry["blocks"].append(
+                    {
+                        "id": inspection.get("block_id"),
+                        "schema": inspection.get("schema"),
+                        "version": inspection.get("version"),
+                        "module": inspection.get("family"),
+                        "name": inspection.get("display_name"),
+                        "profile": inspection.get("profile_request"),
+                        "owned_references": inspection.get("owned_references") or [],
+                        "editable": bool(
+                            inspection.get("profile_request")
+                            and all(value is not None for value in inspection.get("profile_request").values())
+                        ),
+                    }
+                )
+            owned = set(inspection.get("owned_references") or [])
+            model_container = cast_model_container(safe_get(doc3, "TopPart"))
+            for collection_name, accessors in MODEL_OBJECT_COLLECTION_SPECS:
+                collection, _accessor, _errors = _resolve_model_object_collection(model_container, accessors)
+                for model_object in iter_collection(collection):
+                    reference = safe_get(model_object, "Reference")
+                    entry["operations"].append(
+                        {
+                            "reference": reference,
+                            "name": str(safe_get(model_object, "Name") or collection_name),
+                            "kind": collection_name,
+                            "owned": reference in owned,
+                            "valid": safe_get(model_object, "Valid") is not False,
+                        }
+                    )
+        except Exception as exc:
+            entry["diagnostic"] = str(exc)
+        items.append(entry)
+    return {
+        "ok": True,
+        "connected": True,
+        "documents": items,
+        "active_runtime_id": next(
+            (item["document"].get("runtime_id") for item in items if item["document"].get("active")),
+            None,
+        ),
+    }
+
+
 def dispatch(request):
+    global _REQUIRE_VISIBLE_KOMPAS
     action = request.get("action")
-    payload = request.get("payload") or {}
+    payload = dict(request.get("payload") or {})
+    _REQUIRE_VISIBLE_KOMPAS = bool(payload.pop("_require_visible_kompas", False))
 
     if action == "get_session_state":
         return get_session_state()
     if action == "list_documents":
         return handle_list_documents()
+    if action == "activate_document":
+        return handle_activate_document(payload)
     if action == "launch_native_module_command":
         return handle_launch_native_module_command(payload)
     if action == "probe_native_entrypoint_loader_hosted":
@@ -26572,6 +27354,14 @@ def dispatch(request):
         return handle_apply_v_belt_grooves(payload)
     if action == "apply_poly_v_grooves":
         return handle_apply_poly_v_grooves(payload)
+    if action == "create_managed_pulley":
+        return handle_create_managed_pulley(payload)
+    if action == "update_managed_pulley":
+        return handle_update_managed_pulley(payload)
+    if action == "inspect_managed_pulley":
+        return handle_inspect_managed_pulley(payload)
+    if action == "studio_workspace_snapshot":
+        return handle_studio_workspace_snapshot(payload)
     raise RuntimeError("Unsupported action: %s" % action)
 
 

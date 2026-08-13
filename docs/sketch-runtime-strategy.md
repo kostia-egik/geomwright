@@ -23,7 +23,7 @@ Current baseline exists in `src/kompas_mcp/sketch_runtime/`:
 
 These modules are intentionally dependency-free and do not call KOMPAS/COM yet. They are the first pure-python preflight/readback layer that future sketch builders can use before and after executing live commands.
 
-Цель документа - зафиксировать первый нижний слой разработки `kompas-mcp`, который
+Цель документа - зафиксировать первый нижний слой разработки Geomwright, который
 снимает с модели ручное управление мелкими, но постоянно повторяющимися действиями
 КОМПАСа.
 

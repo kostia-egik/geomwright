@@ -111,6 +111,48 @@ class _FakeFailingOperationObject(_FakeOperationObject):
 
 
 class BridgeVisibilityTests(unittest.TestCase):
+    def test_make_app_attaches_to_visible_running_instance_when_required(self) -> None:
+        app7 = object()
+        app5 = types.SimpleNamespace(
+            Visible=True,
+            ActivateControllerAPI=lambda: True,
+            ksGetApplication7=lambda: app7,
+        )
+        client = sys.modules["win32com.client"]
+        original = getattr(client, "GetActiveObject", None)
+        client.GetActiveObject = lambda _progid: app5
+        BRIDGE._REQUIRE_VISIBLE_KOMPAS = True
+        try:
+            self.assertIs(BRIDGE.make_app(), app7)
+            self.assertIs(BRIDGE._APP5, app5)
+        finally:
+            BRIDGE._REQUIRE_VISIBLE_KOMPAS = False
+            if original is None:
+                del client.GetActiveObject
+            else:
+                client.GetActiveObject = original
+
+    def test_make_app_promotes_running_hidden_instance_to_visible(self) -> None:
+        client = sys.modules["win32com.client"]
+        original = getattr(client, "GetActiveObject", None)
+        app7 = object()
+        app5 = types.SimpleNamespace(
+            Visible=False,
+            ActivateControllerAPI=lambda: True,
+            ksGetApplication7=lambda: app7,
+        )
+        client.GetActiveObject = lambda _progid: app5
+        BRIDGE._REQUIRE_VISIBLE_KOMPAS = True
+        try:
+            self.assertIs(BRIDGE.make_app(), app7)
+            self.assertTrue(app5.Visible)
+        finally:
+            BRIDGE._REQUIRE_VISIBLE_KOMPAS = False
+            if original is None:
+                del client.GetActiveObject
+            else:
+                client.GetActiveObject = original
+
     def test_set_model_object_hidden_updates_hidden_flag(self) -> None:
         obj = _FakeHiddenObject(hidden=False)
 

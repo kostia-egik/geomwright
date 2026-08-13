@@ -10,7 +10,7 @@ export is called.
 
 This document is the working strategy for one narrow question:
 
-How far should `kompas-mcp` go in trying to reuse the native KOMPAS Spring
+How far should Geomwright go in trying to reuse the native KOMPAS Spring
 module, and where should we stop and continue with our own geometry path?
 
 The current answer is pragmatic:
@@ -54,7 +54,7 @@ These are the real interaction channels worth tracking.
 
 | Channel | Status | Production value | Current conclusion |
 | --- | --- | --- | --- |
-| Automation API 7 / 3D COM | Supported and already used | High | Mainline path for `kompas-mcp` |
+| Automation API 7 / 3D COM | Supported and already used | High | Mainline path for Geomwright |
 | Legacy Automation API 5 surfaces | Supported but legacy | Medium | Use only where API 7 is missing |
 | Registered procedures libraries via library manager | Supported for discovery/launch | Medium | Good for command discovery and manual launch, not yet a parameter API |
 | Native module manifest + DB inspection | Read-only and already implemented | High for research | Best source for command map, catalogs, and workflow hints |
