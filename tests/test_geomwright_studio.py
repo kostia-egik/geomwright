@@ -10,9 +10,9 @@ from geomwright.studio.registry import get_module, list_modules, managed_pulley_
 def test_registry_exposes_schema_driven_managed_belt_modules() -> None:
     modules = list_modules()
 
-    assert [item["kind"] for item in modules] == ["v_belt", "poly_v"]
+    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt"]
     assert all(item["capabilities"] == {"preview": True, "build": True, "inspect": False} for item in modules)
-    for kind in ("v_belt", "poly_v"):
+    for kind in ("v_belt", "poly_v", "flat_belt"):
         module = get_module(kind)
         spec = module.spec()
         validated = module.request_model.model_validate(spec["defaults"])
@@ -31,6 +31,8 @@ def test_registry_adapts_both_belt_previews_to_one_canvas_contract() -> None:
     assert v_belt["ok"] is True
     assert v_belt["family"] == "v_belt"
     assert len(v_belt["closed_points"]) == 2
+    assert len(v_belt["feature_paths"]) == 2
+    assert all(path[0] != path[-1] for path in v_belt["feature_paths"])
     assert len(v_belt["guide_paths"]) == 3
     assert v_belt["summary"]["datum_diameter_mm"] == pytest.approx(100.0)
     assert [item["key"] for item in v_belt["dimensions"]] == [
@@ -62,6 +64,8 @@ def test_registry_adapts_both_belt_previews_to_one_canvas_contract() -> None:
     assert poly_v["ok"] is True
     assert poly_v["family"] == "poly_v"
     assert len(poly_v["closed_points"]) == 1
+    assert len(poly_v["feature_paths"]) == 6
+    assert all(path[0] != path[-1] for path in poly_v["feature_paths"])
     assert len(poly_v["guide_paths"]) == 2
     assert poly_v["summary"]["effective_diameter_mm"] == pytest.approx(80.0)
     assert [item["key"] for item in poly_v["dimensions"]] == [
@@ -93,6 +97,7 @@ def test_registry_adapts_both_belt_previews_to_one_canvas_contract() -> None:
         assert result["bounds"]["y_min"] < result["bounds"]["y_max"]
         assert len(result["phantom_bodies"]) == 1
         assert result["phantom_bodies"][0]["truncated"] is True
+        assert len(result["phantom_bodies"][0]["surface"]) > 2
         assert result["phantom_bodies"][0]["inner_radius"] < result["summary"]["root_diameter_mm"] / 2.0
         assert result["module"]["capabilities"]["build"] is True
 
@@ -117,6 +122,180 @@ def test_managed_pulley_plan_owns_a_new_blank_and_internal_target_contract() -> 
 
     assert v_plan["grooves"]["axial_center"] == pytest.approx(v_plan["target"]["axial_max"] / 2.0)
     assert poly_plan["grooves"]["axial_center"] == pytest.approx(poly_plan["target"]["axial_max"] / 2.0)
+
+
+def test_flat_belt_pulley_preview_and_managed_plan_cover_both_rim_profiles() -> None:
+    cylindrical = preview_module("flat_belt", get_module("flat_belt").defaults)
+    crowned_request = {
+        "outer_diameter": 160.0,
+        "face_width": 50.0,
+        "crown_height": 1.5,
+    }
+    crowned = preview_module("flat_belt", crowned_request)
+
+    assert cylindrical["family"] == "flat_belt"
+    assert cylindrical["summary"]["edge_diameter_mm"] == pytest.approx(160.0)
+    assert cylindrical["warnings"] == []
+    assert crowned["summary"]["edge_diameter_mm"] == pytest.approx(157.0)
+    assert crowned["summary"]["crown_radius_mm"] == pytest.approx(209.08333333333334)
+    assert crowned["feature_paths"] == [crowned["guide_paths"][0]]
+    assert crowned["feature_paths"][0][0][1] > 0.0
+    assert crowned["feature_paths"][0][-1][1] > 0.0
+    assert crowned["phantom_bodies"][0]["surface"] == crowned["feature_paths"][0]
+    assert len(crowned["closed_points"][0]) > 20
+    assert crowned["closed_points"][0][len(crowned["closed_points"][0]) // 2][1] > crowned["summary"]["edge_diameter_mm"] / 2.0
+    assert [item["key"] for item in crowned["dimensions"]] == [
+        "face_width",
+        "outer_diameter",
+        "crown_height",
+    ]
+    assert crowned["warning_items"][0]["code"] == "explicit_nonstandard_crown"
+    diameter_dimensions = [item for item in crowned["dimensions"] if item["orientation"] == "diameter"]
+    assert [item["symbol"] for item in diameter_dimensions] == ["⌀D"]
+    assert all(item.get("start") and item.get("end") for item in diameter_dimensions)
+
+    plan = managed_pulley_plan("flat_belt", crowned_request)
+    assert plan["family"] == "flat_belt"
+    assert plan["member"]["stage"] == "flat_belt_pulley_cad_plan"
+    assert plan["member"]["operation"] == "boss_rotation"
+    assert plan["ownership"]["required_variables"] == [
+        "PULLEY_D1",
+        "PULLEY_L1",
+        "FP_OR",
+        "FP_CROWN",
+        "FP_PROFILE",
+    ]
+    entities = plan["member"]["bridge_preview"]["operations"][1]["profile_entities"]
+    assert [item["kind"] for item in entities] == ["line", "line", "arc", "line"]
+    assert entities[2]["direction"] is False
+    params = plan["member"]["params"]
+    assert params["require_parameterization"] is True
+    assert params["require_fully_defined"] is True
+    assert params["sketch"]["expected_dimension_count"] == 3
+    assert {item["variable_name"] for item in params["dimensions"]} == {"PULLEY_L1", "FP_CENTER_Y", "FP_ARC_R"}
+    variables = {item["name"]: item for item in plan["member"]["params"]["variables"]}
+    assert variables["FP_OR"]["expression"] == "PULLEY_D1/2"
+    assert variables["FP_ARC_R"]["expression"] == "(PULLEY_L1^2/4 + FP_CROWN^2)/(2*FP_CROWN)"
+    assert variables["FP_CENTER_Y"]["expression"] == "FP_ARC_R - FP_OR"
+
+
+def test_flat_belt_pulley_infers_profile_from_crown_height_and_rejects_impossible_crown() -> None:
+    spec = get_module("flat_belt").spec()
+    assert "profile" not in spec["schema"]["properties"]
+    assert "profile" not in spec["defaults"]
+    assert preview_module("flat_belt", {**spec["defaults"], "crown_height": 0.0})["summary"]["profile"] == "cylindrical"
+    assert preview_module("flat_belt", {**spec["defaults"], "crown_height": 1.0})["summary"]["profile"] == "crowned"
+    assert "rim_thickness" not in spec["schema"]["properties"]
+    assert "rim_thickness" not in spec["defaults"]
+    with pytest.raises(ValueError, match="positive edge radius"):
+        preview_module(
+            "flat_belt",
+            {
+                "outer_diameter": 40.0,
+                "face_width": 20.0,
+                "crown_height": 20.0,
+            },
+        )
+
+
+def test_flat_belt_studio_russian_copy_covers_fields_help_summary_warning_and_progress() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "geomwright" / "studio" / "static" / "i18n.js").read_text(encoding="utf-8")
+
+    expected = [
+        '"module.flat_belt.name": "Плоскоременный шкив"',
+        '"field.outer_diameter": "Наружный диаметр"',
+        '"field.face_width": "Ширина обода"',
+        '"field.crown_height": "Высота выпуклости"',
+        '"field.crown_height.help": "0 — цилиндрический обод;',
+        '"summary.profile": "Форма обода"',
+        '"summary.crown_height_mm": "Высота выпуклости, мм"',
+        '"warning.explicit_nonstandard_crown": "Выпуклость задана явно',
+        '"cad.operation.create_flat_pulley_sketch": "Создание эскиза плоскоременного шкива',
+        '"cad.operation.create_flat_pulley_rotation": "Операция вращения обода',
+    ]
+    assert all(text in source for text in expected)
+
+
+def test_canvas_renders_neutral_bodies_and_unfilled_feature_contours() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "geomwright" / "studio" / "static" / "canvas.js").read_text(encoding="utf-8")
+
+    assert 'context.fillStyle = "rgba(132, 174, 204, 0.055)";' in source
+    assert "(state.data.feature_paths || []).forEach" in source
+    assert "drawPath(path, view, { stroke, lineWidth: 2.5 });" in source
+    assert "drawPath(path, view, { fill, stroke });" not in source
+
+
+def test_studio_cad_plan_status_reads_flat_pulley_dimensions_without_a_target() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "geomwright" / "studio" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "const planDimensions = cadPlanDisplayDimensions(plan);" in source
+    assert "const derived = plan?.profile_preview?.derived || {};" in source
+    assert "outerDiameter: derived.outer_diameter" in source
+    assert "faceWidth: derived.face_width" in source
+    assert "plan.target.outer_diameter" not in source
+
+
+def test_studio_exposes_a_cancel_control_for_running_cad_jobs() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "src" / "geomwright" / "studio" / "templates" / "fields.html").read_text(encoding="utf-8")
+    source = (root / "src" / "geomwright" / "studio" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="cad-cancel-button"' in template
+    assert 'requestJson(`/cad/jobs/${activeCadJobId}/cancel`, { method: "POST" })' in source
+
+
+def test_bundled_bridge_contains_flat_pulley_create_and_ownership_paths() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "bridge" / "kompas_bridge.py").read_text(encoding="utf-8")
+    packaged = (root / "src" / "kompas_mcp" / "assets" / "bridge" / "kompas_bridge.py").read_text(encoding="utf-8")
+
+    assert source == packaged
+    assert "def _build_managed_flat_pulley(" in source
+    assert 'family not in ("v_belt", "poly_v", "flat_belt")' in source
+    assert '{"FP_OR", "FP_T"}.intersection(variable_names)' in source
+    assert 'name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley "))' in source
+    assert '"feature": _v_belt_object_reference(result.get("feature"), "member.functional_feature")' in source
+    assert '"sketch": _v_belt_object_reference(result.get("sketch"), "member.profile_sketch")' in source
+
+
+def test_shared_pulley_body_verification_calls_api5_active_document_accessor() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "bridge" / "kompas_bridge.py").read_text(encoding="utf-8")
+
+    assert 'document5 = safe_get(_APP5, "ActiveDocument3D")' in source
+    assert "if callable(document5):\n        try:\n            document5 = document5()" in source
+
+
+def test_managed_pulley_update_cannot_be_interrupted_mid_transaction() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "geomwright" / "studio" / "app.py").read_text(encoding="utf-8")
+
+    assert "studio_adapter(cancel_event, interruptible=False).update_managed_pulley(" in source
+
+
+def test_flat_belt_preview_is_registered_in_the_public_tool_catalog() -> None:
+    from kompas_mcp.tool_catalog import get_mcp_tool_catalog
+
+    catalog = get_mcp_tool_catalog()
+    category = next(item for item in catalog["categories"] if item["name"] == "transmission_design")
+    assert "preview_flat_belt_pulley" in category["tools"]
 
 
 def test_v_belt_warning_codes_follow_conditions_instead_of_list_positions() -> None:
@@ -238,7 +417,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert health["mode"] == "managed_cad"
     assert health["contract_version"] == 2
     assert "managed_pulley_create_job" in health["capabilities"]
-    assert client.get("/modules").json()["count"] == 2
+    assert client.get("/modules").json()["count"] == 3
 
     spec = client.get("/modules/poly_v/spec")
     assert spec.status_code == 200

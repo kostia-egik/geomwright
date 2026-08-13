@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -37,6 +38,35 @@ class BridgeRunnerResponseTests(unittest.TestCase):
 
     def _runner_context(self, response_payload):
         return _BridgeRunnerContext(response_payload)
+
+    def test_cancellation_terminates_a_running_bridge_process(self) -> None:
+        cancel_event = threading.Event()
+        cancel_event.set()
+        process = _WaitingFakeProcess()
+        with self._runner_context({"ok": True, "data": {}}) as runner:
+            runner.cancel_event = cancel_event
+            with patch("kompas_mcp.bridge_runner.subprocess.Popen", return_value=process):
+                with self.assertRaisesRegex(BridgeError, "cancelled"):
+                    runner.call("create_managed_pulley")
+        self.assertTrue(process.terminated)
+
+
+class _WaitingFakeProcess:
+    def __init__(self) -> None:
+        self.terminated = False
+
+    def poll(self):
+        return 0 if self.terminated else None
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        self.terminated = True
+        return 0
 
 
 class _BridgeRunnerContext:

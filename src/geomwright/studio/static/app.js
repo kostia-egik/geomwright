@@ -21,6 +21,7 @@ const statusDot = document.querySelector("#status-dot");
 const statusText = document.querySelector("#status-text");
 const languageButtons = [...document.querySelectorAll("[data-language]")];
 const cadCreateButton = document.querySelector("#cad-create-button");
+const cadCancelButton = document.querySelector("#cad-cancel-button");
 const cadTitle = document.querySelector("#cad-title");
 const cadDescription = document.querySelector("#cad-description");
 const cadResult = document.querySelector("#cad-result");
@@ -84,6 +85,7 @@ let statusDescriptor = { key: "status.loading", state: "idle", variables: {} };
 let cadPlanKey = null;
 let cadPlanController = null;
 let cadBuildActive = false;
+let activeCadJobId = null;
 let workspaceSnapshot = null;
 let selectedWorkspaceDocumentId = null;
 let selectedWorkspaceBlock = null;
@@ -110,11 +112,29 @@ async function requestJson(url, options = {}) {
   if (!response.ok) {
     const detail = payload.detail;
     const message = Array.isArray(detail)
-      ? detail.map((item) => `${(item.loc || []).join(".")}: ${item.msg}`).join("; ")
+      ? detail.map((item) => localizeValidationError(item)).join("; ")
       : detail || `HTTP ${response.status}`;
     throw new Error(message);
   }
   return payload;
+}
+
+function localizeValidationError(item) {
+  const location = (item.loc || []).filter((part) => part !== "body").join(".");
+  const field = location ? localizedFieldName(location, {}) : "";
+  const context = item.ctx || {};
+  const keyByType = {
+    missing: "error.required",
+    float_parsing: "error.invalid_number",
+    int_parsing: "error.integer_required",
+    greater_than: "error.greater_than",
+    greater_than_equal: "error.greater_than_equal",
+    less_than: "error.less_than",
+    less_than_equal: "error.less_than_equal",
+  };
+  const key = keyByType[item.type] || "error.invalid_value";
+  const message = t(key, item.msg || key, { limit: context.gt ?? context.ge ?? context.lt ?? context.le ?? "" });
+  return field ? `${field}: ${message}` : message;
 }
 
 function updateWorkspaceBusy() {
@@ -416,9 +436,9 @@ function collectPayload() {
     if (!raw) continue;
     if (type === "number" || type === "integer") {
       const value = input.valueAsNumber;
-      if (!Number.isFinite(value)) throw new Error(`${input.name}: invalid number`);
+      if (!Number.isFinite(value)) throw new Error(`${localizedFieldName(input.name, {})}: ${t("error.invalid_number")}`);
       if (type === "integer" && !Number.isInteger(value)) {
-        throw new Error(`${input.name}: expected an integer`);
+        throw new Error(`${localizedFieldName(input.name, {})}: ${t("error.integer_required")}`);
       }
       payload[input.name] = value;
     }
@@ -430,7 +450,7 @@ function collectPayload() {
     for (const input of fieldsContainer.querySelectorAll("[data-custom-profile-field]")) {
       if (!input.value.trim()) continue;
       const value = input.valueAsNumber;
-      if (!Number.isFinite(value)) throw new Error(`${input.dataset.customProfileField}: invalid number`);
+      if (!Number.isFinite(value)) throw new Error(`${t(`custom.field.${input.dataset.customProfileField}`)}: ${t("error.invalid_number")}`);
       customProfile[input.dataset.customProfileField] = value;
     }
     payload.custom_profile = customProfile;
@@ -483,7 +503,7 @@ function renderSummary(values) {
     dt.textContent = t(`summary.${key}`, humanize(key));
     const dd = document.createElement("dd");
     if (typeof value === "number") dd.textContent = formatNumber(value);
-    else if (key === "standard_system") dd.textContent = localizedEnumValue(key, value);
+    else if (key === "standard_system" || key === "profile") dd.textContent = localizedEnumValue(key, value);
     else dd.textContent = String(value);
     summary.append(dt, dd);
   }
@@ -627,10 +647,15 @@ function renderWorkspaceBlockSummary(block) {
 
 function managedBlockName(block) {
   const profile = block.profile || {};
-  const family = block.module === "v_belt" ? "block.v_belt" : "block.poly_v";
+  const family = {
+    v_belt: "block.v_belt",
+    poly_v: "block.poly_v",
+    flat_belt: "block.flat_belt",
+  }[block.module] || "block.generic";
   return t(family, block.name || block.module, {
     designation: profile.designation || "",
     count: profile.groove_count || "",
+    crown: formatNumber(profile.crown_height || 0),
   });
 }
 
@@ -1011,10 +1036,11 @@ async function prepareCadPlan(payload, key = payloadKey(payload)) {
     cadPlanKey = key;
     cadCreateButton.disabled = cadBuildActive || (Boolean(editorContext) && !currentDirtyState());
     cadResult.dataset.state = "ready";
+    const planDimensions = cadPlanDisplayDimensions(plan);
     cadResult.textContent = t("cad.plan_ready", "CAD plan ready", {
       elapsed: formatPlanElapsed(performance.now() - planStartedAt),
-      diameter: formatNumber(plan.target.outer_diameter),
-      width: formatNumber(plan.target.axial_max - plan.target.axial_min),
+      diameter: formatNumber(planDimensions.outerDiameter),
+      width: formatNumber(planDimensions.faceWidth),
     });
   } catch (error) {
     if (error.name === "AbortError" || controller !== cadPlanController) return;
@@ -1024,6 +1050,25 @@ async function prepareCadPlan(payload, key = payloadKey(payload)) {
   } finally {
     if (controller === cadPlanController) cadPlanController = null;
   }
+}
+
+function cadPlanDisplayDimensions(plan) {
+  const target = plan?.target;
+  if (target && Number.isFinite(target.outer_diameter)
+      && Number.isFinite(target.axial_min) && Number.isFinite(target.axial_max)) {
+    return {
+      outerDiameter: target.outer_diameter,
+      faceWidth: target.axial_max - target.axial_min,
+    };
+  }
+  const derived = plan?.profile_preview?.derived || {};
+  if (Number.isFinite(derived.outer_diameter) && Number.isFinite(derived.face_width)) {
+    return {
+      outerDiameter: derived.outer_diameter,
+      faceWidth: derived.face_width,
+    };
+  }
+  throw new Error(t("error.cad_plan_dimensions_missing"));
 }
 
 function formatElapsed(milliseconds) {
@@ -1070,7 +1115,7 @@ async function waitForCadJob(job, startedAt) {
   try {
     while (true) {
       updateProgress();
-      if (job.status === "completed" || job.status === "failed") return job;
+      if (["completed", "failed", "cancelled"].includes(job.status)) return job;
       await new Promise((resolve) => setTimeout(resolve, 500));
       job = await requestJson(`/cad/jobs/${job.id}`);
     }
@@ -1114,6 +1159,7 @@ async function createManagedPulley() {
   const modelName = editorContext?.block?.name || "Geomwright pulley";
   if (!window.confirm(t(updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
   cadBuildActive = true;
+  cadCancelButton.hidden = false;
   cadCreateButton.disabled = true;
   cadResult.dataset.state = "";
   cadResult.textContent = "";
@@ -1134,8 +1180,10 @@ async function createManagedPulley() {
         name: modelName,
       }),
     });
+    activeCadJobId = startedJob.id;
     const job = await waitForCadJob(startedJob, startedAt);
     if (job.status === "failed") throw new Error(job.error || "CAD job failed");
+    if (job.status === "cancelled") throw new Error(t("cad.cancelled"));
     await new Promise((resolve) => setTimeout(resolve, 1000));
     const elapsed = formatElapsed(Date.now() - startedAt);
     cadResult.dataset.state = "ready";
@@ -1181,6 +1229,8 @@ async function createManagedPulley() {
     cadResult.textContent = t("cad.error", error.message, { message: error.message });
   } finally {
     cadBuildActive = false;
+    activeCadJobId = null;
+    cadCancelButton.hidden = true;
     cadProgress.hidden = true;
     cadProgressBar.setAttribute("aria-valuenow", "0");
     cadProgressFill.style.width = "0%";
@@ -1189,6 +1239,20 @@ async function createManagedPulley() {
     cadProgressTime.textContent = "0:00";
     cadCreateButton.disabled = cadPlanKey !== payloadKey(profile)
       || (Boolean(editorContext) && !currentDirtyState());
+  }
+}
+
+async function cancelActiveCadJob() {
+  if (!activeCadJobId) return;
+  cadCancelButton.disabled = true;
+  cadProgressStage.textContent = t("cad.cancelling");
+  try {
+    await requestJson(`/cad/jobs/${activeCadJobId}/cancel`, { method: "POST" });
+  } catch (error) {
+    cadResult.dataset.state = "error";
+    cadResult.textContent = t("cad.error", error.message, { message: error.message });
+  } finally {
+    cadCancelButton.disabled = false;
   }
 }
 
@@ -1283,6 +1347,7 @@ resetButton.addEventListener("click", () => {
   schedulePreview({ immediate: true });
 });
 cadCreateButton.addEventListener("click", createManagedPulley);
+cadCancelButton.addEventListener("click", cancelActiveCadJob);
 workspaceRefreshButton.addEventListener("click", () => refreshWorkspace({ followActive: true }));
 workspaceNewButton.addEventListener("click", async () => {
   editorContext = null;

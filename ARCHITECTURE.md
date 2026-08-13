@@ -163,6 +163,17 @@ The original plan is supplied as rollback data; failed replacement removes a
 partial new branch and recreates the prior managed branch. CUSTOM V-belt fields
 and catalog overrides are stored as managed metadata so save/reopen inspection
 can reconstruct the editable profile without relying on display names.
+The flat-belt Layer 4 family is a separate owned rotational rim rather than a
+groove cut over a cylindrical blank. It supports cylindrical and explicit
+circular-crown profiles, uses `PULLEY_D1`, `PULLEY_L1`, and `FP_*` ownership
+variables, and reuses the managed topology-replacement/rollback boundary for
+profile edits. Belt routes, belts, and tensioners remain outside this family.
+Its initial body is closed to the rotation axis and contains no bore; the rim
+thickness, hub, bore, keyway, and shaft interfaces belong to separate generic
+modeling modules. Its cylindrical and circular-crown sketches carry formula-bound
+driving dimensions and must read back as fully defined. Studio bounds each
+isolated bridge call and can cancel that child process without terminating
+KOMPAS, so a stalled COM operation cannot retain the single CAD-job lock forever.
 
 Geomwright Studio owns document/session navigation above Layer 4 modules. Its
 workspace discovers open KOMPAS documents, opens saved files, presents managed
@@ -261,7 +272,7 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | parametric part workflows | L2–L4 | experimental, family-specific live evidence |
 | managed spring families | L2–L4 | implemented, see family contracts |
 | diaphragm module | L2–L4 | complete and live-verified |
-| mechanical-transmission platform | L2–L4 | V-belt and Poly-V Layers 2/3 live-verified; managed V-belt Layer 4 create/recognize vertical slice live-verified; edit and full Poly-V Layer 4 acceptance pending |
+| mechanical-transmission platform | L2–L4 | managed V-belt and Poly-V pulley workflow plus completed cylindrical/crowned flat-belt pulley; flat-pulley create, inspect, update, save, and reopen live-verified |
 | Geomwright Studio | presentation over L2–L4 | experimental; preview plus confirmed creation of a new unsaved managed pulley; no arbitrary-body write path |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |

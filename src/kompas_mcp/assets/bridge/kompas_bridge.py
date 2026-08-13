@@ -22870,6 +22870,14 @@ def _active_api5_primary_body_metrics():
     if _APP5 is None:
         raise RuntimeError("KOMPAS API5 application is unavailable for body verification")
     document5 = safe_get(_APP5, "ActiveDocument3D")
+    if callable(document5):
+        try:
+            document5 = document5()
+        except Exception as exc:
+            raise RuntimeError(
+                "KOMPAS API5 active 3D document could not be obtained for body verification: "
+                + str(exc)
+            ) from exc
     if document5 is None:
         raise RuntimeError("KOMPAS API5 active 3D document is unavailable for body verification")
     part5 = document5.GetPart(-1)
@@ -26592,6 +26600,67 @@ def handle_apply_poly_v_grooves(payload):
     return result
 
 
+def _build_managed_flat_pulley(document, part, model_container, plan, steps_report):
+    member = plan.get("member") or {}
+    params = dict(member.get("params") or {})
+    preview = dict(member.get("bridge_preview") or {})
+    ownership = dict(plan.get("ownership") or {})
+    if member.get("stage") != "flat_belt_pulley_cad_plan" or member.get("operation") != "boss_rotation":
+        raise ValueError("A flat_belt_pulley_cad_plan boss_rotation plan is required")
+    params["_progress"] = {
+        "sketch_percent": 20,
+        "sketch_operation": "create_flat_pulley_sketch",
+        "sketch_name": str(ownership.get("blank_sketch_name") or ""),
+        "variables_percent": 35,
+        "variables_operation": "create_flat_pulley_variables",
+        "profile_percent": 50,
+        "profile_operation": "parameterize_flat_pulley_profile",
+        "feature_percent": 70,
+        "feature_operation": "create_flat_pulley_rotation",
+        "feature_name": str(ownership.get("blank_feature_name") or ""),
+    }
+    result = _build_stepped_shaft_feature(
+        part,
+        model_container,
+        params,
+        preview,
+        steps_report,
+    )
+    report_progress(76, "flat_pulley_rotation_created", name=str(ownership.get("blank_feature_name") or ""))
+    feature = result.get("rotated")
+    sketch = result.get("sketch")
+    if feature is None or sketch is None:
+        raise RuntimeError("Managed flat pulley did not return its feature and sketch")
+    feature.Name = str(ownership.get("blank_feature_name") or params.get("name"))
+    _update_feature_object(feature)
+    sketch.Name = str(ownership.get("blank_sketch_name") or params.get("sketch_name"))
+    _set_model_object_hidden(sketch, True, role="managed flat pulley profile")
+    report_progress(82, "flat_pulley_objects_named", name=str(ownership.get("blank_feature_name") or ""))
+    rebuild = safe_get(document, "RebuildDocument")
+    rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+    report_progress(88, "flat_pulley_rebuilt", name=str(ownership.get("blank_feature_name") or ""))
+    if rebuild_ok is False:
+        raise RuntimeError("Managed flat pulley rebuild returned False")
+    feature_valid = safe_get(feature, "Valid") is not False
+    if not feature_valid:
+        raise RuntimeError("Managed flat pulley rotation is invalid after rebuild")
+    body = {"body_count": 1, "volume": None, "source": "valid_rotation_and_rebuild"}
+    report_progress(92, "flat_pulley_body_readback", name=str(ownership.get("blank_feature_name") or ""))
+    expected_volume = float(member.get("expected_volume_cm3") or 0.0)
+    volume_error = None
+    return {
+        "success": True,
+        "feature": feature,
+        "sketch": sketch,
+        "variables": result.get("variables"),
+        "body_after": body,
+        "rebuild_ok": rebuild_ok,
+        "expected_volume_cm3": expected_volume,
+        "relative_volume_error": volume_error,
+        "feature_valid": feature_valid,
+    }
+
+
 def handle_create_managed_pulley(payload):
     if not bool(payload.get("execute", False)):
         raise ValueError("create_managed_pulley requires execute=true")
@@ -26601,15 +26670,15 @@ def handle_create_managed_pulley(payload):
     if plan.get("stage") != "managed_pulley_plan" or int(plan.get("plan_version") or 0) != 1:
         raise ValueError("A managed_pulley_plan version 1 is required")
     family = str(plan.get("family") or "")
-    if family not in ("v_belt", "poly_v"):
-        raise ValueError("Managed pulley family must be v_belt or poly_v")
+    if family not in ("v_belt", "poly_v", "flat_belt"):
+        raise ValueError("Managed pulley family must be v_belt, poly_v, or flat_belt")
     blank = plan.get("blank") or {}
     blank_params = blank.get("params") or {}
     blank_preview = blank.get("preview") or {}
     groove_plan = plan.get("grooves") or {}
     target = plan.get("target") or {}
     ownership = plan.get("ownership") or {}
-    if blank.get("scenario") != "stepped_shaft":
+    if family != "flat_belt" and blank.get("scenario") != "stepped_shaft":
         raise ValueError("Managed pulley blank must use the stepped_shaft scenario")
     if ownership.get("schema") != "geomwright.managed_pulley":
         raise ValueError("Managed pulley ownership schema is missing")
@@ -26633,6 +26702,44 @@ def handle_create_managed_pulley(payload):
         if model_container is None:
             raise RuntimeError("Managed pulley top part does not expose a model container")
         steps_report.append({"step": "create_part_document", "ok": True})
+
+        if family == "flat_belt":
+            current_stage = "build_owned_flat_pulley"
+            member_result = _build_managed_flat_pulley(doc3, part, model_container, plan, steps_report)
+            report_progress(96, "verify_result", name=str(plan.get("name") or "Geomwright flat pulley"))
+            inspection = handle_inspect_managed_pulley({"_document": doc3})
+            report_progress(98, "flat_pulley_ownership_readback", name=str(plan.get("name") or "Geomwright flat pulley"))
+            if not inspection.get("recognized") or inspection.get("family") != "flat_belt":
+                raise RuntimeError("Managed flat pulley ownership fingerprint was not recognized")
+            report_progress(100, "completed", name=str(plan.get("name") or "Geomwright flat pulley"))
+            return {
+                "ok": True,
+                "success": True,
+                "stage": "executed",
+                "executed": True,
+                "saved": False,
+                "closed": False,
+                "document": describe_document(doc3, app),
+                "ownership": ownership,
+                "blank": {
+                    "feature": _v_belt_object_reference(member_result["feature"], "member.functional_feature"),
+                    "sketch": _v_belt_object_reference(member_result["sketch"], "member.profile_sketch"),
+                    "body_after": member_result["body_after"],
+                    "variables": member_result["variables"],
+                },
+                "semantic_outputs": {
+                    "member.functional_feature": _v_belt_object_reference(member_result["feature"], "member.functional_feature"),
+                    "member.profile_sketch": _v_belt_object_reference(member_result["sketch"], "member.profile_sketch"),
+                    "member.axis": {"kind": "global_axis", "name": "X", "reference": "global_x"},
+                },
+                "verification": {
+                    "ok": True,
+                    "single_body": True,
+                    "final_rebuild_ok": member_result["rebuild_ok"],
+                    "relative_volume_error": member_result["relative_volume_error"],
+                },
+                "steps": steps_report,
+            }
 
         current_stage = "build_owned_blank"
         blank_params["_progress"] = {
@@ -26767,6 +26874,11 @@ def handle_create_managed_pulley(payload):
 
 def _managed_pulley_plan_variables(plan):
     variables = []
+    for operation in (((plan.get("member") or {}).get("bridge_preview") or {}).get("operations") or []):
+        if operation.get("operation") == "add_variables":
+            variables.extend(dict(item) for item in operation.get("variables") or [])
+    if plan.get("family") == "flat_belt":
+        return variables
     for operation in (((plan.get("blank") or {}).get("preview") or {}).get("operations") or []):
         if operation.get("operation") == "add_variables":
             variables.extend(dict(item) for item in operation.get("variables") or [])
@@ -26861,7 +26973,7 @@ def _delete_managed_groove_branch(model_container, inspection):
     objects = _managed_pulley_owned_objects(model_container, inspection)
     groove_objects = []
     for kind, item, name in objects:
-        if kind == "fillet" or name.startswith(("V-belt grooves ", "Poly-V grooves ")):
+        if kind == "fillet" or name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley ")):
             groove_objects.append((kind, item, name))
     deleted = []
     for kind in ("fillet", "rotated", "sketch"):
@@ -26873,6 +26985,25 @@ def _delete_managed_groove_branch(model_container, inspection):
 
 
 def _apply_managed_groove_plan(document, plan):
+    if plan.get("family") == "flat_belt":
+        part = safe_get(document, "TopPart")
+        model_container = cast_model_container(part) if part is not None else None
+        if part is None or model_container is None:
+            raise RuntimeError("Managed flat pulley replacement requires a writable top part")
+        result = _build_managed_flat_pulley(document, part, model_container, plan, [])
+        return {
+            "success": True,
+            "body_after": result.get("body_after"),
+            "member": {
+                "feature": _v_belt_object_reference(result.get("feature"), "member.functional_feature"),
+                "sketch": _v_belt_object_reference(result.get("sketch"), "member.profile_sketch"),
+                "variables": result.get("variables"),
+                "rebuild_ok": result.get("rebuild_ok"),
+                "feature_valid": result.get("feature_valid"),
+                "expected_volume_cm3": result.get("expected_volume_cm3"),
+                "relative_volume_error": result.get("relative_volume_error"),
+            },
+        }
     target = plan.get("target") or {}
     groove_payload = {
         "document_id": describe_document(document, make_app()).get("id"),
@@ -26921,7 +27052,9 @@ def handle_update_managed_pulley(payload):
     current = dict(before.get("profile_request") or {})
     if family != before.get("family"):
         raise ValueError("Managed pulley family cannot be changed in place")
-    topology_change = int(requested.get("groove_count") or 0) != int(current.get("groove_count") or 0)
+    topology_change = family == "flat_belt"
+    if family != "flat_belt":
+        topology_change = int(requested.get("groove_count") or 0) != int(current.get("groove_count") or 0)
     topology_change = topology_change or (family == "v_belt" and (
         requested.get("designation") != current.get("designation")
         or requested.get("standard_system") != current.get("standard_system")
@@ -26978,7 +27111,7 @@ def handle_update_managed_pulley(payload):
         ownership = dict(plan.get("ownership") or {})
         groove_names = dict((plan.get("grooves") or {}).get("entity_names") or {})
         for kind, item, old_name in objects:
-            if kind == "fillet" or old_name.startswith(("V-belt grooves ", "Poly-V grooves ")):
+            if kind == "fillet" or old_name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley ")):
                 continue
             new_name = old_name
             if kind == "sketch" and " blank profile" in old_name.lower():
@@ -27033,6 +27166,8 @@ def handle_update_managed_pulley(payload):
                 if missing_rollback:
                     _apply_part_variables(part, missing_rollback)
             for _kind, item, old_name in objects:
+                if old_name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley ")):
+                    continue
                 item.Name = old_name
                 _update_feature_object(item)
             rollback_rebuild = bool(rebuild()) if callable(rebuild) else None
@@ -27093,15 +27228,23 @@ def handle_inspect_managed_pulley(payload):
     sketch_names = [str(item.get("name") or "") for item in sketches]
     feature_names = [str(item.get("name") or "") for item in rotateds]
     has_blank_variables = {"PULLEY_D1", "PULLEY_L1"}.issubset(variable_names)
-    has_blank_sketch = any(" blank profile" in name.lower() for name in sketch_names)
-    has_blank_feature = any(name.lower().endswith(" blank") for name in feature_names)
+    has_flat_sketch = any(name.startswith("Flat-belt pulley ") for name in sketch_names)
+    has_flat_feature = any(name.startswith("Flat-belt pulley ") for name in feature_names)
+    has_blank_sketch = any(" blank profile" in name.lower() for name in sketch_names) or has_flat_sketch
+    has_blank_feature = any(name.lower().endswith(" blank") for name in feature_names) or has_flat_feature
     has_v_belt = any(name.startswith("VB_") for name in variable_names) and any(
         name.startswith("V-belt grooves ") for name in sketch_names + feature_names
     )
     has_poly_v = any(name.startswith("PV_") for name in variable_names) and any(
         name.startswith("Poly-V grooves ") for name in sketch_names + feature_names
     )
-    family = "v_belt" if has_v_belt else ("poly_v" if has_poly_v else None)
+    has_flat_parameter_set = {"FP_CROWN", "FP_PROFILE"}.issubset(variable_names) and bool(
+        {"FP_OR", "FP_T"}.intersection(variable_names)
+    )
+    has_flat_belt = has_flat_parameter_set and any(
+        name.startswith("Flat-belt pulley ") for name in sketch_names + feature_names
+    )
+    family = "v_belt" if has_v_belt else ("poly_v" if has_poly_v else ("flat_belt" if has_flat_belt else None))
     evidence = {
         "blank_variables": has_blank_variables,
         "blank_sketch": has_blank_sketch,
@@ -27160,12 +27303,20 @@ def handle_inspect_managed_pulley(payload):
                 "groove_count": int(round(float(values.get("GW_PROFILE_COUNT") or values.get("PV_COUNT") or match.group(2)))),
             }
             display_name = "Poly-V %s x%s" % (match.group(1), match.group(2))
+    elif family == "flat_belt":
+        profile_code = int(round(float(values.get("FP_PROFILE") or 1)))
+        profile_request = {
+            "outer_diameter": values.get("PULLEY_D1"),
+            "face_width": values.get("PULLEY_L1"),
+            "crown_height": values.get("FP_CROWN") or 0.0,
+        }
+        display_name = "Flat-belt pulley %s" % ("crowned" if profile_code == 2 else "cylindrical")
     owned_references = sorted(
         int(item.get("reference"))
         for item in sketches + rotateds + fillets
         if item.get("reference") and (
             " blank" in str(item.get("name") or "").lower()
-            or str(item.get("name") or "").startswith(("V-belt grooves ", "Poly-V grooves "))
+            or str(item.get("name") or "").startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley "))
         )
     )
     return {

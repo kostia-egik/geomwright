@@ -5,14 +5,21 @@ require an AI agent: modules expose deterministic schemas and operations that
 the UI can invoke directly. An agent is an optional client of the same contracts,
 not a required intermediary between the UI and CAD.
 
-The first experimental vertical slice supports the V-belt and Poly-V groove
+The current experimental slice supports V-belt, Poly-V, and flat-belt pulley
 preview functions through one schema-driven form and one HTML5 Canvas renderer.
+For the flat-belt pulley, Studio exposes one continuous `crown_height` parameter:
+zero means a cylindrical rim and a positive value means a crowned rim. The
+internal CAD plan still records the inferred profile kind for ownership/readback.
 
 The implemented CAD vertical slice creates a new unsaved KOMPAS part, builds its
-own parameterized blank, applies the selected grooves, and verifies the result.
-It will not cut grooves into an arbitrary existing body. CAD planning is
+own parameterized member, applies family geometry (grooves or a flat rim), and
+verifies the result. It will not modify an arbitrary existing body. CAD planning is
 read-only and runs automatically after each valid preview; only execution
 requires an explicit confirmation.
+
+The flat-belt slice is complete: cylindrical and circular-crown sketches are
+fully constrained through formula-bound driving dimensions, and create, inspect,
+update, save, and reopen behavior has been verified in live KOMPAS.
 
 The intended module lifecycle is `preview -> inspect -> create -> edit ->
 rebuild -> verify`. Later Studio slices may call deterministic CAD workflows

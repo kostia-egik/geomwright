@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -33,10 +34,14 @@ class BridgeRunner:
         kompas_python: str | None = None,
         bridge_script: str | None = None,
         require_visible_kompas: bool = False,
+        timeout_seconds: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.kompas_python = Path(kompas_python or os.environ.get("KOMPAS_PYTHON") or DEFAULT_KOMPAS_PYTHON)
         self.bridge_script = Path(bridge_script or os.environ.get("KOMPAS_BRIDGE_SCRIPT") or default_bridge_script_path())
         self.require_visible_kompas = bool(require_visible_kompas)
+        self.timeout_seconds = timeout_seconds
+        self.cancel_event = cancel_event
 
     def call(
         self,
@@ -79,8 +84,15 @@ class BridgeRunner:
                 errors="replace",
                 env=env,
             )
+            started_at = time.monotonic()
             progress_line_count = 0
             while process.poll() is None:
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    self._stop_process(process)
+                    raise BridgeError("Bridge call was cancelled")
+                if self.timeout_seconds is not None and time.monotonic() - started_at > self.timeout_seconds:
+                    self._stop_process(process)
+                    raise BridgeError(f"Bridge call timed out after {self.timeout_seconds:g} seconds")
                 progress_line_count = self._report_progress(
                     progress_path, progress_line_count, progress_callback
                 )
@@ -112,6 +124,18 @@ class BridgeRunner:
                 else str(error)
             ) or stderr.strip() or "Unknown bridge error"
             raise BridgeError(message)
+
+    @staticmethod
+    def _stop_process(process: subprocess.Popen[str]) -> None:
+        try:
+            process.terminate()
+            process.wait(timeout=2.0)
+        except Exception:
+            try:
+                process.kill()
+                process.wait(timeout=2.0)
+            except Exception:
+                pass
 
     @staticmethod
     def _report_progress(

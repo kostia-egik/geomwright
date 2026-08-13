@@ -7,8 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from kompas_mcp.transmission_tools import PolyVGroovePreviewRequest, VGroovePreviewRequest
-from kompas_mcp.transmissions import preview_poly_v_groove, preview_v_belt_groove
+from kompas_mcp.transmission_tools import FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, VGroovePreviewRequest
+from kompas_mcp.transmissions import preview_flat_belt_pulley, preview_poly_v_groove, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
 
 
@@ -66,6 +66,10 @@ def _build_poly_v_preview(payload: dict[str, Any]) -> dict[str, Any]:
     return preview_poly_v_groove(**payload)
 
 
+def _build_flat_belt_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return preview_flat_belt_pulley(**payload)
+
+
 def _points(value: Any) -> list[list[float]]:
     result: list[list[float]] = []
     for point in list(value or []):
@@ -96,6 +100,7 @@ def _phantom_body(
     root_radius: float,
     outer_radius: float,
     groove_depth: float,
+    surface: list[list[float]] | None = None,
 ) -> dict[str, Any]:
     face_width = x_max - x_min
     radial_extension = max(groove_depth * 0.75, min(face_width * 0.3, root_radius * 0.18))
@@ -110,7 +115,18 @@ def _phantom_body(
         "inner_radius": inner_radius,
         "outer_radius": outer_radius,
         "truncated": inner_radius > 0.0,
+        "surface": list(surface or [[x_min, outer_radius], [x_max, outer_radius]]),
     }
+
+
+def _joined_surface_paths(paths: list[list[list[float]]]) -> list[list[float]]:
+    ordered = sorted((path for path in paths if path), key=lambda path: float(path[0][0]))
+    result: list[list[float]] = []
+    for path in ordered:
+        for point in path:
+            if not result or point != result[-1]:
+                result.append(point)
+    return result
 
 
 def _reference_path(
@@ -493,6 +509,7 @@ def _adapt_v_belt(preview: dict[str, Any], request: dict[str, Any]) -> dict[str,
     ]
     if surface_features:
         closed_points = _rounded_v_belt_closed_points(geometry, surface_features)
+    feature_paths = [points[:-1] for points in closed_points if len(points) > 1]
     guide_paths = [
         points
         for segment in list(geometry.get("outer_surface_segments") or [])
@@ -504,12 +521,14 @@ def _adapt_v_belt(preview: dict[str, Any], request: dict[str, Any]) -> dict[str,
         "x_max": float(envelope.get("x_max", 1.0)),
         "y_max": float(envelope.get("radius_max", 1.0)),
     }
+    body_surface = _joined_surface_paths([*guide_paths, *feature_paths])
     phantom_body = _phantom_body(
         x_min=surface_bounds["x_min"],
         x_max=surface_bounds["x_max"],
         root_radius=float(envelope.get("radius_min", 0.0)),
         outer_radius=surface_bounds["y_max"],
         groove_depth=float(profile.get("groove_depth", 0.0)),
+        surface=body_surface,
     )
     reference_paths = [
         path
@@ -533,6 +552,7 @@ def _adapt_v_belt(preview: dict[str, Any], request: dict[str, Any]) -> dict[str,
         "ok": bool(preview.get("success")),
         "family": "v_belt",
         "closed_points": closed_points,
+        "feature_paths": feature_paths,
         "guide_paths": guide_paths,
         "surface_features": surface_features,
         "reference_paths": reference_paths,
@@ -600,6 +620,16 @@ def _adapt_poly_v(preview: dict[str, Any], request: dict[str, Any]) -> dict[str,
     inputs = dict(preview.get("inputs") or request)
     profile = _points(geometry.get("sampled_cut_polygon"))
     closed_points = [profile] if profile else []
+    feature_paths = []
+    for groove in list(geometry.get("grooves") or []):
+        outer_points = _points(groove.get("outer_points"))
+        if len(outer_points) != 2:
+            continue
+        x_min = min(outer_points[0][0], outer_points[1][0]) - 1e-9
+        x_max = max(outer_points[0][0], outer_points[1][0]) + 1e-9
+        groove_path = [point for point in profile[:-1] if x_min <= point[0] <= x_max]
+        if groove_path:
+            feature_paths.append(groove_path)
     envelope = dict(geometry.get("envelope") or {})
     guide_paths = [
         points
@@ -624,12 +654,14 @@ def _adapt_poly_v(preview: dict[str, Any], request: dict[str, Any]) -> dict[str,
         "x_max": float(envelope.get("x_max", 1.0)),
         "y_max": float(envelope.get("radius_max", 1.0)),
     }
+    body_surface = _joined_surface_paths([*guide_paths, *feature_paths])
     phantom_body = _phantom_body(
         x_min=surface_bounds["x_min"],
         x_max=surface_bounds["x_max"],
         root_radius=float(envelope.get("radius_min", 0.0)),
         outer_radius=surface_bounds["y_max"],
         groove_depth=float(derived.get("groove_depth", 0.0)),
+        surface=body_surface,
     )
     reference_paths = [
         path
@@ -653,6 +685,7 @@ def _adapt_poly_v(preview: dict[str, Any], request: dict[str, Any]) -> dict[str,
         "ok": bool(preview.get("success")),
         "family": "poly_v",
         "closed_points": closed_points,
+        "feature_paths": feature_paths,
         "guide_paths": guide_paths,
         "reference_paths": reference_paths,
         "phantom_bodies": [phantom_body],
@@ -701,6 +734,57 @@ def _adapt_poly_v(preview: dict[str, Any], request: dict[str, Any]) -> dict[str,
     }
 
 
+def _adapt_flat_belt(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    geometry = dict(preview.get("geometry") or {})
+    derived = dict(preview.get("derived") or {})
+    inputs = dict(preview.get("inputs") or request)
+    closed = _points(geometry.get("closed_profile"))
+    outer = _points(geometry.get("outer_surface"))
+    body_break_radius = max(0.0, float(derived["edge_diameter"]) * 0.32)
+    phantom = _phantom_body(
+        x_min=0.0,
+        x_max=float(inputs["face_width"]),
+        root_radius=body_break_radius,
+        outer_radius=float(derived["outer_radius"]),
+        groove_depth=max(1.0, float(derived["outer_radius"]) - body_break_radius),
+        surface=outer,
+    )
+    bounds = _bounds([closed], [outer, phantom["outline"]])
+    dimensions = [
+        {"key": "face_width", "symbol": "B", "orientation": "horizontal", "start": [0.0, derived["outer_radius"]], "end": [inputs["face_width"], derived["outer_radius"]], "value": inputs["face_width"], "unit": "mm", "level": 1},
+        {"key": "outer_diameter", "symbol": "⌀D", "orientation": "diameter", "start": [inputs["face_width"], derived["outer_radius"]], "end": [inputs["face_width"], derived["outer_radius"]], "target_x": inputs["face_width"] / 2.0, "break_radius": phantom["inner_radius"], "value": inputs["outer_diameter"], "unit": "mm", "placement": "right", "level": 2},
+    ]
+    if inputs["profile"] == "crowned":
+        dimensions.append(
+            {"key": "crown_height", "symbol": "h", "orientation": "vertical", "start": [inputs["face_width"] / 2.0, derived["edge_diameter"] / 2.0], "end": [inputs["face_width"] / 2.0, derived["outer_radius"]], "value": inputs["crown_height"], "unit": "mm", "level": 2}
+        )
+    return {
+        "ok": bool(preview.get("success")),
+        "family": "flat_belt",
+        "closed_points": [closed],
+        "feature_paths": [outer],
+        "guide_paths": [outer],
+        "reference_paths": [],
+        "phantom_bodies": [phantom],
+        "bounds": bounds,
+        "coordinate_system": geometry.get("coordinate_system"),
+        "summary": {
+            "profile": inputs["profile"],
+            "outer_diameter_mm": inputs["outer_diameter"],
+            "edge_diameter_mm": derived["edge_diameter"],
+            "face_width_mm": inputs["face_width"],
+            "crown_height_mm": inputs["crown_height"],
+            "crown_radius_mm": derived.get("crown_radius"),
+        },
+        "dimensions": dimensions,
+        "warnings": list(preview.get("warnings") or []),
+        "warning_items": [
+            {"code": "explicit_nonstandard_crown", "message": item}
+            for item in list(preview.get("warnings") or [])
+        ],
+    }
+
+
 _MODULES: dict[str, PreviewModule] = {
     "v_belt": PreviewModule(
         kind="v_belt",
@@ -726,6 +810,20 @@ _MODULES: dict[str, PreviewModule] = {
         defaults={"designation": "PJ", "effective_diameter": 80.0, "groove_count": 6},
         builder=_build_poly_v_preview,
         adapter=_adapt_poly_v,
+    ),
+    "flat_belt": PreviewModule(
+        kind="flat_belt",
+        name="Flat-belt pulley",
+        description="Cylindrical or explicitly crowned functional rim without a belt, hub, or bore.",
+        standard="Parametric geometry; no implicit standard crown",
+        request_model=FlatBeltPulleyPreviewRequest,
+        defaults={
+            "outer_diameter": 160.0,
+            "face_width": 50.0,
+            "crown_height": 0.0,
+        },
+        builder=_build_flat_belt_preview,
+        adapter=_adapt_flat_belt,
     ),
 }
 

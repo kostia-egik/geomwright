@@ -77,11 +77,17 @@ def create_app(
     file_picker: Any = _pick_model_file,
     save_file_picker: Any = _pick_save_model_file,
 ) -> FastAPI:
-    def studio_adapter() -> Any:
+    def studio_adapter(
+        cancel_event: threading.Event | None = None,
+        *,
+        interruptible: bool = True,
+    ) -> Any:
         adapter = adapter_factory()
         runner = getattr(adapter, "runner", None)
         if runner is not None:
             runner.require_visible_kompas = True
+            runner.timeout_seconds = 180.0 if interruptible else None
+            runner.cancel_event = cancel_event if interruptible else None
         return adapter
 
     app = FastAPI(
@@ -94,6 +100,7 @@ def create_app(
     cad_jobs: dict[str, dict[str, Any]] = {}
     cad_jobs_lock = threading.Lock()
     cad_build_lock = threading.Lock()
+    cad_cancel_events: dict[str, threading.Event] = {}
 
     def job_snapshot(job_id: str) -> dict[str, Any]:
         with cad_jobs_lock:
@@ -107,6 +114,7 @@ def create_app(
             cad_jobs[job_id].update(values)
 
     def run_cad_job(job_id: str, module_kind: str, profile: dict[str, Any], name: str) -> None:
+        cancel_event = cad_cancel_events[job_id]
         def report_bridge_progress(event: dict[str, Any]) -> None:
             update_job(
                 job_id,
@@ -121,6 +129,9 @@ def create_app(
 
         try:
             with cad_build_lock:
+                if cancel_event.is_set():
+                    update_job(job_id, status="cancelled", stage="cancelled", finished_at=time.time())
+                    return
                 update_job(
                     job_id,
                     status="running",
@@ -128,7 +139,7 @@ def create_app(
                     started_at=time.time(),
                     progress={"percent": 0, "operation": "starting", "name": name, "names": []},
                 )
-                result = studio_adapter().create_managed_pulley(
+                result = studio_adapter(cancel_event).create_managed_pulley(
                     family=module_kind,
                     profile_request=profile,
                     name=name,
@@ -146,10 +157,11 @@ def create_app(
                     progress={"percent": 100, "operation": "completed", "name": name, "names": []},
                 )
         except Exception as exc:
+            cancelled = cancel_event.is_set()
             update_job(
                 job_id,
-                status="failed",
-                stage="failed",
+                status="cancelled" if cancelled else "failed",
+                stage="cancelled" if cancelled else "failed",
                 finished_at=time.time(),
                 error=str(exc),
             )
@@ -163,6 +175,7 @@ def create_app(
         document_id: str,
         block_id: str,
     ) -> None:
+        cancel_event = cad_cancel_events[job_id]
         def report_bridge_progress(event: dict[str, Any]) -> None:
             update_job(
                 job_id,
@@ -177,6 +190,9 @@ def create_app(
 
         try:
             with cad_build_lock:
+                if cancel_event.is_set():
+                    update_job(job_id, status="cancelled", stage="cancelled", finished_at=time.time())
+                    return
                 update_job(
                     job_id,
                     status="running",
@@ -184,7 +200,10 @@ def create_app(
                     started_at=time.time(),
                     progress={"percent": 0, "operation": "starting_update", "name": name, "names": []},
                 )
-                result = studio_adapter().update_managed_pulley(
+                # Topology replacement deletes and recreates an owned CAD branch.  The
+                # bridge must be allowed to finish its rollback if that transaction fails;
+                # terminating its process here can leave the user's model half-deleted.
+                result = studio_adapter(cancel_event, interruptible=False).update_managed_pulley(
                     document_id=document_id,
                     block_id=block_id,
                     family=module_kind,
@@ -204,10 +223,11 @@ def create_app(
                     progress={"percent": 100, "operation": "updated", "name": name, "names": []},
                 )
         except Exception as exc:
+            cancelled = cancel_event.is_set()
             update_job(
                 job_id,
-                status="failed",
-                stage="failed",
+                status="cancelled" if cancelled else "failed",
+                stage="cancelled" if cancelled else "failed",
                 finished_at=time.time(),
                 error=str(exc),
             )
@@ -499,6 +519,7 @@ def create_app(
                     "result": None,
                     "error": None,
                 }
+                cad_cancel_events[job_id] = threading.Event()
             worker = threading.Thread(
                 target=run_cad_job,
                 args=(
@@ -544,6 +565,7 @@ def create_app(
                     "result": None,
                     "error": None,
                 }
+                cad_cancel_events[job_id] = threading.Event()
             worker = threading.Thread(
                 target=run_update_job,
                 args=(
@@ -573,6 +595,20 @@ def create_app(
             return job_snapshot(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="CAD job was not found") from exc
+
+    @app.post("/cad/jobs/{job_id}/cancel")
+    def cancel_cad_job(job_id: str) -> dict[str, Any]:
+        try:
+            snapshot = job_snapshot(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="CAD job was not found") from exc
+        if snapshot.get("status") in {"completed", "failed", "cancelled"}:
+            return snapshot
+        cancel_event = cad_cancel_events.get(job_id)
+        if cancel_event is not None:
+            cancel_event.set()
+        update_job(job_id, stage="cancelling")
+        return job_snapshot(job_id)
 
     return app
 

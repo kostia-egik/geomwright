@@ -119,23 +119,23 @@ function drawPhantomBodies(view) {
   for (const body of state.data?.phantom_bodies || []) {
     if (!body.outline?.length) continue;
     const points = body.outline.map(view.point);
-    const [topLeft, bottomLeft, bottomRight, topRight] = points;
+    const [, bottomLeft, bottomRight] = points;
+    const surface = (body.surface?.length ? body.surface : [body.outline[0], body.outline[3]]).map(view.point);
     context.save();
-    context.fillStyle = "rgba(101, 130, 153, 0.075)";
-    context.strokeStyle = "rgba(134, 163, 185, 0.52)";
+    context.fillStyle = "rgba(132, 174, 204, 0.055)";
+    context.strokeStyle = "rgba(157, 177, 191, 0.62)";
     context.lineWidth = 1.2;
-    context.setLineDash([8, 6]);
     context.beginPath();
-    context.moveTo(...topLeft);
-    context.lineTo(...bottomLeft);
+    context.moveTo(...surface[0]);
+    for (const point of surface.slice(1)) context.lineTo(...point);
     context.lineTo(...bottomRight);
-    context.lineTo(...topRight);
+    context.lineTo(...bottomLeft);
     context.closePath();
     context.fill();
     context.beginPath();
-    context.moveTo(...topLeft);
+    context.moveTo(...surface[0]);
     context.lineTo(...bottomLeft);
-    context.moveTo(...topRight);
+    context.moveTo(...surface[surface.length - 1]);
     context.lineTo(...bottomRight);
     context.stroke();
 
@@ -162,16 +162,6 @@ function drawReferencePaths(view) {
       stroke: "rgba(97, 192, 177, 0.68)",
       dash: [11, 4, 2, 4],
       lineWidth: 1.15,
-    });
-  }
-}
-
-function drawSurfaceFeatures(view) {
-  for (const feature of state.data?.surface_features || []) {
-    if (feature.kind !== "top_edge_fillet") continue;
-    drawPath(feature.points, view, {
-      stroke: feature.radius_source === "standard" ? "#f0c36d" : "#c993f3",
-      lineWidth: 3.1,
     });
   }
 }
@@ -407,17 +397,16 @@ function draw() {
   drawPhantomBodies(view);
   drawReferencePaths(view);
   for (const guide of state.data.guide_paths || []) {
-    drawPath(guide, view, { stroke: "rgba(153, 190, 216, 0.72)", dashed: true });
+    drawPath(guide, view, { stroke: "rgba(157, 177, 191, 0.72)", lineWidth: 1.2 });
   }
   const palette = [
-    ["rgba(224, 156, 66, 0.15)", "#e3aa4f"],
-    ["rgba(74, 175, 160, 0.13)", "#61c0b1"],
+    "#e3aa4f",
+    "#61c0b1",
   ];
-  (state.data.closed_points || []).forEach((path, index) => {
-    const [fill, stroke] = palette[index % palette.length];
-    drawPath(path, view, { fill, stroke });
+  (state.data.feature_paths || []).forEach((path, index) => {
+    const stroke = palette[index % palette.length];
+    drawPath(path, view, { stroke, lineWidth: 2.5 });
   });
-  drawSurfaceFeatures(view);
   drawDimensions(view);
 }
 

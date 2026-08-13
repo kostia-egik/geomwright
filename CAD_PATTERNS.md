@@ -59,6 +59,7 @@ Evidence levels used by this file:
 | Native curve fillet needs a source cut point but raw spiral endpoints cannot be read | `FILLET-003` |
 | Need full bent-coil construction chain | `CASE-001` |
 | UI opens files in a hidden or different KOMPAS instance | `SESSION-001` |
+| CAD job remains queued after a completed-looking operation | `SESSION-002` |
 
 ## Rules
 
@@ -94,6 +95,47 @@ Verification:
 - Start visible KOMPAS afterwards and confirm the host discovers its documents
   without restarting.
 - Open/create from the host and confirm the document appears in that same window.
+
+---
+
+### SESSION-002: Isolate And Bound Stateful Bridge Calls
+
+Applies when:
+- a user-facing host serializes write operations through one CAD lock;
+- a short-lived bridge subprocess performs a blocking COM call;
+- KOMPAS may finish the visible operation while a later legacy readback call
+  does not return.
+
+Symptom:
+- the body and model-tree operation are visible and valid in KOMPAS, but Studio
+  never reports completion;
+- all later jobs remain at “waiting for KOMPAS access”.
+
+Cause:
+- an unbounded child bridge process retains the host-side CAD lock after a COM
+  or legacy API5 readback blocks. Successful visible geometry does not prove
+  that every later verification channel will return.
+
+Rule:
+- run every Studio bridge write in an isolated child process with a hard timeout
+  and a user-visible cancellation event;
+- cancellation terminates only the child bridge, never KOMPAS or the document;
+- queued jobs must observe cancellation before entering COM;
+- place progress checkpoints around risky post-operation rebuild/readback steps;
+- if one readback channel is proven to block after a valid operation, replace it
+  with bounded operation validity, rebuild, ownership, and variable readback for
+  that family, and document the verification gap explicitly.
+
+Verification:
+- cancel a running bridge and confirm the job becomes `cancelled`, the CAD lock
+  is released, and KOMPAS remains open;
+- create a managed flat-belt pulley and confirm `completed / verified` without
+  calling the blocking API5 active-body volume probe.
+
+Known example:
+- flat-belt pulley rotation completed and was recognized by workspace readback,
+  while `_active_api5_primary_body_metrics()` blocked indefinitely immediately
+  after `RebuildDocument()`.
 
 ---
 

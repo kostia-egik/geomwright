@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .transmissions import list_v_belt_profiles as _list_v_belt_profiles
 from .transmissions import list_poly_v_profiles as _list_poly_v_profiles
+from .transmissions import preview_flat_belt_pulley as _preview_flat_belt_pulley
 from .transmissions import preview_poly_v_groove as _preview_poly_v_groove
 from .transmissions import preview_v_belt_groove as _preview_v_belt_groove
 from .transmissions import resolve_poly_v_profile as _resolve_poly_v_profile
@@ -17,6 +18,7 @@ VProfileDesignation = Literal["Z", "A", "B", "C", "D", "E", "SPZ", "SPA", "SPB",
 VProfileFamily = Literal["classical", "narrow_wedge"]
 VStandardSystem = Literal["din_iso", "gost_20889_88"]
 PolyVProfileDesignation = Literal["PH", "PJ", "PK", "PL", "PM"]
+FlatPulleyProfile = Literal["cylindrical", "crowned"]
 
 
 class VGrooveOverrides(BaseModel):
@@ -87,6 +89,18 @@ class PolyVGroovePreviewRequest(BaseModel):
     designation: PolyVProfileDesignation
     effective_diameter: float = Field(gt=0)
     groove_count: int = Field(default=1, ge=1, le=64)
+
+
+class FlatBeltPulleyPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outer_diameter: float = Field(gt=0)
+    face_width: float = Field(gt=0)
+    crown_height: float = Field(
+        default=0.0,
+        ge=0,
+        description="Zero creates a cylindrical rim; a positive value creates a crowned rim.",
+    )
 
 
 class RotationalBlankParameterBaseContract(BaseModel):
@@ -167,6 +181,11 @@ class PolyVGrooveApplyRequest(BaseModel):
 
 
 def register_transmission_tools(mcp: Any, adapter: Any) -> None:
+    @mcp.tool()
+    def preview_flat_belt_pulley(request: FlatBeltPulleyPreviewRequest) -> dict:
+        """Preview a cylindrical or explicitly crowned flat-belt pulley rim."""
+        return _preview_flat_belt_pulley(**request.model_dump())
+
     @mcp.tool()
     def list_poly_v_profiles() -> dict:
         """List ISO 9982:2021 PH, PJ, PK, PL, and PM Poly-V pulley profiles."""

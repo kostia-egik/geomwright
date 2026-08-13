@@ -20,7 +20,7 @@ The runtime catalog is the source of truth for the exposed MCP surface. Call
 | Session/document lifecycle, composition, specifications, relinking | stable |
 | Low-level sketch and feature runtime | experimental |
 | Parametric part and spring generation | experimental |
-| Geomwright Studio (V-belt and Poly-V) | experimental, managed CAD creation |
+| Geomwright Studio (V-belt, Poly-V, and flat-belt pulleys) | experimental, managed CAD creation |
 | Native KOMPAS module inspection and command launching | research |
 
 Generated CAD files and live readback artifacts are local evidence. They are
@@ -65,7 +65,7 @@ For a manual or developer installation:
 
 The command also opens `http://127.0.0.1:8765` automatically; pass
 `--no-browser` when running it under a supervisor. Studio attaches to an already
-running visible KOMPAS instance, previews V-belt and Poly-V profiles, creates
+running visible KOMPAS instance, previews V-belt, Poly-V, and flat-belt profiles, creates
 owned managed pulleys, and rebuilds recognized blocks through confirmed CAD
 jobs. It never starts a hidden KOMPAS process.
 

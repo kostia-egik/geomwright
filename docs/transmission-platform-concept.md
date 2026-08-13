@@ -8,9 +8,12 @@ Current implementation status: focused Layer 2 catalogs and Layer 3
 cut-from-body builders are available for V-belt and Poly-V grooves as documented
 in `v-belt-groove.md` and `poly-v-groove.md`. The first Layer 4 vertical slice
 creates a new owned blank and applies and verifies both V-belt and Poly-V grooves.
+The flat-belt family adds a standalone cylindrical or explicitly crowned owned
+rim without introducing belt-route or tensioner scope.
 Its ownership inspector recognizes a managed pulley independently of its
-position in the model tree; that path has live V-belt evidence. Edit/rebuild and
-the complete family/profile Layer 4 live matrix remain pending.
+position in the model tree. Flat-belt create, inspect, update, save, and reopen
+have live KOMPAS evidence; remaining Layer 4 work belongs to other transmission
+families.
 
 This document defines the planned mechanical-transmission platform for
 Geomwright. The goal is not to copy one native KOMPAS application as a
@@ -505,7 +508,7 @@ standard or manufacturing process.
 - V-belt groove — Layer 2 catalog/preview and focused Layer 3 cut-from-body
   builder implemented and live-verified;
 - poly-V groove;
-- flat pulley;
+- flat pulley — cylindrical and explicit circular-crown Layer 2/4 workflow complete and live-verified;
 - timing pulley.
 
 ### Phase 2 — belt routes and static bodies

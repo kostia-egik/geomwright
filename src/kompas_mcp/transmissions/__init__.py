@@ -11,6 +11,7 @@ from .poly_v import preview_poly_v_groove
 from .poly_v import resolve_poly_v_profile
 from .poly_v import validate_poly_v_cut_target
 from .pulley import build_managed_pulley_plan
+from .flat_belt import build_flat_belt_pulley_plan, preview_flat_belt_pulley
 
 __all__ = [
     "list_v_belt_profiles",
@@ -24,4 +25,6 @@ __all__ = [
     "resolve_poly_v_profile",
     "validate_poly_v_cut_target",
     "build_managed_pulley_plan",
+    "build_flat_belt_pulley_plan",
+    "preview_flat_belt_pulley",
 ]

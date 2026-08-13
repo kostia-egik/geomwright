@@ -48,6 +48,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
         "stability": "experimental",
         "purpose": "Resolve and preview composable mechanical-transmission functional geometry.",
         "tools": [
+            "preview_flat_belt_pulley",
             "list_poly_v_profiles",
             "resolve_poly_v_profile",
             "preview_poly_v_groove",

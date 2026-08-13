@@ -38,10 +38,11 @@ confused with research evidence or historical implementation plans.
 | Document | Status | Purpose |
 | --- | --- | --- |
 | [Transmission platform concept](transmission-platform-concept.md) | approved concept | Composition contract, family map, cutter-aware geometry, and delivery phases |
+| [Flat-belt pulley](flat-belt-pulley.md) | complete, live-verified | Cylindrical/crowned managed rim geometry and Studio workflow |
 | [Native transmission audit](native-transmission-audit.md) | research evidence | Installed Shaft command map and interactive automation boundary |
 | [V-belt groove profile and CAD builder](v-belt-groove.md) | Layers 2/3 implemented | Profile catalog, deterministic groove geometry, and verified cut-from-body workflow |
 | [Poly-V groove profile and CAD builder](poly-v-groove.md) | Layers 2/3 implemented | ISO 9982 catalog, live master/dependent rounded profile, and mutation/save/reopen-verified cut workflow |
-| [Geomwright Studio](geomwright-studio.md) | experimental, managed CAD creation | Local schema-driven UI that previews and creates owned V-belt and Poly-V pulleys |
+| [Geomwright Studio](geomwright-studio.md) | experimental, managed CAD creation | Local schema-driven UI for owned V-belt, Poly-V, and flat-belt pulleys |
 
 ## Spring-family documents
 

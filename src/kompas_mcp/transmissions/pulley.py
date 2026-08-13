@@ -5,9 +5,10 @@ from typing import Any, Literal
 from ..parametric import preview_stepped_shaft
 from .poly_v import build_poly_v_cut_plan, preview_poly_v_groove
 from .v_belt import build_v_belt_cut_plan, preview_v_belt_groove
+from .flat_belt import build_flat_belt_pulley_plan, preview_flat_belt_pulley
 
 
-PulleyFamily = Literal["v_belt", "poly_v"]
+PulleyFamily = Literal["v_belt", "poly_v", "flat_belt"]
 _PLAN_VERSION = 1
 _PARAMETER_PREFIX = "PULLEY"
 
@@ -27,8 +28,40 @@ def build_managed_pulley_plan(
         profile_preview = preview_v_belt_groove(**dict(profile_request))
     elif family == "poly_v":
         profile_preview = preview_poly_v_groove(**dict(profile_request))
+    elif family == "flat_belt":
+        profile_preview = preview_flat_belt_pulley(**dict(profile_request))
+        member_plan = build_flat_belt_pulley_plan(profile_preview, name=requested_name)
+        ownership = {
+            "schema": "geomwright.managed_pulley",
+            "version": _PLAN_VERSION,
+            "family": family,
+            "parameter_prefix": _PARAMETER_PREFIX,
+            "required_variables": ["PULLEY_D1", "PULLEY_L1", "FP_OR", "FP_CROWN", "FP_PROFILE"],
+            "blank_feature_name": member_plan["entity_names"]["feature"],
+            "blank_sketch_name": member_plan["entity_names"]["sketch"],
+            "groove_feature_name": None,
+            "groove_sketch_name": None,
+            "source_profile": dict(profile_request),
+        }
+        return {
+            "ok": True,
+            "stage": "managed_pulley_plan",
+            "plan_version": _PLAN_VERSION,
+            "family": family,
+            "name": requested_name,
+            "profile_request": dict(profile_request),
+            "profile_preview": profile_preview,
+            "member": member_plan,
+            "ownership": ownership,
+            "verification": {
+                "require_single_body": True,
+                "require_blank_variables": ownership["required_variables"],
+                "require_positive_volume": True,
+                "require_downstream_rebuild": True,
+            },
+        }
     else:
-        raise ValueError("family must be 'v_belt' or 'poly_v'")
+        raise ValueError("family must be 'v_belt', 'poly_v', or 'flat_belt'")
 
     derived = dict(profile_preview.get("derived") or {})
     outer_diameter = float(derived["outer_diameter"])
