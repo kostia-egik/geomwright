@@ -47,6 +47,7 @@ Evidence levels used by this file:
 | Need to edit or inspect an existing sketch after reopening | `SKETCH-007`, `SKETCH-002` |
 | Generated model file misses late-created sketches | `SKETCH-008` |
 | Symmetric/repeated copies accumulate duplicate dimensions or skipped constraints | `SKETCH-009`, `VAR-001` |
+| Sketch solver stalls after attaching auxiliary geometry to an already merged profile node | `SKETCH-010`, `SKETCH-005` |
 | Sketch arc, line, axis, or curve has wrong direction | `VERIFY-001`, `ARC-001`, `CS-002` |
 | Direction flag works but result is inverted | `DIR-001`, `VERIFY-001` |
 | Spiral direction is confused with spiral construction side | `DIR-001`, `SPIRAL-001`, `VERIFY-001` |
@@ -57,6 +58,7 @@ Evidence levels used by this file:
 | Operation uses wrong sketch contour or rejects a valid-looking sketch | `OP-002`, `OP-001` |
 | Bent coil / hook spiral phase is wrong | `SPIRAL-001`, `VAR-001` |
 | Native curve fillet needs a source cut point but raw spiral endpoints cannot be read | `FILLET-003` |
+| Cut sketch rounds the cutter when the retained body edge must be rounded | `FILLET-004`, `OP-002`, `VERIFY-001` |
 | Need full bent-coil construction chain | `CASE-001` |
 | UI opens files in a hidden or different KOMPAS instance | `SESSION-001` |
 | CAD job remains queued after a completed-looking operation | `SESSION-002` |
@@ -1188,6 +1190,51 @@ Related:
 
 ---
 
+### SKETCH-010: Do Not Re-Merge An Already Owned Profile Node Through Auxiliary Geometry
+
+Applies when an operational contour endpoint is already joined to its neighbor
+and an auxiliary locator is added to the same solved point.
+
+Symptom:
+- all entities and constraints are individually valid, but KOMPAS spends minutes
+  inside sketch parameterization or never returns from the solve;
+- removing one auxiliary `merge_points` relation makes the same dimensions and
+  production contour settle immediately.
+
+Cause:
+- the auxiliary entity creates a redundant cyclic ownership path through a node
+  already owned by the primary contour topology;
+- the cycle is especially expensive when tangent arcs, datum circles, and
+  formula-bound radii also meet at that node.
+
+Rule:
+- merge every primary contour junction exactly once;
+- constrain auxiliary geometry to independent datums, midpoints, or curves;
+- do not attach an auxiliary endpoint to a primary node merely to restate a
+  direction that is already implied by tangent/closure constraints;
+- isolate cumulative constraint groups with bounded live probes when solve time
+  changes abruptly.
+
+Verification:
+- all planned constraints and dimensions apply without skips or failures;
+- `ConstraintsState == 2`, primary-contour preflight passes, and save/reopen is
+  stable;
+- change one driving variable and confirm the intended geometry moves while the
+  contour remains closed.
+
+Known example:
+- the parameterized T/AT timing-pulley groove stalled when left/right auxiliary
+  radial lines were merged into tip-arc endpoints already joined to closure
+  segments. Removing those duplicate radial ownership links and locating one
+  outside-material closure point by its leg length plus a
+  formula-bound aligned distance from the fixed datum center, and making the
+  opposite leg equal, retained a fully defined profile without the ownership
+  cycle. Geometric `vertical`, deferred-angle, and X/Y coordinate variants all
+  stalled; the two ordinary linear dimensions removed the same freedom without
+  another curve-relation cycle.
+
+---
+
 ### DIR-001: Direction Parameters And Sketch Directions Require Verification
 
 Applies when:
@@ -1898,6 +1945,31 @@ Known example:
   standard outside-diameter variable). The initial seed radius is separate from
   that target and follows the local-pitch rule above.
 
+### FILLET-004: Construct Cut Fillets From The Retained-Body Side
+
+A corner fillet inside a closed cut contour rounds the cutter region. That is not
+equivalent to rounding the edge that remains on the solid after the cut; at a
+groove mouth the two arcs have opposite corner sense.
+
+For a rounded tooth face adjoining an outside circle of radius `R`:
+
+1. Keep ordinary internal contour fillets only where the removed groove itself
+   must be rounded, such as the groove root.
+2. Construct each mouth transition as a circle of radius `r` whose center lies on
+   radius `R - r` from the part axis.
+3. Make that circle tangent to the tooth flank and use its radial contact point on
+   the radius-`R` circle as the other arc endpoint.
+4. Extend the closing cut boundary outward from that contact point; do not reuse
+   an internal polygon-corner fillet at the sharp groove-mouth intersection.
+5. Verify the center radius `R - r`, the outer endpoint radius `R`, flank
+   tangency, contour closure, and the live KOMPAS arc direction after readback.
+
+Known example:
+- the numeric T/AT timing-pulley groove uses retained-body mouth transitions plus
+  ordinary groove-root fillets. Applying the generic internal fillet at all four
+  trapezoid corners produced a valid cut but rounded the cutter body on the wrong
+  side of each tooth face.
+
 ### CONTOUR-001: Build KOMPAS Contours In Continuous UI Order
 
 KOMPAS contour assembly follows UI-like continuity rules. If an added element does
@@ -1936,6 +2008,31 @@ For `self_wrapping_hooks`:
 - create native `FilletCurve` operations against the materialized sketch edges;
 - call `RebuildDocument()` again before reading `FilletCurve.Owner.ModelObjects(7)`;
 - then create the final 9-edge `Contour3D` and `IEvolution` body.
+
+### REBUILD-002: Recreate Timing Groove Branch After Tooth-Count Changes
+
+For managed timing pulleys, changing tooth count changes the blank diameter,
+the groove profile radius, and the groove-pattern count. KOMPAS can accept the
+updated part and operation variables while leaving the existing `one groove`
+sketch at the previous radius. The first edit may appear correct; subsequent
+edits can leave the profile at the previous radius and report that the sketch
+has no solution.
+
+Use this sequence for both trapezoidal and curvilinear timing profiles:
+
+- treat a tooth-count change as a managed groove-branch topology replacement;
+- remove the owned pattern, groove cut, and `one groove` sketch while retaining
+  the blank and its axis;
+- rebuild the groove sketch, cut, and circular pattern from the new workflow
+  plan;
+- rebuild the document and verify the pattern variable readback, groove-sketch
+  geometry readback, and managed ownership fingerprint.
+
+Failed approach: updating only the blank sketch, or repeatedly calling
+`Update()` on the existing groove sketch, does not reliably move the profile on
+the second and later edits. Do not use a `BeginEdit()` geometry readback as the
+refresh mechanism during the active transaction; on some KOMPAS builds it can
+block while the new feature tree is still resolving.
 
 ## Case Studies
 

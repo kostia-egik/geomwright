@@ -1053,6 +1053,44 @@ def _bind_circular_pattern_operation_variables(pattern, params, scenario, target
     return report
 
 
+def _snapshot_operation_variable_state(model_object):
+    return [
+        {
+            "variable": variable,
+            "expression": safe_get(variable, "Expression"),
+            "value": safe_get(variable, "Value"),
+        }
+        for variable in _iter_operation_variables(model_object)
+    ]
+
+
+def _restore_operation_variable_state(model_object, snapshots):
+    restored = []
+    failed = []
+    for snapshot in snapshots or []:
+        variable = snapshot.get("variable")
+        try:
+            expression = snapshot.get("expression")
+            variable.Expression = "" if expression is None else expression
+            if not str(expression or "").strip() and snapshot.get("value") is not None:
+                variable.Value = snapshot.get("value")
+            update = safe_get(variable, "Update")
+            update_ok = bool(update()) if callable(update) else True
+            if not update_ok:
+                raise RuntimeError("operation_variable_update_failed")
+            restored.append(str(safe_get(variable, "Name") or ""))
+        except Exception as exc:
+            failed.append({"name": str(safe_get(variable, "Name") or ""), "error": str(exc)})
+    object_update = safe_get(model_object, "Update")
+    object_update_ok = bool(object_update()) if callable(object_update) else True
+    return {
+        "ok": not failed and object_update_ok,
+        "restored": restored,
+        "failed": failed,
+        "object_update_ok": object_update_ok,
+    }
+
+
 SPRING_ANCHOR_ROTATION_PARAMETER_NOTES = (
     "Angle",
     "Угол",
@@ -3913,6 +3951,37 @@ def describe_document(document, app, runtime_index=None):
         "active": document == safe_get(app, "ActiveDocument"),
         "changed": safe_get(document, "Changed"),
     }
+
+
+def describe_runtime_document(document, app):
+    """Describe a document with an identifier accepted by strict handlers."""
+    path_name = normalize_display_path(safe_get(document, "PathName", ""))
+    if path_name:
+        return describe_document(document, app)
+
+    target_reference = safe_get(document, "Reference")
+    active_document = safe_get(app, "ActiveDocument")
+    for runtime_index, candidate in enumerate(iter_collection(safe_get(app, "Documents"))):
+        same_document = False
+        try:
+            same_document = candidate == document
+        except Exception:
+            pass
+        if not same_document and target_reference is not None:
+            candidate_reference = safe_get(candidate, "Reference")
+            try:
+                same_document = candidate_reference is not None and candidate_reference == target_reference
+            except Exception:
+                pass
+        if not same_document and document == active_document:
+            try:
+                same_document = candidate == active_document
+            except Exception:
+                pass
+        if same_document:
+            return describe_document(document, app, runtime_index)
+
+    raise RuntimeError("Unsaved document could not be matched to a strict runtime identifier")
 
 
 def text_to_string(text):
@@ -22077,7 +22146,7 @@ def _normalize_runtime_output_key(scenario, output_key):
         if normalized != "point":
             raise RuntimeError("Unsupported projection_point output: %s" % output_key)
         return normalized
-    if scenario_name in ("projection_anchor_sketch", "diaphragm_cut_profile_sketch", "diaphragm_terminal_relief_sketch"):
+    if scenario_name in ("projection_anchor_sketch", "diaphragm_cut_profile_sketch", "diaphragm_terminal_relief_sketch", "numeric_profile_sketch"):
         aliases = {
             "sketch": "sketch",
             "result": "sketch",
@@ -22087,6 +22156,19 @@ def _normalize_runtime_output_key(scenario, output_key):
         normalized = aliases.get(key, key)
         if normalized != "sketch":
             raise RuntimeError("Unsupported %s output: %s" % (scenario_name, output_key))
+        return normalized
+    if scenario_name == "cylindrical_blank":
+        aliases = {
+            "body": "body",
+            "result": "body",
+            "feature": "feature",
+            "extrusion": "feature",
+            "sketch": "sketch",
+            "axis": "axis",
+        }
+        normalized = aliases.get(key, key)
+        if normalized not in ("body", "feature", "sketch", "axis"):
+            raise RuntimeError("Unsupported cylindrical_blank output: %s" % output_key)
         return normalized
     if scenario_name == "cut_extrusion":
         aliases = {
@@ -22343,13 +22425,28 @@ def _resolve_runtime_workflow_output(runtime_objects, operation_id, output_key):
             "origin": [safe_get(point, "X", 0.0), safe_get(point, "Y", 0.0), safe_get(point, "Z", 0.0)],
         }
 
-    if scenario in ("projection_anchor_sketch", "diaphragm_cut_profile_sketch", "diaphragm_terminal_relief_sketch"):
+    if scenario in ("projection_anchor_sketch", "diaphragm_cut_profile_sketch", "diaphragm_terminal_relief_sketch", "numeric_profile_sketch"):
         if normalized_output != "sketch" or target.get("sketch") is None:
             raise RuntimeError(
                 "Workflow output %s.%s does not resolve to a sketch; operation scenario=%s; available outputs: %s"
                 % (operation_id, normalized_output, scenario, available_outputs_text)
             )
         return {"type": "sketch", "object": target["sketch"], "name": safe_get(target["sketch"], "Name")}
+
+    if scenario == "cylindrical_blank":
+        output_map = {
+            "body": ("body", "feature"),
+            "feature": ("feature", "feature"),
+            "sketch": ("sketch", "sketch"),
+            "axis": ("axis", "axis"),
+        }
+        expected = output_map.get(normalized_output)
+        if expected is None or target.get(expected[1]) is None:
+            raise RuntimeError(
+                "Workflow output %s.%s is unavailable; operation scenario=%s; available outputs: %s"
+                % (operation_id, normalized_output, scenario, available_outputs_text)
+            )
+        return {"type": expected[0], "object": target[expected[1]], "name": safe_get(target[expected[1]], "Name")}
 
     if scenario == "cut_extrusion":
         feature = target.get("feature")
@@ -22908,6 +23005,201 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
     params = dict(operation.get("params") or {})
     preview = operation.get("preview") or {}
     bindings = operation.get("bindings") or {}
+
+    if scenario == "cylindrical_blank":
+        outside_diameter = float(params.get("outside_diameter") or params.get("diameter") or 0.0)
+        width = float(params.get("width") or params.get("length") or 0.0)
+        if outside_diameter <= 0.0 or width <= 0.0:
+            raise RuntimeError("cylindrical_blank requires positive outside_diameter and width")
+        plane_value = str(params.get("plane") or "YOZ").strip().lower().replace("-", "_")
+        axis_value = str(params.get("axis") or "x_axis").strip().lower().replace("-", "_")
+        if plane_value not in ("yoz", "yz", "yoz_plane") or axis_value not in ("x", "x_axis", "global_x"):
+            raise RuntimeError("cylindrical_blank currently requires plane=YOZ and axis=x_axis")
+        parameterize = bool(params.get("parameterize", False))
+        variable_report = {"ok": True, "skipped": True, "reason": "numeric_operation_mode"}
+        if parameterize:
+            variable_report = _apply_part_variables(part, list(params.get("variable_plan") or []))
+            if not bool(variable_report.get("ok")):
+                raise RuntimeError("Cylindrical blank part-variable creation failed: %s" % variable_report)
+        sketch, target, entities_report, parameterization_report = _create_sketch_entities(
+            model_container,
+            part,
+            {
+                "name": params.get("sketch_name") or "%s sketch" % (params.get("name") or "Cylindrical blank"),
+                "plane": params.get("plane") or "YOZ",
+                "create_new_sketch": True,
+                "entities": [
+                    {
+                        "id": "blank_circle",
+                        "kind": "circle",
+                        "role": "primary_blank_contour",
+                        "center": [0.0, 0.0],
+                        "radius": outside_diameter / 2.0,
+                        "line_style": 1,
+                    }
+                ],
+                "constraints": list(params.get("constraints") or []) if parameterize else [],
+                "dimensions": list(params.get("dimensions") or []) if parameterize else [],
+                "sketch_options": dict(params.get("sketch_options") or {}) if parameterize else {},
+            },
+        )
+        extrusions = safe_get(model_container, "Extrusions")
+        if extrusions is None:
+            get_extrusions = safe_get(model_container, "GetExtrusions")
+            if callable(get_extrusions):
+                extrusions = get_extrusions()
+        if extrusions is None or not callable(safe_get(extrusions, "Add")):
+            raise RuntimeError("Part does not expose Extrusions.Add")
+        feature = extrusions.Add(25)
+        if feature is None:
+            raise RuntimeError("Extrusions.Add(o3d_bossExtrusion) returned None")
+        feature.Name = str(params.get("name") or "Cylindrical blank")
+        assigned_profile = False
+        for setter_name in ("SetSketch", "SetProfile"):
+            setter = safe_get(feature, setter_name)
+            if callable(setter):
+                setter(sketch)
+                assigned_profile = True
+                break
+        if not assigned_profile:
+            for attr_name in ("Sketch", "Profile"):
+                try:
+                    setattr(feature, attr_name, sketch)
+                    assigned_profile = True
+                    break
+                except Exception:
+                    continue
+        if not assigned_profile:
+            raise RuntimeError("Cylindrical blank extrusion does not expose Sketch/Profile binding")
+        feature.Direction = 0
+        feature.SetExtrusionType(True, 0)
+        feature.SetDepth(True, width)
+        if not bool(feature.Update()):
+            raise RuntimeError("Cylindrical blank boss extrusion update failed")
+        operation_variable_report = (
+            _bind_extrusion_operation_variables(feature, params, scenario)
+            if parameterize
+            else {"ok": True, "skipped": True, "reason": "numeric_operation_mode"}
+        )
+        if operation_variable_report is not None and not bool(operation_variable_report.get("ok")):
+            operation_variable_report["available_variables"] = [
+                {
+                    "name": safe_get(variable, "Name"),
+                    "parameter_note": safe_get(variable, "ParameterNote"),
+                    "value": safe_get(variable, "Value"),
+                    "expression": safe_get(variable, "Expression"),
+                }
+                for variable in _iter_operation_variables(feature)
+            ]
+            raise RuntimeError(
+                "Cylindrical blank extrusion variable binding failed: %s" % operation_variable_report
+            )
+        update_part = safe_get(part, "Update")
+        part_update_result = bool(update_part()) if callable(update_part) else None
+        feature_valid = bool(safe_get(feature, "Valid", False))
+        if not feature_valid:
+            raise RuntimeError("Cylindrical blank boss extrusion is invalid after update")
+        body_metrics = _active_api5_primary_body_metrics()
+        if body_metrics["body_count"] != 1 or body_metrics["volume"] <= 0.0 or not body_metrics["solid"]:
+            raise RuntimeError("cylindrical_blank body verification failed: %s" % body_metrics)
+        axis_start = _create_point3d(
+            model_container,
+            "%s axis start" % (params.get("name") or "Cylindrical blank"),
+            [0.0, 0.0, 0.0],
+        )
+        axis_end = _create_point3d(
+            model_container,
+            "%s axis end" % (params.get("name") or "Cylindrical blank"),
+            [width, 0.0, 0.0],
+        )
+        axis = _create_axis3d_by_2_points(
+            part,
+            "%s axis" % (params.get("name") or "Cylindrical blank"),
+            axis_start,
+            axis_end,
+        )
+        runtime_objects[operation_id] = {
+            "scenario": scenario,
+            "body": feature,
+            "feature": feature,
+            "sketch": sketch,
+            "axis": axis,
+            "axis_start": axis_start,
+            "axis_end": axis_end,
+            "interface": operation.get("interface") or {},
+            "params": params,
+        }
+        steps_report.append(
+            {
+                "operation": "workflow_feature",
+                "id": operation_id,
+                "scenario": scenario,
+                "name": safe_get(feature, "Name"),
+                "valid": feature_valid,
+                "part_update_result": part_update_result,
+                "outside_diameter": outside_diameter,
+                "width": width,
+                "target": target,
+                "entities": entities_report,
+                "parameterization": parameterization_report,
+                "variables": variable_report,
+                "operation_variable_binding": operation_variable_report,
+                "body_after": body_metrics,
+            }
+        )
+        return
+
+    if scenario == "numeric_profile_sketch":
+        parameterize = bool(params.get("parameterize", False))
+        sketch, target, entities_report, parameterization_report = _create_sketch_entities(
+            model_container,
+            part,
+            {
+                "name": params.get("name") or "Numeric profile sketch",
+                "plane": params.get("plane") or "YOZ",
+                "create_new_sketch": True,
+                "entities": list(params.get("entities") or []),
+                "constraints": list(params.get("constraints") or []) if parameterize else [],
+                "dimensions": list(params.get("dimensions") or []) if parameterize else [],
+                "sketch_options": dict(params.get("sketch_options") or {}) if parameterize else {},
+            },
+        )
+        sketch_state = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
+        profile_preflight = _audit_sketch_profile_preflight(
+            model_container,
+            sketch,
+            closure_style=1,
+            expected_component_count=1,
+            profile_entities=list(params.get("entities") or []),
+        )
+        if parameterize and not bool((parameterization_report or {}).get("ok")):
+            raise RuntimeError("Numeric profile sketch parameterization failed: %s" % parameterization_report)
+        if parameterize and bool(params.get("require_fully_defined", True)) and sketch_state.get("code") != 2:
+            raise RuntimeError("Numeric profile sketch is not fully defined: %s" % sketch_state)
+        if not bool(profile_preflight.get("ok")):
+            raise RuntimeError("Numeric profile sketch preflight failed: %s" % profile_preflight)
+        runtime_objects[operation_id] = {
+            "scenario": scenario,
+            "sketch": sketch,
+            "feature": sketch,
+            "interface": operation.get("interface") or {},
+            "params": params,
+        }
+        steps_report.append(
+            {
+                "operation": "workflow_feature",
+                "id": operation_id,
+                "scenario": scenario,
+                "sketch": _describe_sketch_entity_for_report(sketch),
+                "target": target,
+                "entities": entities_report,
+                "parameterization": parameterization_report,
+                "parameterization_level": "constrained" if parameterize else "none",
+                "sketch_state": sketch_state,
+                "profile_preflight": profile_preflight,
+            }
+        )
+        return
 
     if scenario in ("stepped_shaft", "disc_spring", "diaphragm_spring", "external_conical_step", "internal_conical_step", "internal_cylindrical_step", "external_polygonal_step", "internal_polygonal_step", "external_flat_step", "internal_flat_step", "external_helical_thread", "internal_helical_thread", "external_threaded_step", "internal_threaded_step", "face_ring_groove", "bolt_circle_holes", "compression_spring", "conical_compression_spring", "torsion_spring", "extension_spring"):
         coordinate_system = None
@@ -24206,6 +24498,8 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         constraints_state_code = int(constraints_state.get("code") or 0)
         deferred_constraints_state = False
         sketch_runtime = runtime_objects.get(sketch_operation_id) or {}
+        if not bool(params.get("require_fully_defined", True)) and sketch_runtime.get("scenario") != "numeric_profile_sketch":
+            raise RuntimeError("cut_extrusion may disable fully-defined enforcement only for numeric_profile_sketch")
         sketch_step = None
         for step in reversed(steps_report):
             if step.get("id") == sketch_operation_id:
@@ -24394,40 +24688,43 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
             raise RuntimeError("circular_pattern count must be >= 2")
         if abs(span_angle - 360.0) > 1e-9:
             raise RuntimeError("circular_pattern currently supports only span_angle=360")
-        count_variable = str(params.get("count_variable") or "DIA_CUT_COUNT1")
-        span_angle_variable = str(params.get("span_angle_variable") or "DIA_CUT_SPAN_A1")
-        angle_step_variable = str(params.get("angle_step_variable") or "DIA_CUT_STEP_A1")
-        existing_variable_names = {
-            str(safe_get(variable, "Name") or "")
-            for variable in _iter_operation_variables(part)
-        }
-        variable_specs = [
-            {
-                "name": count_variable,
-                "expression": "",
-                "value": float(count),
-                "unit_category": "unitless",
-                "precision": 0,
-            },
-            {
-                "name": span_angle_variable,
-                "expression": "",
-                "value": span_angle,
-                "unit_category": "angle",
-                "precision": 6,
-            },
-            {
-                "name": angle_step_variable,
-                "expression": "%s / %s" % (span_angle_variable, count_variable),
-                "value": angle_step,
-                "unit_category": "angle",
-                "precision": 6,
-            },
-        ]
-        variable_report = _apply_part_variables(
-            part,
-            [spec for spec in variable_specs if spec["name"] not in existing_variable_names],
-        )
+        parameterize = bool(params.get("parameterize", True))
+        variable_report = {"ok": True, "skipped": True, "reason": "numeric_operation_mode"}
+        if parameterize:
+            count_variable = str(params.get("count_variable") or "DIA_CUT_COUNT1")
+            span_angle_variable = str(params.get("span_angle_variable") or "DIA_CUT_SPAN_A1")
+            angle_step_variable = str(params.get("angle_step_variable") or "DIA_CUT_STEP_A1")
+            existing_variable_names = {
+                str(safe_get(variable, "Name") or "")
+                for variable in _iter_operation_variables(part)
+            }
+            variable_specs = [
+                {
+                    "name": count_variable,
+                    "expression": "",
+                    "value": float(count),
+                    "unit_category": "unitless",
+                    "precision": 0,
+                },
+                {
+                    "name": span_angle_variable,
+                    "expression": "",
+                    "value": span_angle,
+                    "unit_category": "angle",
+                    "precision": 6,
+                },
+                {
+                    "name": angle_step_variable,
+                    "expression": "%s / %s" % (span_angle_variable, count_variable),
+                    "value": angle_step,
+                    "unit_category": "angle",
+                    "precision": 6,
+                },
+            ]
+            variable_report = _apply_part_variables(
+                part,
+                [spec for spec in variable_specs if spec["name"] not in existing_variable_names],
+            )
 
         body_before = _active_api5_primary_body_metrics()
         pattern = _create_circular_feature_pattern(
@@ -24439,10 +24736,10 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
             angle_step,
             save_initial_orientation=False,
         )
-        operation_variable_report = _bind_circular_pattern_operation_variables(
-            pattern,
-            params,
-            scenario,
+        operation_variable_report = (
+            _bind_circular_pattern_operation_variables(pattern, params, scenario)
+            if parameterize
+            else {"ok": True, "skipped": True, "reason": "numeric_operation_mode"}
         )
         if operation_variable_report is not None and not bool(operation_variable_report.get("ok")):
             operation_variable_report["available_variables"] = [
@@ -26670,15 +26967,15 @@ def handle_create_managed_pulley(payload):
     if plan.get("stage") != "managed_pulley_plan" or int(plan.get("plan_version") or 0) != 1:
         raise ValueError("A managed_pulley_plan version 1 is required")
     family = str(plan.get("family") or "")
-    if family not in ("v_belt", "poly_v", "flat_belt"):
-        raise ValueError("Managed pulley family must be v_belt, poly_v, or flat_belt")
+    if family not in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear"):
+        raise ValueError("Managed pulley family must be v_belt, poly_v, flat_belt, timing_trapezoidal, or timing_curvilinear")
     blank = plan.get("blank") or {}
     blank_params = blank.get("params") or {}
     blank_preview = blank.get("preview") or {}
     groove_plan = plan.get("grooves") or {}
     target = plan.get("target") or {}
     ownership = plan.get("ownership") or {}
-    if family != "flat_belt" and blank.get("scenario") != "stepped_shaft":
+    if family not in ("flat_belt", "timing_trapezoidal", "timing_curvilinear") and blank.get("scenario") != "stepped_shaft":
         raise ValueError("Managed pulley blank must use the stepped_shaft scenario")
     if ownership.get("schema") != "geomwright.managed_pulley":
         raise ValueError("Managed pulley ownership schema is missing")
@@ -26703,6 +27000,60 @@ def handle_create_managed_pulley(payload):
             raise RuntimeError("Managed pulley top part does not expose a model container")
         steps_report.append({"step": "create_part_document", "ok": True})
 
+        if family in ("timing_trapezoidal", "timing_curvilinear"):
+            current_stage = "build_owned_timing_pulley"
+            workflow_params = (((plan.get("member") or {}).get("workflow") or {}).get("params") or {})
+            operations = list(workflow_params.get("operations") or [])
+            runtime_objects = {}
+            for operation in operations:
+                _execute_workflow_operation(part, model_container, operation, runtime_objects, steps_report)
+            exports = _resolve_runtime_workflow_exports(workflow_params.get("exports"), runtime_objects)
+            source_profile = dict(ownership.get("source_profile") or {})
+            timing_metadata = [
+                {"name": "GW_MANAGED_VERSION", "value": 1, "expression": None, "note": "Geomwright managed schema version"},
+                {"name": "GW_FAMILY_CODE", "value": int(ownership.get("family_code") or 4), "expression": None, "note": "Geomwright timing-pulley family code"},
+                {"name": "GW_TIMING_DESIGNATION_CODE", "value": int(source_profile.get("designation_code") or 0), "expression": None, "note": "Geomwright timing designation code"},
+            ]
+            for field, suffix in (
+                ("custom_pitch", "PITCH"), ("custom_groove_depth", "DEPTH"),
+                ("custom_groove_width", "WIDTH"), ("custom_pitch_line_offset", "OFFSET"),
+                ("custom_tip_radius", "TIP_RADIUS"), ("custom_root_radius", "ROOT_RADIUS"),
+            ):
+                if source_profile.get(field) is not None:
+                    timing_metadata.append({"name": "GW_TIMING_CUSTOM_" + suffix, "value": float(source_profile[field]), "expression": None, "note": "Geomwright source timing-profile metadata"})
+            metadata_report = _apply_part_variables(part, timing_metadata)
+            if not metadata_report.get("ok"):
+                raise RuntimeError("Managed timing-pulley metadata variables could not be created")
+            timing_document = cast_document_3d(doc3)
+            rebuild = safe_get(timing_document, "RebuildDocument")
+            rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+            if rebuild_ok is not True:
+                raise RuntimeError("Managed timing pulley final rebuild was not confirmed")
+            body = _active_api5_primary_body_metrics()
+            if int(body.get("body_count") or 0) != 1 or float(body.get("volume") or 0.0) <= 0.0:
+                raise RuntimeError("Managed timing pulley must create one positive-volume body")
+            inspection = handle_inspect_managed_pulley({"_document": doc3})
+            if not inspection.get("recognized") or inspection.get("family") != family:
+                raise RuntimeError("Managed timing-pulley ownership fingerprint was not recognized")
+            report_progress(100, "completed", name=str(plan.get("name") or "Geomwright timing pulley"))
+            return {
+                "ok": True,
+                "success": True,
+                "stage": "executed",
+                "executed": True,
+                "saved": False,
+                "closed": False,
+                "document": describe_runtime_document(doc3, app),
+                "ownership": ownership,
+                "inspection": inspection,
+                "exports": exports,
+                "semantic_outputs": exports,
+                "verification": {"ok": True, "single_body": True, "final_rebuild_ok": rebuild_ok},
+                "body": body,
+                "metadata": metadata_report,
+                "steps": steps_report,
+            }
+
         if family == "flat_belt":
             current_stage = "build_owned_flat_pulley"
             member_result = _build_managed_flat_pulley(doc3, part, model_container, plan, steps_report)
@@ -26719,7 +27070,7 @@ def handle_create_managed_pulley(payload):
                 "executed": True,
                 "saved": False,
                 "closed": False,
-                "document": describe_document(doc3, app),
+                "document": describe_runtime_document(doc3, app),
                 "ownership": ownership,
                 "blank": {
                     "feature": _v_belt_object_reference(member_result["feature"], "member.functional_feature"),
@@ -26846,7 +27197,7 @@ def handle_create_managed_pulley(payload):
             "executed": True,
             "saved": False,
             "closed": False,
-            "document": describe_document(doc3, app),
+            "document": describe_runtime_document(doc3, app),
             "ownership": ownership,
             "blank": {
                 "feature": _v_belt_object_reference(blank_feature, "member.blank_feature"),
@@ -26874,6 +27225,24 @@ def handle_create_managed_pulley(payload):
 
 def _managed_pulley_plan_variables(plan):
     variables = []
+    if plan.get("family") in ("timing_trapezoidal", "timing_curvilinear"):
+        operations = (((plan.get("member") or {}).get("workflow") or {}).get("params") or {}).get("operations") or []
+        for operation in operations:
+            variables.extend(dict(item) for item in ((operation.get("params") or {}).get("variable_plan") or []))
+        source = dict((plan.get("ownership") or {}).get("source_profile") or {})
+        variables.extend([
+            {"name": "GW_MANAGED_VERSION", "value": 1, "expression": None},
+            {"name": "GW_FAMILY_CODE", "value": int((plan.get("ownership") or {}).get("family_code") or 4), "expression": None},
+            {"name": "GW_TIMING_DESIGNATION_CODE", "value": int(source.get("designation_code") or 0), "expression": None},
+        ])
+        for field, suffix in (
+            ("custom_pitch", "PITCH"), ("custom_groove_depth", "DEPTH"),
+            ("custom_groove_width", "WIDTH"), ("custom_pitch_line_offset", "OFFSET"),
+            ("custom_tip_radius", "TIP_RADIUS"), ("custom_root_radius", "ROOT_RADIUS"),
+        ):
+            if source.get(field) is not None:
+                variables.append({"name": "GW_TIMING_CUSTOM_" + suffix, "value": float(source[field]), "expression": None})
+        return variables
     for operation in (((plan.get("member") or {}).get("bridge_preview") or {}).get("operations") or []):
         if operation.get("operation") == "add_variables":
             variables.extend(dict(item) for item in operation.get("variables") or [])
@@ -26922,6 +27291,8 @@ def _managed_pulley_owned_objects(model_container, inspection):
         ("sketch", safe_get(model_container, "Sketchs")),
         ("rotated", safe_get(model_container, "Rotateds")),
         ("fillet", safe_get(model_container, "Fillets")),
+        ("extrusion", safe_get(model_container, "Extrusions")),
+        ("feature_pattern", safe_get(model_container, "FeaturePatterns")),
     ):
         for item in iter_collection(collection):
             reference = safe_get(item, "Reference")
@@ -26930,8 +27301,81 @@ def _managed_pulley_owned_objects(model_container, inspection):
     return result
 
 
+def _managed_timing_blank_sketch(model_container):
+    return next(
+        (item for item in iter_collection(safe_get(model_container, "Sketchs"))
+         if str(safe_get(item, "Name") or "").lower().endswith(" blank sketch")),
+        None,
+    )
+
+
+def _refresh_timing_blank_sketch(model_container):
+    sketch = _managed_timing_blank_sketch(model_container)
+    if sketch is None:
+        return {"ok": False, "error": "managed_timing_blank_sketch_missing"}
+    update = safe_get(sketch, "Update")
+    if not callable(update):
+        return {"ok": False, "error": "managed_timing_blank_sketch_update_unavailable"}
+    result = update()
+    return {"ok": result is not False, "reference": safe_get(sketch, "Reference"), "update_result": result}
+
+
+def _refresh_timing_groove_sketch(model_container, part):
+    sketch = next(
+        (item for item in iter_collection(safe_get(model_container, "Sketchs"))
+         if str(safe_get(item, "Name") or "").lower().endswith(" one groove")),
+        None,
+    )
+    if sketch is None:
+        return {"ok": False, "error": "managed_timing_groove_sketch_missing"}
+    update = safe_get(sketch, "Update")
+    if not callable(update):
+        return {"ok": False, "error": "managed_timing_groove_sketch_update_unavailable"}
+    part_variables = {
+        str(safe_get(item, "Name") or ""): item
+        for item in _iter_operation_variables(part)
+    }
+    expression_by_dimension = {
+        "TB_CO_DIM": "TB_CO",
+        "TB_OR_DIM": "TB_OR",
+        "TB_W_DIM": "TB_W",
+        "TB_CLOSURE_RADIUS_DIM": "TB_OR + TB_CO",
+        "TB_RF_DIM": "TB_RF",
+        "TB_RR_DIM": "TB_RR",
+        "TB_RT_DIM": "TB_RT",
+    }
+    synchronized = []
+    pending = []
+    for variable in _iter_operation_variables(sketch):
+        name = str(safe_get(variable, "Name") or "")
+        expression = expression_by_dimension.get(name)
+        if expression is None:
+            continue
+        source_names = [token for token in expression.replace("+", " ").split() if token.isidentifier()]
+        source_values = [safe_get(part_variables[token], "Value") for token in source_names if token in part_variables]
+        if not source_values or any(value is None for value in source_values):
+            return {"ok": False, "error": "managed_timing_groove_source_variable_missing", "name": name}
+        value = sum(float(item) for item in source_values)
+        try:
+            variable.Expression = ""
+            variable.Value = value
+            pending.append((variable, expression, name))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "name": name, "synchronized": synchronized}
+    if pending and update() is False:
+        return {"ok": False, "error": "numeric_groove_dimension_update_failed", "synchronized": synchronized}
+    for variable, expression, name in pending:
+        try:
+            variable.Expression = expression
+            synchronized.append(name)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "name": name, "synchronized": synchronized}
+    result = update()
+    return {"ok": result is not False, "reference": safe_get(sketch, "Reference"), "update_result": result, "synchronized": synchronized}
+
+
 def _delete_model_object(model_container, kind, target):
-    collection = safe_get(model_container, {"sketch": "Sketchs", "rotated": "Rotateds", "fillet": "Fillets"}[kind])
+    collection = safe_get(model_container, {"sketch": "Sketchs", "rotated": "Rotateds", "fillet": "Fillets", "extrusion": "Extrusions", "feature_pattern": "FeaturePatterns"}[kind])
     for index in range(collection_count(collection)):
         item = get_collection_item(collection, index)
         if item == target:
@@ -26973,15 +27417,43 @@ def _delete_managed_groove_branch(model_container, inspection):
     objects = _managed_pulley_owned_objects(model_container, inspection)
     groove_objects = []
     for kind, item, name in objects:
-        if kind == "fillet" or name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley ")):
+        if (
+            kind == "fillet"
+            or name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley "))
+            or name.lower().endswith((" one groove", " one groove cut", " groove pattern"))
+        ):
             groove_objects.append((kind, item, name))
     deleted = []
-    for kind in ("fillet", "rotated", "sketch"):
+    for kind in ("fillet", "feature_pattern", "rotated", "extrusion", "sketch"):
         for object_kind, item, name in list(groove_objects):
             if object_kind == kind:
-                _delete_model_object(model_container, kind, item)
+                try:
+                    _delete_model_object(model_container, kind, item)
+                except RuntimeError as exc:
+                    if not name.lower().endswith((" one groove", " one groove cut", " groove pattern")) or "not found" not in str(exc):
+                        raise
                 deleted.append({"kind": kind, "name": name})
     return deleted
+
+
+def _rebuild_managed_timing_groove_branch(part, model_container, plan, steps_report):
+    workflow = ((plan.get("member") or {}).get("workflow") or {}).get("params") or {}
+    operations = list(workflow.get("operations") or [])
+    blank_feature = next(
+        (item for item in iter_collection(safe_get(model_container, "Extrusions"))
+         if str(safe_get(item, "Name") or "").lower().endswith(" blank")),
+        None,
+    )
+    blank_sketch = _managed_timing_blank_sketch(model_container)
+    auxiliary = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    axis = next(iter(iter_collection(safe_get(auxiliary, "Axes3D"))), None)
+    if blank_feature is None or blank_sketch is None or axis is None:
+        raise RuntimeError("Managed timing-pulley groove replacement cannot resolve the existing blank outputs")
+    runtime_objects = {"blank": {"scenario": "cylindrical_blank", "body": blank_feature, "feature": blank_feature, "sketch": blank_sketch, "axis": axis, "interface": {}, "params": {}}}
+    for operation in operations:
+        if str(operation.get("scenario") or "") != "cylindrical_blank":
+            _execute_workflow_operation(part, model_container, operation, runtime_objects, steps_report)
+    return {"success": True, "mode": "groove_branch_replacement", "operations": [str(item.get("id") or "") for item in operations if str(item.get("scenario") or "") != "cylindrical_blank"]}
 
 
 def _apply_managed_groove_plan(document, plan):
@@ -27055,6 +27527,8 @@ def handle_update_managed_pulley(payload):
     topology_change = family == "flat_belt"
     if family != "flat_belt":
         topology_change = int(requested.get("groove_count") or 0) != int(current.get("groove_count") or 0)
+    if family in ("timing_trapezoidal", "timing_curvilinear"):
+        topology_change = topology_change or int(requested.get("tooth_count") or 0) != int(current.get("tooth_count") or 0)
     topology_change = topology_change or (family == "v_belt" and (
         requested.get("designation") != current.get("designation")
         or requested.get("standard_system") != current.get("standard_system")
@@ -27069,6 +27543,12 @@ def handle_update_managed_pulley(payload):
         if rollback_plan.get("stage") != "managed_pulley_plan" or rollback_plan.get("family") != family:
             raise ValueError("A matching rollback managed_pulley_plan is required for topology replacement")
         preflight = _managed_pulley_topology_preflight(model_container, before)
+        if family in ("timing_trapezoidal", "timing_curvilinear"):
+            preflight["unsupported_downstream"] = [
+                item for item in preflight.get("unsupported_downstream") or []
+                if not (item.get("kind") == "sketch" and not str(item.get("name") or "").strip())
+            ]
+            preflight["ok"] = not preflight["unsupported_downstream"]
         if not preflight.get("ok"):
             raise RuntimeError("Topology replacement is blocked by non-owned downstream operations: " + json.dumps(preflight["unsupported_downstream"], ensure_ascii=False))
 
@@ -27088,6 +27568,18 @@ def handle_update_managed_pulley(payload):
         if name in existing
     }
     objects = _managed_pulley_owned_objects(model_container, before)
+    timing_operation_snapshots = []
+    if family in ("timing_trapezoidal", "timing_curvilinear"):
+        timing_blank = next(
+            (item for item in iter_collection(safe_get(model_container, "Extrusions")) if str(safe_get(item, "Name") or "").lower().endswith(" blank")),
+            None,
+        )
+        timing_pattern = next(iter(iter_collection(safe_get(model_container, "FeaturePatterns"))), None)
+        for role, model_object in (("blank", timing_blank), ("pattern", timing_pattern)):
+            if model_object is not None:
+                timing_operation_snapshots.append(
+                    {"role": role, "object": model_object, "variables": _snapshot_operation_variable_state(model_object)}
+                )
     rebuild = safe_get(doc3, "RebuildDocument")
     try:
         if topology_change:
@@ -27108,9 +27600,40 @@ def handle_update_managed_pulley(payload):
                 missing_report = _apply_part_variables(part, missing_after_delete)
                 if not missing_report.get("ok"):
                     raise RuntimeError("Topology replacement variables could not be recreated")
+        timing_binding_report = None
+        replacement_result = None
+        if family in ("timing_trapezoidal", "timing_curvilinear"):
+            if topology_change:
+                replacement_result = _rebuild_managed_timing_groove_branch(part, model_container, plan, [])
+                timing_binding_report = {"ok": True, "mode": "recreated_with_groove_branch"}
+            else:
+                operations = (((plan.get("member") or {}).get("workflow") or {}).get("params") or {}).get("operations") or []
+                operation_by_scenario = {str(item.get("scenario") or ""): item for item in operations}
+                blank_operation = operation_by_scenario.get("cylindrical_blank") or {}
+                pattern_operation = operation_by_scenario.get("circular_pattern") or {}
+                blank_feature = next(
+                    (item for item in iter_collection(safe_get(model_container, "Extrusions")) if str(safe_get(item, "Name") or "").lower().endswith(" blank")),
+                    None,
+                )
+                pattern_feature = next(iter(iter_collection(safe_get(model_container, "FeaturePatterns"))), None)
+                if blank_feature is None or pattern_feature is None:
+                    raise RuntimeError("Managed timing-pulley operation variables cannot be rebound because owned features are missing")
+                blank_binding = _bind_extrusion_operation_variables(
+                    blank_feature, blank_operation.get("params") or {}, "cylindrical_blank"
+                )
+                pattern_binding = _bind_circular_pattern_operation_variables(
+                    pattern_feature, pattern_operation.get("params") or {}, "circular_pattern"
+                )
+                timing_binding_report = {"blank": blank_binding, "pattern": pattern_binding}
+                if blank_binding is not None and not blank_binding.get("ok"):
+                    raise RuntimeError("Managed timing-pulley blank-width binding failed")
+                if pattern_binding is None or not pattern_binding.get("ok"):
+                    raise RuntimeError("Managed timing-pulley pattern binding failed")
         ownership = dict(plan.get("ownership") or {})
         groove_names = dict((plan.get("grooves") or {}).get("entity_names") or {})
         for kind, item, old_name in objects:
+            if topology_change and family in ("timing_trapezoidal", "timing_curvilinear"):
+                continue
             if kind == "fillet" or old_name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley ")):
                 continue
             new_name = old_name
@@ -27124,8 +27647,7 @@ def handle_update_managed_pulley(payload):
                 new_name = groove_names.get("cut") or old_name
             item.Name = str(new_name)
             _update_feature_object(item)
-        replacement_result = None
-        if topology_change:
+        if topology_change and family not in ("timing_trapezoidal", "timing_curvilinear"):
             blank_rebuild_ok = bool(rebuild()) if callable(rebuild) else None
             if blank_rebuild_ok is False:
                 raise RuntimeError("Managed pulley blank rebuild before topology replacement returned False")
@@ -27134,8 +27656,31 @@ def handle_update_managed_pulley(payload):
                 raise RuntimeError("Replacement managed groove build failed verification")
         report_progress(70, "rebuild_updated_model", name=str(plan.get("name") or "Geomwright pulley"))
         rebuild_ok = bool(rebuild()) if callable(rebuild) else None
-        if rebuild_ok is False:
+        if rebuild_ok is False or (family in ("timing_trapezoidal", "timing_curvilinear") and rebuild_ok is not True):
             raise RuntimeError("Managed pulley rebuild returned False")
+        if family in ("timing_trapezoidal", "timing_curvilinear"):
+            blank_refresh = _refresh_timing_blank_sketch(model_container)
+            if not blank_refresh.get("ok"):
+                raise RuntimeError("Managed timing-pulley blank sketch refresh failed")
+            groove_refresh = _refresh_timing_groove_sketch(model_container, part)
+            if not groove_refresh.get("ok"):
+                raise RuntimeError("Managed timing-pulley groove sketch refresh failed")
+            rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+            if rebuild_ok is not True:
+                raise RuntimeError("Managed timing-pulley rebuild after blank sketch refresh was not confirmed")
+            pattern_feature = next(iter(iter_collection(safe_get(model_container, "FeaturePatterns"))), None)
+            expected_count = int(requested.get("tooth_count") or 0)
+            expected_step = 360.0 / float(expected_count) if expected_count else 0.0
+            pattern_variables = _iter_operation_variables(pattern_feature) if pattern_feature is not None else []
+            count_driver = next((item for item in pattern_variables if str(safe_get(item, "Expression") or "").strip() == "TB_Z"), None)
+            step_driver = next((item for item in pattern_variables if str(safe_get(item, "Expression") or "").strip() == "TB_STEP"), None)
+            actual_count = int(round(float(safe_get(count_driver, "Value", 0.0) or 0.0))) if count_driver is not None else 0
+            actual_step = float(safe_get(step_driver, "Value", 0.0) or 0.0) if step_driver is not None else 0.0
+            if actual_count != expected_count or abs(actual_step - expected_step) > 1e-7:
+                raise RuntimeError(
+                    "Managed timing-pulley pattern readback mismatch: count=%s step=%s expected_count=%s expected_step=%s"
+                    % (actual_count, actual_step, expected_count, expected_step)
+                )
         body = _active_api5_primary_body_metrics()
         if int(body.get("body_count") or 0) != 1 or float(body.get("volume") or 0.0) <= 0.0:
             raise RuntimeError("Managed pulley rebuild did not preserve one positive-volume body")
@@ -27151,7 +27696,7 @@ def handle_update_managed_pulley(payload):
             elif value != expected:
                 raise RuntimeError("Managed pulley profile readback mismatch for " + str(key))
         report_progress(100, "updated", name=str(after.get("display_name") or plan.get("name") or "Geomwright pulley"))
-        return {"ok": True, "success": True, "stage": "updated", "update_mode": "topology_replacement" if topology_change else "variable_rebuild", "document": describe_document(doc3, app), "before": before, "after": after, "variables": variable_report, "replacement": replacement_result, "body": body, "rebuild_ok": rebuild_ok}
+        return {"ok": True, "success": True, "stage": "updated", "update_mode": "topology_replacement" if topology_change else "variable_rebuild", "document": describe_runtime_document(doc3, app), "before": before, "after": after, "variables": variable_report, "operation_variable_bindings": timing_binding_report, "replacement": replacement_result, "body": body, "rebuild_ok": rebuild_ok}
     except Exception as exc:
         rollback = {"attempted": True, "ok": False, "error": None}
         try:
@@ -27170,13 +27715,20 @@ def handle_update_managed_pulley(payload):
                     continue
                 item.Name = old_name
                 _update_feature_object(item)
+            operation_rollback = []
+            for snapshot in timing_operation_snapshots:
+                restore_report = _restore_operation_variable_state(snapshot["object"], snapshot["variables"])
+                restore_report["role"] = snapshot["role"]
+                operation_rollback.append(restore_report)
+            if any(not item.get("ok") for item in operation_rollback):
+                raise RuntimeError("Managed timing-pulley operation-variable rollback failed")
             rollback_rebuild = bool(rebuild()) if callable(rebuild) else None
             if topology_change:
                 restored_branch = _apply_managed_groove_plan(doc3, rollback_plan)
                 if not restored_branch.get("success"):
                     raise RuntimeError("Rollback groove branch verification failed")
                 rollback_rebuild = bool(rebuild()) if callable(rebuild) else None
-            rollback.update({"ok": bool(restored.get("ok")) and rollback_rebuild is not False, "rebuild_ok": rollback_rebuild})
+            rollback.update({"ok": bool(restored.get("ok")) and rollback_rebuild is not False, "rebuild_ok": rollback_rebuild, "operation_variables": operation_rollback})
         except Exception as rollback_exc:
             rollback["error"] = str(rollback_exc)
         raise RuntimeError("update_managed_pulley failed: %s | rollback=%s" % (exc, json.dumps(rollback, ensure_ascii=False)))
@@ -27225,6 +27777,14 @@ def handle_inspect_managed_pulley(payload):
         _v_belt_object_reference(item, "fillet")
         for item in iter_collection(safe_get(model_container, "Fillets"))
     ]
+    extrusions = [
+        _v_belt_object_reference(item, "extrusion")
+        for item in iter_collection(safe_get(model_container, "Extrusions"))
+    ]
+    feature_patterns = [
+        _v_belt_object_reference(item, "feature_pattern")
+        for item in iter_collection(safe_get(model_container, "FeaturePatterns"))
+    ]
     sketch_names = [str(item.get("name") or "") for item in sketches]
     feature_names = [str(item.get("name") or "") for item in rotateds]
     has_blank_variables = {"PULLEY_D1", "PULLEY_L1"}.issubset(variable_names)
@@ -27244,7 +27804,31 @@ def handle_inspect_managed_pulley(payload):
     has_flat_belt = has_flat_parameter_set and any(
         name.startswith("Flat-belt pulley ") for name in sketch_names + feature_names
     )
-    family = "v_belt" if has_v_belt else ("poly_v" if has_poly_v else ("flat_belt" if has_flat_belt else None))
+    extrusion_names = [str(item.get("name") or "") for item in extrusions]
+    pattern_names = [str(item.get("name") or "") for item in feature_patterns]
+    timing_family_code = int(round(float(next((item.get("value") for item in variables if item["name"] == "GW_FAMILY_CODE"), 0) or 0)))
+    has_timing_marker = (
+        {"GW_MANAGED_VERSION", "GW_FAMILY_CODE", "GW_TIMING_DESIGNATION_CODE"}.issubset(variable_names)
+        and timing_family_code in (4, 5)
+    )
+    has_timing_parameter_set = {
+        "TB_P", "TB_Z", "TB_B", "TB_OR", "TB_H", "TB_RR", "TB_W", "TB_RT", "TB_RF", "TB_CO", "TB_STEP"
+    }.issubset(variable_names)
+    has_timing_sketches = any(name.lower().endswith(" blank sketch") for name in sketch_names) and any(
+        name.lower().endswith(" one groove") for name in sketch_names
+    )
+    has_timing_features = (
+        any(name.lower().endswith(" blank") for name in extrusion_names)
+        and any(name.lower().endswith(" one groove cut") for name in extrusion_names)
+        and any(name.lower().endswith(" groove pattern") for name in pattern_names)
+    )
+    has_timing = has_timing_marker and has_timing_parameter_set and has_timing_sketches and has_timing_features
+    timing_family = "timing_trapezoidal" if timing_family_code == 4 else ("timing_curvilinear" if timing_family_code == 5 else None)
+    family = "v_belt" if has_v_belt else ("poly_v" if has_poly_v else ("flat_belt" if has_flat_belt else (timing_family if has_timing else None)))
+    if family in ("timing_trapezoidal", "timing_curvilinear"):
+        has_blank_variables = {"TB_OR", "TB_B"}.issubset(variable_names)
+        has_blank_sketch = any(name.lower().endswith(" blank sketch") for name in sketch_names)
+        has_blank_feature = any(name.lower().endswith(" blank") for name in extrusion_names)
     evidence = {
         "blank_variables": has_blank_variables,
         "blank_sketch": has_blank_sketch,
@@ -27264,7 +27848,7 @@ def handle_inspect_managed_pulley(payload):
         "minimum_datum_diameter": "MIN_D",
         "standard_top_edge_radius": "FILLET_R",
     }
-    all_names = sketch_names + feature_names
+    all_names = sketch_names + feature_names + extrusion_names + pattern_names
     profile_request = None
     display_name = None
     if family == "v_belt":
@@ -27311,34 +27895,79 @@ def handle_inspect_managed_pulley(payload):
             "crown_height": values.get("FP_CROWN") or 0.0,
         }
         display_name = "Flat-belt pulley %s" % ("crowned" if profile_code == 2 else "cylindrical")
+    elif family in ("timing_trapezoidal", "timing_curvilinear"):
+        designation_codes = {0: "CUSTOM", 1: "T2.5", 2: "T5", 3: "T10", 4: "AT5", 5: "HTD_3M", 6: "HTD_5M", 7: "HTD_8M"}
+        designation_code = int(round(float(values.get("GW_TIMING_DESIGNATION_CODE") or 0)))
+        designation = designation_codes.get(designation_code)
+        if designation is not None:
+            profile_request = {
+                "designation": designation,
+                "tooth_count": int(round(float(values.get("TB_Z") or 0))),
+                "face_width": values.get("TB_B"),
+            }
+            if designation == "CUSTOM":
+                profile_request.update(
+                    {
+                        "custom_pitch": values.get("GW_TIMING_CUSTOM_PITCH") or values.get("TB_P"),
+                        "custom_groove_depth": values.get("GW_TIMING_CUSTOM_DEPTH") or values.get("TB_H"),
+                        "custom_groove_width": values.get("GW_TIMING_CUSTOM_WIDTH") or values.get("TB_W"),
+                        "custom_pitch_line_offset": values.get("GW_TIMING_CUSTOM_OFFSET") or values.get("TB_PL"),
+                        "custom_tip_radius": values.get("GW_TIMING_CUSTOM_TIP_RADIUS") or values.get("TB_RT"),
+                        "custom_root_radius": values.get("GW_TIMING_CUSTOM_ROOT_RADIUS") or values.get("TB_RF"),
+                    }
+                )
+            display_name = "Timing pulley %s Z%s" % (designation, profile_request["tooth_count"])
     owned_references = sorted(
         int(item.get("reference"))
-        for item in sketches + rotateds + fillets
+        for item in sketches + rotateds + fillets + extrusions + feature_patterns
         if item.get("reference") and (
             " blank" in str(item.get("name") or "").lower()
             or str(item.get("name") or "").startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley "))
+            or str(item.get("name") or "").lower().endswith((" one groove", " one groove cut", " groove pattern"))
         )
     )
+    identity_references = list(owned_references)
+    if family in ("timing_trapezoidal", "timing_curvilinear"):
+        identity_objects = []
+        for items, suffix in (
+            (sketches, " blank sketch"),
+            (sketches, " one groove"),
+            (extrusions, " blank"),
+            (extrusions, " one groove cut"),
+            (feature_patterns, " groove pattern"),
+        ):
+            match = next(
+                (item for item in items if str(item.get("name") or "").lower().endswith(suffix)),
+                None,
+            )
+            if match is not None and match.get("reference"):
+                identity_objects.append(int(match["reference"]))
+        identity_references = sorted(set(identity_objects))
     return {
         "ok": True,
         "recognized": managed,
         "schema": "geomwright.managed_pulley" if managed else None,
         "version": 1 if managed else None,
         "family": family,
-        "block_id": ("managed-pulley:" + "-".join(str(item) for item in owned_references)) if managed else None,
+        "block_id": ("managed-pulley:" + "-".join(str(item) for item in identity_references)) if managed else None,
         "display_name": display_name,
         "profile_request": profile_request,
         "owned_references": owned_references,
+        "identity_references": identity_references,
         "document": describe_document(document, app),
         "evidence": evidence,
         "variables": variables,
         "sketches": sketches,
         "rotated_features": rotateds,
         "fillet_features": fillets,
+        "extrusion_features": extrusions,
+        "feature_patterns": feature_patterns,
         "scan_scope": {
             "all_part_variables": True,
             "all_sketches": True,
             "all_rotated_features": True,
+            "all_extrusion_features": True,
+            "all_feature_patterns": True,
             "requires_last_feature": False,
         },
     }
@@ -27380,13 +28009,21 @@ def handle_studio_workspace_snapshot(payload):
                 collection, _accessor, _errors = _resolve_model_object_collection(model_container, accessors)
                 for model_object in iter_collection(collection):
                     reference = safe_get(model_object, "Reference")
+                    object_name = str(safe_get(model_object, "Name") or "")
+                    object_valid = safe_get(model_object, "Valid")
+                    timing_pattern_owned = bool(
+                        inspection.get("family") in ("timing_trapezoidal", "timing_curvilinear")
+                        and collection_name == "sketches"
+                        and not object_name.strip()
+                        and object_valid is False
+                    )
                     entry["operations"].append(
                         {
                             "reference": reference,
-                            "name": str(safe_get(model_object, "Name") or collection_name),
+                            "name": object_name or collection_name,
                             "kind": collection_name,
-                            "owned": reference in owned,
-                            "valid": safe_get(model_object, "Valid") is not False,
+                            "owned": reference in owned or timing_pattern_owned,
+                            "valid": object_valid is not False,
                         }
                     )
         except Exception as exc:

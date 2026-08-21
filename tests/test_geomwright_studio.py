@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import math
 
 import pytest
 
@@ -10,9 +11,12 @@ from geomwright.studio.registry import get_module, list_modules, managed_pulley_
 def test_registry_exposes_schema_driven_managed_belt_modules() -> None:
     modules = list_modules()
 
-    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt"]
-    assert all(item["capabilities"] == {"preview": True, "build": True, "inspect": False} for item in modules)
-    for kind in ("v_belt", "poly_v", "flat_belt"):
+    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear"]
+    assert all(item["group"] == "mechanical_transmissions" for item in modules)
+    assert all(item["subgroup"] == "belt_drives" for item in modules)
+    assert get_module("timing_trapezoidal").descriptor()["capabilities"]["build"] is True
+    assert get_module("timing_curvilinear").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear"):
         module = get_module(kind)
         spec = module.spec()
         validated = module.request_model.model_validate(spec["defaults"])
@@ -124,6 +128,57 @@ def test_managed_pulley_plan_owns_a_new_blank_and_internal_target_contract() -> 
     assert poly_plan["grooves"]["axial_center"] == pytest.approx(poly_plan["target"]["axial_max"] / 2.0)
 
 
+def test_timing_trapezoidal_managed_plan_owns_parameterized_workflow() -> None:
+    request = dict(get_module("timing_trapezoidal").defaults)
+    plan = managed_pulley_plan("timing_trapezoidal", request)
+
+    assert plan["stage"] == "managed_pulley_plan"
+    assert plan["family"] == "timing_trapezoidal"
+    assert plan["member"]["stage"] == "trapezoidal_timing_pulley_parameterized_mechanics"
+    assert plan["ownership"]["schema"] == "geomwright.managed_pulley"
+    assert plan["ownership"]["pattern_feature_name"] == "Geomwright pulley groove pattern"
+    assert plan["ownership"]["source_profile"]["designation_code"] == 2
+    assert plan["target"] == {
+        "axis": "global_x",
+        "body_count": 1,
+        "outer_diameter": pytest.approx(plan["profile_preview"]["derived"]["outside_diameter"]),
+        "axial_min": 0.0,
+        "axial_max": 20.0,
+        "parameter_base": {
+            "outer_radius_variable": "TB_OR",
+            "face_width_variable": "TB_B",
+        },
+    }
+    assert {"GW_MANAGED_VERSION", "GW_FAMILY_CODE", "GW_TIMING_DESIGNATION_CODE", "TB_Z", "TB_B"}.issubset(
+        plan["ownership"]["required_variables"]
+    )
+    operations = plan["member"]["workflow"]["params"]["operations"]
+    assert [item["scenario"] for item in operations] == [
+        "cylindrical_blank",
+        "numeric_profile_sketch",
+        "cut_extrusion",
+        "circular_pattern",
+    ]
+    assert operations[1]["params"]["require_fully_defined"] is True
+    assert plan["verification"]["require_pattern_count"] == 24
+
+
+def test_timing_curvilinear_managed_plan_is_available_through_studio_gate() -> None:
+    from kompas_mcp.transmissions.pulley import build_managed_pulley_plan
+
+    plan = build_managed_pulley_plan(
+        "timing_curvilinear",
+        {"designation": "HTD_5M", "tooth_count": 24, "face_width": 20.0},
+    )
+
+    assert plan["family"] == "timing_curvilinear"
+    assert plan["member"]["stage"] == "curvilinear_timing_pulley_parameterized_mechanics"
+    assert plan["ownership"]["family_code"] == 5
+    assert plan["ownership"]["source_profile"]["designation_code"] == 6
+    assert len(plan["member"]["workflow"]["params"]["operations"][1]["params"]["constraints"]) == 37
+    assert get_module("timing_curvilinear").descriptor()["capabilities"]["build"] is True
+
+
 def test_flat_belt_pulley_preview_and_managed_plan_cover_both_rim_profiles() -> None:
     cylindrical = preview_module("flat_belt", get_module("flat_belt").defaults)
     crowned_request = {
@@ -198,6 +253,75 @@ def test_flat_belt_pulley_infers_profile_from_crown_height_and_rejects_impossibl
         )
 
 
+def test_timing_belt_preview_uses_cropped_end_view_catalog_and_exposes_managed_cad() -> None:
+    result = preview_module("timing_curvilinear", get_module("timing_curvilinear").defaults)
+
+    assert result["family"] == "timing_belt"
+    assert result["view_mode"] == "end"
+    assert result["summary"]["designation"] == "HTD_5M"
+    assert result["summary"]["profile_shape"] == "curvilinear"
+    assert result["summary"]["pitch_diameter_mm"] == pytest.approx(24 * 5 / math.pi)
+    assert len(result["feature_paths"][0]) == 119
+    assert min(math.hypot(*point) for point in result["feature_paths"][0]) == pytest.approx(
+        result["summary"]["root_diameter_mm"] / 2.0,
+        abs=1e-8,
+    )
+    assert len(result["guide_paths"][0]) == 145
+    assert result["guide_paths"][0][0] == pytest.approx(result["feature_paths"][0][-1])
+    assert result["guide_paths"][0][-1] == pytest.approx(result["feature_paths"][0][0])
+    assert result["bounds"]["y_min"] > 0
+    assert [item["key"] for item in result["dimensions"]] == [
+        "outside_diameter",
+        "root_diameter",
+        "groove_width",
+        "groove_depth",
+        "tip_radius",
+        "root_fillet_radius",
+    ]
+    assert [item["key"] for item in result["reference_paths"]] == ["outside_circle"]
+    assert all(item["orientation"] == "radial" for item in result["dimensions"][:2])
+    assert result["dimensions"][2]["value"] == pytest.approx(result["summary"]["groove_width_mm"])
+    assert result["dimensions"][3]["value"] == pytest.approx(result["summary"]["groove_depth_mm"])
+    assert result["summary"]["tip_radius_mm"] == pytest.approx(0.43)
+    assert result["summary"]["root_fillet_radius_mm"] == pytest.approx(1.5)
+    assert result["module"]["family"] == "synchronous_pulleys"
+    assert result["module"]["capabilities"]["build"] is True
+    managed = managed_pulley_plan("timing_curvilinear", get_module("timing_curvilinear").defaults)
+    assert managed["family"] == "timing_curvilinear"
+    assert managed["target"]["outer_diameter"] == pytest.approx(result["summary"]["outside_diameter_mm"])
+
+
+def test_timing_belt_custom_profile_requires_complete_geometry() -> None:
+    request = {
+        "designation": "CUSTOM",
+        "tooth_count": 30,
+        "face_width": 18.0,
+        "custom_pitch": 4.0,
+        "custom_groove_depth": 1.2,
+        "custom_groove_width": 2.4,
+        "custom_pitch_line_offset": 0.5,
+        "custom_tip_radius": 0.18,
+        "custom_root_radius": 0.32,
+    }
+    result = preview_module("timing_trapezoidal", request)
+
+    assert result["summary"]["profile_shape"] == "trapezoidal"
+    profile_path = result["feature_paths"][0]
+    assert len(profile_path) == 158
+    assert [item["key"] for item in result["dimensions"]][-2:] == ["tip_radius", "root_fillet_radius"]
+    assert result["summary"]["tip_radius_mm"] == pytest.approx(0.18)
+    assert result["summary"]["root_fillet_radius_mm"] == pytest.approx(0.32)
+    assert result["warning_items"][0]["code"] == "custom_timing_profile"
+    compatible = preview_module(
+        "timing_trapezoidal",
+        {key: value for key, value in request.items() if key not in {"custom_tip_radius", "custom_root_radius"}},
+    )
+    assert compatible["summary"]["tip_radius_mm"] == pytest.approx(0.24)
+    assert compatible["summary"]["root_fillet_radius_mm"] == pytest.approx(0.42)
+    with pytest.raises(Exception, match="CUSTOM requires"):
+        preview_module("timing_trapezoidal", {"designation": "CUSTOM", "tooth_count": 30, "face_width": 18.0})
+
+
 def test_flat_belt_studio_russian_copy_covers_fields_help_summary_warning_and_progress() -> None:
     from pathlib import Path
 
@@ -242,6 +366,12 @@ def test_studio_cad_plan_status_reads_flat_pulley_dimensions_without_a_target() 
     assert "outerDiameter: derived.outer_diameter" in source
     assert "faceWidth: derived.face_width" in source
     assert "plan.target.outer_diameter" not in source
+    assert 'timing_trapezoidal: "block.timing_trapezoidal"' in source
+    assert 'timing_curvilinear: "block.timing_curvilinear"' in source
+    assert 'form.addEventListener("wheel"' in source
+    assert "event.preventDefault();" in source
+    assert 'moduleSelect.addEventListener("click"' in source
+    assert 'moduleFamilySelect.addEventListener("click"' in source
 
 
 def test_studio_exposes_a_cancel_control_for_running_cad_jobs() -> None:
@@ -255,7 +385,7 @@ def test_studio_exposes_a_cancel_control_for_running_cad_jobs() -> None:
     assert 'requestJson(`/cad/jobs/${activeCadJobId}/cancel`, { method: "POST" })' in source
 
 
-def test_bundled_bridge_contains_flat_pulley_create_and_ownership_paths() -> None:
+def test_bundled_bridge_contains_managed_pulley_create_and_ownership_paths() -> None:
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
@@ -264,9 +394,16 @@ def test_bundled_bridge_contains_flat_pulley_create_and_ownership_paths() -> Non
 
     assert source == packaged
     assert "def _build_managed_flat_pulley(" in source
-    assert 'family not in ("v_belt", "poly_v", "flat_belt")' in source
+    assert 'family not in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear")' in source
     assert '{"FP_OR", "FP_T"}.intersection(variable_names)' in source
     assert 'name.startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley "))' in source
+    assert 'and object_valid is False' in source
+    assert '"GW_TIMING_DESIGNATION_CODE"' in source
+    assert '"all_feature_patterns": True' in source
+    assert "def _refresh_timing_blank_sketch(model_container):" in source
+    assert "def _rebuild_managed_timing_groove_branch(" in source
+    assert '"groove_branch_replacement"' in source
+    assert '"Managed timing-pulley rebuild after blank sketch refresh was not confirmed"' in source
     assert '"feature": _v_belt_object_reference(result.get("feature"), "member.functional_feature")' in source
     assert '"sketch": _v_belt_object_reference(result.get("sketch"), "member.profile_sketch")' in source
 
@@ -296,6 +433,7 @@ def test_flat_belt_preview_is_registered_in_the_public_tool_catalog() -> None:
     catalog = get_mcp_tool_catalog()
     category = next(item for item in catalog["categories"] if item["name"] == "transmission_design")
     assert "preview_flat_belt_pulley" in category["tools"]
+    assert "preview_timing_belt_pulley" in category["tools"]
 
 
 def test_v_belt_warning_codes_follow_conditions_instead_of_list_positions() -> None:
@@ -417,7 +555,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert health["mode"] == "managed_cad"
     assert health["contract_version"] == 2
     assert "managed_pulley_create_job" in health["capabilities"]
-    assert client.get("/modules").json()["count"] == 3
+    assert client.get("/modules").json()["count"] == 5
 
     spec = client.get("/modules/poly_v/spec")
     assert spec.status_code == 200
@@ -431,6 +569,15 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     cad_plan = client.post("/modules/poly_v/cad/plan", json=spec.json()["defaults"])
     assert cad_plan.status_code == 200
     assert cad_plan.json()["stage"] == "managed_pulley_plan"
+
+    timing_spec = client.get("/modules/timing_trapezoidal/spec").json()
+    timing_plan = client.post(
+        "/modules/timing_trapezoidal/cad/plan",
+        json=timing_spec["defaults"],
+    )
+    assert timing_plan.status_code == 200
+    assert timing_plan.json()["target"]["outer_diameter"] > 0
+    assert timing_plan.json()["target"]["axial_max"] == 20.0
 
     unconfirmed = client.post(
         "/modules/poly_v/cad/create",
@@ -680,7 +827,7 @@ def test_workspace_close_saved_document_uses_strict_save_and_close() -> None:
     ]
 
 
-def test_cad_job_reports_real_lifecycle_without_blocking_start_request() -> None:
+def test_curvilinear_timing_cad_create_job_reports_real_lifecycle_without_blocking_start_request() -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -704,9 +851,9 @@ def test_cad_job_reports_real_lifecycle_without_blocking_start_request() -> None
             return {"ok": True, "stage": "executed", "verification": {"ok": True}}
 
     client = TestClient(create_app(adapter_factory=FakeAdapter))
-    profile = get_module("poly_v").defaults
+    profile = get_module("timing_curvilinear").defaults
     started = client.post(
-        "/modules/poly_v/cad/jobs",
+        "/modules/timing_curvilinear/cad/jobs",
         json={"profile": profile, "confirm_write": True},
     )
     assert started.status_code == 202
@@ -723,13 +870,13 @@ def test_cad_job_reports_real_lifecycle_without_blocking_start_request() -> None
     assert job["result"]["verification"]["ok"] is True
     assert job["progress"]["percent"] == 100
     assert job["progress"]["operation"] == "completed"
-    assert calls[0]["family"] == "poly_v"
+    assert calls[0]["family"] == "timing_curvilinear"
     assert calls[0]["confirm_write"] is True
     assert client.get("/cad/jobs/missing").status_code == 404
-    assert client.post("/modules/poly_v/cad/jobs", json={"profile": profile}).status_code == 409
+    assert client.post("/modules/timing_curvilinear/cad/jobs", json={"profile": profile}).status_code == 409
 
 
-def test_cad_update_job_targets_existing_managed_block() -> None:
+def test_curvilinear_timing_cad_update_job_targets_existing_managed_block() -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -745,9 +892,9 @@ def test_cad_update_job_targets_existing_managed_block() -> None:
             return {"ok": True, "success": True, "stage": "updated"}
 
     client = TestClient(create_app(adapter_factory=UpdateAdapter))
-    profile = get_module("poly_v").defaults
+    profile = get_module("timing_curvilinear").defaults
     started = client.post(
-        "/modules/poly_v/cad/update-jobs",
+        "/modules/timing_curvilinear/cad/update-jobs",
         json={
             "profile": profile,
             "previous_profile": profile,
@@ -765,6 +912,7 @@ def test_cad_update_job_targets_existing_managed_block() -> None:
     assert job["status"] == "completed"
     assert calls[0]["document_id"] == "@document:0"
     assert calls[0]["block_id"] == "managed-pulley:1-2-3-4"
+    assert calls[0]["family"] == "timing_curvilinear"
     assert calls[0]["previous_profile_request"] == profile
     assert calls[0]["confirm_write"] is True
 

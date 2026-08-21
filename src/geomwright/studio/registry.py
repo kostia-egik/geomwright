@@ -7,8 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from kompas_mcp.transmission_tools import FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, VGroovePreviewRequest
-from kompas_mcp.transmissions import preview_flat_belt_pulley, preview_poly_v_groove, preview_v_belt_groove
+from kompas_mcp.transmission_tools import FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, TimingCurvilinearPulleyPreviewRequest, TimingTrapezoidalPulleyPreviewRequest, VGroovePreviewRequest
+from kompas_mcp.transmissions import preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
 
 
@@ -26,6 +26,10 @@ class PreviewModule:
     defaults: dict[str, Any]
     builder: PreviewBuilder
     adapter: PreviewAdapter
+    group: str = "mechanical_transmissions"
+    subgroup: str = "belt_drives"
+    family: str = "belt_pulleys"
+    build: bool = True
 
     def descriptor(self) -> dict[str, Any]:
         return {
@@ -33,7 +37,10 @@ class PreviewModule:
             "name": self.name,
             "description": self.description,
             "standard": self.standard,
-            "capabilities": {"preview": True, "build": True, "inspect": False},
+            "group": self.group,
+            "subgroup": self.subgroup,
+            "family": self.family,
+            "capabilities": {"preview": True, "build": self.build, "inspect": False},
             "spec_url": f"/modules/{self.kind}/spec",
             "preview_url": f"/modules/{self.kind}/preview",
             "cad_plan_url": f"/modules/{self.kind}/cad/plan",
@@ -70,6 +77,14 @@ def _build_flat_belt_preview(payload: dict[str, Any]) -> dict[str, Any]:
     return preview_flat_belt_pulley(**payload)
 
 
+def _build_timing_trapezoidal_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return preview_timing_belt_pulley(**payload, custom_shape="trapezoidal" if payload.get("designation") == "CUSTOM" else None)
+
+
+def _build_timing_curvilinear_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return preview_timing_belt_pulley(**payload, custom_shape="curvilinear" if payload.get("designation") == "CUSTOM" else None)
+
+
 def _points(value: Any) -> list[list[float]]:
     result: list[list[float]] = []
     for point in list(value or []):
@@ -77,6 +92,10 @@ def _points(value: Any) -> list[list[float]]:
             continue
         result.append([float(point[0]), float(point[1])])
     return result
+
+
+def _polar(radius: float, angle: float) -> list[float]:
+    return [radius * math.sin(angle), radius * math.cos(angle)]
 
 
 def _bounds(closed_points: list[list[list[float]]], guide_paths: list[list[list[float]]]) -> dict[str, float]:
@@ -785,6 +804,143 @@ def _adapt_flat_belt(preview: dict[str, Any], request: dict[str, Any]) -> dict[s
     }
 
 
+def _adapt_timing_belt(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    geometry = dict(preview["geometry"])
+    profile = dict(preview["profile"])
+    derived = dict(preview["derived"])
+    outside_radius = derived["outside_diameter"] / 2.0
+    root_radius = derived["root_diameter"] / 2.0
+    tooth_angle = 2.0 * math.pi / request["tooth_count"]
+    half_groove_angle = profile["groove_width"] / (2.0 * outside_radius)
+    dimension_start_radius = geometry["break_radius"] + profile["groove_depth"] * 0.48
+    outside_angle = -1.34 * tooth_angle
+    root_angle = tooth_angle
+    fillets = list(geometry.get("fillets") or [])
+    tip_fillet = next(
+        item
+        for item in fillets
+        if item.get("kind") == "tip" and item.get("groove_index") == 0 and item.get("side") == "right"
+    )
+    root_fillet = next(
+        item
+        for item in fillets
+        if item.get("kind") == "root" and item.get("groove_index") == 2 and item.get("side") in {"left", "center"}
+    )
+    dimensions = [
+        {
+            "key": "outside_diameter",
+            "symbol": "Dₐ",
+            "orientation": "radial",
+            "start": _polar(dimension_start_radius, outside_angle),
+            "end": _polar(outside_radius, outside_angle),
+            "value": derived["outside_diameter"],
+            "unit": "mm",
+            "label_normal": -43,
+            "label_tangent": 5,
+        },
+        {
+            "key": "root_diameter",
+            "symbol": "D_f",
+            "orientation": "radial",
+            "start": _polar(dimension_start_radius, root_angle),
+            "end": _polar(root_radius, root_angle),
+            "value": derived["root_diameter"],
+            "unit": "mm",
+            "label_normal": 47,
+            "label_tangent": -4,
+        },
+        {
+            "key": "groove_width",
+            "symbol": "s",
+            "orientation": "horizontal",
+            "start": _polar(outside_radius, -half_groove_angle),
+            "end": _polar(outside_radius, half_groove_angle),
+            "value": profile["groove_width"],
+            "unit": "mm",
+            "placement": "top",
+        },
+        {
+            "key": "groove_depth",
+            "symbol": "h",
+            "orientation": "vertical",
+            "start": _polar(outside_radius, 0.0),
+            "end": _polar(root_radius, 0.0),
+            "value": profile["groove_depth"],
+            "unit": "mm",
+            "placement": "right",
+            "label_horizontal": True,
+            "label_dx": 42,
+        },
+        {
+            "key": "tip_radius",
+            "symbol": "rₐ",
+            "orientation": "radius",
+            "start": tip_fillet["anchor_end"],
+            "end": tip_fillet["center"],
+            "center": tip_fillet["center"],
+            "anchor": tip_fillet["anchor_end"],
+            "value": derived["tip_radius"],
+            "unit": "mm",
+            "extension_length": 24,
+            "label_dx": -20,
+            "label_dy": -10,
+            "label_horizontal": True,
+        },
+        {
+            "key": "root_fillet_radius",
+            "symbol": "r_f",
+            "orientation": "radius",
+            "start": root_fillet["anchor_start"],
+            "end": root_fillet["center"],
+            "center": root_fillet["center"],
+            "anchor": root_fillet["anchor_start"],
+            "value": derived["root_fillet_radius"],
+            "unit": "mm",
+            "extension_length": 25,
+            "label_dx": 18,
+            "label_dy": 8,
+            "label_horizontal": True,
+        },
+    ]
+    angle = geometry["sector_half_angle"] * 1.22
+    x_extent = outside_radius * math.sin(angle)
+    y_min = geometry["break_radius"] - profile["groove_depth"] * 0.45
+    return {
+        "ok": True,
+        "family": "timing_belt",
+        "view_mode": "end",
+        "closed_points": [geometry["outline"]],
+        "feature_paths": [geometry["profile_path"]],
+        "guide_paths": [geometry["break_path"]],
+        "reference_paths": [
+            {"key": "outside_circle", "points": geometry["outside_circle"]},
+        ],
+        "phantom_bodies": [],
+        "bounds": {"x_min": -x_extent, "x_max": x_extent, "y_min": y_min, "y_max": outside_radius + profile["groove_depth"] * 1.8},
+        "coordinate_system": geometry["coordinate_system"],
+        "summary": {
+            "designation": request["designation"],
+            "profile_shape": profile["shape"],
+            "tooth_count": request["tooth_count"],
+            "pitch_mm": profile["pitch"],
+            "pitch_diameter_mm": derived["pitch_diameter"],
+            "outside_diameter_mm": derived["outside_diameter"],
+            "root_diameter_mm": derived["root_diameter"],
+            "face_width_mm": request["face_width"],
+            "groove_width_mm": profile["groove_width"],
+            "groove_depth_mm": profile["groove_depth"],
+            "tip_radius_mm": derived["tip_radius"],
+            "root_fillet_radius_mm": derived["root_fillet_radius"],
+        },
+        "dimensions": dimensions,
+        "warnings": list(preview.get("warnings") or []),
+        "warning_items": [
+            {"code": "custom_timing_profile", "message": item}
+            for item in list(preview.get("warnings") or [])
+        ],
+    }
+
+
 _MODULES: dict[str, PreviewModule] = {
     "v_belt": PreviewModule(
         kind="v_belt",
@@ -800,6 +956,7 @@ _MODULES: dict[str, PreviewModule] = {
         },
         builder=_build_v_belt_preview,
         adapter=_adapt_v_belt,
+        family="wedge_pulleys",
     ),
     "poly_v": PreviewModule(
         kind="poly_v",
@@ -810,6 +967,7 @@ _MODULES: dict[str, PreviewModule] = {
         defaults={"designation": "PJ", "effective_diameter": 80.0, "groove_count": 6},
         builder=_build_poly_v_preview,
         adapter=_adapt_poly_v,
+        family="wedge_pulleys",
     ),
     "flat_belt": PreviewModule(
         kind="flat_belt",
@@ -824,6 +982,35 @@ _MODULES: dict[str, PreviewModule] = {
         },
         builder=_build_flat_belt_preview,
         adapter=_adapt_flat_belt,
+        family="friction_pulleys",
+    ),
+    "timing_trapezoidal": PreviewModule(
+        kind="timing_trapezoidal",
+        name="Trapezoidal timing-belt pulley",
+        description="End-view straight-flank tooth geometry for T and AT synchronous-belt profiles.",
+        standard="Catalog geometry preview; supplier data required for automotive profiles",
+        request_model=TimingTrapezoidalPulleyPreviewRequest,
+        defaults={
+            "designation": "T5",
+            "tooth_count": 24,
+            "face_width": 20.0,
+        },
+        builder=_build_timing_trapezoidal_preview,
+        adapter=_adapt_timing_belt,
+        family="synchronous_pulleys",
+        build=True,
+    ),
+    "timing_curvilinear": PreviewModule(
+        kind="timing_curvilinear",
+        name="Curvilinear timing-belt pulley",
+        description="End-view rounded tooth geometry for HTD synchronous-belt profiles.",
+        standard="Catalog geometry preview; supplier data required for automotive profiles",
+        request_model=TimingCurvilinearPulleyPreviewRequest,
+        defaults={"designation": "HTD_5M", "tooth_count": 24, "face_width": 20.0},
+        builder=_build_timing_curvilinear_preview,
+        adapter=_adapt_timing_belt,
+        family="synchronous_pulleys",
+        build=True,
     ),
 }
 
@@ -848,6 +1035,8 @@ def preview_module(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def managed_pulley_plan(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     module = get_module(kind)
+    if not module.build:
+        raise ValueError(f"{module.kind} is preview-only; CAD planning is not implemented")
     request = module.request_model.model_validate(payload)
     normalized_request = request.model_dump(exclude_none=True)
     return build_managed_pulley_plan(module.kind, normalized_request)

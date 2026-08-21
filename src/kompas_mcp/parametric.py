@@ -67,6 +67,8 @@ SUPPORTED_PART_SCENARIOS = (
     "projection_anchor_sketch",
     "diaphragm_cut_profile_sketch",
     "diaphragm_terminal_relief_sketch",
+    "cylindrical_blank",
+    "numeric_profile_sketch",
     "cut_extrusion",
     "circular_pattern",
     "cut_reference_points_sketch",
@@ -5354,6 +5356,120 @@ def _normalize_workflow_operation(
             "summary": {"variant": variant, "radius": radius, "straight_length": straight_length, "creation_status": "available", "live_support": "available"},
             "interface": {"outputs": {"sketch": {"type": "sketch", "description": "Terminal relief operation sketch"}}},
         }
+    elif scenario == "cylindrical_blank":
+        outside_diameter = _positive_float(
+            params.get("outside_diameter") or params.get("diameter"),
+            "cylindrical_blank outside_diameter",
+        )
+        width = _positive_float(
+            params.get("width") or params.get("length"),
+            "cylindrical_blank width",
+        )
+        plane_value = str(params.get("plane") or "YOZ").strip().lower().replace("-", "_")
+        if plane_value not in {"yoz", "yz", "yoz_plane"}:
+            raise ValueError("cylindrical_blank currently requires plane=YOZ")
+        plane = "YOZ"
+        axis_value = str(params.get("axis") or "x_axis").strip().lower().replace("-", "_")
+        if axis_value not in {"x", "x_axis", "global_x"}:
+            raise ValueError("cylindrical_blank currently requires axis=x_axis")
+        axis = "x_axis"
+        params["outside_diameter"] = outside_diameter
+        params["width"] = width
+        params["plane"] = plane
+        params["axis"] = axis
+        params["parameterize"] = bool(params.get("parameterize", False))
+        if params["parameterize"]:
+            variable_plan = params.get("variable_plan") or []
+            constraints = params.get("constraints") or []
+            dimensions = params.get("dimensions") or []
+            operation_variable_bindings = params.get("operation_variable_bindings") or []
+            if not isinstance(variable_plan, list):
+                raise ValueError("cylindrical_blank variable_plan must be a list")
+            if not isinstance(constraints, list) or not isinstance(dimensions, list):
+                raise ValueError("cylindrical_blank constraints and dimensions must be lists")
+            if not isinstance(operation_variable_bindings, list):
+                raise ValueError("cylindrical_blank operation_variable_bindings must be a list")
+            params["variable_plan"] = list(variable_plan)
+            params["constraints"] = list(constraints)
+            params["dimensions"] = list(dimensions)
+            params["operation_variable_bindings"] = list(operation_variable_bindings)
+            params["sketch_options"] = dict(params.get("sketch_options") or {})
+        else:
+            params["variable_plan"] = []
+            params["constraints"] = []
+            params["dimensions"] = []
+            params["operation_variable_bindings"] = []
+        params["name"] = str(params.get("name") or "Cylindrical blank")
+        params["sketch_name"] = str(params.get("sketch_name") or f"{params['name']} sketch")
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "outside_diameter": outside_diameter,
+                "width": width,
+                "parameterization_level": "sketch_and_operation" if params["parameterize"] else "none",
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "body": {"type": "body", "description": "Cylindrical blank body"},
+                    "feature": {"type": "feature", "description": "Blank boss extrusion"},
+                    "sketch": {"type": "sketch", "description": "Numeric blank circle sketch"},
+                    "axis": {"type": "axis", "description": "Blank rotation axis"},
+                }
+            },
+        }
+    elif scenario == "numeric_profile_sketch":
+        entities = params.get("entities")
+        if not isinstance(entities, list) or not entities:
+            raise ValueError("numeric_profile_sketch entities must be a non-empty list")
+        normalized_entities = []
+        for entity_index, entity in enumerate(entities):
+            if not isinstance(entity, dict):
+                raise ValueError(f"numeric_profile_sketch entities[{entity_index}] must be an object")
+            kind = str(entity.get("kind") or "").strip().lower()
+            if kind not in {"segment", "polyline", "arc", "circle"}:
+                raise ValueError(f"numeric_profile_sketch entities[{entity_index}].kind is unsupported: {kind}")
+            normalized_entities.append(dict(entity, kind=kind))
+        params["entities"] = normalized_entities
+        params["plane"] = str(params.get("plane") or "YOZ").strip()
+        params["name"] = str(params.get("name") or "Numeric profile sketch")
+        params["parameterize"] = bool(params.get("parameterize", False))
+        if params["parameterize"]:
+            constraints = params.get("constraints") or []
+            dimensions = params.get("dimensions") or []
+            if not isinstance(constraints, list) or not isinstance(dimensions, list):
+                raise ValueError("numeric_profile_sketch constraints and dimensions must be lists")
+            params["parameterization_level"] = "constrained"
+            params["constraints"] = list(constraints)
+            params["dimensions"] = list(dimensions)
+            params["sketch_options"] = dict(params.get("sketch_options") or {})
+            params["require_fully_defined"] = bool(params.get("require_fully_defined", True))
+        else:
+            params["parameterization_level"] = "none"
+            params["constraints"] = []
+            params["dimensions"] = []
+            params["require_fully_defined"] = False
+        preview = {
+            "scenario": scenario,
+            "ok": True,
+            "params": dict(params),
+            "summary": {
+                "entity_spec_count": len(normalized_entities),
+                "parameterization_level": params["parameterization_level"],
+                "constraint_count": len(params["constraints"]),
+                "dimension_count": len(params["dimensions"]),
+                "creation_status": "available",
+                "live_support": "available",
+            },
+            "interface": {
+                "outputs": {
+                    "sketch": {"type": "sketch", "description": "Numeric profile sketch with optional parameterization"},
+                }
+            },
+        }
     elif scenario == "cut_extrusion":
         sketch_reference = params.get("sketch") or params.get("profile")
         sketch_resolved = _resolve_workflow_output_reference_any(context, sketch_reference, default_output="sketch")
@@ -5377,7 +5493,11 @@ def _normalize_workflow_operation(
         params["direction"] = direction
         params["end_condition"] = end_condition
         params["name"] = str(params.get("name") or "Cut extrusion")
-        params["require_fully_defined"] = True
+        require_fully_defined = bool(params.get("require_fully_defined", True))
+        source_scenario = str((sketch_resolved.get("target") or {}).get("scenario") or "")
+        if not require_fully_defined and source_scenario != "numeric_profile_sketch":
+            raise ValueError("cut_extrusion may disable fully-defined enforcement only for numeric_profile_sketch")
+        params["require_fully_defined"] = require_fully_defined
         bindings["sketch_operation"] = sketch_resolved["operation_id"]
         bindings["sketch_output"] = sketch_resolved["output_key"]
         depends_on.append(sketch_resolved["operation_id"])
@@ -5431,13 +5551,20 @@ def _normalize_workflow_operation(
         params["span_angle"] = span_angle
         params["angle_step"] = angle_step
         params["parameter_prefix"] = parameter_prefix
-        params["count_variable"] = str(params.get("count_variable") or f"{parameter_prefix}_CUT_COUNT1")
-        params["span_angle_variable"] = str(params.get("span_angle_variable") or f"{parameter_prefix}_CUT_SPAN_A1")
-        params["angle_step_variable"] = str(params.get("angle_step_variable") or f"{parameter_prefix}_CUT_STEP_A1")
-        params["pattern_operation_variable_bindings"] = _build_circular_pattern_variable_bindings(
-            params["count_variable"],
-            params["angle_step_variable"],
-        )
+        params["parameterize"] = bool(params.get("parameterize", True))
+        if params["parameterize"]:
+            params["count_variable"] = str(params.get("count_variable") or f"{parameter_prefix}_CUT_COUNT1")
+            params["span_angle_variable"] = str(params.get("span_angle_variable") or f"{parameter_prefix}_CUT_SPAN_A1")
+            params["angle_step_variable"] = str(params.get("angle_step_variable") or f"{parameter_prefix}_CUT_STEP_A1")
+            params["pattern_operation_variable_bindings"] = _build_circular_pattern_variable_bindings(
+                params["count_variable"],
+                params["angle_step_variable"],
+            )
+        else:
+            params.pop("count_variable", None)
+            params.pop("span_angle_variable", None)
+            params.pop("angle_step_variable", None)
+            params["pattern_operation_variable_bindings"] = []
         params["name"] = str(params.get("name") or "Circular cut pattern")
         bindings["source_operation"] = source_resolved_items[0]["operation_id"]
         bindings["source_output"] = source_resolved_items[0]["output_key"]
@@ -5455,6 +5582,7 @@ def _normalize_workflow_operation(
                 "source_count": len(source_resolved_items),
                 "span_angle": span_angle,
                 "angle_step": angle_step,
+                "parameterization_level": "operation_variables" if params["parameterize"] else "none",
                 "creation_status": "available",
                 "live_support": "available",
             },
@@ -5756,13 +5884,14 @@ def _default_operation_output_key(scenario: str) -> str:
         "face_ring_groove",
         "bolt_circle_holes",
         "compression_spring",
+        "cylindrical_blank",
     }:
         return "body"
     if normalized_scenario == "point":
         return "point"
     if normalized_scenario == "projection_point":
         return "point"
-    if normalized_scenario == "projection_anchor_sketch":
+    if normalized_scenario in {"projection_anchor_sketch", "numeric_profile_sketch"}:
         return "sketch"
     if normalized_scenario == "cut_reference_points_sketch":
         return "sketch"

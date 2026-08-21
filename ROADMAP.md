@@ -1,6 +1,6 @@
 # ROADMAP
 
-Живой план развития `kompas-mcp`. Документ нужен, чтобы не держать направление только в переписке.
+Живой план развития Geomwright. Документ нужен, чтобы не держать направление только в переписке.
 
 ## Срез 2026-05-18: метрическая физическая резьба
 
@@ -193,6 +193,13 @@
 
 Что осталось добить:
 
+- синхронизировать устаревшие spring-assertions в `tests/test_parametric.py` с
+  текущими live-verified контрактами, не откатывая рабочую CAD-геометрию:
+  compression/conical должны проверять native `curve_fillet`, актуальный радиус,
+  локальный wire profile и per-side end contract; extension — native fillet,
+  исправленный порядок путей и anchor `full_path_sequence[-1]/end`; torsion —
+  локальный профиль и native fillet. Текущий диагностический прогон воспроизводит
+  18 старых ожиданий, тогда как публичные spring-tool тесты проходят;
 - надёжная перезапись/сохранение `.m3d`, если целевой файл уже открыт в КОМПАС, реализована через staging-save -> close opened target -> replace -> reopen; unit-покрытие проверяет успешный reopen, dirty-target отказ и отказ при target, который остаётся открытым после close-попыток;
 - явная диагностика такого случая вместо “тихой” неудачной перегенерации добавлена: report содержит `open_target_documents`, `closed_target_documents`, `remaining_open_target_documents`, reopen-attempts и cleanup-report для staging-файла при ошибке;
 - честный вынос `L` наружу для extrude-модулей, где COM пока уходит в числовой fallback;

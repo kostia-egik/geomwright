@@ -1,4 +1,4 @@
-import { formatNumber } from "./i18n.js";
+import { formatNumber, splitReadableSubscripts } from "./i18n.js";
 
 const canvas = document.querySelector("#profile-canvas");
 const emptyState = document.querySelector("#canvas-empty");
@@ -170,15 +170,35 @@ function drawDimensionLabel(text, x, y, angle = 0) {
   context.save();
   context.translate(x, y);
   context.rotate(angle);
-  context.font = "600 12px Inter, ui-sans-serif, system-ui, sans-serif";
-  context.textAlign = "center";
-  context.textBaseline = "middle";
-  const width = context.measureText(text).width + 12;
+  const normalFont = "650 13px Inter, ui-sans-serif, system-ui, sans-serif";
+  const subscriptFont = "750 12px Inter, ui-sans-serif, system-ui, sans-serif";
+  const runs = splitReadableSubscripts(text).map((run) => {
+    context.font = run.subscript ? subscriptFont : normalFont;
+    return { ...run, width: context.measureText(run.text).width };
+  });
+  const textWidth = runs.reduce((sum, run) => sum + run.width, 0);
+  const width = textWidth + 14;
   context.fillStyle = "rgba(16, 21, 28, 0.92)";
-  context.fillRect(-width / 2, -10, width, 20);
+  context.fillRect(-width / 2, -11, width, 22);
   context.fillStyle = "rgba(185, 205, 219, 0.9)";
-  context.fillText(text, 0, 0);
+  context.textAlign = "left";
+  context.textBaseline = "alphabetic";
+  let cursor = -textWidth / 2;
+  for (const run of runs) {
+    context.font = run.subscript ? subscriptFont : normalFont;
+    context.fillText(run.text, cursor, run.subscript ? 6.5 : 4);
+    cursor += run.width;
+  }
   context.restore();
+}
+
+function readableDimensionAngle(angle) {
+  let normalized = angle % (Math.PI * 2);
+  if (normalized > Math.PI) normalized -= Math.PI * 2;
+  if (normalized <= -Math.PI) normalized += Math.PI * 2;
+  if (normalized > Math.PI / 2) normalized -= Math.PI;
+  if (normalized < -Math.PI / 2) normalized += Math.PI;
+  return normalized;
 }
 
 function drawHorizontalArrow(x, y, direction) {
@@ -210,7 +230,7 @@ function drawArrowHead(x, y, directionAngle, size = 7) {
 }
 
 function dimensionText(item) {
-  return `${item.symbol} = ${formatNumber(item.value, 3)}${item.unit ? ` ${item.unit}` : ""}`;
+  return `${item.symbol} = ${formatNumber(item.value, 2)}${item.unit ? ` ${item.unit}` : ""}`;
 }
 
 function drawHorizontalDimension(item, view) {
@@ -258,7 +278,12 @@ function drawVerticalDimension(item, view) {
   drawVerticalArrow(lineX, topY, 1);
   drawVerticalArrow(lineX, bottomY, -1);
   context.stroke();
-  drawDimensionLabel(dimensionText(item), lineX, (topY + bottomY) / 2, -Math.PI / 2);
+  drawDimensionLabel(
+    dimensionText(item),
+    lineX + Number(item.label_dx || 0),
+    (topY + bottomY) / 2 + Number(item.label_dy || 0),
+    item.label_horizontal ? 0 : -Math.PI / 2,
+  );
 }
 
 function drawDiameterDimension(item, view) {
@@ -357,8 +382,8 @@ function drawRadiusDimension(item, view) {
     anchor[1] + Math.sin(direction) * extensionLength,
   ];
   const label = [
-    anchor[0] + Math.cos(direction) * (extensionLength + 20),
-    anchor[1] + Math.sin(direction) * (extensionLength + 20),
+    anchor[0] + Math.cos(direction) * (extensionLength + 20) + Number(item.label_dx || 0),
+    anchor[1] + Math.sin(direction) * (extensionLength + 20) + Number(item.label_dy || 0),
   ];
 
   context.beginPath();
@@ -370,7 +395,38 @@ function drawRadiusDimension(item, view) {
   context.beginPath();
   drawArrowHead(anchor[0], anchor[1], direction + Math.PI, 7);
   context.stroke();
-  drawDimensionLabel(dimensionText(item), label[0], label[1], direction);
+  drawDimensionLabel(
+    dimensionText(item),
+    label[0],
+    label[1],
+    item.label_horizontal ? 0 : readableDimensionAngle(direction),
+  );
+}
+
+function drawRadialDimension(item, view) {
+  const start = view.point(item.start);
+  const end = view.point(item.end);
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const length = Math.hypot(dx, dy);
+  if (length <= 1e-6) return;
+  const ux = dx / length;
+  const uy = dy / length;
+  const nx = -uy;
+  const ny = ux;
+  const middle = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2];
+  context.beginPath();
+  context.moveTo(start[0], start[1]);
+  context.lineTo(end[0], end[1]);
+  drawArrowHead(end[0], end[1], Math.atan2(dy, dx), 7);
+  context.stroke();
+  const labelNormal = Number(item.label_normal || 0);
+  const labelTangent = Number(item.label_tangent || 0);
+  drawDimensionLabel(
+    dimensionText(item),
+    middle[0] + nx * labelNormal + ux * labelTangent,
+    middle[1] + ny * labelNormal + uy * labelTangent,
+  );
 }
 
 function drawDimensions(view) {
@@ -385,6 +441,7 @@ function drawDimensions(view) {
     else if (item.orientation === "diameter") drawDiameterDimension(item, view);
     else if (item.orientation === "angular") drawAngularDimension(item, view);
     else if (item.orientation === "radius") drawRadiusDimension(item, view);
+    else if (item.orientation === "radial") drawRadialDimension(item, view);
   }
   context.restore();
 }

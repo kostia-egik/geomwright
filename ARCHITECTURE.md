@@ -174,6 +174,35 @@ modeling modules. Its cylindrical and circular-crown sketches carry formula-boun
 driving dimensions and must read back as fully defined. Studio bounds each
 isolated bridge call and can cancel that child process without terminating
 KOMPAS, so a stalled COM operation cannot retain the single CAD-job lock forever.
+The trapezoidal timing-belt family is an approved managed Layer 4 Studio module.
+Its internal Layer 3 construction covers numeric and parameterized T/AT mechanics:
+a cylindrical blank, one closed groove sketch with six primary segments
+and four true-radius arcs (two retained-tooth transitions tangent to the outside
+circle plus two groove-root fillets),
+a through-all cut, and a full circular pattern. The parameterized mode adds 15
+semantic `TB_*` variables, eight auxiliary datum entities, 45 geometric
+constraints, eight formula-bound sketch dimensions, blank-width binding, and
+tooth-count/angular-step pattern bindings. The numeric mode remains available as
+the accepted geometry baseline. Trapezoidal T/AT and curvilinear HTD profiles
+remain separate Studio modules because their groove sketches have different
+entity and constraint mechanics.
+Each preview is a cropped end-view fragment of three grooves and two teeth with
+a short tooth-tip reference arc, a closed lower/side break boundary, tangent
+profile fillets, and distributed outside/root diameter plus groove width/depth
+and fillet-radius dimensions;
+both timing descriptors report `build=true`. Their Layer 4 blocks own a `TB_*`
+and `GW_*` fingerprint,
+two sketches, blank/cut extrusions, and circular pattern. Generated pattern
+copies participate in the owned set and topology preflight, but only the five
+root objects define the stable block identity. Parameter updates rebind and
+read back blank width, pattern count, and angular step; failure restores the
+previous variables and rebuilds the recognized block. Live create, designation,
+tooth-count and width update, save/reopen, and rollback are accepted for both
+T/AT and HTD. The HTD Layer 3 contour uses two true-radius outside-circle
+transitions and one central root arc, 37 geometric constraints, and seven
+formula-bound dimensions. Studio module
+descriptors carry stable group/subgroup/family taxonomy so staged selectors can
+separate a family path from modules without coupling identity to display structure.
 
 Geomwright Studio owns document/session navigation above Layer 4 modules. Its
 workspace discovers open KOMPAS documents, opens saved files, presents managed

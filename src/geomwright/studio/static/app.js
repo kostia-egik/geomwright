@@ -4,10 +4,12 @@ import {
   getLocale,
   localizeWarning,
   setLocale,
+  splitReadableSubscripts,
   t,
 } from "./i18n.js";
 
 const moduleSelect = document.querySelector("#module-select");
+const moduleFamilySelect = document.querySelector("#module-family-select");
 const moduleDescription = document.querySelector("#module-description");
 const form = document.querySelector("#preview-form");
 const fieldsContainer = document.querySelector("#dynamic-fields");
@@ -65,6 +67,8 @@ const editorDocumentActions = document.querySelector("#editor-document-actions")
 const editorSaveDocumentButton = document.querySelector("#editor-save-document");
 const editorSaveAsDocumentButton = document.querySelector("#editor-save-as-document");
 const moduleHeading = document.querySelector("#module-heading");
+const editorModePill = document.querySelector("#editor-mode-pill");
+const editorModeText = document.querySelector("#editor-mode-text");
 
 let currentModule = null;
 let currentSpec = null;
@@ -382,6 +386,30 @@ function syncConditionalFields() {
   const designation = fieldsContainer.querySelector("[name='designation']")?.value;
   const customMode = designation === "CUSTOM";
   const existing = fieldsContainer.querySelector("[data-custom-profile-editor]");
+  for (const wrapper of fieldsContainer.querySelectorAll("[data-field-name^='custom_']")) {
+    const input = wrapper.querySelector("input, select, textarea");
+    wrapper.hidden = !customMode;
+    if (input) {
+      input.disabled = !customMode;
+      input.required = customMode;
+      if (customMode && !input.value) {
+        const defaults = {
+          custom_shape: "trapezoidal",
+          custom_pitch: "5",
+          custom_groove_depth: "1.5",
+          custom_groove_width: "3",
+          custom_pitch_line_offset: "0.6",
+          custom_tip_radius: "0.3",
+          custom_root_radius: "0.5",
+        };
+        input.value = defaults[wrapper.dataset.fieldName] || "";
+      }
+    }
+  }
+  if (currentModule?.kind !== "v_belt") {
+    existing?.remove();
+    return;
+  }
   if (!customMode) {
     existing?.remove();
     return;
@@ -445,7 +473,7 @@ function collectPayload() {
     else if (type === "object" || type === "array") payload[input.name] = JSON.parse(raw);
     else payload[input.name] = raw;
   }
-  if (payload.designation === "CUSTOM") {
+  if (currentModule?.kind === "v_belt" && payload.designation === "CUSTOM") {
     const customProfile = { designation: "CUSTOM", family: "custom" };
     for (const input of fieldsContainer.querySelectorAll("[data-custom-profile-field]")) {
       if (!input.value.trim()) continue;
@@ -495,15 +523,25 @@ function updateDirtyState() {
   return dirty;
 }
 
+function renderReadableSubscripts(element, value) {
+  element.replaceChildren(...splitReadableSubscripts(value).map((run) => {
+    if (!run.subscript) return document.createTextNode(run.text);
+    const subscript = document.createElement("sub");
+    subscript.className = "readable-subscript";
+    subscript.textContent = run.text;
+    return subscript;
+  }));
+}
+
 function renderSummary(values) {
   summary.replaceChildren();
   for (const [key, value] of Object.entries(values || {})) {
     if (value === null || value === undefined) continue;
     const dt = document.createElement("dt");
-    dt.textContent = t(`summary.${key}`, humanize(key));
+    renderReadableSubscripts(dt, t(`summary.${key}`, humanize(key)));
     const dd = document.createElement("dd");
-    if (typeof value === "number") dd.textContent = formatNumber(value);
-    else if (key === "standard_system" || key === "profile") dd.textContent = localizedEnumValue(key, value);
+    if (typeof value === "number") dd.textContent = formatNumber(value, 2);
+    else if (["standard_system", "profile", "designation", "profile_shape"].includes(key)) dd.textContent = localizedEnumValue(key, value);
     else dd.textContent = String(value);
     summary.append(dt, dd);
   }
@@ -566,7 +604,7 @@ async function runPreview({ force = false } = {}) {
     setStatus(dirty ? "status.updated_dirty" : "status.updated", dirty ? "dirty" : "ready", { count: components });
     window.dispatchEvent(new CustomEvent("geomwright-preview-state", { detail: { state: "ready" } }));
     previewController = null;
-    if (cadPlanKey !== key) await prepareCadPlan(payload, key);
+    if (currentModule.capabilities.build && cadPlanKey !== key) await prepareCadPlan(payload, key);
     return;
   }
 
@@ -596,7 +634,7 @@ async function runPreview({ force = false } = {}) {
     window.dispatchEvent(new CustomEvent("geomwright-preview-state", { detail: { state: "ready" } }));
     const components = result.closed_points?.length || 0;
     setStatus(dirty ? "status.updated_dirty" : "status.updated", dirty ? "dirty" : "ready", { count: components });
-    await prepareCadPlan(payload, key);
+    if (currentModule.capabilities.build) await prepareCadPlan(payload, key);
   } catch (error) {
     if (error.name === "AbortError" || revision !== previewRevision) return;
     renderWarnings([{ message: error.message }]);
@@ -617,15 +655,66 @@ function schedulePreview({ immediate = false } = {}) {
 }
 
 function renderModuleCatalogText() {
-  for (const option of moduleSelect.options) {
-    const module = moduleCatalog.find((item) => item.kind === option.value);
-    if (module) option.textContent = moduleName(module);
-  }
+  const selected = moduleSelect.dataset.value;
+  renderModuleOptions();
+  moduleSelect.dataset.value = selected;
   if (currentModule) {
     moduleDescription.textContent = moduleDescriptionText(currentModule);
     standardBadge.textContent = moduleStandard(currentModule);
     setStatus(statusDescriptor.key, statusDescriptor.state, statusDescriptor.variables);
   }
+}
+
+function modulePathLabel(module) {
+  const group = t(`catalog.group.${module.group}`, humanize(module.group));
+  const subgroup = t(`catalog.subgroup.${module.subgroup}`, humanize(module.subgroup));
+  const family = t(`catalog.family.${module.family}`, humanize(module.family));
+  return { group: `${group} / ${subgroup}`, family, option: moduleName(module) };
+}
+
+function renderModuleOptions() {
+  const selectedModule = currentModule?.kind || moduleSelect.dataset.value;
+  const selectedFamily = moduleFamilySelect.dataset.value || currentModule?.family || moduleCatalog[0]?.family;
+  moduleFamilySelect.replaceChildren();
+  const families = new Map();
+  for (const module of moduleCatalog) {
+    if (families.has(module.family)) continue;
+    const labels = modulePathLabel(module);
+    families.set(module.family, labels);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "module-family-choice";
+    button.dataset.family = module.family;
+    button.textContent = labels.family;
+    button.title = `${labels.group} · ${labels.subgroup} · ${labels.family}`;
+    button.disabled = moduleHeading.classList.contains("locked");
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(module.family === selectedFamily));
+    moduleFamilySelect.append(button);
+  }
+  moduleFamilySelect.dataset.value = selectedFamily;
+  moduleSelect.replaceChildren();
+  const visibleModules = moduleCatalog.filter((module) => module.family === selectedFamily);
+  const nextModule = visibleModules.some((module) => module.kind === selectedModule)
+    ? selectedModule
+    : visibleModules[0]?.kind;
+  for (const module of visibleModules) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "module-choice";
+    button.dataset.module = module.kind;
+    button.title = moduleDescriptionText(module);
+    button.disabled = moduleHeading.classList.contains("locked");
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(module.kind === nextModule));
+    const name = document.createElement("strong");
+    name.textContent = moduleName(module);
+    const standard = document.createElement("small");
+    standard.textContent = moduleStandard(module);
+    button.append(name, standard);
+    moduleSelect.append(button);
+  }
+  moduleSelect.dataset.value = nextModule || "";
 }
 
 function currentWorkspaceDocument() {
@@ -638,9 +727,9 @@ function renderWorkspaceBlockSummary(block) {
   workspaceBlockSummary.replaceChildren();
   for (const [key, value] of Object.entries(block.profile || {})) {
     const dt = document.createElement("dt");
-    dt.textContent = localizedFieldName(key, {});
+    renderReadableSubscripts(dt, localizedFieldName(key, {}));
     const dd = document.createElement("dd");
-    dd.textContent = typeof value === "number" ? formatNumber(value) : localizedEnumValue(key, value);
+    dd.textContent = typeof value === "number" ? formatNumber(value, 2) : localizedEnumValue(key, value);
     workspaceBlockSummary.append(dt, dd);
   }
 }
@@ -651,10 +740,12 @@ function managedBlockName(block) {
     v_belt: "block.v_belt",
     poly_v: "block.poly_v",
     flat_belt: "block.flat_belt",
+    timing_trapezoidal: "block.timing_trapezoidal",
+    timing_curvilinear: "block.timing_curvilinear",
   }[block.module] || "block.generic";
   return t(family, block.name || block.module, {
     designation: profile.designation || "",
-    count: profile.groove_count || "",
+    count: profile.groove_count || profile.tooth_count || "",
     crown: formatNumber(profile.crown_height || 0),
   });
 }
@@ -946,8 +1037,12 @@ function showEditor({ locked = false } = {}) {
   editorShell.hidden = false;
   moduleHeading.classList.toggle("locked", locked);
   moduleHeading.dataset.lockedName = locked ? moduleName(currentModule) : "";
-  moduleSelect.disabled = locked;
-  document.querySelector(".cad-controls").hidden = false;
+  for (const button of moduleHeading.querySelectorAll(".module-family-choice, .module-choice")) {
+    button.disabled = locked;
+  }
+  document.querySelector(".cad-controls").hidden = !currentModule.capabilities.build;
+  editorModePill.title = t(currentModule.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
+  editorModeText.textContent = t(currentModule.capabilities.build ? "app.managed_cad" : "app.preview_only");
   cadTitle.textContent = t(locked ? "cad.update_title" : "cad.title");
   cadDescription.textContent = t(locked ? "cad.update_description" : "cad.description");
   cadCreateButton.textContent = t(locked ? "cad.update" : "cad.create");
@@ -983,7 +1078,7 @@ async function selectModule(kind, autoPreview = true) {
   const module = moduleCatalog.find((item) => item.kind === kind);
   if (!module) throw new Error(t("error.unknown_module", `Unknown module: ${kind}`, { kind }));
 
-  moduleSelect.disabled = true;
+  moduleSelect.setAttribute("aria-busy", "true");
   try {
     const spec = await requestJson(module.spec_url);
     if (revision !== selectionRevision) return;
@@ -1003,9 +1098,15 @@ async function selectModule(kind, autoPreview = true) {
     cadPlanController = null;
     cadCreateButton.disabled = true;
     cadResult.textContent = "";
-    moduleSelect.value = kind;
+    moduleSelect.dataset.value = kind;
+    moduleFamilySelect.dataset.value = module.family;
+    renderModuleOptions();
+    moduleSelect.dataset.value = kind;
     moduleDescription.textContent = moduleDescriptionText(module);
     standardBadge.textContent = moduleStandard(module);
+    document.querySelector(".cad-controls").hidden = !module.capabilities.build;
+    editorModePill.title = t(module.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
+    editorModeText.textContent = t(module.capabilities.build ? "app.managed_cad" : "app.preview_only");
     renderFields();
     renderSummary({});
     renderWarnings([]);
@@ -1013,11 +1114,17 @@ async function selectModule(kind, autoPreview = true) {
     setStatus("status.module_ready", "idle", { module: moduleName(module) });
     if (autoPreview) await runPreview({ force: true });
   } finally {
-    if (revision === selectionRevision) moduleSelect.disabled = false;
+    if (revision === selectionRevision) moduleSelect.removeAttribute("aria-busy");
   }
 }
 
 async function prepareCadPlan(payload, key = payloadKey(payload)) {
+  if (!currentModule.capabilities.build) {
+    cadPlanKey = null;
+    cadCreateButton.disabled = true;
+    cadResult.textContent = "";
+    return;
+  }
   cadPlanController?.abort();
   const controller = new AbortController();
   cadPlanController = controller;
@@ -1278,6 +1385,10 @@ function refreshLanguage() {
   }
   if (lastPreviewResult) renderSummary(lastPreviewResult.summary);
   renderWarnings(displayedWarnings, false);
+  if (currentModule) {
+    editorModePill.title = t(currentModule.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
+    editorModeText.textContent = t(currentModule.capabilities.build ? "app.managed_cad" : "app.preview_only");
+  }
   refreshStatusLanguage();
   if (workspaceActionActive) updateWorkspaceBusy();
 }
@@ -1288,13 +1399,7 @@ async function initialize() {
   try {
     const catalog = await requestJson("/modules");
     moduleCatalog = catalog.items;
-    moduleSelect.replaceChildren();
-    for (const module of moduleCatalog) {
-      const option = document.createElement("option");
-      option.value = module.kind;
-      option.textContent = moduleName(module);
-      moduleSelect.append(option);
-    }
+    renderModuleOptions();
     if (!moduleCatalog.length) throw new Error(t("error.no_modules"));
     await selectModule(moduleCatalog[0].kind, false);
     editorShell.hidden = true;
@@ -1306,15 +1411,49 @@ async function initialize() {
   }
 }
 
-moduleSelect.addEventListener("change", async () => {
+moduleSelect.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-module]");
+  if (!button || button.disabled || moduleSelect.getAttribute("aria-busy") === "true") return;
   try {
-    await selectModule(moduleSelect.value);
+    await selectModule(button.dataset.module);
+  } catch (error) {
+    setStatus("status.error", "error", { message: error.message });
+    renderWarnings([{ message: error.message }]);
+  }
+});
+moduleFamilySelect.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-family]");
+  if (!button || button.disabled || moduleSelect.getAttribute("aria-busy") === "true") return;
+  moduleFamilySelect.dataset.value = button.dataset.family;
+  renderModuleOptions();
+  if (!moduleSelect.dataset.value) return;
+  try {
+    await selectModule(moduleSelect.dataset.value);
   } catch (error) {
     setStatus("status.error", "error", { message: error.message });
     renderWarnings([{ message: error.message }]);
   }
 });
 form.addEventListener("input", () => schedulePreview());
+form.addEventListener("wheel", (event) => {
+  const input = event.target.closest("input[type='number']");
+  if (!input || input.disabled || input.readOnly || event.deltaY === 0) return;
+  event.preventDefault();
+
+  const configuredStep = Number(input.step);
+  const step = Number.isFinite(configuredStep) && configuredStep > 0 ? configuredStep : 1;
+  const minimum = Number(input.min);
+  const maximum = Number(input.max);
+  const current = Number.isFinite(input.valueAsNumber)
+    ? input.valueAsNumber
+    : (Number.isFinite(minimum) ? minimum : 0);
+  let next = current + (event.deltaY < 0 ? step : -step);
+  if (Number.isFinite(minimum)) next = Math.max(minimum, next);
+  if (Number.isFinite(maximum)) next = Math.min(maximum, next);
+  const precision = String(step).split(".")[1]?.length || 0;
+  input.value = precision ? next.toFixed(precision) : String(next);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}, { passive: false });
 form.addEventListener("change", (event) => {
   if (event.target.name === "designation") {
     customProfileDraft = readCustomProfileDraft();

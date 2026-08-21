@@ -5,8 +5,9 @@ require an AI agent: modules expose deterministic schemas and operations that
 the UI can invoke directly. An agent is an optional client of the same contracts,
 not a required intermediary between the UI and CAD.
 
-The current experimental slice supports V-belt, Poly-V, and flat-belt pulley
-preview functions through one schema-driven form and one HTML5 Canvas renderer.
+The current experimental slice supports V-belt, Poly-V, flat-belt, and two
+shape-specific timing-pulley preview modules through one schema-driven form and
+one HTML5 Canvas renderer.
 For the flat-belt pulley, Studio exposes one continuous `crown_height` parameter:
 zero means a cylindrical rim and a positive value means a crowned rim. The
 internal CAD plan still records the inferred profile kind for ownership/readback.
@@ -20,6 +21,18 @@ requires an explicit confirmation.
 The flat-belt slice is complete: cylindrical and circular-crown sketches are
 fully constrained through formula-bound driving dimensions, and create, inspect,
 update, save, and reopen behavior has been verified in live KOMPAS.
+
+The timing-belt slice has managed CAD build for both trapezoidal T/AT and
+curvilinear HTD. Both modules use a cropped end view of three grooves and two teeth, short reference
+arcs, a lower-and-side wavy break boundary, tangent tip/root fillets, and
+distributed outside/root diameter, pitch, and radius dimensions. T/AT exposes
+`build=true` after live create, variable update, pattern readback, rollback, and
+save/reopen acceptance. HTD uses its own three-arc one-groove mechanics and was
+accepted through fully-defined sketch, designation/tooth-count/width update,
+rollback, and save/reopen checks. Module descriptors carry group/subgroup/family
+metadata; the new-model editor presents that logic as family chips followed by
+visual module cards. Each card shows its standard and exposes the module path and
+a short explanation on hover, separating wedge, friction, and synchronous pulleys.
 
 The intended module lifecycle is `preview -> inspect -> create -> edit ->
 rebuild -> verify`. Later Studio slices may call deterministic CAD workflows
@@ -40,6 +53,11 @@ transmission module. The workspace will provide one compact shell for:
   KOMPAS operations;
 - routing a recognized block to its editor with the module family locked;
 - returning from editing to the same document and tree context.
+
+Recognized timing-pulley blocks display their timing designation and tooth count in
+the tree and inspector. Pattern-generated invalid helper sketches are marked as
+owned internal operations, so a clean managed block does not acquire a generic
+“KOMPAS operations” group; valid or unrelated operations remain visible as context.
 
 Studio attaches only to an already running KOMPAS COM object and makes that
 registered instance visible before document work. Starting Studio first is
@@ -112,6 +130,9 @@ on its next launch.
 - The RU/EN switch changes the interface language and persists it in browser
   local storage. Stable parameter identifiers such as `groove_count` remain
   visible in English under the localized field labels.
+- Numeric fields support native arrows, direct entry, and wheel stepping. While a
+  pointer is over a numeric field, the wheel changes that field by its step and is
+  consumed by the editor, so the controls panel does not scroll at the same time.
 - The canvas shows face width `B`, groove pitch `e`, groove depth `h`, the
   groove-entry width `b₀`, angle `α`, and outer, datum/effective, and root
   diameters. Poly-V previews also identify transition radius `Rₜ` and maximum
@@ -129,6 +150,10 @@ on its next launch.
   a hub, bore, web, or other geometry outside the groove module. Its sides are
   phantom lines, its fragment edge is wavy, and diameter leaders use a standard
   break mark.
+- Timing-pulley fragments omit the straight-line tooth-pitch dimension and the
+  pitch circle. They show radial outside/root diameter leaders, a thin
+  tooth-tip reference arc, center-groove width `s` and depth `h`, and separated
+  tooth-tip/root-fillet radius leaders.
 - The desktop parameter panel scrolls independently when the screen is short.
   Narrow viewports stack the preview and form into one page; the canvas keeps
   compact diameter symbols so annotations remain within the available width.

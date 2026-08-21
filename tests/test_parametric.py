@@ -14,6 +14,7 @@ from kompas_mcp.sketch import normalize_line_style
 from kompas_mcp.thread_profile_geometry import build_pipe_bsp_parallel_thread_geometry
 from kompas_mcp.thread_profile_geometry import build_pipe_straight_thread_geometry
 from kompas_mcp.thread_profile_geometry import build_pipe_tapered_thread_geometry
+from kompas_mcp.transmissions.timing_belt import build_curvilinear_timing_pulley_plan, build_trapezoidal_timing_pulley_plan
 
 
 class FakeRunner:
@@ -5517,6 +5518,178 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(normalize_line_style("axis"), 3)
         self.assertEqual(normalize_line_style("main"), 1)
         self.assertEqual(normalize_line_style(6), 6)
+
+    def test_trapezoidal_timing_pulley_numeric_plan_has_no_parameterization(self) -> None:
+        plan = build_trapezoidal_timing_pulley_plan(
+            designation="T5",
+            tooth_count=20,
+            face_width=12.0,
+        )
+        workflow = preview_part_scenario("workflow", plan["workflow"]["params"])
+        operations = workflow["params"]["operations"]
+
+        self.assertEqual(
+            [operation["scenario"] for operation in operations],
+            ["cylindrical_blank", "numeric_profile_sketch", "cut_extrusion", "circular_pattern"],
+        )
+        self.assertFalse(operations[0]["params"]["parameterize"])
+        self.assertEqual(operations[1]["params"]["parameterization_level"], "none")
+        self.assertEqual(operations[1]["params"]["constraints"], [])
+        self.assertEqual(operations[1]["params"]["dimensions"], [])
+        self.assertFalse(operations[2]["params"]["require_fully_defined"])
+        self.assertFalse(operations[3]["params"]["parameterize"])
+        self.assertEqual(operations[3]["params"]["pattern_operation_variable_bindings"], [])
+        self.assertEqual(operations[3]["params"]["count"], 20)
+
+        points = plan["geometry"]["groove_vertices"]
+        entities = plan["geometry"]["groove_entities"]
+        outside_radius = plan["geometry"]["outside_radius"]
+        root_radius = plan["geometry"]["root_radius"]
+        self.assertEqual(len(points), 6)
+        self.assertEqual(sum(entity["kind"] == "segment" for entity in entities), 6)
+        self.assertEqual(sum(entity["kind"] == "arc" for entity in entities), 4)
+        self.assertEqual(
+            sorted(entity["radius"] for entity in entities if entity["kind"] == "arc"),
+            [0.41, 0.41, 0.41, 0.41],
+        )
+        self.assertGreater(math.hypot(*points[0]), outside_radius)
+        self.assertGreater(math.hypot(*points[-1]), outside_radius)
+        self.assertAlmostEqual(math.hypot(*points[2]), root_radius)
+        self.assertAlmostEqual(math.hypot(*points[3]), root_radius)
+
+        tip_radius = 0.41
+        for side, tip_index, root_index in (("left", 1, 2), ("right", 4, 3)):
+            transition = plan["geometry"]["tip_transitions"][side]
+            center = transition["center"]
+            outer = transition["outer"]
+            tangent = transition["tangent"]
+            flank = (
+                points[root_index][0] - points[tip_index][0],
+                points[root_index][1] - points[tip_index][1],
+            )
+            center_to_tangent = (tangent[0] - center[0], tangent[1] - center[1])
+
+            self.assertAlmostEqual(math.hypot(*center), outside_radius - tip_radius)
+            self.assertAlmostEqual(math.hypot(*outer), outside_radius)
+            self.assertAlmostEqual(
+                flank[0] * center_to_tangent[0] + flank[1] * center_to_tangent[1],
+                0.0,
+            )
+            self.assertGreater(abs(outer[0]), abs(points[tip_index][0]))
+
+    def test_trapezoidal_timing_pulley_numeric_plan_rejects_curvilinear_profile(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only T/AT trapezoidal profiles"):
+            build_trapezoidal_timing_pulley_plan(
+                designation="HTD_5M",
+                tooth_count=20,
+                face_width=12.0,
+            )
+
+    def test_curvilinear_timing_pulley_numeric_plan_uses_true_root_and_tip_arcs(self) -> None:
+        plan = build_curvilinear_timing_pulley_plan(
+            designation="HTD_5M",
+            tooth_count=24,
+            face_width=14.0,
+        )
+        workflow = preview_part_scenario("workflow", plan["workflow"]["params"])
+        blank, groove, cut, pattern = workflow["params"]["operations"]
+        entities = plan["geometry"]["groove_entities"]
+        arcs = [entity for entity in entities if entity["kind"] == "arc"]
+
+        self.assertEqual(plan["stage"], "curvilinear_timing_pulley_numeric_mechanics")
+        self.assertEqual([item["scenario"] for item in workflow["params"]["operations"]], [
+            "cylindrical_blank", "numeric_profile_sketch", "cut_extrusion", "circular_pattern",
+        ])
+        self.assertFalse(blank["params"]["parameterize"])
+        self.assertEqual(groove["params"]["parameterization_level"], "none")
+        self.assertFalse(cut["params"]["require_fully_defined"])
+        self.assertEqual(pattern["params"]["count"], 24)
+        self.assertEqual(len(entities), 8)
+        self.assertEqual(sum(entity["kind"] == "segment" for entity in entities), 5)
+        self.assertEqual([arc["id"] for arc in arcs], [
+            "groove_arc_tip_left", "groove_arc_root", "groove_arc_tip_right",
+        ])
+        self.assertEqual(sorted(arc["radius"] for arc in arcs), [0.43, 0.43, 1.5])
+        root_fillet = plan["geometry"]["root_fillet"]
+        actual_root_radius = math.hypot(*root_fillet["center"]) - root_fillet["radius"]
+        self.assertAlmostEqual(actual_root_radius, plan["geometry"]["root_radius"])
+        self.assertGreater(plan["geometry"]["closure_radius"], plan["geometry"]["outside_radius"])
+
+    def test_curvilinear_timing_pulley_numeric_plan_rejects_trapezoidal_profile(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only HTD curvilinear profiles"):
+            build_curvilinear_timing_pulley_plan(
+                designation="T5",
+                tooth_count=20,
+                face_width=12.0,
+            )
+
+    def test_curvilinear_timing_pulley_parameterized_plan_binds_sketch_and_operations(self) -> None:
+        plan = build_curvilinear_timing_pulley_plan(
+            designation="HTD_5M",
+            tooth_count=24,
+            face_width=14.0,
+            parameterize=True,
+        )
+        workflow = preview_part_scenario("workflow", plan["workflow"]["params"])
+        blank, groove, cut, pattern = workflow["params"]["operations"]
+        variables = {item["name"]: item for item in plan["parameterization"]["variables"]}
+
+        self.assertEqual(plan["stage"], "curvilinear_timing_pulley_parameterized_mechanics")
+        self.assertEqual(variables["TB_RR"]["expression"], "TB_OR - TB_H")
+        self.assertEqual(variables["TB_STEP"]["expression"], "TB_SPAN / TB_Z")
+        self.assertTrue(blank["params"]["parameterize"])
+        self.assertEqual(blank["params"]["operation_variable_bindings"][0]["expression"], "TB_B")
+        self.assertEqual(groove["params"]["parameterization_level"], "constrained")
+        self.assertTrue(groove["params"]["require_fully_defined"])
+        self.assertEqual(len(groove["params"]["entities"]), 15)
+        self.assertEqual(len(groove["params"]["constraints"]), 37)
+        self.assertEqual(len(groove["params"]["dimensions"]), 7)
+        self.assertTrue(cut["params"]["require_fully_defined"])
+        self.assertTrue(pattern["params"]["parameterize"])
+        self.assertEqual(pattern["params"]["count_variable"], "TB_Z")
+        self.assertEqual(pattern["params"]["angle_step_variable"], "TB_STEP")
+
+    def test_trapezoidal_timing_pulley_parameterized_plan_binds_sketch_and_operations(self) -> None:
+        plan = build_trapezoidal_timing_pulley_plan(
+            designation="T5",
+            tooth_count=20,
+            face_width=12.0,
+            parameterize=True,
+        )
+        workflow = preview_part_scenario("workflow", plan["workflow"]["params"])
+        blank, groove, cut, pattern = workflow["params"]["operations"]
+        variables = {item["name"]: item for item in plan["parameterization"]["variables"]}
+
+        self.assertEqual(plan["stage"], "trapezoidal_timing_pulley_parameterized_mechanics")
+        self.assertEqual(variables["TB_DA"]["expression"], "TB_P * TB_Z / 3.141592653589793 - 2 * TB_PL")
+        self.assertEqual(variables["TB_STEP"]["expression"], "TB_SPAN / TB_Z")
+        self.assertTrue(blank["params"]["parameterize"])
+        self.assertEqual(blank["params"]["operation_variable_bindings"][0]["expression"], "TB_B")
+        self.assertEqual(groove["params"]["parameterization_level"], "constrained")
+        self.assertTrue(groove["params"]["require_fully_defined"])
+        self.assertEqual(len(groove["params"]["entities"]), 18)
+        self.assertEqual(len(groove["params"]["constraints"]), 45)
+        closure_radius_dimension = next(
+            item for item in groove["params"]["dimensions"] if item["name"] == "TB_CLOSURE_RADIUS_DIM"
+        )
+        self.assertEqual(closure_radius_dimension["kind"], "point_distance")
+        self.assertEqual(closure_radius_dimension["target"], "timing_outer_datum")
+        self.assertEqual(closure_radius_dimension["partner"], "groove_segment_1")
+        self.assertEqual(closure_radius_dimension["orientation"], "parallel")
+        self.assertEqual(closure_radius_dimension["expression"], "TB_OR + TB_CO")
+        self.assertAlmostEqual(
+            closure_radius_dimension["value"],
+            variables["TB_OR"]["value"] + variables["TB_CO"]["value"],
+        )
+        self.assertIn(
+            {"kind": "equal_length", "target": "groove_segment_5", "partner": "groove_segment_1"},
+            groove["params"]["constraints"],
+        )
+        self.assertEqual(len(groove["params"]["dimensions"]), 8)
+        self.assertTrue(cut["params"]["require_fully_defined"])
+        self.assertTrue(pattern["params"]["parameterize"])
+        self.assertEqual(pattern["params"]["count_variable"], "TB_Z")
+        self.assertEqual(pattern["params"]["angle_step_variable"], "TB_STEP")
 
 
 if __name__ == "__main__":

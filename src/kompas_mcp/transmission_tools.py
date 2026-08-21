@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .transmissions import list_v_belt_profiles as _list_v_belt_profiles
 from .transmissions import list_poly_v_profiles as _list_poly_v_profiles
 from .transmissions import preview_flat_belt_pulley as _preview_flat_belt_pulley
+from .transmissions import preview_timing_belt_pulley as _preview_timing_belt_pulley
 from .transmissions import preview_poly_v_groove as _preview_poly_v_groove
 from .transmissions import preview_v_belt_groove as _preview_v_belt_groove
 from .transmissions import resolve_poly_v_profile as _resolve_poly_v_profile
@@ -19,6 +20,8 @@ VProfileFamily = Literal["classical", "narrow_wedge"]
 VStandardSystem = Literal["din_iso", "gost_20889_88"]
 PolyVProfileDesignation = Literal["PH", "PJ", "PK", "PL", "PM"]
 FlatPulleyProfile = Literal["cylindrical", "crowned"]
+TimingPulleyDesignation = Literal["T2.5", "T5", "T10", "AT5", "HTD_3M", "HTD_5M", "HTD_8M", "CUSTOM"]
+TimingPulleyShape = Literal["trapezoidal", "curvilinear"]
 
 
 class VGrooveOverrides(BaseModel):
@@ -103,6 +106,85 @@ class FlatBeltPulleyPreviewRequest(BaseModel):
     )
 
 
+class TimingBeltPulleyPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    designation: TimingPulleyDesignation = "HTD_5M"
+    tooth_count: int = Field(default=24, ge=8, le=360)
+    face_width: float = Field(default=20.0, gt=0)
+    custom_shape: TimingPulleyShape | None = None
+    custom_pitch: float | None = Field(default=None, gt=0)
+    custom_groove_depth: float | None = Field(default=None, gt=0)
+    custom_groove_width: float | None = Field(default=None, gt=0)
+    custom_pitch_line_offset: float | None = Field(default=None, gt=0)
+    custom_tip_radius: float | None = Field(default=None, gt=0)
+    custom_root_radius: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_custom_profile(self) -> "TimingBeltPulleyPreviewRequest":
+        required_custom_values = (
+            self.custom_shape,
+            self.custom_pitch,
+            self.custom_groove_depth,
+            self.custom_groove_width,
+            self.custom_pitch_line_offset,
+        )
+        all_custom_values = (*required_custom_values, self.custom_tip_radius, self.custom_root_radius)
+        if self.designation == "CUSTOM" and any(value is None for value in required_custom_values):
+            raise ValueError("CUSTOM requires shape, pitch, groove depth/width, and pitch-line offset")
+        if self.designation != "CUSTOM" and any(value is not None for value in all_custom_values):
+            raise ValueError("custom timing dimensions are allowed only for designation=CUSTOM")
+        return self
+
+
+class TimingTrapezoidalPulleyPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    designation: Literal["T2.5", "T5", "T10", "AT5", "CUSTOM"] = "T5"
+    tooth_count: int = Field(default=24, ge=8, le=360)
+    face_width: float = Field(default=20.0, gt=0)
+    custom_pitch: float | None = Field(default=None, gt=0)
+    custom_groove_depth: float | None = Field(default=None, gt=0)
+    custom_groove_width: float | None = Field(default=None, gt=0)
+    custom_pitch_line_offset: float | None = Field(default=None, gt=0)
+    custom_tip_radius: float | None = Field(default=None, gt=0)
+    custom_root_radius: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_custom_profile(self) -> "TimingTrapezoidalPulleyPreviewRequest":
+        required_values = (self.custom_pitch, self.custom_groove_depth, self.custom_groove_width, self.custom_pitch_line_offset)
+        all_values = (*required_values, self.custom_tip_radius, self.custom_root_radius)
+        if self.designation == "CUSTOM" and any(value is None for value in required_values):
+            raise ValueError("CUSTOM requires pitch, groove depth/width, and pitch-line offset")
+        if self.designation != "CUSTOM" and any(value is not None for value in all_values):
+            raise ValueError("custom timing dimensions are allowed only for designation=CUSTOM")
+        return self
+
+
+class TimingCurvilinearPulleyPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    designation: Literal["HTD_3M", "HTD_5M", "HTD_8M", "CUSTOM"] = "HTD_5M"
+    tooth_count: int = Field(default=24, ge=8, le=360)
+    face_width: float = Field(default=20.0, gt=0)
+    custom_pitch: float | None = Field(default=None, gt=0)
+    custom_groove_depth: float | None = Field(default=None, gt=0)
+    custom_groove_width: float | None = Field(default=None, gt=0)
+    custom_pitch_line_offset: float | None = Field(default=None, gt=0)
+    custom_tip_radius: float | None = Field(default=None, gt=0)
+    custom_root_radius: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_custom_profile(self) -> "TimingCurvilinearPulleyPreviewRequest":
+        required_values = (self.custom_pitch, self.custom_groove_depth, self.custom_groove_width, self.custom_pitch_line_offset)
+        all_values = (*required_values, self.custom_tip_radius, self.custom_root_radius)
+        if self.designation == "CUSTOM" and any(value is None for value in required_values):
+            raise ValueError("CUSTOM requires pitch, groove depth/width, and pitch-line offset")
+        if self.designation != "CUSTOM" and any(value is not None for value in all_values):
+            raise ValueError("custom timing dimensions are allowed only for designation=CUSTOM")
+        return self
+
+
 class RotationalBlankParameterBaseContract(BaseModel):
     """Operation variables that define a composed rotational blank."""
 
@@ -181,6 +263,11 @@ class PolyVGrooveApplyRequest(BaseModel):
 
 
 def register_transmission_tools(mcp: Any, adapter: Any) -> None:
+    @mcp.tool()
+    def preview_timing_belt_pulley(request: TimingBeltPulleyPreviewRequest) -> dict:
+        """Preview an end-view synchronous-belt pulley tooth profile; no CAD write."""
+        return _preview_timing_belt_pulley(**request.model_dump(exclude_none=True))
+
     @mcp.tool()
     def preview_flat_belt_pulley(request: FlatBeltPulleyPreviewRequest) -> dict:
         """Preview a cylindrical or explicitly crowned flat-belt pulley rim."""
