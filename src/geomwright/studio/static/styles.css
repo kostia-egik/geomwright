@@ -82,9 +82,7 @@ button.workspace-tree-item:hover, button.workspace-tree-item.selected { border-c
 .compact-button { min-height: 30px; padding: 5px 10px; font-size: 11px; }
 @keyframes workspace-spin { to { transform: rotate(360deg); } }
 .editor-back { margin: 0 0 6px; padding: 0; border: 0; color: var(--accent-strong); background: transparent; font-size: 11px; cursor: pointer; }
-.controls-heading.locked .module-family-choices,
-.controls-heading.locked .module-choices,
-.controls-heading.locked .module-select-label { display: none; }
+.controls-heading.locked select { display: none; }
 .controls-heading.locked::before { content: attr(data-locked-name); display: block; font-size: 16px; font-weight: 620; }
 
 .preview-panel {
@@ -200,38 +198,7 @@ h2 { margin: 0; font-size: 13px; font-weight: 650; }
   background: var(--panel);
 }
 .controls-heading { padding-bottom: 20px; border-bottom: 1px solid var(--line); }
-.module-family-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; }
-.module-family-choice {
-  padding: 5px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  background: rgba(255,255,255,0.02);
-  font-size: 10px;
-  cursor: pointer;
-}
-.module-family-choice:hover,
-.module-family-choice[aria-selected="true"] { border-color: rgba(227, 170, 79, 0.5); color: var(--accent-strong); background: rgba(227, 170, 79, 0.08); }
-.module-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-.module-choice {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-  padding: 9px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: #cbd5dc;
-  text-align: left;
-  background: rgba(255,255,255,0.025);
-  cursor: pointer;
-}
-.module-choice strong { overflow: hidden; font-size: 12px; font-weight: 640; text-overflow: ellipsis; white-space: nowrap; }
-.module-choice small { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-.module-choice:hover,
-.module-choice[aria-selected="true"] { border-color: rgba(97, 192, 177, 0.52); color: #eaf4f2; background: rgba(97, 192, 177, 0.09); }
-.module-choice[aria-selected="true"] small { color: #9dccca; }
-.module-family-choice:disabled,
-.module-choice:disabled { cursor: default; opacity: 0.55; }
+.controls-heading select { width: 100%; font-size: 16px; font-weight: 620; }
 .module-description { min-height: 36px; margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 select, input, textarea {
   width: 100%;

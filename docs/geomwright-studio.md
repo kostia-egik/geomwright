@@ -30,9 +30,8 @@ distributed outside/root diameter, pitch, and radius dimensions. T/AT exposes
 save/reopen acceptance. HTD uses its own three-arc one-groove mechanics and was
 accepted through fully-defined sketch, designation/tooth-count/width update,
 rollback, and save/reopen checks. Module descriptors carry group/subgroup/family
-metadata; the new-model editor presents that logic as family chips followed by
-visual module cards. Each card shows its standard and exposes the module path and
-a short explanation on hover, separating wedge, friction, and synchronous pulleys.
+metadata; the module selector remains a compact catalog list while the catalog
+grows, separating wedge, friction, and synchronous pulleys.
 
 The intended module lifecycle is `preview -> inspect -> create -> edit ->
 rebuild -> verify`. Later Studio slices may call deterministic CAD workflows

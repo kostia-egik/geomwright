@@ -370,8 +370,8 @@ def test_studio_cad_plan_status_reads_flat_pulley_dimensions_without_a_target() 
     assert 'timing_curvilinear: "block.timing_curvilinear"' in source
     assert 'form.addEventListener("wheel"' in source
     assert "event.preventDefault();" in source
-    assert 'moduleSelect.addEventListener("click"' in source
-    assert 'moduleFamilySelect.addEventListener("click"' in source
+    assert 'moduleSelect.addEventListener("change"' in source
+    assert 'moduleSelect.value' in source
 
 
 def test_studio_exposes_a_cancel_control_for_running_cad_jobs() -> None:

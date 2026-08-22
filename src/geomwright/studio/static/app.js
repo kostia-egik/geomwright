@@ -9,7 +9,6 @@ import {
 } from "./i18n.js";
 
 const moduleSelect = document.querySelector("#module-select");
-const moduleFamilySelect = document.querySelector("#module-family-select");
 const moduleDescription = document.querySelector("#module-description");
 const form = document.querySelector("#preview-form");
 const fieldsContainer = document.querySelector("#dynamic-fields");
@@ -655,66 +654,15 @@ function schedulePreview({ immediate = false } = {}) {
 }
 
 function renderModuleCatalogText() {
-  const selected = moduleSelect.dataset.value;
-  renderModuleOptions();
-  moduleSelect.dataset.value = selected;
+  for (const option of moduleSelect.options) {
+    const module = moduleCatalog.find((item) => item.kind === option.value);
+    if (module) option.textContent = moduleName(module);
+  }
   if (currentModule) {
     moduleDescription.textContent = moduleDescriptionText(currentModule);
     standardBadge.textContent = moduleStandard(currentModule);
     setStatus(statusDescriptor.key, statusDescriptor.state, statusDescriptor.variables);
   }
-}
-
-function modulePathLabel(module) {
-  const group = t(`catalog.group.${module.group}`, humanize(module.group));
-  const subgroup = t(`catalog.subgroup.${module.subgroup}`, humanize(module.subgroup));
-  const family = t(`catalog.family.${module.family}`, humanize(module.family));
-  return { group: `${group} / ${subgroup}`, family, option: moduleName(module) };
-}
-
-function renderModuleOptions() {
-  const selectedModule = currentModule?.kind || moduleSelect.dataset.value;
-  const selectedFamily = moduleFamilySelect.dataset.value || currentModule?.family || moduleCatalog[0]?.family;
-  moduleFamilySelect.replaceChildren();
-  const families = new Map();
-  for (const module of moduleCatalog) {
-    if (families.has(module.family)) continue;
-    const labels = modulePathLabel(module);
-    families.set(module.family, labels);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "module-family-choice";
-    button.dataset.family = module.family;
-    button.textContent = labels.family;
-    button.title = `${labels.group} · ${labels.subgroup} · ${labels.family}`;
-    button.disabled = moduleHeading.classList.contains("locked");
-    button.setAttribute("role", "tab");
-    button.setAttribute("aria-selected", String(module.family === selectedFamily));
-    moduleFamilySelect.append(button);
-  }
-  moduleFamilySelect.dataset.value = selectedFamily;
-  moduleSelect.replaceChildren();
-  const visibleModules = moduleCatalog.filter((module) => module.family === selectedFamily);
-  const nextModule = visibleModules.some((module) => module.kind === selectedModule)
-    ? selectedModule
-    : visibleModules[0]?.kind;
-  for (const module of visibleModules) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "module-choice";
-    button.dataset.module = module.kind;
-    button.title = moduleDescriptionText(module);
-    button.disabled = moduleHeading.classList.contains("locked");
-    button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", String(module.kind === nextModule));
-    const name = document.createElement("strong");
-    name.textContent = moduleName(module);
-    const standard = document.createElement("small");
-    standard.textContent = moduleStandard(module);
-    button.append(name, standard);
-    moduleSelect.append(button);
-  }
-  moduleSelect.dataset.value = nextModule || "";
 }
 
 function currentWorkspaceDocument() {
@@ -1037,9 +985,7 @@ function showEditor({ locked = false } = {}) {
   editorShell.hidden = false;
   moduleHeading.classList.toggle("locked", locked);
   moduleHeading.dataset.lockedName = locked ? moduleName(currentModule) : "";
-  for (const button of moduleHeading.querySelectorAll(".module-family-choice, .module-choice")) {
-    button.disabled = locked;
-  }
+  moduleSelect.disabled = locked;
   document.querySelector(".cad-controls").hidden = !currentModule.capabilities.build;
   editorModePill.title = t(currentModule.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
   editorModeText.textContent = t(currentModule.capabilities.build ? "app.managed_cad" : "app.preview_only");
@@ -1078,7 +1024,8 @@ async function selectModule(kind, autoPreview = true) {
   const module = moduleCatalog.find((item) => item.kind === kind);
   if (!module) throw new Error(t("error.unknown_module", `Unknown module: ${kind}`, { kind }));
 
-  moduleSelect.setAttribute("aria-busy", "true");
+  const wasModuleSelectDisabled = moduleSelect.disabled;
+  moduleSelect.disabled = true;
   try {
     const spec = await requestJson(module.spec_url);
     if (revision !== selectionRevision) return;
@@ -1098,10 +1045,7 @@ async function selectModule(kind, autoPreview = true) {
     cadPlanController = null;
     cadCreateButton.disabled = true;
     cadResult.textContent = "";
-    moduleSelect.dataset.value = kind;
-    moduleFamilySelect.dataset.value = module.family;
-    renderModuleOptions();
-    moduleSelect.dataset.value = kind;
+    moduleSelect.value = kind;
     moduleDescription.textContent = moduleDescriptionText(module);
     standardBadge.textContent = moduleStandard(module);
     document.querySelector(".cad-controls").hidden = !module.capabilities.build;
@@ -1114,7 +1058,7 @@ async function selectModule(kind, autoPreview = true) {
     setStatus("status.module_ready", "idle", { module: moduleName(module) });
     if (autoPreview) await runPreview({ force: true });
   } finally {
-    if (revision === selectionRevision) moduleSelect.removeAttribute("aria-busy");
+    if (revision === selectionRevision) moduleSelect.disabled = wasModuleSelectDisabled;
   }
 }
 
@@ -1399,7 +1343,13 @@ async function initialize() {
   try {
     const catalog = await requestJson("/modules");
     moduleCatalog = catalog.items;
-    renderModuleOptions();
+    moduleSelect.replaceChildren();
+    for (const module of moduleCatalog) {
+      const option = document.createElement("option");
+      option.value = module.kind;
+      option.textContent = moduleName(module);
+      moduleSelect.append(option);
+    }
     if (!moduleCatalog.length) throw new Error(t("error.no_modules"));
     await selectModule(moduleCatalog[0].kind, false);
     editorShell.hidden = true;
@@ -1411,24 +1361,10 @@ async function initialize() {
   }
 }
 
-moduleSelect.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-module]");
-  if (!button || button.disabled || moduleSelect.getAttribute("aria-busy") === "true") return;
+moduleSelect.addEventListener("change", async () => {
+  if (moduleSelect.disabled) return;
   try {
-    await selectModule(button.dataset.module);
-  } catch (error) {
-    setStatus("status.error", "error", { message: error.message });
-    renderWarnings([{ message: error.message }]);
-  }
-});
-moduleFamilySelect.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-family]");
-  if (!button || button.disabled || moduleSelect.getAttribute("aria-busy") === "true") return;
-  moduleFamilySelect.dataset.value = button.dataset.family;
-  renderModuleOptions();
-  if (!moduleSelect.dataset.value) return;
-  try {
-    await selectModule(moduleSelect.dataset.value);
+    await selectModule(moduleSelect.value);
   } catch (error) {
     setStatus("status.error", "error", { message: error.message });
     renderWarnings([{ message: error.message }]);
