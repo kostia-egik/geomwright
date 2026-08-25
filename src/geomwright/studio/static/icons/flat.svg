@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Flat-belt pulley" shape-rendering="geometricPrecision" color="#8d9aa7">
+  <g transform="translate(1.34775826 1.00000000) scale(0.09780033)">
+    <path d="m 232.58904,361.44381 0.003,-270.023719 25.36661,-8.766656 C 309.89539,64.70421 376.03986,49.435388 428.51017,43.283256 494.88663,35.50063 538.01532,34.471293 593.53862,39.344581 l 30.89574,2.711722 V 336.76191 631.46753 H 428.51017 232.58598 Z" fill="currentColor" fill-opacity="0.5" stroke="none" />
+    <path d="m 230.6177,90.418394 -18.28687,-15.239055 -18.28686,-10.15937 -18.28687,-6.095623 -17.27093,-2.031874 -17.27093,3.047811 -9.14343,3.047811" fill="none" stroke="currentColor" stroke-width="17.38235448" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="m 132.07181,62.988094 -16.25499,8.127497 -15.23906,12.191244 -15.239051,17.270925 -14.223118,20.31874 -12.191245,25.39843 -12.191244,28.44623 -11.175307,33.52592 -10.15937,38.60561 -8.127496,42.66935 -7.111559,48.76498 -5.0796851,52.82873 -3.047811,59.94028 -1.015937,66.0359 3.047811,74.16341 2.0318741,41.65341" fill="none" stroke="currentColor" stroke-width="17.38235448" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="m 132.07181,62.988094 54.8606,-20.31874 57.90841,-16.254992 56.89247,-12.191244 58.92434,-8.127496 58.92435,-4.0637481 56.89247,-1.015937 59.94029,4.063748 27.4303,3.0478111" fill="none" stroke="currentColor" stroke-width="17.38235448" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M 625.81719,40.63748 607.53033,25.398425 589.24346,15.239055 570.9566,9.1434329 563.84504,8.127496" fill="none" stroke="currentColor" stroke-width="17.38235448" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M 230.6177,632.92875 V 90.418394" fill="none" stroke="currentColor" stroke-width="17.38235448" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="m 625.81719,40.63748 -56.89247,-5.079685 -56.89247,-1.015937 -57.90841,4.063748 -58.92435,7.111559 -57.90841,12.191244 -56.89247,15.239056 -49.78091,17.270929" fill="none" stroke="currentColor" stroke-width="17.38235448" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M 625.81719,40.63748 V 632.92875" fill="none" stroke="currentColor" stroke-width="17.38235448" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>

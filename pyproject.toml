@@ -42,5 +42,6 @@ kompas_mcp = [
 geomwright = [
   "studio/static/*.css",
   "studio/static/*.js",
+  "studio/static/icons/*.svg",
   "studio/templates/*.html",
 ]

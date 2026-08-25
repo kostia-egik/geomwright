@@ -30,6 +30,7 @@ class PreviewModule:
     subgroup: str = "belt_drives"
     family: str = "belt_pulleys"
     build: bool = True
+    icon: str = ""
 
     def descriptor(self) -> dict[str, Any]:
         return {
@@ -40,6 +41,7 @@ class PreviewModule:
             "group": self.group,
             "subgroup": self.subgroup,
             "family": self.family,
+            "icon": self.icon or f"/static/icons/{self.kind}.svg",
             "capabilities": {"preview": True, "build": self.build, "inspect": False},
             "spec_url": f"/modules/{self.kind}/spec",
             "preview_url": f"/modules/{self.kind}/preview",
@@ -957,6 +959,7 @@ _MODULES: dict[str, PreviewModule] = {
         builder=_build_v_belt_preview,
         adapter=_adapt_v_belt,
         family="wedge_pulleys",
+        icon="/static/icons/v.svg",
     ),
     "poly_v": PreviewModule(
         kind="poly_v",
@@ -968,6 +971,7 @@ _MODULES: dict[str, PreviewModule] = {
         builder=_build_poly_v_preview,
         adapter=_adapt_poly_v,
         family="wedge_pulleys",
+        icon="/static/icons/poli-v.svg",
     ),
     "flat_belt": PreviewModule(
         kind="flat_belt",
@@ -983,6 +987,7 @@ _MODULES: dict[str, PreviewModule] = {
         builder=_build_flat_belt_preview,
         adapter=_adapt_flat_belt,
         family="friction_pulleys",
+        icon="/static/icons/flat.svg",
     ),
     "timing_trapezoidal": PreviewModule(
         kind="timing_trapezoidal",
@@ -999,6 +1004,7 @@ _MODULES: dict[str, PreviewModule] = {
         adapter=_adapt_timing_belt,
         family="synchronous_pulleys",
         build=True,
+        icon="/static/icons/trap.svg",
     ),
     "timing_curvilinear": PreviewModule(
         kind="timing_curvilinear",
@@ -1011,6 +1017,7 @@ _MODULES: dict[str, PreviewModule] = {
         adapter=_adapt_timing_belt,
         family="synchronous_pulleys",
         build=True,
+        icon="/static/icons/crc.svg",
     ),
 }
 

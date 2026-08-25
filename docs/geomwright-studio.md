@@ -30,8 +30,14 @@ distributed outside/root diameter, pitch, and radius dimensions. T/AT exposes
 save/reopen acceptance. HTD uses its own three-arc one-groove mechanics and was
 accepted through fully-defined sketch, designation/tooth-count/width update,
 rollback, and save/reopen checks. Module descriptors carry group/subgroup/family
-metadata; the module selector remains a compact catalog list while the catalog
-grows, separating wedge, friction, and synchronous pulleys.
+metadata and an approved SVG icon. New-model authoring begins in a separate
+three-level module selector: each horizontal row represents one taxonomy level,
+the selected branch is highlighted in orange, and changing any row rebuilds the
+rows below it. The leaf row opens the module editor; the editor returns either
+to the selector or directly to the workspace. The mechanical-transmissions group
+uses the `transmission` icon; the current belt-drive subgroup uses `frictional`.
+The `transmission` icon is also reserved for a future toothed-transmission
+subgroup.
 
 The intended module lifecycle is `preview -> inspect -> create -> edit ->
 rebuild -> verify`. Later Studio slices may call deterministic CAD workflows

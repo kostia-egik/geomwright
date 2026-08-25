@@ -10,6 +10,7 @@ import {
 
 const moduleSelect = document.querySelector("#module-select");
 const moduleDescription = document.querySelector("#module-description");
+const moduleCurrentName = document.querySelector("#module-current-name");
 const form = document.querySelector("#preview-form");
 const fieldsContainer = document.querySelector("#dynamic-fields");
 const resetButton = document.querySelector("#reset-button");
@@ -33,6 +34,9 @@ const cadProgressPercent = document.querySelector("#cad-progress-percent");
 const cadProgressStage = document.querySelector("#cad-progress-stage");
 const cadProgressTime = document.querySelector("#cad-progress-time");
 const workspaceShell = document.querySelector("#workspace-shell");
+const moduleShell = document.querySelector("#module-shell");
+const moduleSelectorRows = document.querySelector("#module-selector-rows");
+const moduleShellWorkspaceButton = document.querySelector("#module-shell-workspace");
 const editorShell = document.querySelector("#editor-shell");
 const workspaceRefreshButton = document.querySelector("#workspace-refresh");
 const workspaceOpenButton = document.querySelector("#workspace-open");
@@ -61,7 +65,8 @@ const workspaceStatus = document.querySelector("#workspace-status");
 const workspaceBusy = document.querySelector("#workspace-busy");
 const workspaceBusyText = document.querySelector("#workspace-busy-text");
 const workspaceBusyTime = document.querySelector("#workspace-busy-time");
-const editorBackButton = document.querySelector("#editor-back");
+const editorModulesButton = document.querySelector("#editor-modules");
+const editorWorkspaceButton = document.querySelector("#editor-workspace");
 const editorDocumentActions = document.querySelector("#editor-document-actions");
 const editorSaveDocumentButton = document.querySelector("#editor-save-document");
 const editorSaveAsDocumentButton = document.querySelector("#editor-save-as-document");
@@ -72,6 +77,8 @@ const editorModeText = document.querySelector("#editor-mode-text");
 let currentModule = null;
 let currentSpec = null;
 let moduleCatalog = [];
+let selectorGroup = null;
+let selectorSubgroup = null;
 let baselinePayload = {};
 let baselinePayloadKey = "{}";
 let lastSuccessfulPayloadKey = null;
@@ -659,10 +666,128 @@ function renderModuleCatalogText() {
     if (module) option.textContent = moduleName(module);
   }
   if (currentModule) {
+    moduleCurrentName.textContent = moduleName(currentModule);
     moduleDescription.textContent = moduleDescriptionText(currentModule);
     standardBadge.textContent = moduleStandard(currentModule);
     setStatus(statusDescriptor.key, statusDescriptor.state, statusDescriptor.variables);
   }
+}
+
+function setModulePickerDisabled(disabled) {
+  moduleSelect.disabled = disabled;
+}
+
+function selectorLabel(kind, value) {
+  return t(`selector.${kind}.${value}`, humanize(value));
+}
+
+const selectorIcons = {
+  group: {
+    mechanical_transmissions: "/static/icons/transmission.svg",
+  },
+  subgroup: {
+    belt_drives: "/static/icons/frictional.svg",
+  },
+};
+
+function selectorButton({ label, selected, description, onClick, icon }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `selector-button${selected ? " selected" : ""}`;
+  button.setAttribute("aria-pressed", String(selected));
+  button.title = description || label;
+  if (icon) {
+    const iconElement = document.createElement("span");
+    iconElement.className = "selector-icon";
+    iconElement.style.setProperty("--icon-url", `url("${icon}")`);
+    iconElement.setAttribute("aria-hidden", "true");
+    button.append(iconElement);
+  }
+  const text = document.createElement("span");
+  text.textContent = label;
+  button.append(text);
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function uniqueValues(items, key) {
+  return [...new Set(items.map((item) => item[key]).filter(Boolean))];
+}
+
+function renderModuleSelector() {
+  moduleSelectorRows.replaceChildren();
+  const groups = uniqueValues(moduleCatalog, "group");
+  if (!selectorGroup || !groups.includes(selectorGroup)) selectorGroup = groups[0];
+  const groupModules = moduleCatalog.filter((item) => item.group === selectorGroup);
+  const subgroups = uniqueValues(groupModules, "subgroup");
+  if (!selectorSubgroup || !subgroups.includes(selectorSubgroup)) selectorSubgroup = subgroups[0];
+  const levels = [
+    { key: "group", values: groups, selected: selectorGroup },
+    { key: "subgroup", values: subgroups, selected: selectorSubgroup },
+  ];
+  for (const level of levels) {
+    const row = document.createElement("div");
+    row.className = "selector-row";
+    row.dataset.level = level.key;
+    const heading = document.createElement("p");
+    heading.className = "selector-row-label";
+    heading.textContent = t(`selector.level.${level.key}`, humanize(level.key));
+    const buttons = document.createElement("div");
+    buttons.className = "selector-row-buttons";
+    for (const value of level.values) {
+      buttons.append(selectorButton({
+        label: selectorLabel(level.key, value),
+        selected: value === level.selected,
+        icon: selectorIcons[level.key]?.[value],
+        onClick: () => {
+          if (level.key === "group") {
+            selectorGroup = value;
+            selectorSubgroup = null;
+          } else {
+            selectorSubgroup = value;
+          }
+          renderModuleSelector();
+        },
+      }));
+    }
+    row.append(heading, buttons);
+    moduleSelectorRows.append(row);
+  }
+  const moduleRow = document.createElement("div");
+  moduleRow.className = "selector-row";
+  moduleRow.dataset.level = "module";
+  const moduleHeading = document.createElement("p");
+  moduleHeading.className = "selector-row-label";
+  moduleHeading.textContent = t("selector.level.module", "Модуль");
+  const moduleButtonsRow = document.createElement("div");
+  moduleButtonsRow.className = "selector-row-buttons module-selector-buttons";
+  for (const module of groupModules.filter((item) => item.subgroup === selectorSubgroup)) {
+    moduleButtonsRow.append(selectorButton({
+      label: moduleName(module),
+      selected: currentModule?.kind === module.kind,
+      description: moduleDescriptionText(module),
+      icon: module.icon,
+      onClick: async () => {
+        try {
+          await selectModule(module.kind);
+          showEditor({ locked: false });
+        } catch (error) {
+          setStatus("status.error", "error", { message: error.message });
+          renderWarnings([{ message: error.message }]);
+        }
+      },
+    }));
+  }
+  moduleRow.append(moduleHeading, moduleButtonsRow);
+  moduleSelectorRows.append(moduleRow);
+}
+
+function showModuleSelector() {
+  workspaceShell.hidden = true;
+  editorShell.hidden = true;
+  moduleShell.hidden = false;
+  editorContext = null;
+  renderModuleSelector();
 }
 
 function currentWorkspaceDocument() {
@@ -982,10 +1107,11 @@ async function refreshWorkspace({ followActive = false } = {}) {
 
 function showEditor({ locked = false } = {}) {
   workspaceShell.hidden = true;
+  moduleShell.hidden = true;
   editorShell.hidden = false;
   moduleHeading.classList.toggle("locked", locked);
   moduleHeading.dataset.lockedName = locked ? moduleName(currentModule) : "";
-  moduleSelect.disabled = locked;
+  setModulePickerDisabled(locked);
   document.querySelector(".cad-controls").hidden = !currentModule.capabilities.build;
   editorModePill.title = t(currentModule.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
   editorModeText.textContent = t(currentModule.capabilities.build ? "app.managed_cad" : "app.preview_only");
@@ -1012,6 +1138,7 @@ async function openSelectedBlockEditor() {
 
 function showWorkspace() {
   editorShell.hidden = true;
+  moduleShell.hidden = true;
   workspaceShell.hidden = false;
   editorContext = null;
   refreshWorkspace();
@@ -1025,7 +1152,7 @@ async function selectModule(kind, autoPreview = true) {
   if (!module) throw new Error(t("error.unknown_module", `Unknown module: ${kind}`, { kind }));
 
   const wasModuleSelectDisabled = moduleSelect.disabled;
-  moduleSelect.disabled = true;
+  setModulePickerDisabled(true);
   try {
     const spec = await requestJson(module.spec_url);
     if (revision !== selectionRevision) return;
@@ -1046,6 +1173,7 @@ async function selectModule(kind, autoPreview = true) {
     cadCreateButton.disabled = true;
     cadResult.textContent = "";
     moduleSelect.value = kind;
+    moduleCurrentName.textContent = moduleName(module);
     moduleDescription.textContent = moduleDescriptionText(module);
     standardBadge.textContent = moduleStandard(module);
     document.querySelector(".cad-controls").hidden = !module.capabilities.build;
@@ -1058,7 +1186,7 @@ async function selectModule(kind, autoPreview = true) {
     setStatus("status.module_ready", "idle", { module: moduleName(module) });
     if (autoPreview) await runPreview({ force: true });
   } finally {
-    if (revision === selectionRevision) moduleSelect.disabled = wasModuleSelectDisabled;
+    if (revision === selectionRevision) setModulePickerDisabled(wasModuleSelectDisabled);
   }
 }
 
@@ -1319,6 +1447,7 @@ function refreshLanguage() {
   applyStaticTranslations();
   updateLanguageButtons();
   renderModuleCatalogText();
+  if (!moduleShell.hidden) renderModuleSelector();
   if (currentSpec) {
     customProfileDraft = readCustomProfileDraft();
     const customMode = fieldsContainer.querySelector("[name='designation']")?.value === "CUSTOM";
@@ -1365,6 +1494,7 @@ moduleSelect.addEventListener("change", async () => {
   if (moduleSelect.disabled) return;
   try {
     await selectModule(moduleSelect.value);
+    showEditor({ locked: false });
   } catch (error) {
     setStatus("status.error", "error", { message: error.message });
     renderWarnings([{ message: error.message }]);
@@ -1378,8 +1508,8 @@ form.addEventListener("wheel", (event) => {
 
   const configuredStep = Number(input.step);
   const step = Number.isFinite(configuredStep) && configuredStep > 0 ? configuredStep : 1;
-  const minimum = Number(input.min);
-  const maximum = Number(input.max);
+  const minimum = input.min === "" ? -Infinity : Number(input.min);
+  const maximum = input.max === "" ? Infinity : Number(input.max);
   const current = Number.isFinite(input.valueAsNumber)
     ? input.valueAsNumber
     : (Number.isFinite(minimum) ? minimum : 0);
@@ -1426,9 +1556,11 @@ cadCancelButton.addEventListener("click", cancelActiveCadJob);
 workspaceRefreshButton.addEventListener("click", () => refreshWorkspace({ followActive: true }));
 workspaceNewButton.addEventListener("click", async () => {
   editorContext = null;
-  await selectModule(moduleCatalog[0].kind, true);
-  showEditor({ locked: false });
+  showModuleSelector();
 });
+moduleShellWorkspaceButton.addEventListener("click", showWorkspace);
+editorModulesButton.addEventListener("click", showModuleSelector);
+editorWorkspaceButton.addEventListener("click", showWorkspace);
 workspaceOpenButton.addEventListener("click", async () => {
   setWorkspaceBusy("workspace.choosing_file");
   workspaceStatus.textContent = t("workspace.choosing_file", "Choosing an .m3d file…");
@@ -1482,7 +1614,6 @@ editorSaveAsDocumentButton.addEventListener("click", async () => {
   );
   if (entry) await saveWorkspaceDocument(entry.document, { saveAs: true });
 });
-editorBackButton.addEventListener("click", showWorkspace);
 window.addEventListener("focus", () => {
   if (!workspaceShell.hidden && !cadBuildActive && !workspaceActionActive) {
     refreshWorkspace({ followActive: true });

@@ -28,6 +28,22 @@ button, input, select, textarea { font: inherit; }
   height: 100dvh;
   min-height: 0;
 }
+.module-shell { display: grid; grid-template-rows: 92px minmax(0, 1fr); min-height: 100vh; min-height: 100dvh; background: var(--panel); }
+.module-shell-topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 26px; border-bottom: 1px solid var(--line); background: linear-gradient(100deg, rgba(227, 170, 79, 0.07), transparent 45%); }
+.module-shell-actions { display: flex; align-items: center; gap: 12px; }
+.module-selector { width: min(1120px, calc(100vw - 52px)); margin: 0 auto; padding: 48px 0; }
+.module-selector-hint { margin: 0 0 30px; color: var(--muted); font-size: 12px; }
+.module-selector-rows { display: grid; gap: 28px; }
+.selector-row { display: grid; gap: 10px; }
+.selector-row-label { margin: 0; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; }
+.selector-row-buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+.selector-button { display: inline-flex; min-width: 154px; min-height: 116px; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 8px; border: 1px solid var(--line); border-radius: 9px; color: #aebbc4; background: rgba(255,255,255,0.025); font-size: 12px; font-weight: 650; cursor: pointer; }
+.selector-button:hover, .selector-button.selected { border-color: rgba(227, 170, 79, 0.7); color: var(--accent-strong); background: rgba(227, 170, 79, 0.1); }
+.selector-icon { display: block; width: 40px; height: 40px; flex: 0 0 auto; background: currentColor; -webkit-mask: var(--icon-url) center / contain no-repeat; mask: var(--icon-url) center / contain no-repeat; }
+.module-selector-buttons .selector-icon { width: 58px; height: 58px; }
+.selector-button.selected { color: var(--accent-strong); }
+.editor-navigation { display: flex; align-items: center; gap: 14px; }
+.editor-navigation .editor-back + .editor-back { padding-left: 14px; border-left: 1px solid var(--line); }
 
 .workspace-shell { display: grid; grid-template-rows: 72px minmax(0, 1fr) 34px; height: 100vh; height: 100dvh; min-height: 0; }
 .workspace-topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 22px; border-bottom: 1px solid var(--line); background: linear-gradient(100deg, rgba(227, 170, 79, 0.07), transparent 45%); }
@@ -83,6 +99,7 @@ button.workspace-tree-item:hover, button.workspace-tree-item.selected { border-c
 @keyframes workspace-spin { to { transform: rotate(360deg); } }
 .editor-back { margin: 0 0 6px; padding: 0; border: 0; color: var(--accent-strong); background: transparent; font-size: 11px; cursor: pointer; }
 .controls-heading.locked select { display: none; }
+.controls-heading.locked .module-current-name { display: none; }
 .controls-heading.locked::before { content: attr(data-locked-name); display: block; font-size: 16px; font-weight: 620; }
 
 .preview-panel {
@@ -199,6 +216,8 @@ h2 { margin: 0; font-size: 13px; font-weight: 650; }
 }
 .controls-heading { padding-bottom: 20px; border-bottom: 1px solid var(--line); }
 .controls-heading select { width: 100%; font-size: 16px; font-weight: 620; }
+.module-select-fallback { position: absolute; width: 1px !important; height: 1px !important; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.module-current-name { margin: 0; color: #e7edf2; font-size: 16px; font-weight: 650; }
 .module-description { min-height: 36px; margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 select, input, textarea {
   width: 100%;
@@ -330,6 +349,11 @@ select:focus, input:focus, textarea:focus { border-color: rgba(227, 170, 79, 0.6
   .dynamic-fields { grid-template-columns: 1fr; }
   .field { grid-column: 1 / -1; }
   .controls-panel { padding: 20px 16px 28px; }
+  .module-shell-topbar { align-items: flex-start; flex-direction: column; height: auto; }
+  .module-selector { width: calc(100vw - 32px); padding-block: 28px; }
+  .selector-row-buttons { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+  .selector-button { flex: 0 0 auto; }
+  .module-selector-buttons .selector-button { min-width: 130px; }
   .canvas-help { right: 16px; font-size: 9px; }
   .custom-profile-grid { grid-template-columns: 1fr; }
 }

@@ -329,7 +329,7 @@ def test_flat_belt_studio_russian_copy_covers_fields_help_summary_warning_and_pr
     source = (root / "src" / "geomwright" / "studio" / "static" / "i18n.js").read_text(encoding="utf-8")
 
     expected = [
-        '"module.flat_belt.name": "Плоскоременный шкив"',
+        '"module.flat_belt.name": "Плоский"',
         '"field.outer_diameter": "Наружный диаметр"',
         '"field.face_width": "Ширина обода"',
         '"field.crown_height": "Высота выпуклости"',
@@ -370,6 +370,8 @@ def test_studio_cad_plan_status_reads_flat_pulley_dimensions_without_a_target() 
     assert 'timing_curvilinear: "block.timing_curvilinear"' in source
     assert 'form.addEventListener("wheel"' in source
     assert "event.preventDefault();" in source
+    assert 'input.min === "" ? -Infinity : Number(input.min)' in source
+    assert 'input.max === "" ? Infinity : Number(input.max)' in source
     assert 'moduleSelect.addEventListener("change"' in source
     assert 'moduleSelect.value' in source
 

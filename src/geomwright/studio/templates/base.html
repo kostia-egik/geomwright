@@ -90,6 +90,26 @@
     <footer id="workspace-status" class="workspace-status" aria-live="polite"></footer>
   </main>
 
+  <main id="module-shell" class="module-shell" hidden>
+    <header class="module-shell-topbar">
+      <div>
+        <p class="eyebrow" data-i18n="app.eyebrow">Geomwright Studio</p>
+        <h1 data-i18n="module_selector.title">Выбор модуля</h1>
+        <button id="module-shell-workspace" class="editor-back module-shell-workspace-button" type="button" data-i18n="module_selector.workspace">Рабочий стол</button>
+      </div>
+      <div class="module-shell-actions">
+        <div class="language-switch" role="group" aria-label="Язык интерфейса" data-i18n-label="language.label">
+          <button type="button" data-language="ru" aria-pressed="true">RU</button>
+          <button type="button" data-language="en" aria-pressed="false">EN</button>
+        </div>
+      </div>
+    </header>
+    <section class="module-selector" aria-labelledby="module-selector-title">
+      <p id="module-selector-title" class="module-selector-hint" data-i18n="module_selector.hint">Выберите ветку и модуль</p>
+      <div id="module-selector-rows" class="module-selector-rows"></div>
+    </section>
+  </main>
+
   <dialog id="workspace-close-dialog" class="workspace-dialog">
     <form method="dialog">
       <p class="eyebrow" data-i18n="workspace.close_dialog_eyebrow">Документ КОМПАС</p>
@@ -107,7 +127,10 @@
     <section class="preview-panel" aria-label="Предпросмотр профиля">
       <header class="topbar">
         <div>
-          <button id="editor-back" class="editor-back" type="button" data-i18n="workspace.back">← К модели</button>
+          <div class="editor-navigation">
+            <button id="editor-modules" class="editor-back" type="button" data-i18n="module_selector.back">← К выбору модулей</button>
+            <button id="editor-workspace" class="editor-back" type="button" data-i18n="module_selector.workspace">Рабочий стол</button>
+          </div>
           <p class="eyebrow" data-i18n="app.eyebrow">Geomwright Studio</p>
           <h1 data-i18n="app.title">Профиль ременного шкива</h1>
         </div>
