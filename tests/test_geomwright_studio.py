@@ -6,14 +6,19 @@ import math
 import pytest
 
 from geomwright.studio.registry import get_module, list_modules, managed_pulley_plan, preview_module
+from kompas_mcp.adapter import KompasAdapter
+from kompas_mcp.bridge_runner import BridgeError
+from kompas_mcp.transmissions import build_chain_sprocket_plan, list_chain_profiles, preview_chain_sprocket
 
 
-def test_registry_exposes_schema_driven_managed_belt_modules() -> None:
+def test_registry_exposes_schema_driven_transmission_modules() -> None:
     modules = list_modules()
 
-    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear"]
+    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket"]
     assert all(item["group"] == "mechanical_transmissions" for item in modules)
-    assert all(item["subgroup"] == "belt_drives" for item in modules)
+    assert all(item["subgroup"] == "belt_drives" for item in modules[:-1])
+    assert modules[-1]["subgroup"] == "chain_drives"
+    assert modules[-1]["icon"] is None
     assert get_module("timing_trapezoidal").descriptor()["capabilities"]["build"] is True
     assert get_module("timing_curvilinear").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
     for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear"):
@@ -26,6 +31,604 @@ def test_registry_exposes_schema_driven_managed_belt_modules() -> None:
         assert spec["module"]["cad_job_url"] == f"/modules/{kind}/cad/jobs"
         assert spec["schema"]["additionalProperties"] is False
         assert validated.model_dump(exclude_none=True) == spec["defaults"]
+
+
+def test_chain_sprocket_exposes_hierarchical_catalog_and_preview_without_icon() -> None:
+    module = get_module("chain_sprocket")
+    assert module.descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    assert module.descriptor()["icon"] is None
+    assert module.request_model.model_validate(module.defaults).model_dump() == module.defaults
+    assert "face_width" not in module.spec()["schema"]["properties"]
+    assert module.spec()["schema"]["properties"]["gost_profile_variant"]["enum"] == ["offset", "non_offset"]
+    selection = module.spec()["module"]["selection"]
+    assert [item["value"] for item in selection["standards"]] == ["iso_606", "gost_13568", "gost_21834"]
+    assert [item["value"] for item in selection["standards"][0]["families"]] == [
+        "iso_a_1", "iso_a_2", "iso_a_3", "iso_b_1", "iso_b_2", "iso_b_3",
+    ]
+    assert [item["value"] for item in selection["standards"][1]["families"]] == [
+        "pr_1", "pr_2", "pr_3", "pr_4", "pri_1", "pv_1", "pv_2",
+    ]
+    assert [item["value"] for item in selection["standards"][2]["families"]] == [
+        "np_1", "np_2", "np_3", "np_4", "np_6", "np_8",
+        "tp_1", "tp_2", "tp_3", "tp_4", "tp_6", "tp_8",
+    ]
+    assert selection["standards"][1]["label_ru"] == "ГОСТ 13568-2017"
+    assert selection["standards"][1]["label_en"] == "GOST 13568-2017"
+    assert selection["standards"][1]["families"][0]["label_ru"] == "ПР"
+    assert selection["standards"][1]["families"][0]["label_en"] == "PR"
+    assert selection["standards"][0]["families"][1]["label_ru"] == "A-2"
+    assert selection["standards"][0]["families"][1]["label_en"] == "A-2"
+    assert selection["standards"][2]["available"] is True
+    pv = selection["standards"][1]["families"][6]
+    assert pv["profiles"][0]["chain_type"] == "bush"
+    assert pv["profiles"][0]["nominal_row_count"] == 2
+
+    roller = preview_module("chain_sprocket", module.defaults)
+    bush = preview_module("chain_sprocket", {**module.defaults, "chain_type": "bush"})
+
+    assert roller["family"] == "chain_sprocket"
+    assert roller["secondary_view"] is None
+    multi = preview_module("chain_sprocket", {**module.defaults, "designation": "ISO_08B_3", "row_count": 3})["secondary_view"]
+    assert multi["row_count"] == 3
+    assert multi["tooth_width_mm"] == pytest.approx(0.90 * 7.75 - 0.15)
+    assert multi["row_spacing_mm"] == 13.92
+    assert multi["total_width_mm"] == pytest.approx(2 * 13.92 + multi["tooth_width_mm"])
+    unknown = preview_module("chain_sprocket", {**module.defaults, "designation": "ISO_50A_2", "row_count": 2})["secondary_view"]
+    assert unknown["row_spacing_mm"] is None
+    assert unknown["total_width_mm"] is None
+    assert unknown["axial_layout_status"] == "schematic_missing_row_spacing"
+    assert roller["summary"]["profile_family"] == "iso_b"
+    assert roller["summary"]["chain_type"] == "roller"
+    assert bush["summary"]["chain_type"] == "bush"
+    assert roller["summary"]["pitch_diameter_mm"] == pytest.approx(12.7 / math.sin(math.pi / 19))
+    assert roller["summary"]["standard"] == "iso_606"
+    assert len(roller["closed_points"][0]) > 20
+    assert len(roller["feature_paths"]) == 1
+    assert len(roller["feature_paths"][0]) > 20
+    assert {item["key"] for item in roller["dimensions"]} == {
+        "pitch_diameter", "outside_diameter", "root_diameter",
+    }
+    assert all(item["orientation"] == "radial" for item in roller["dimensions"])
+    for item in roller["dimensions"]:
+        assert item["start"][0] * item["end"][1] - item["start"][1] * item["end"][0] == pytest.approx(0.0)
+    assert len(roller["closed_points"]) == 1
+    assert roller["closed_points"][0][0] == roller["closed_points"][0][-1]
+    assert roller["preview_window"] == {
+        "tooth_gap_count": 3,
+        "visible_tooth_count": 2,
+        "section_style": "broken_out",
+    }
+    assert {item["key"] for item in roller["reference_paths"]} == {"pitch_circle", "outside_circle"}
+    one_gap = preview_chain_sprocket(
+        designation="ISO_08B",
+        chain_type="roller",
+        tooth_count=19,
+    )["geometry"]["profile_path"]
+    section_profile = roller["feature_paths"][0]
+    assert len(section_profile) >= 3 * len(one_gap) - 2
+    assert any(
+        section_profile[index:index + len(one_gap)] == one_gap
+        for index in range(len(section_profile) - len(one_gap) + 1)
+    )
+    assert min(point[1] for point in roller["guide_paths"][0]) < roller["summary"]["root_diameter_mm"] / 2.0
+    assert {item["code"] for item in roller["warning_items"]} == {
+        "chain_profile_standard_scope",
+        "chain_downstream_operations_external",
+        "chain_multirow_axial_preview_pending",
+    }
+
+    gost = preview_module(
+        "chain_sprocket",
+        {"designation": "GOST_PR_12_7_18_2", "chain_type": "roller", "tooth_count": 19},
+    )
+    assert gost["summary"]["standard"] == "gost_13568_2017"
+    assert gost["summary"]["designation"] == "GOST_PR_12_7_18_2"
+    assert gost["summary"]["gost_profile_variant"] == "offset"
+    assert gost["summary"]["tooth_gap_center_offset_mm"] == pytest.approx(0.03 * 12.7)
+
+    gost_non_offset = preview_module(
+        "chain_sprocket",
+        {
+            "designation": "GOST_PR_12_7_18_2",
+            "chain_type": "roller",
+            "tooth_count": 19,
+            "gost_profile_variant": "non_offset",
+        },
+    )
+    assert gost_non_offset["summary"]["gost_profile_variant"] == "non_offset"
+    assert gost_non_offset["summary"]["tooth_gap_center_offset_mm"] == 0.0
+    assert roller["summary"]["gost_profile_variant"] == "offset"
+    assert roller["summary"]["tooth_gap_center_offset_mm"] == pytest.approx(0.03 * 12.7)
+    assert roller["summary"]["profile_construction"] == "kompas_native_gost_591_offset"
+    seating_radius = 0.5025 * 8.51 + 0.05
+    assert roller["summary"]["roller_seating_radius_mm"] == pytest.approx(seating_radius)
+    assert roller["summary"]["tooth_flank_radius_mm"] == pytest.approx(0.8 * 8.51 + seating_radius)
+
+    duplex = preview_module(
+        "chain_sprocket",
+        {"designation": "ISO_08B", "chain_type": "roller", "tooth_count": 19, "row_count": 2},
+    )
+    assert duplex["summary"]["row_count"] == 2
+    assert duplex["request"]["row_count"] == 2
+
+
+def test_chain_tooth_profile_uses_native_detail_and_gost_half_offsets_for_iso_and_gost() -> None:
+    pitch = 12.7
+    roller_diameter = 8.51
+    tooth_count = 19
+    expected_pitch_diameter = pitch / math.sin(math.pi / tooth_count)
+    expected_outside_diameter = pitch * (0.480 + 1.0 / math.tan(math.pi / tooth_count))
+    expected_seating_radius = 0.5025 * roller_diameter + 0.05
+    expected_flank_radius = 0.8 * roller_diameter + expected_seating_radius
+    beta = math.radians(18.0 - 56.0 / tooth_count)
+    phi = math.radians(17.0 - 64.0 / tooth_count)
+    expected_secondary_radius = roller_diameter * (
+        1.24 * math.cos(phi) + 0.8 * math.cos(beta) - 1.3025
+    ) - 0.05
+
+    for variant in ("offset", "non_offset"):
+        preview = preview_chain_sprocket(
+            designation="GOST_PR_12_7_18_2",
+            chain_type="roller",
+            tooth_count=tooth_count,
+            gost_profile_variant=variant,
+        )
+        derived = preview["derived"]
+        fillets = preview["geometry"]["fillets"]
+        right_seat = next(item for item in fillets if item["kind"] == "roller_seat" and item["side"] == "right")
+        left_seat = next(item for item in fillets if item["kind"] == "roller_seat" and item["side"] == "left")
+        right_flank = next(item for item in fillets if item["kind"] == "tooth_flank" and item["side"] == "right")
+        left_flank = next(item for item in fillets if item["kind"] == "tooth_flank" and item["side"] == "left")
+        right_secondary = next(item for item in fillets if item["kind"] == "secondary_flank" and item["side"] == "right")
+        left_secondary = next(item for item in fillets if item["kind"] == "secondary_flank" and item["side"] == "left")
+        contact = preview["geometry"]["tangent_points"]["right_seating_to_flank"]
+        flank_tangent = preview["geometry"]["tangent_points"]["right_flank_to_tip"]
+        secondary_tangent = preview["geometry"]["tangent_points"]["right_flank_to_secondary"]
+        entities = preview["geometry"]["cad_entities"]
+
+        assert derived["pitch_diameter"] == pytest.approx(expected_pitch_diameter)
+        assert derived["outside_diameter"] == pytest.approx(expected_outside_diameter)
+        assert derived["root_diameter"] == pytest.approx(expected_pitch_diameter - 2 * expected_seating_radius)
+        assert right_seat["radius"] == pytest.approx(expected_seating_radius)
+        assert right_seat["center"][1] == pytest.approx(expected_pitch_diameter / 2.0)
+        assert left_seat["center"][1] == pytest.approx(expected_pitch_diameter / 2.0)
+        assert right_flank["radius"] == pytest.approx(expected_flank_radius)
+        assert math.dist(right_seat["center"], contact) == pytest.approx(right_seat["radius"])
+        assert math.dist(right_flank["center"], contact) == pytest.approx(right_flank["radius"])
+        assert math.dist(right_flank["center"], flank_tangent) == pytest.approx(right_flank["radius"])
+        assert math.dist(right_secondary["center"], secondary_tangent) == pytest.approx(right_secondary["radius"])
+        assert right_secondary["radius"] == pytest.approx(expected_secondary_radius)
+        assert right_secondary["center"][0] - right_seat["center"][0] == pytest.approx(
+            1.24 * roller_diameter * math.cos(math.pi / tooth_count)
+        )
+        assert right_secondary["center"][1] - right_seat["center"][1] == pytest.approx(
+            -1.24 * roller_diameter * math.sin(math.pi / tooth_count)
+        )
+        assert left_flank["center"][0] == pytest.approx(-right_flank["center"][0])
+        assert left_secondary["center"][0] == pytest.approx(-right_secondary["center"][0])
+        assert len(entities) == (12 if variant == "offset" else 11)
+        assert [entity["kind"] for entity in entities].count("arc") == 6
+        assert [entity["kind"] for entity in entities].count("segment") == (6 if variant == "offset" else 5)
+        bottoms = [entity for entity in entities if entity["id"] == "roller_seat_bottom"]
+        if variant == "offset":
+            bottom = bottoms[0]
+            assert math.dist(bottom["start"], bottom["end"]) == pytest.approx(0.03 * pitch)
+            assert bottom["start"][1] == pytest.approx(bottom["end"][1])
+            for side, point in ((left_seat, bottom["start"]), (right_seat, bottom["end"])):
+                assert point[0] == pytest.approx(side["center"][0])
+                assert point[1] == pytest.approx(side["center"][1] - side["radius"])
+        else:
+            assert not bottoms
+        assert all(
+            math.dist(left["end"], right["start"]) <= 1e-10
+            for left, right in zip(entities, entities[1:] + entities[:1])
+        )
+        right_tip = preview["geometry"]["profile_path"][-1]
+        assert math.hypot(*right_tip) > math.hypot(*secondary_tangent)
+        assert math.atan2(right_tip[0], right_tip[1]) < math.pi / tooth_count
+        profile_path = preview["geometry"]["profile_path"]
+        right_branch_radii = [math.hypot(*point) for point in profile_path[len(profile_path) // 2 :]]
+        assert all(
+            next_radius > radius
+            for radius, next_radius in zip(right_branch_radii, right_branch_radii[1:])
+        )
+        assert preview["geometry"]["outline"][0] == preview["geometry"]["outline"][-1]
+        expected_offset = 0.03 * pitch if variant == "offset" else 0.0
+        assert right_seat["center"][0] == pytest.approx(expected_offset / 2.0)
+        assert left_seat["center"][0] == pytest.approx(-expected_offset / 2.0)
+        assert right_seat["center"][0] - left_seat["center"][0] == pytest.approx(expected_offset)
+
+    iso_offset = preview_chain_sprocket(
+        designation="ISO_08B",
+        chain_type="roller",
+        tooth_count=tooth_count,
+        gost_profile_variant="offset",
+    )
+    iso_non_offset = preview_chain_sprocket(
+        designation="ISO_08B",
+        chain_type="roller",
+        tooth_count=tooth_count,
+        gost_profile_variant="non_offset",
+    )
+    assert iso_offset["gost_profile_variant"] == "offset"
+    assert iso_non_offset["gost_profile_variant"] == "non_offset"
+    assert iso_offset["derived"]["tooth_gap_center_offset_mm"] == pytest.approx(0.03 * pitch)
+    assert iso_non_offset["derived"]["tooth_gap_center_offset_mm"] == 0.0
+    low_tooth_gost = preview_chain_sprocket(
+        designation="GOST_PR_12_7_18_2",
+        chain_type="roller",
+        tooth_count=6,
+        gost_profile_variant="non_offset",
+    )
+    assert any(item["kind"] == "secondary_flank" for item in low_tooth_gost["geometry"]["fillets"])
+
+    assert iso_non_offset["derived"]["standard_parameters"]["standard"].startswith("ISO 606")
+    assert iso_non_offset["derived"]["standard_parameters"]["construction"] == (
+        "kompas_native_gost_591_non_offset"
+    )
+
+
+def test_chain_catalog_keeps_iso_dimensions_and_gost_tooth_strategy_separate() -> None:
+    catalog = list_chain_profiles()
+    families = {item["profile_family"]: item for item in catalog["profile_families"]}
+
+    assert catalog["profile_count"] == 215
+    assert {families[family]["designation_count"] for family in ("pr", "pri", "pv")} == {36, 4, 3}
+    assert families["np"]["designation_count"] == families["tp"]["designation_count"] == 37
+    assert families["iso_a"]["cad_strategy"] == "kompas_gost_591_11_entity_tooth_gap"
+    assert families["iso_b"]["cad_strategy"] == "kompas_gost_591_11_entity_tooth_gap"
+    assert families["iso_a"]["equivalence_group"] == families["iso_b"]["equivalence_group"]
+    for family in ("pr", "pri", "pv", "np", "tp"):
+        assert families[family]["cad_strategy"] == "kompas_gost_591_11_entity_tooth_gap"
+        assert families[family]["equivalence_group"] != families["iso_b"]["equivalence_group"]
+    assert families["iso_a"]["engagement_diameter_to_pitch"]["min"] < families["iso_a"]["engagement_diameter_to_pitch"]["max"]
+    profiles = {item["designation"]: item for item in catalog["profiles"]}
+    assert profiles["ISO_08A"]["outside_diameter"] == 7.95
+    assert profiles["ISO_08A"]["inner_width"] == 7.85
+    assert profiles["ISO_08A_2"]["dimensions_standard"] == "ISO 606:1994"
+    assert profiles["ISO_40A"]["outside_diameter"] == 7.92
+    assert "row_spacing" not in profiles["ISO_40A_3"]
+    assert profiles["ISO_10A_3"]["pitch"] == 15.875
+    assert profiles["ISO_10A_3"]["inner_width"] == 9.4
+    assert profiles["ISO_10A_3"]["row_spacing"] == 18.11
+    assert profiles["ISO_12B_2"]["plate_height"] == 16.13
+    assert profiles["ISO_16A_2"]["plate_height"] == 24.13
+    assert profiles["ISO_28B_2"]["plate_height"] == 37.08
+    iso_selection = get_module("chain_sprocket").spec()["module"]["selection"]["standards"][0]
+    a3 = next(f for f in iso_selection["families"] if f["value"] == "iso_a_3")
+    assert any(p["value"] == "ISO_10A_3" and p["label_ru"] == "10A-3" for p in a3["profiles"])
+    iso_a = preview_chain_sprocket(designation="ISO_08A", chain_type="roller", tooth_count=25)
+    assert iso_a["derived"]["standard_parameters"]["outside_coefficient"] == 0.532
+    assert iso_a["derived"]["outside_diameter"] == pytest.approx(12.7 * (0.532 + 1 / math.tan(math.pi / 25)))
+    # One catalog representative per Table 1 interval; ISO_05B also covers lambda=1.60.
+    for designation, coefficient in (("ISO_08B", 0.480), ("ISO_08A", 0.532),
+                                     ("ISO_05B", 0.555), ("ISO_140A", 0.575), ("ISO_25A", 0.565)):
+        preview = preview_chain_sprocket(
+            designation=designation, chain_type=profiles[designation]["chain_type"], tooth_count=25,
+        )
+        assert preview["derived"]["standard_parameters"]["outside_coefficient"] == coefficient
+    for label in ("ПРИ-78,1-360", "ПРИ-103,2-650", "ПРИ-140-1200"):
+        designation = next(key for key, item in profiles.items() if item["label"] == label)
+        with pytest.raises(ValueError, match="GOST 591-69.*lambda"):
+            managed_pulley_plan("chain_sprocket", {
+                "designation": designation, "chain_type": "roller", "tooth_count": 90,
+            })
+    supported_pri = next(key for key, item in profiles.items() if item["label"] == "ПРИ-78,1-400")
+    assert preview_chain_sprocket(designation=supported_pri, chain_type="roller", tooth_count=25)["success"]
+    iso_a_plan = managed_pulley_plan("chain_sprocket", {
+        "designation": "ISO_08A", "chain_type": "roller", "tooth_count": 25,
+    })
+    assert iso_a_plan["geometry"]["outside_radius"] == pytest.approx(iso_a["derived"]["outside_diameter"] / 2)
+    special = {
+        profile["label"]: profile
+        for profile in catalog["profiles"]
+        if profile.get("kompas_catalog_source") == "Таблица ГВС 005-2015"
+    }
+    assert set(special) == {"081", "082", "083", "084", "085"}
+    assert special["082"]["inner_width"] == pytest.approx(2.38)
+    assert special["085"]["outside_diameter"] == pytest.approx(7.77)
+    assert all(profile["selection_family"] == "iso_b_1" for profile in special.values())
+    assert {
+        profile["standard"]
+        for profile in catalog["profiles"]
+        if profile["profile_family"] in ("np", "tp")
+    } == {"gost_21834_87"}
+
+
+def test_chain_sprocket_cad_plan_uses_true_arcs_and_rejects_unmodelled_multirow_layout() -> None:
+    plan = managed_pulley_plan(
+        "chain_sprocket",
+        {
+            "designation": "ISO_08B",
+            "chain_type": "roller",
+            "tooth_count": 19,
+            "row_count": 1,
+            "gost_profile_variant": "offset",
+        },
+    )
+
+    assert plan["stage"] == "managed_chain_sprocket_plan"
+    assert plan["ownership"]["schema"] == "geomwright.managed_chain_sprocket"
+    assert plan["geometry"]["face_width"] == pytest.approx(0.93 * 7.75)
+    rounding = plan["axial_rounding"]
+    assert rounding["r3"] == pytest.approx(1.7 * 8.51)
+    assert rounding["h3"] == pytest.approx(0.8 * 8.51)
+    assert rounding["axial_interval"] == [-plan["geometry"]["face_width"], 0.0]
+    left, right = rounding["ends"]
+    left_arc = left["bridge_preview"]["geometry"]["profile_entities"][0]
+    right_arc = right["bridge_preview"]["geometry"]["profile_entities"][0]
+    assert left_arc["start"][0] == 0.0
+    assert right_arc["start"][0] == pytest.approx(-rounding["face_width"])
+    assert left_arc["end"][0] < left_arc["start"][0]
+    assert right_arc["end"][0] > right_arc["start"][0]
+    assert left_arc["end"][0] + right_arc["end"][0] == pytest.approx(-rounding["face_width"])
+    assert left_arc["direction"] is False and right_arc["direction"] is True
+    for end in rounding["ends"]:
+        axial_entities = end["bridge_preview"]["geometry"]["profile_entities"]
+        arc = axial_entities[0]
+        assert math.dist(arc["center"], arc["start"]) == pytest.approx(rounding["r3"])
+        assert math.dist(arc["center"], arc["end"]) == pytest.approx(rounding["r3"])
+        assert arc["start"][1] == pytest.approx(rounding["outside_radius"] - rounding["h3"])
+        assert arc["end"][1] == pytest.approx(rounding["outside_radius"])
+        assert all(a["end"] == b["start"] for a, b in zip(axial_entities, axial_entities[1:] + axial_entities[:1]))
+        assert end["params"]["require_fully_defined"] is True
+        assert end["params"]["sketch"]["parameterization_order"] == "constraints_first"
+    entities = plan["geometry"]["tooth_space_entities"]
+    assert len(entities) == 12
+    assert [entity["kind"] for entity in entities].count("arc") == 6
+    assert [entity["kind"] for entity in entities].count("segment") == 6
+    closure = next(entity for entity in entities if entity["id"] == "outside_closure")
+    assert closure["start"][1] == pytest.approx(plan["geometry"]["outside_radius"] + 0.5)
+    assert closure["end"][1] == pytest.approx(plan["geometry"]["outside_radius"] + 0.5)
+    assert all(
+        math.dist(left["end"], right["start"]) <= 1e-10
+        for left, right in zip(entities, entities[1:])
+    )
+    assert math.dist(entities[-1]["end"], entities[0]["start"]) <= 1e-10
+    operations = plan["workflow"]["params"]["operations"]
+    assert [operation["scenario"] for operation in operations] == [
+        "cylindrical_blank", "numeric_profile_sketch", "cut_extrusion", "circular_pattern",
+    ]
+    sketch_params = operations[1]["params"]
+    assert sketch_params["parameterize"] is True
+    assert sketch_params["require_fully_defined"] is True
+    assert sketch_params["sketch_options"]["require_exact_counts"] is True
+    assert sketch_params["sketch_options"]["expected_constraint_count"] == 41
+    assert sketch_params["sketch_options"]["expected_dimension_count"] == 17
+    assert sketch_params["post_build_constraints"] == [{
+        "kind": "point_on_curve",
+        "target": "outside_overshoot_right",
+        "index": 0,
+        "partner": "chain_outside_datum",
+    }]
+    assert operations[2]["params"]["require_fully_defined"] is True
+    assert operations[-1]["params"]["parameterize"] is True
+    assert operations[-1]["params"]["count_variable"] == "CH_Z"
+    assert operations[-1]["params"]["angle_step_variable"] == "CH_STEP"
+    dimensions = {item["name"]: item for item in plan["parameterization"]["dimensions"]}
+    assert dimensions["CH_E_DIM"]["variable_name"] == "CH_E"
+    assert {
+        "CH_RP_DIM", "CH_RA_DIM", "CH_AXIS_DIM",
+        "CH_HSPAN_DIM", "CH_HX_DIM", "CH_HY_DIM",
+        "CH_FSPAN_DIM", "CH_FX_DIM", "CH_FY_DIM",
+        "CH_R_DIM", "CH_R1_DIM", "CH_R2_DIM",
+        "CH_E_DIM", "CH_E2_DIM", "CH_CO_DIM", "CH_CW_DIM", "CH_SCY_DIM",
+    } == set(dimensions)
+    assert dimensions["CH_R_DIM"]["target"] == "roller_seat_right"
+    assert dimensions["CH_R1_DIM"]["target"] == "tooth_flank_right"
+    assert dimensions["CH_R2_DIM"]["target"] == "tooth_head_right"
+    assert dimensions["CH_CW_DIM"]["kind"] == "line_length"
+    assert dimensions["CH_CW_DIM"]["target"] == "outside_closure"
+    assert dimensions["CH_CW_DIM"]["driving"] is False
+    assert "variable_name" not in dimensions["CH_CW_DIM"]
+    assert dimensions["CH_CW_DIM"]["value"] == pytest.approx(
+        abs(closure["end"][0] - closure["start"][0])
+    )
+    constraints = plan["parameterization"]["constraints"]
+    assert sum(item["kind"] == "tangent" for item in constraints) == 8
+    assert {"kind": "horizontal", "target": "roller_seat_bottom"} in constraints
+    assert not any(item["target"] == "roller_seat_bottom" for item in dimensions.values())
+    assert sum(item["kind"] == "equal_radius" for item in constraints) == 3
+    assert sum(item["kind"] == "point_on_curve" for item in constraints) == 0
+    assert {"kind": "horizontal", "target": "outside_closure"} in constraints
+    assert "chain_closure_datum" not in {
+        item["id"] for item in plan["geometry"]["auxiliary_entities"]
+    }
+    variables = {item["name"]: item for item in plan["parameterization"]["variables"]}
+    assert variables["CH_R"]["expression"] == "0.5025 * CH_DR + 0.05"
+    assert variables["CH_R1"]["expression"] == "0.8 * CH_DR + CH_R"
+    assert variables["CH_R2"]["expression"].endswith("* CH_DR - 0.05")
+    assert variables["CH_CW"]["value"] > 0.0
+    assert {"CH_E", "CH_R", "CH_R1", "CH_R2", "CH_CW", "CH_STEP"}.issubset(
+        plan["ownership"]["required_variables"]
+    )
+
+    gost_plan = build_chain_sprocket_plan(
+        designation="GOST_PR_12_7_18_2",
+        chain_type="roller",
+        tooth_count=19,
+        row_count=1,
+    )
+    assert gost_plan["geometry"]["face_width"] == pytest.approx(0.93 * 7.75 - 0.15)
+    assert len(gost_plan["geometry"]["tooth_space_entities"]) == 12
+
+    narrow_plan = build_chain_sprocket_plan(designation="ISO_081", chain_type="roller", tooth_count=19)
+    narrow = narrow_plan["axial_rounding"]
+    assert narrow_plan["geometry"]["face_width"] == pytest.approx(2.919)
+    assert narrow["r3"] > 1.7 * 7.75
+    assert narrow["h3"] == pytest.approx(0.8 * 7.75)
+    assert narrow["tip_land_width"] == pytest.approx(0.2 * 2.919)
+    assert narrow["radius_selection"] == "width_fitted_20_percent_land"
+    assert narrow["r3"] == pytest.approx((6.2 ** 2 + (0.4 * 2.919) ** 2) / (0.8 * 2.919))
+    assert rounding["radius_selection"] == "minimum_1.7_engagement_diameter"
+    # Continuous transition from the fitted radius to the normative minimum.
+    for width in (0.5 * 7.75 - 1e-5, 0.5 * 7.75, 0.5 * 7.75 + 1e-5):
+        boundary = build_chain_sprocket_plan(
+            designation="ISO_081", chain_type="roller", tooth_count=19, face_width=width,
+        )["axial_rounding"]
+        assert boundary["r3"] >= boundary["minimum_radius"] - 1e-10
+        assert boundary["tip_land_width"] >= 0.2 * width - 1e-10
+        assert boundary["r3"] == pytest.approx(1.7 * 7.75, abs=1e-4)
+    native_preview = preview_chain_sprocket(
+        designation="ISO_081",
+        chain_type="roller",
+        tooth_count=19,
+        row_count=1,
+        gost_profile_variant="non_offset",
+    )
+    native_parameters = native_preview["derived"]["standard_parameters"]
+    native_entities = native_preview["geometry"]["cad_entities"]
+    assert native_preview["profile"]["label"] == "081"
+    assert native_preview["profile"]["outside_diameter"] == pytest.approx(7.75)
+    assert native_preview["profile"]["inner_width"] == pytest.approx(3.3)
+    assert native_preview["derived"]["pitch_diameter"] == pytest.approx(77.1592795263731)
+    assert native_preview["derived"]["outside_diameter"] == pytest.approx(83.15542752026585)
+    assert native_parameters["construction"] == "kompas_native_gost_591_non_offset"
+    assert native_parameters["seating_radius"] == pytest.approx(3.944375)
+    assert native_parameters["flank_radius"] == pytest.approx(10.144375)
+    assert native_parameters["secondary_radius"] == pytest.approx(5.182186887975166)
+    assert native_parameters["fg_distance"] == pytest.approx(0.6546848419970204)
+    assert len(native_entities) == 11
+    assert [entity["kind"] for entity in native_entities].count("arc") == 6
+    assert [entity["kind"] for entity in native_entities].count("segment") == 5
+    assert all(
+        math.dist(left["end"], right["start"]) <= 1e-10
+        for left, right in zip(native_entities, native_entities[1:] + native_entities[:1])
+    )
+    assert native_entities[2]["start"] == pytest.approx([-4.455519529261, 38.429318275896])
+    assert native_entities[7]["end"] == pytest.approx([6.318632539610, 41.104900177632])
+    native_iso_plan = build_chain_sprocket_plan(
+        designation="ISO_08B", chain_type="roller", tooth_count=19, gost_profile_variant="non_offset",
+    )
+    native_sketch = native_iso_plan["workflow"]["params"]["operations"][1]["params"]
+    assert native_sketch["sketch_options"]["expected_constraint_count"] == 35
+    assert native_sketch["sketch_options"]["expected_dimension_count"] == 14
+    assert "CH_E_DIM" not in {
+        item["name"] for item in native_iso_plan["parameterization"]["dimensions"]
+    }
+    assert "chain_seat_center_span" not in {
+        item["id"] for item in native_iso_plan["geometry"]["auxiliary_entities"]
+    }
+
+    multi = build_chain_sprocket_plan(designation="ISO_08B_2", chain_type="roller", tooth_count=25, row_count=2)
+    layout = multi["row_layout"]
+    assert layout["enabled"]
+    assert layout["tooth_width"] == pytest.approx(6.825)
+    assert layout["row_spacing"] == pytest.approx(13.92)
+    assert layout["total_width"] == pytest.approx(20.745)
+    assert layout["connector_diameter"] == 85.0
+    junction = layout["junction_fillet"]
+    assert junction["radius"] == 1.6
+    assert junction["expected_edge_count"] == 2
+    assert [edge["point"][0] for edge in junction["edge_probe_points"]] == pytest.approx([-6.825, -13.92])
+    assert all(math.hypot(*edge["point"][1:]) == pytest.approx(42.5) for edge in junction["edge_probe_points"])
+    assert junction["expected_added_volume_cm3"] > 0.0
+    assert layout["row_offsets"] == [0.0, -13.92]
+    assert multi["workflow"]["params"]["operations"][0]["params"]["width"] == layout["tooth_width"]
+    assert layout["connector"]["params"]["require_fully_defined"]
+    assert layout["expected_gap_volume_cm3"] == pytest.approx(math.pi * 42.5**2 * (13.92 - 6.825) / 1000)
+    triple = build_chain_sprocket_plan(designation="ISO_08A_3", chain_type="roller", tooth_count=25, row_count=3)
+    assert triple["row_layout"]["row_offsets"] == [0.0, -14.38, -28.76]
+    assert triple["row_layout"]["junction_fillet"]["expected_edge_count"] == 4
+    assert triple["geometry"]["total_face_width"] == pytest.approx(2 * 14.38 + 0.9 * 7.85 - 0.15)
+    new_a = build_chain_sprocket_plan(designation="ISO_10A_3", chain_type="roller", tooth_count=25, row_count=3)
+    assert new_a["geometry"]["total_face_width"] == pytest.approx(44.53)
+    assert new_a["row_layout"]["row_spacing"] == 18.11
+    profiles_by_label = {p["label"]: p for p in list_chain_profiles()["profiles"]}
+    for label, count, spacing, height, r4 in (
+        ("2ПВ-9,525-20", 2, 10.75, 9.85, 1.6),
+        ("4ПР-38,1-508", 4, 45.44, 36.2, 2.5),
+    ):
+        profile = profiles_by_label[label]
+        plan = build_chain_sprocket_plan(designation=profile["designation"], chain_type=profile["chain_type"], tooth_count=25, row_count=count)
+        assert plan["row_layout"]["row_spacing"] == spacing
+        assert plan["row_layout"]["plate_height"] == height
+        assert plan["row_layout"]["junction_fillet"]["radius"] == r4
+        assert plan["row_layout"]["junction_fillet"]["expected_edge_count"] == 2 * (count - 1)
+    with pytest.raises(ValueError, match="multi-row CAD"):
+        build_chain_sprocket_plan(
+            designation="ISO_50A_2",
+            chain_type="roller",
+            tooth_count=19,
+            row_count=2,
+        )
+    with pytest.raises(ValueError, match="row_count must match"):
+        build_chain_sprocket_plan(designation="ISO_08B_3", chain_type="roller", tooth_count=25, row_count=2)
+    with pytest.raises(ValueError, match="row_spacing must exceed"):
+        build_chain_sprocket_plan(designation="ISO_08B_2", chain_type="roller", tooth_count=25, row_count=2, face_width=14.0)
+    with pytest.raises(ValueError, match="r4 junction fillets do not fit"):
+        build_chain_sprocket_plan(designation="ISO_08B_2", chain_type="roller", tooth_count=25, row_count=2, face_width=12.0)
+
+
+def test_chain_sprocket_execute_routes_the_managed_plan_to_its_bridge_action() -> None:
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def call(self, action: str, payload: dict, **_: object) -> dict:
+            self.calls.append((action, payload))
+            if action == "create_chain_sprocket":
+                return {
+                    "ok": True,
+                    "success": True,
+                    "stage": "executed",
+                    "document": {"runtime_id": "@document:1"},
+                    "steps": [{
+                        "id": "tooth_space_sketch",
+                        "sketch": {"reference": 101},
+                        "entities": [
+                            {"id": "outside_overshoot_right", "reference": 201, "collection_index": 2},
+                            {"id": "chain_outside_datum", "reference": 301, "collection_index": 1},
+                        ],
+                    }],
+                }
+            if action == "apply_existing_sketch_constraint":
+                raise BridgeError("Bridge call timed out after 15 seconds")
+            if action == "inspect_sketch_full":
+                return {
+                    "entities": [
+                        {"kind": "segment", "index": 2, "reference": 201},
+                        {"kind": "circle", "index": 1, "reference": 301},
+                    ],
+                    "constraints_state": {"code": 2, "label": "fully_defined"},
+                    "summary": {
+                        "closure_primary_closed": True,
+                        "closure_primary_gap_count": 0,
+                        "closure_primary_self_intersection_count": 0,
+                    },
+                    "constraints": {"all_items": [{
+                        "properties": {"constraint_kind": "point_on_curve"},
+                        "owner_object": {"reference": 201},
+                        "partner_object": {"reference": 301},
+                    }]},
+                }
+            raise AssertionError(action)
+
+    runner = RecordingRunner()
+    result = KompasAdapter(runner=runner).create_managed_pulley(
+        family="chain_sprocket",
+        profile_request={
+            "designation": "ISO_08B",
+            "chain_type": "roller",
+            "tooth_count": 19,
+            "row_count": 1,
+            "gost_profile_variant": "offset",
+        },
+        execute=True,
+        confirm_write=True,
+    )
+
+    assert result["success"] is True
+    assert result["transition_constraint"]["ok"] is True
+    assert result["transition_constraint"]["apply_call_timed_out"] is True
+    assert result["transition_constraint"]["constraints_state_requires_ui_confirmation"] is False
+    assert runner.calls[0][0] == "create_chain_sprocket"
+    assert runner.calls[0][1]["plan"]["stage"] == "managed_chain_sprocket_plan"
+    assert [action for action, _ in runner.calls] == [
+        "create_chain_sprocket",
+        "apply_existing_sketch_constraint",
+        "inspect_sketch_full",
+    ]
 
 
 def test_registry_adapts_both_belt_previews_to_one_canvas_contract() -> None:
@@ -355,7 +958,7 @@ def test_canvas_renders_neutral_bodies_and_unfilled_feature_contours() -> None:
     assert "drawPath(path, view, { fill, stroke });" not in source
 
 
-def test_studio_cad_plan_status_reads_flat_pulley_dimensions_without_a_target() -> None:
+def test_studio_cad_plan_status_reads_family_specific_dimensions_without_a_target() -> None:
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
@@ -365,6 +968,9 @@ def test_studio_cad_plan_status_reads_flat_pulley_dimensions_without_a_target() 
     assert "const derived = plan?.profile_preview?.derived || {};" in source
     assert "outerDiameter: derived.outer_diameter" in source
     assert "faceWidth: derived.face_width" in source
+    assert "const geometry = plan?.geometry || {};" in source
+    assert "outerDiameter: 2 * geometry.outside_radius" in source
+    assert "faceWidth: geometry.face_width" in source
     assert "plan.target.outer_diameter" not in source
     assert 'timing_trapezoidal: "block.timing_trapezoidal"' in source
     assert 'timing_curvilinear: "block.timing_curvilinear"' in source
@@ -373,6 +979,8 @@ def test_studio_cad_plan_status_reads_flat_pulley_dimensions_without_a_target() 
     assert 'input.min === "" ? -Infinity : Number(input.min)' in source
     assert 'input.max === "" ? Infinity : Number(input.max)' in source
     assert 'moduleSelect.addEventListener("change"' in source
+    assert 'const applies = currentModule?.kind === "chain_sprocket";' in source
+    assert 'standard?.startsWith("gost_")' not in source
     assert 'moduleSelect.value' in source
 
 
@@ -408,6 +1016,12 @@ def test_bundled_bridge_contains_managed_pulley_create_and_ownership_paths() -> 
     assert '"Managed timing-pulley rebuild after blank sketch refresh was not confirmed"' in source
     assert '"feature": _v_belt_object_reference(result.get("feature"), "member.functional_feature")' in source
     assert '"sketch": _v_belt_object_reference(result.get("sketch"), "member.profile_sketch")' in source
+    assert 'family_code == 6' in source
+    assert '"geomwright.managed_chain_sprocket" if family == "chain_sprocket"' in source
+    assert '(feature_patterns, " tooth space pattern")' in source
+    assert '"managed-chain-sprocket:"' in source
+    assert "def handle_apply_existing_sketch_constraint(payload):" in source
+    assert 'if action == "apply_existing_sketch_constraint":' in source
 
 
 def test_shared_pulley_body_verification_calls_api5_active_document_accessor() -> None:
@@ -417,7 +1031,7 @@ def test_shared_pulley_body_verification_calls_api5_active_document_accessor() -
     source = (root / "bridge" / "kompas_bridge.py").read_text(encoding="utf-8")
 
     assert 'document5 = safe_get(_APP5, "ActiveDocument3D")' in source
-    assert "if callable(document5):\n        try:\n            document5 = document5()" in source
+    assert 'if callable(document5) and not callable(safe_get(document5, "GetPart")):' in source
 
 
 def test_managed_pulley_update_cannot_be_interrupted_mid_transaction() -> None:
@@ -557,7 +1171,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert health["mode"] == "managed_cad"
     assert health["contract_version"] == 2
     assert "managed_pulley_create_job" in health["capabilities"]
-    assert client.get("/modules").json()["count"] == 5
+    assert client.get("/modules").json()["count"] == 6
 
     spec = client.get("/modules/poly_v/spec")
     assert spec.status_code == 200
@@ -580,6 +1194,21 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert timing_plan.status_code == 200
     assert timing_plan.json()["target"]["outer_diameter"] > 0
     assert timing_plan.json()["target"]["axial_max"] == 20.0
+
+    chain_spec = client.get("/modules/chain_sprocket/spec").json()
+    chain_plan = client.post("/modules/chain_sprocket/cad/plan", json=chain_spec["defaults"])
+    assert chain_plan.status_code == 200
+    assert chain_plan.json()["stage"] == "managed_chain_sprocket_plan"
+    multirow_chain = dict(chain_spec["defaults"], designation="ISO_08B_2", row_count=2)
+    multirow_plan = client.post("/modules/chain_sprocket/cad/plan", json=multirow_chain)
+    assert multirow_plan.status_code == 200
+    assert multirow_plan.json()["stage"] == "managed_chain_sprocket_plan"
+    multirow_job = client.post(
+        "/modules/chain_sprocket/cad/jobs",
+        json={"profile": multirow_chain, "confirm_write": True},
+    )
+    assert multirow_job.status_code == 202
+    assert multirow_job.json()["status"] in {"queued", "running", "completed", "failed"}
 
     unconfirmed = client.post(
         "/modules/poly_v/cad/create",

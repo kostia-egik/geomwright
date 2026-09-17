@@ -62,6 +62,7 @@ Evidence levels used by this file:
 | Need full bent-coil construction chain | `CASE-001` |
 | UI opens files in a hidden or different KOMPAS instance | `SESSION-001` |
 | CAD job remains queued after a completed-looking operation | `SESSION-002` |
+| CAD model is created but Studio reports that the managed block is missing | `SESSION-003` |
 
 ## Rules
 
@@ -91,6 +92,10 @@ Rule:
 - Absence of a running object is a recoverable disconnected state, not
   permission to create an application.
 - Non-interactive MCP workflows retain their explicit existing session policy.
+- API5 `ActiveDocument3D` may be exposed as a method or as an already-resolved
+  dispatch document. A dispatch object is also callable, so `callable()` alone
+  is insufficient: if it exposes `GetPart`, use it directly. Invoking its default
+  member instead fails with DISP_E_MEMBERNOTFOUND during body verification.
 
 Verification:
 - Start the host before KOMPAS and confirm no KOMPAS process is created.
@@ -138,6 +143,46 @@ Known example:
 - flat-belt pulley rotation completed and was recognized by workspace readback,
   while `_active_api5_primary_body_metrics()` blocked indefinitely immediately
   after `RebuildDocument()`.
+
+---
+
+### SESSION-003: Studio Creation Completes Only After Managed-Block Readback
+
+Applies when:
+- a Studio CAD job creates a valid document and reports successful bridge
+  verification;
+- the UI then waits for the new document to appear as a managed block.
+
+Symptom:
+- the part and its operations are visible in KOMPAS, but Studio reports that the
+  created managed block was not found and does not enter the result view.
+
+Cause:
+- creation metadata and workspace recognition have diverged: the bridge writes a
+  new family fingerprint, but `handle_inspect_managed_pulley` does not recognize
+  that family and `/workspace` consequently returns an empty `blocks` list.
+
+Rule:
+- every Studio-createable Layer 4 family must have workspace recognition in the
+  same delivery slice;
+- recognition must verify family metadata, the required parameter set, root
+  sketches/features, and a stable root-object identity;
+- generated pattern copies may be owned for topology purposes, but must not
+  participate in block identity;
+- create-only families may return an uneditable recognized block when their full
+  profile request cannot yet be reconstructed after reopen.
+
+Verification:
+- complete the CAD job and record its runtime document ID;
+- query `/workspace` and require exactly one block with the expected module and
+  schema under that runtime ID;
+- repeat inspection after save/reopen when the family claims reopen support.
+
+Known example:
+- single-row chain sprockets use `GW_FAMILY_CODE=6`, `CH_*` variables, two root
+  sketches, blank/cut extrusions, and one tooth-space pattern. Recognition uses
+  five root references and keeps reopened blocks read-only until designation and
+  profile-variant metadata become reconstructable.
 
 ---
 
@@ -417,6 +462,29 @@ Related:
 
 ### CS-003: Early Coordinate-System Changes Cascade Through The Model
 
+For chain row replication use `IFeaturePatterns.Add(528)` / `ILinearPattern`
+(body mesh pattern), not type 35 (operation mesh pattern). Copy the evaluated
+part body obtained from `IFeature7(part).ResultBodies` after rebuild: an individual
+cut's ResultBodies can be empty. Along default X, `Direction1=False` copies toward
+negative X. Rebuild after the pattern before counting or inspecting copied bodies;
+Update/Valid/Count alone can report success while body readback still shows only
+the original. Verify row bounding boxes, then unite them with the rim revolution
+and verify one body plus expected added gap volume.
+For the subsequent concave rim/row fillets, resolve the unique circular edges
+at the two axial boundaries of each gap and the connecting-rim radius. These
+fillets add material; do not apply a convex edge-fillet volume-removal test.
+With radial clearance below the tooth roots, each full ring adds
+`2*pi*(Rc*r4^2*(1-pi/4) + r4^3*(5/6-pi/4))` in cubic millimetres.
+Verify all `2*(n-1)` edge references, both radius properties, unchanged bounds,
+one solid, and persistence after reopen.
+
+Chain axial tooth-end cuts provide a concrete direction check: the owned blank
+extruded from default YOZ occupies global X `[-CH_B, 0]`, not `[0, CH_B]`.
+Its XOY rounding profiles must enter that interval from both end planes.
+Mirroring the X coordinates also reverses each arc's `Direction`. A closed,
+fully constrained sketch on the outside of the end face removes no material;
+verify actual volume decrease for each cut and read back both arc endpoints.
+
 Applies when:
 - changing a baseline, plane, or sketch coordinate system that later operations
   depend on;
@@ -505,7 +573,7 @@ Verification:
 
 Known examples:
 - `CASE-001`
-- Report: `docs/bent-coil-sketch-coordinate-system.md`
+- Local bent-coil investigation evidence (kept outside the public contract).
 
 ---
 
@@ -1232,6 +1300,57 @@ Known example:
   cycle. Geometric `vertical`, deferred-angle, and X/Y coordinate variants all
   stalled; the two ordinary linear dimensions removed the same freedom without
   another curve-relation cycle.
+- the chain-sprocket tooth space uses independent centre spans and coordinates as
+  sketch dimensions. Its master roller-seat, flank, and head arcs require
+  formula-bound driving radii; mirrored working arcs inherit equal radius, and
+  the six working branch junctions carry tangent relations in addition to their
+  single topology merge. A green solver state produced only by fixed centers and
+  merged seed endpoints is not accepted as engineering parameterization. Apply
+  these relations in staged groups and require exact counts, radial-dimension
+  readback, a fully defined sketch, contour preflight, and save/reopen stability.
+  For the offset variant, classify a seat by its physical branch endpoints rather
+  than collection order: the right seat center must read back at `+e/2`, the left
+  at `-e/2`, and each secondary-flank center must preserve its specified vector
+  from that same seat center. A successful solve alone does not detect an inward,
+  side-swapped construction.
+- keep the chain sprocket's non-working closure linear, but never locate its top
+  line by a fixed overshoot from the side intersection. Set the line level to
+  `outside_radius + 0.5 mm`; its closest point to the axis then has a guaranteed
+  0.5 mm clearance from every supported blank. Two equal vertical overshoots of
+  driving length `CH_CO` connect that line to the working profile. Show the line
+  length as reference dimension `CH_CW`; a driving width dimension closes another
+  ownership loop and stalls numeric profile parameterization. A pair of mirrored
+  closure arcs introduced an unnecessary intermediate node, while every tested
+  single-arc constraint network also stalled in KOMPAS. Treat the
+  GOST/KOMPAS-derived `r`, `r1`, `r2`, offset, and tangent construction as the
+  functional profile; the outside cap is host-owned technical geometry.
+- For offset chain seats, trim each arc at its lower tangent point and join the
+  two points by one horizontal segment. Joining the circles at their intersection
+  leaves a central bump of `r - sqrt(r*r - (e/2)*(e/2))`. Native-model readback
+  confirmed two collinear half-segments totaling `e=0.381 mm`, tangent to both
+  `r=4.326275 mm` seats. Our parametric sketch uses one segment, two endpoint
+  merges, horizontal orientation, and two tangencies; its length is dependent on
+  the centre span, not separately dimensioned. Omit this segment when `e=0`.
+  Keep the seat-centre height at the pitch radius in both variants. The former
+  correction `sqrt(r*r-(e/2)*(e/2))-r` preserved an obsolete circle-intersection
+  root and shifted all offset working branches inward after adding the tangent
+  bottom. Bounded comparison against native PR/PV/NP/TP/08B examples confirms
+  centres, radii and internal junctions within 0.000001 mm after removing it.
+  This is native-reference evidence, not independent normative certification.
+- do not classify a bridge timeout as a failed CAD constraint without preserving
+  and inspecting the live document. For the chain sketch, a final type-2
+  `point_on_curve` from point 0 of the right technical side line to the outside
+  datum did not return within 90 seconds, yet independent `inspect_sketch_full`
+  found the relation applied and the sketch `fully_defined`, closed, gap-free,
+  and free of self-intersections. Saving and reopening this candidate preserved
+  the type-2 relation but reported `under_constrained` in one automated readback.
+  The user then confirmed both saved and unsaved sketches fully defined in visible KOMPAS;
+  the probe had not required a visible session (see `SESSION-001`). Do not infer
+  constraint loss from that conflicting readback. The production chain workflow
+  now creates all features first, applies this one relation in an isolated bridge
+  call, and independently verifies the exact reference pair and contour topology.
+  Preserve both the unsaved live state and a saved artifact when investigating
+  future solver discrepancies.
 
 ---
 
@@ -2087,8 +2206,8 @@ Result:
 - Both bent spirals leave the body under angle.
 - Sketches are constrained through projections instead of unstable origins.
 - Offset and bend parameters are formula-driven.
-- Reports: `docs/bent-coil-sketch-coordinate-system.md`,
-  `docs/bent-coil-parametrize-report.md`.
+- Reports: local bent-coil investigation evidence (kept outside the public
+  contract).
 
 ### CASE-002: Compression Spring Fully-Constrained Sketch Drift
 

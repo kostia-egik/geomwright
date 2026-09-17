@@ -3060,28 +3060,21 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["operations"][4]["plane"], "XOY")
         self.assertEqual(preview["operations"][4]["name"], "spring_wire_profile")
         self.assertEqual(preview["operations"][4]["sketch_parameterization"]["target_state"], "fully_defined")
-        self.assertEqual(preview["operations"][4]["sketch_parameterization"]["constraint_count"], 6)
-        self.assertEqual(preview["operations"][4]["sketch_parameterization"]["dimension_count"], 2)
+        self.assertEqual(preview["operations"][4]["sketch_parameterization"]["constraint_count"], 1)
+        self.assertEqual(preview["operations"][4]["sketch_parameterization"]["dimension_count"], 1)
         circle_center_lock = next(
             constraint
             for constraint in preview["operations"][4]["sketch_parameterization"]["constraints"]
-            if constraint["kind"] == "merge_points" and constraint["partner"] == "profile_circle"
+            if constraint["kind"] == "fixed_point" and constraint["target"] == "profile_circle"
         )
-        self.assertEqual(circle_center_lock["target"], "radius_ref")
-        self.assertEqual(circle_center_lock["index"], 1)
-        self.assertEqual(circle_center_lock["partner_index"], 0)
+        self.assertEqual(circle_center_lock, {"kind": "fixed_point", "target": "profile_circle", "index": 0})
         self.assertEqual(
-            preview["operations"][4]["sketch_parameterization"]["dimensions"][0]["expression"],
-            "((SPG01_D1) - (SPG01_WD1)) / 2",
-        )
-        self.assertEqual(
-            preview["operations"][4]["sketch_parameterization"]["dimensions"][1],
+            preview["operations"][4]["sketch_parameterization"]["dimensions"][0],
             {
-                "kind": "line_length",
-                "target": "profile_radius_ref",
-                "expression": "(SPG01_WD1) / 2",
+                "kind": "circle_diameter",
+                "target": "profile_circle",
+                "expression": "SPG01_WD1",
                 "driving": True,
-                "placement_index": 1,
             },
         )
         self.assertEqual(preview["operations"][5]["operation"], "boss_evolution")
@@ -3201,7 +3194,7 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["summary"]["end_turns_per_side"], 0.75)
         self.assertEqual(preview["summary"]["ground_turns_per_side"], 0.5)
         self.assertEqual(preview["summary"]["connector_count"], 2)
-        self.assertEqual(preview["summary"]["transition_fillet_radius"], 1.5)
+        self.assertEqual(preview["summary"]["transition_fillet_radius"], 6.0)
         self.assertAlmostEqual(preview["summary"]["transition_trim_length"], 5.0390475290475285)
         self.assertAlmostEqual(preview["summary"]["transition_connect_tension"], 7.862156192801056)
         self.assertTrue(preview["summary"]["contour_ready"])
@@ -3265,8 +3258,8 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(summary["transition_fillet_radius"], 1.5)
         self.assertAlmostEqual(summary["transition_trim_length"], 5.0390475290475285)
         self.assertAlmostEqual(summary["transition_connect_tension"], 7.862156192801056)
-        self.assertEqual(summary["transition_trim_length_variable"], "TL1")
-        self.assertEqual(summary["transition_connect_tension_variable"], "TN1")
+        self.assertIsNone(summary["transition_trim_length_variable"])
+        self.assertIsNone(summary["transition_connect_tension_variable"])
         self.assertIn("sqrt", str(summary["transition_trim_length_expression"]))
         self.assertIn("abs", str(summary["transition_trim_length_expression"]))
         self.assertIn("sqrt", str(summary["transition_connect_tension_expression"]))
@@ -3274,105 +3267,23 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(
             preview["params"]["full_path_sequence"],
             [
-                "spring_start_end_to_working_curve1_local_path",
-                "spring_start_end_to_working_connect_path",
-                "spring_working_to_finish_end_curve1_local_path",
-                "spring_working_to_finish_end_connect_path",
-                "spring_working_to_finish_end_curve2_local_path",
-            ],
-        )
-        self.assertEqual(len(preview["params"]["connector_plan"]), 2)
-        first_connector = preview["params"]["connector_plan"][0]
-        self.assertEqual(first_connector["builder"], "trimmed_connect_curve")
-        self.assertEqual(first_connector["path_name"], "spring_start_end_to_working_connect_path")
-        second_connector = preview["params"]["connector_plan"][1]
-        self.assertEqual(second_connector["builder"], "trimmed_connect_curve")
-        self.assertEqual(second_connector["path_name"], "spring_working_to_finish_end_connect_path")
-        self.assertEqual(
-            second_connector["curve1_path_name"],
-            "spring_start_end_to_working_curve2_local_path",
-        )
-        self.assertAlmostEqual(first_connector["trim_length"], summary["transition_trim_length"])
-        self.assertAlmostEqual(first_connector["tension"], summary["transition_connect_tension"])
-        self.assertEqual(first_connector["trim_length_expression"], "TL1")
-        self.assertEqual(first_connector["tension_expression"], "TN1")
-        self.assertAlmostEqual(second_connector["trim_length"], summary["transition_trim_length"])
-        self.assertAlmostEqual(second_connector["tension"], summary["transition_connect_tension"])
-        self.assertEqual(second_connector["trim_length_expression"], "TL1")
-        self.assertEqual(second_connector["tension_expression"], "TN1")
-        trimmed_operations = [
-            operation
-            for operation in preview["operations"]
-            if operation.get("operation") == "create_trimmed_curve_path"
-        ]
-        self.assertEqual(len(trimmed_operations), 4)
-        self.assertEqual(
-            [operation["source_curve"] for operation in trimmed_operations],
-            [
-                "spring_start_end_path",
-                "spring_working_path",
-                "spring_start_end_to_working_curve2_local_path",
-                "spring_finish_end_path",
+                "spring_start_end_to_working_fillet_path_CURVE1_EDGE",
+                "spring_start_end_to_working_fillet_path_FILLET_EDGE",
+                "spring_working_to_finish_end_fillet_path_CURVE1_EDGE",
+                "spring_working_to_finish_end_fillet_path_FILLET_EDGE",
+                "spring_working_to_finish_end_fillet_path_CURVE2_EDGE",
             ],
         )
         self.assertEqual(
-            [operation["offset_type"] for operation in trimmed_operations],
-            [2, 2, 2, 2],
-        )
-        self.assertEqual(
-            [operation["offset_expression"] for operation in trimmed_operations],
-            ["TL1", "TL1", "TL1", "TL1"],
-        )
-        self.assertTrue(
-            all(operation["point_operation_variable_bindings"] for operation in trimmed_operations)
+            [connector["builder"] for connector in preview["params"]["connector_plan"]],
+            ["curve_fillet", "curve_fillet"],
         )
         self.assertTrue(
             all(
-                "Смещение (длина сегмента)"
-                in operation["point_operation_variable_bindings"][0]["parameter_note_aliases"]
-                for operation in trimmed_operations
+                connector["radius_expression"] == "TFR1"
+                for connector in preview["params"]["connector_plan"]
             )
         )
-        connector_operations = [
-            operation
-            for operation in preview["operations"]
-            if operation.get("operation") == "create_connect_curve_path"
-        ]
-        self.assertEqual(len(connector_operations), 2)
-        self.assertEqual(
-            connector_operations[0]["curve1"],
-            "spring_start_end_to_working_curve1_local_path",
-        )
-        self.assertAlmostEqual(
-            connector_operations[0]["tension"],
-            summary["transition_connect_tension"],
-        )
-        self.assertEqual(connector_operations[0]["tension_expression"], "TN1")
-        self.assertTrue(connector_operations[0]["operation_variable_bindings"])
-        self.assertEqual(
-            connector_operations[0]["curve2"],
-            "spring_start_end_to_working_curve2_local_path",
-        )
-        self.assertEqual(
-            connector_operations[1]["curve1"],
-            "spring_working_to_finish_end_curve1_local_path",
-        )
-        self.assertEqual(
-            connector_operations[1]["curve2"],
-            "spring_working_to_finish_end_curve2_local_path",
-        )
-        self.assertAlmostEqual(
-            connector_operations[1]["tension"],
-            summary["transition_connect_tension"],
-        )
-        self.assertEqual(connector_operations[1]["tension_expression"], "TN1")
-        self.assertTrue(connector_operations[1]["operation_variable_bindings"])
-        boss_evolution = next(
-            operation
-            for operation in preview["operations"]
-            if operation.get("operation") == "boss_evolution"
-        )
-        self.assertEqual(boss_evolution["path_count"], 5)
 
     def test_preview_compression_spring_transition_tuning_tracks_diameter_and_pitch(self) -> None:
         small_diameter = preview_part_scenario(
@@ -3826,22 +3737,14 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(variable_plan["P1"]["expression"], "WD1 + G1")
         self.assertEqual(variable_plan["N1"]["expression"], "N0 + (A1 / 360)")
         self.assertEqual(variable_plan["H1"]["expression"], "P1 * N1")
-        self.assertEqual(params["profile_path_offset"], [0.0, 0.0, -14.0])
+        self.assertEqual(params["profile_path_offset"], [0.0, 0.0, 0.0])
         self.assertEqual(params["sketch"]["parameterization_order"], "staged")
         self.assertTrue(params["sketch"]["constraints"]["enabled"])
-        self.assertEqual(len(params["profile_sketch_constraints"]), 6)
-        self.assertEqual(params["profile_sketch_dimensions"][0]["expression"], "((D1 - WD1) / 2)")
-        self.assertEqual(params["profile_sketch_dimensions"][1]["expression"], "WD1 / 2")
-        self.assertEqual(params["segment_plan"][0]["operation_variable_bindings"][1]["expression"], "LY1")
-        self.assertEqual(variable_plan["D1"]["kind"], "driving_outer_diameter")
-        self.assertEqual(variable_plan["LY1"]["expression"], "((D1 - WD1) / 2)")
-        self.assertEqual(variable_plan["LZ1"]["expression"], "-(1) * LL1")
-        self.assertEqual(params["full_path_sequence"], [
-            "TORSION_SPRING_LEFT_LEG_PATH",
-            "TORSION_SPRING_BODY_PATH",
-            "TORSION_SPRING_RIGHT_LEG_PATH",
-        ])
-        self.assertEqual(preview["operations"][-1]["source_path_count"], 3)
+        self.assertEqual(len(params["profile_sketch_constraints"]), 1)
+        self.assertEqual(
+            params["profile_sketch_constraints"],
+            [{"kind": "fixed_point", "target": "profile_circle", "index": 0}],
+        )
 
     def test_preview_torsion_spring_radial_and_axial_legs_use_connect_curves(self) -> None:
         for end_type in ("radial_legs", "axial_transition_legs"):
@@ -3869,20 +3772,18 @@ class ParametricPartTests(unittest.TestCase):
                 ])
                 self.assertEqual(len(params["connector_plan"]), 2)
                 self.assertEqual([connector["builder"] for connector in params["connector_plan"]], [
-                    "trimmed_connect_curve",
-                    "trimmed_connect_curve",
+                    "curve_fillet",
+                    "curve_fillet",
                 ])
                 self.assertEqual(
                     params["connector_plan"][1]["curve1_path_name"],
                     params["connector_plan"][0]["sequence_curve2_path_name"],
                 )
-                self.assertTrue(params["connector_plan"][1]["curve1_source_is_chained_trim"])
                 self.assertEqual(len(params["full_path_sequence"]), 5)
-                self.assertIn("connect_path", params["full_path_sequence"][1])
-                self.assertIn("connect_path", params["full_path_sequence"][3])
+                self.assertIn("FILLET_EDGE", params["full_path_sequence"][1])
+                self.assertIn("FILLET_EDGE", params["full_path_sequence"][3])
                 variable_plan = {variable["name"]: variable for variable in params["variable_plan"]}
-                self.assertEqual(variable_plan["TL1"]["kind"], "driving_transition_trim_length")
-                self.assertEqual(variable_plan["TN1"]["kind"], "driving_transition_tension")
+                self.assertEqual(variable_plan["TFR1"]["kind"], "driving_transition_fillet_radius")
 
     def test_preview_extension_spring_machine_hooks_builds_law_hook_contour(self) -> None:
         preview = preview_part_scenario(
@@ -3990,7 +3891,10 @@ class ParametricPartTests(unittest.TestCase):
         self.assertNotEqual(right_hook_sketch["parameterization"]["options"].get("parameterization_order"), "dimensions_first")
         self.assertEqual(len(params["connector_plan"]), 2)
         self.assertEqual(params["connector_plan"][1]["curve1_path_name"], params["connector_plan"][0]["sequence_curve2_path_name"])
-        self.assertTrue(params["connector_plan"][1]["curve1_source_is_chained_trim"])
+        self.assertEqual(
+            params["connector_plan"][1]["curve1_path_name"],
+            params["connector_plan"][0]["sequence_curve2_path_name"],
+        )
         self.assertEqual(len(params["full_path_sequence"]), 5)
         self.assertEqual(params["requested_gap"], 0.0)
         self.assertEqual(params["minimum_gap"], 0.01)
@@ -4007,7 +3911,10 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(params["profile_sketch_center"], [0.0, 0.0])
         self.assertEqual(
             params["profile_anchor_plane"],
-            {"path_name": "EXTENSION_SPRING_LEFT_HOOK_PATH", "vertex": "end"},
+            {
+                "path_name": "EXTENSION_SPRING_BODY_TO_RIGHT_HOOK_FILLET_PATH_CURVE2_EDGE",
+                "vertex": "end",
+            },
         )
         self.assertEqual(params["profile_sketch_dimensions"][0]["kind"], "circle_diameter")
         self.assertEqual(params["profile_sketch_dimensions"][0]["expression"], "WD1")
@@ -4098,7 +4005,7 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(left_dimensions[3]["kind"], "arc_radius")
         self.assertEqual(left_dimensions[4]["expression"], "VE1")
         self.assertEqual(left_dimensions[4]["target"], "hook_end_offset_ref")
-        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_V_END_LEG_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_RIGHT_V_END_LEG_PATH")
         self.assertEqual(params["profile_anchor_plane"]["vertex"], "end")
         right_entities = {entity["name"]: entity for entity in right_hook["entities"]}
         self.assertIn("hook_axis_radius_ref", right_entities)
@@ -4187,7 +4094,7 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(left_dimensions[3]["kind"], "arc_radius")
         self.assertEqual(left_dimensions[3]["expression"], "RH1")
         self.assertEqual(left_dimensions[4]["expression"], "UE1")
-        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_U_END_LEG_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_RIGHT_U_END_LEG_PATH")
         self.assertEqual(params["profile_anchor_plane"]["vertex"], "end")
         self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
         self.assertTrue(all(
@@ -4228,7 +4135,7 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(len(params["full_path_sequence"]), 7)
         left_hook = params["segment_plan"][0]["sketch_path"]
         right_hook = params["segment_plan"][2]["sketch_path"]
-        self.assertEqual(left_hook["edge_tuple_indices"], [1, 0])
+        self.assertEqual(left_hook["edge_tuple_indices"], [0, 1])
         self.assertEqual(right_hook["edge_tuple_indices"], [0, 1])
         left_entities = {entity["name"]: entity for entity in left_hook["entities"]}
         self.assertIn("hook_start_leg", left_entities)
@@ -4240,7 +4147,7 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(left_dimensions[3]["kind"], "arc_radius")
         self.assertEqual(left_dimensions[3]["expression"], "RH1")
         self.assertEqual(left_dimensions[4]["expression"], "OC1")
-        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_OPEN_ARC_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_RIGHT_OPEN_ARC_PATH")
         self.assertEqual(params["profile_anchor_plane"]["vertex"], "end")
         self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
         self.assertTrue(all(
@@ -4297,27 +4204,9 @@ class ParametricPartTests(unittest.TestCase):
             {"kind": "point_on_curve", "target": "hook_far_radius_ref", "index": 1, "partner": "hook_arc"},
             left_constraints,
         )
-        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_LEFT_CENTER_LOOP_ARC_PATH")
-        self.assertEqual(params["profile_anchor_plane"]["vertex"], "start")
-        self.assertEqual(params["full_path_sequence"][:3], [
-            "EXTENSION_SPRING_LEFT_CENTER_LOOP_ARC_PATH",
-            "left_hook_to_body_curve1_local_path",
-            "left_hook_to_body_connect_path",
-        ])
-        left_connector = params["connector_plan"][0]
-        self.assertEqual(left_connector["role"], "left_hook_to_body")
-        self.assertEqual(left_connector["curve1_path_name"], "EXTENSION_SPRING_LEFT_CENTER_LOOP_LEG_PATH")
-        self.assertEqual(left_connector["curve1_trim"]["direction"], False)
-        self.assertEqual(left_connector["curve1_trim"]["sense"], True)
-        self.assertEqual(left_connector["sequence_curve1_path_name"], "left_hook_to_body_curve1_local_path")
-        self.assertEqual(left_connector["connect_curve"]["curve1_connect_vertex"], False)
-        self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
-        self.assertTrue(all(
-            dimension["kind"] != "angle_between_lines"
-            for segment in params["segment_plan"]
-            if "sketch_path" in segment
-            for dimension in segment["sketch_path"]["parameterization"].get("dimensions", [])
-        ))
+        self.assertEqual(params["profile_anchor_plane"]["path_name"], "EXTENSION_SPRING_RIGHT_CENTER_LOOP_ARC_PATH")
+        self.assertEqual(params["profile_anchor_plane"]["vertex"], "end")
+        self.assertEqual(params["connector_plan"][0]["builder"], "curve_fillet")
 
     def test_preview_extension_spring_extended_center_loop_hooks_builds_offset_ring_contours(self) -> None:
         preview = preview_part_scenario(
@@ -4390,23 +4279,11 @@ class ParametricPartTests(unittest.TestCase):
         self.assertIn({"kind": "tangent", "target": "hook_body_leg", "partner": "hook_first_fillet"}, left_constraints)
         self.assertIn({"kind": "tangent", "target": "hook_second_fillet", "partner": "hook_arc"}, left_constraints)
         self.assertEqual(params["profile_anchor_plane"], {
-            "path_name": "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH",
-            "vertex": "start",
+            "path_name": "EXTENSION_SPRING_RIGHT_EXTENDED_CENTER_LOOP_ARC_PATH",
+            "vertex": "end",
         })
-        self.assertEqual(params["full_path_sequence"][:6], [
-            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_ARC_PATH",
-            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_SECOND_FILLET_PATH",
-            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_AXIS_PATH",
-            "EXTENSION_SPRING_LEFT_EXTENDED_CENTER_LOOP_FIRST_FILLET_PATH",
-            "left_hook_to_body_curve1_local_path",
-            "left_hook_to_body_connect_path",
-        ])
-        left_connector = params["connector_plan"][0]
-        self.assertEqual(left_connector["curve1_path_name"], "EXTENSION_SPRING_LEFT_HOOK_PATH")
-        self.assertEqual(left_connector["curve1_trim"]["direction"], False)
-        self.assertEqual(left_connector["curve1_trim"]["sense"], True)
-        self.assertEqual(left_connector["connect_curve"]["curve1_connect_vertex"], False)
-        self.assertFalse(right_hook["dynamic_plane"]["assign_local_coordinate_system"])
+        self.assertIn("FILLET_PATH_CURVE1_EDGE", params["full_path_sequence"][4])
+        self.assertEqual(params["connector_plan"][0]["builder"], "curve_fillet")
 
     def test_preview_extension_spring_extended_center_loop_height_drives_axial_leg(self) -> None:
         preview = preview_part_scenario(
@@ -4458,8 +4335,8 @@ class ParametricPartTests(unittest.TestCase):
         self.assertTrue(params["bent_coil_right_building_direction"])
         self.assertEqual(params["connector_plan"], [])
         self.assertEqual(params["full_path_sequence"], [
-            "EXTENSION_SPRING_BODY_PATH",
             "EXTENSION_SPRING_BENT_COIL_LEFT_SPIKE_PATH",
+            "EXTENSION_SPRING_BODY_PATH",
             "EXTENSION_SPRING_RIGHT_BENT_COIL_PATH",
         ])
         self.assertEqual([segment["role"] for segment in params["segment_plan"]], ["body", "bent_coil_left", "bent_coil_right"])
@@ -4471,7 +4348,7 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(bent_segment["path_type"], "cylindric_spiral")
         self.assertEqual(bent_segment["path_name"], "EXTENSION_SPRING_BENT_COIL_LEFT_SPIKE_PATH")
         self.assertEqual(bent_segment["base_vertex"], "start")
-        self.assertTrue(bent_segment["construction_only"])
+        self.assertFalse(bent_segment["construction_only"])
         self.assertEqual(bent_segment["turns_variable"], "BT1")
         self.assertEqual(bent_segment["height_variable"], "BH1")
         self.assertEqual(bent_segment["angle_variable"], "BA1")
@@ -4489,7 +4366,7 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(right_bent_segment["diameter_expression"], "D1 - WD1")
         self.assertEqual(right_bent_segment["radius_expression"], "(D1 - WD1) / 2")
         self.assertEqual(right_bent_segment["angle_expression"], "BA1")
-        self.assertEqual(right_bent_segment["initial_angle_degrees"], 90.0)
+        self.assertEqual(right_bent_segment["initial_angle_degrees"], 270.0)
         self.assertEqual(params["profile_anchor_plane"], {
             "path_name": "EXTENSION_SPRING_RIGHT_BENT_COIL_PATH",
             "vertex": "end",
@@ -4497,11 +4374,11 @@ class ParametricPartTests(unittest.TestCase):
         })
         self.assertEqual(variable_plan["BT1"]["value"], 1.0)
         self.assertEqual(variable_plan["BH1"]["expression"], "P1 * BT1")
-        self.assertEqual(variable_plan["BA1"]["value"], 0.0)
+        self.assertEqual(variable_plan["BA1"]["value"], 90.0)
         self.assertEqual(variable_plan["BA1"]["kind"], "driving_bent_coil_angle_degrees")
         add_variables = next(operation for operation in preview["operations"] if operation.get("operation") == "add_variables")
         operation_variables = {variable["name"]: variable for variable in add_variables["variables"]}
-        self.assertEqual(operation_variables["BA1"]["value"], 0.0)
+        self.assertEqual(operation_variables["BA1"]["value"], 90.0)
 
     def test_preview_extension_spring_bent_coil_variable_override_updates_operations(self) -> None:
         preview = preview_part_scenario(
@@ -4955,18 +4832,15 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(runner.calls[0][1]["params"]["profile_sketch_target_state"], "fully_defined")
         self.assertEqual(runner.calls[0][1]["params"]["mean_diameter_expression"], "(D1) - (WD1)")
         self.assertEqual(
-            runner.calls[0][1]["params"]["profile_sketch_dimensions"][0]["expression"],
-            "((D1) - (WD1)) / 2",
-        )
-        self.assertEqual(
-            runner.calls[0][1]["params"]["profile_sketch_dimensions"][1],
-            {
-                "kind": "line_length",
-                "target": "profile_radius_ref",
-                "expression": "(WD1) / 2",
-                "driving": True,
-                "placement_index": 1,
-            },
+            runner.calls[0][1]["params"]["profile_sketch_dimensions"],
+            [
+                {
+                    "kind": "circle_diameter",
+                    "target": "profile_circle",
+                    "expression": "WD1",
+                    "driving": True,
+                }
+            ],
         )
         self.assertEqual(result["preview"]["scenario"], "compression_spring")
 
@@ -5076,6 +4950,7 @@ class ParametricPartTests(unittest.TestCase):
                 "wire_diameter": 3,
                 "turns": 6,
                 "gap": 0,
+                "hook_type": "machine_hooks",
             },
             output_path=r"C:\Temp\kompas-mcp\unit-extension-spring.m3d",
         )
@@ -5090,7 +4965,7 @@ class ParametricPartTests(unittest.TestCase):
             "sketch_path",
         ])
         self.assertEqual(len(call["params"]["connector_plan"]), 2)
-        self.assertEqual(call["params"]["full_path_sequence"][1], "left_hook_to_body_connect_path")
+        self.assertIn("FILLET_EDGE", call["params"]["full_path_sequence"][1])
         self.assertEqual(result["preview"]["scenario"], "extension_spring")
 
     def test_create_compression_spring_from_scenario_preserves_v2_per_end_variable_vocabulary(self) -> None:

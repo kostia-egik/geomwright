@@ -50,6 +50,18 @@ class BridgeRunnerResponseTests(unittest.TestCase):
                     runner.call("create_managed_pulley")
         self.assertTrue(process.terminated)
 
+    def test_call_timeout_override_bounds_one_bridge_operation(self) -> None:
+        process = _WaitingFakeProcess()
+        with self._runner_context({"ok": True, "data": {}}) as runner:
+            runner.timeout_seconds = 99.0
+            with (
+                patch("kompas_mcp.bridge_runner.subprocess.Popen", return_value=process),
+                patch("kompas_mcp.bridge_runner.time.monotonic", side_effect=[0.0, 2.0]),
+            ):
+                with self.assertRaisesRegex(BridgeError, "timed out after 1 seconds"):
+                    runner.call("apply_existing_sketch_constraint", timeout_seconds=1.0)
+        self.assertTrue(process.terminated)
+
 
 class _WaitingFakeProcess:
     def __init__(self) -> None:

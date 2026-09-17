@@ -30,17 +30,36 @@ mcp = FastMCP("geomwright", json_response=True)
 adapter = KompasAdapter()
 
 
+def _research_tools_enabled() -> bool:
+    return os.environ.get("GEOMWRIGHT_ENABLE_RESEARCH_TOOLS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _rules(rules_path: str | None = None) -> dict:
     return load_rules(rules_path or os.environ.get("KOMPAS_RULES_PATH"))
 
 
 @mcp.tool()
-def get_mcp_tool_catalog(category: str | None = None, stability: str | None = None) -> dict:
-    """Return the grouped MCP tool catalog for discoverability."""
-    return build_mcp_tool_catalog(category=category, stability=stability)
+def get_mcp_tool_catalog(
+    category: str | None = None,
+    stability: str | None = None,
+    include_research: bool = False,
+) -> dict:
+    """Return the public tool catalog; research tools require explicit opt-in."""
+    research_enabled = _research_tools_enabled()
+    return build_mcp_tool_catalog(
+        category=category,
+        stability=stability,
+        include_research=include_research and research_enabled,
+    )
 
 
-register_native_tools(mcp, adapter)
+if _research_tools_enabled():
+    register_native_tools(mcp, adapter)
 register_thread_tools(mcp)
 register_transmission_tools(mcp, adapter)
 register_session_tools(mcp, adapter)

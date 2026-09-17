@@ -34,7 +34,7 @@ class ToolCatalogTests(unittest.TestCase):
         self.assertIn("probe_document_readback", catalog["categories"][0]["tools"])
 
     def test_can_filter_by_stability(self) -> None:
-        catalog = get_mcp_tool_catalog(stability="research")
+        catalog = get_mcp_tool_catalog(stability="research", include_research=True)
 
         self.assertTrue(catalog["ok"])
         self.assertEqual(catalog["stability"], "research")
@@ -71,10 +71,16 @@ class ToolCatalogTests(unittest.TestCase):
     def test_server_tool_exposes_stability_filter(self) -> None:
         from geomwright.kompas import server
 
-        catalog = server.get_mcp_tool_catalog(stability="research")
+        catalog = server.get_mcp_tool_catalog(stability="research", include_research=True)
 
-        self.assertTrue(catalog["ok"])
+        self.assertFalse(catalog["ok"])
         self.assertEqual(catalog["stability"], "research")
+
+    def test_research_tools_are_not_registered_or_catalogued_by_default(self) -> None:
+        from geomwright.kompas import server
+
+        self.assertNotIn("list_native_modules", _registered_tool_names())
+        self.assertFalse(server.get_mcp_tool_catalog(stability="research")["ok"])
 
     def test_geomwright_server_facade_preserves_the_mcp_contract(self) -> None:
         from geomwright import server as public_server
@@ -108,6 +114,25 @@ class ToolCatalogTests(unittest.TestCase):
 
     def test_registered_tools_live_in_server_or_registration_modules(self) -> None:
         source_tools = set(_source_tool_names([SERVER_PATH, *TOOL_MODULE_PATHS]))
+        from geomwright.kompas import server
+
+        if not server._research_tools_enabled():
+            source_tools -= {
+                "list_native_modules",
+                "inspect_native_module",
+                "inspect_native_module_interfaces",
+                "inspect_native_spring_workflow",
+                "probe_native_module_programmatic_access",
+                "inspect_native_module_entrypoints",
+                "plan_native_entrypoint_validation",
+                "inspect_native_entrypoint_static_abi",
+                "probe_native_entrypoint_loader",
+                "probe_native_entrypoint_loader_hosted",
+                "launch_native_module_command",
+                "start_native_module_result_probe",
+                "capture_native_module_result",
+                "diff_native_module_results",
+            }
 
         self.assertEqual(source_tools, set(_registered_tool_names()))
 

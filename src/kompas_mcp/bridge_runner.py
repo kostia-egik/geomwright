@@ -49,8 +49,10 @@ class BridgeRunner:
         payload: dict[str, Any] | None = None,
         *,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         payload = dict(payload or {})
+        effective_timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if self.require_visible_kompas:
             payload["_require_visible_kompas"] = True
 
@@ -90,9 +92,9 @@ class BridgeRunner:
                 if self.cancel_event is not None and self.cancel_event.is_set():
                     self._stop_process(process)
                     raise BridgeError("Bridge call was cancelled")
-                if self.timeout_seconds is not None and time.monotonic() - started_at > self.timeout_seconds:
+                if effective_timeout is not None and time.monotonic() - started_at > effective_timeout:
                     self._stop_process(process)
-                    raise BridgeError(f"Bridge call timed out after {self.timeout_seconds:g} seconds")
+                    raise BridgeError(f"Bridge call timed out after {effective_timeout:g} seconds")
                 progress_line_count = self._report_progress(
                     progress_path, progress_line_count, progress_callback
                 )

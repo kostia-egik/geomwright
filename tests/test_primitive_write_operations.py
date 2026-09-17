@@ -610,7 +610,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         result = adapter.list_sketch_dimensions(
             document_id="doc-1",
             sketch_ref=100,
-            kinds=["line_length", "circle_diameter"],
+            kinds=["line_length", "circle_diameter", "arc_radius"],
             max_items=10,
         )
 
@@ -622,7 +622,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
                     "document_id": "doc-1",
                     "target": {"mode": "existing_sketch", "sketch_ref": "100"},
                     "max_items": 10,
-                    "kinds": ["line", "diametral"],
+                    "kinds": ["line", "diametral", "radial"],
                 },
             ),
         )
@@ -673,7 +673,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         result = adapter.list_sketch_constraints(
             document_id="doc-1",
             sketch_ref=100,
-            kinds=["horizontal", "fixed_length"],
+            kinds=["horizontal", "fixed_length", "equal_radius"],
             max_items=10,
         )
 
@@ -685,7 +685,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
                     "document_id": "doc-1",
                     "target": {"mode": "existing_sketch", "sketch_ref": "100"},
                     "max_items": 10,
-                    "kinds": ["horizontal", "fixed_length"],
+                    "kinds": ["horizontal", "fixed_length", "equal_radius"],
                 },
             ),
         )
@@ -2129,9 +2129,14 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             Reference=301,
         )
         diam_dim = types.SimpleNamespace(Name="D2", Angle=0.0, DimensionType=False, Reference=302)
+        radial_dim = types.SimpleNamespace(
+            Name="R1", Xc=5.0, Yc=5.0, Radius=2.0, Angle=0.0,
+            DimensionType=True, Reference=303,
+        )
         view = types.SimpleNamespace(
             LineDimensions=_FakeCollection([line_dim]),
             DiametralDimensions=_FakeCollection([diam_dim]),
+            RadialDimensions=_FakeCollection([radial_dim]),
         )
         sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
         sketch = _FakeSketch("SK_A", 100, sketch_doc)
@@ -2141,18 +2146,27 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
             part,
             {
                 "target": {"mode": "existing_sketch", "sketch_ref": "100"},
-                "kinds": ["line_length", "circle_diameter"],
                 "max_items": 10,
             },
         )
 
         self.assertIs(sketch_result, sketch)
         self.assertEqual(target["sketch_ref"], 100)
-        self.assertEqual([item["kind"] for item in items], ["line", "diametral"])
+        self.assertEqual([item["kind"] for item in items], ["line", "diametral", "radial"])
         self.assertEqual(items[0]["collection_index"], 0)
         self.assertEqual(items[0]["geometry"]["x2"], 10.0)
         self.assertIn("line|301", items[0]["fingerprint"])
-        self.assertEqual(summary["counts"], {"line_dimensions": 1, "diametral_dimensions": 1})
+        self.assertEqual(
+            summary["counts"],
+            {
+                "line_dimensions": 1,
+                "break_line_dimensions": 0,
+                "diametral_dimensions": 1,
+                "radial_dimensions": 1,
+                "angle_dimensions": 0,
+            },
+        )
+        self.assertEqual(items[2]["geometry"]["radius"], 2.0)
         self.assertFalse(summary["truncated"])
         self.assertTrue(sketch.ended)
 

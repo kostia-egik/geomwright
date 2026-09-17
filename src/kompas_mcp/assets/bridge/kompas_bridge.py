@@ -2880,7 +2880,7 @@ def _inspect_sketch_full(model_container, payload):
         if bool(payload.get("include_dimensions", True)):
             try:
                 symbols_container = _get_sketch_symbols_container(drawing_container)
-                kinds = payload.get("dimension_kinds") or payload.get("kinds") or ["line", "break_line", "diametral", "angle"]
+                kinds = payload.get("dimension_kinds") or payload.get("kinds") or ["line", "break_line", "diametral", "radial", "angle"]
                 dimension_items, dimension_summary = _collect_existing_sketch_dimensions(
                     symbols_container,
                     kinds,
@@ -5902,6 +5902,8 @@ def _normalize_sketch_dimension_kind(kind):
         return "break_line"
     if value in ("diameter", "diametral", "circle_diameter"):
         return "diametral"
+    if value in ("radius", "radial", "circle_radius", "arc_radius"):
+        return "radial"
     if value in ("angle", "angle_between_lines"):
         return "angle"
     return value
@@ -5931,6 +5933,8 @@ def _collection_for_sketch_dimension_kind(symbols_container, kind):
         return _get_dimension_collection(symbols_container, "BreakLineDimensions", "GetBreakLineDimensions"), "break_line_dimensions"
     if normalized == "diametral":
         return _get_dimension_collection(symbols_container, "DiametralDimensions", "GetDiametralDimensions"), "diametral_dimensions"
+    if normalized == "radial":
+        return _get_dimension_collection(symbols_container, "RadialDimensions", "GetRadialDimensions"), "radial_dimensions"
     if normalized == "angle":
         return _get_dimension_collection(symbols_container, "AngleDimensions", "GetAngleDimensions"), "angle_dimensions"
     raise RuntimeError("unsupported_sketch_dimension_kind")
@@ -5938,7 +5942,7 @@ def _collection_for_sketch_dimension_kind(symbols_container, kind):
 
 def _sketch_dimension_geometry(dimension):
     geometry = {}
-    for key in ("X1", "Y1", "X2", "Y2", "X3", "Y3"):
+    for key in ("X1", "Y1", "X2", "Y2", "X3", "Y3", "Xc", "Yc", "Radius"):
         value = safe_get(dimension, key)
         if value is not None:
             geometry[key.lower()] = _json_safe_scalar(value)
@@ -5956,7 +5960,7 @@ def _sketch_dimension_geometry(dimension):
 
 def _sketch_dimension_fingerprint(kind, geometry, reference):
     parts = [str(kind), str(reference if reference not in (None, "") else "")]
-    for key in ("x1", "y1", "x2", "y2", "x3", "y3", "angle", "orientation", "dimension_type"):
+    for key in ("x1", "y1", "x2", "y2", "x3", "y3", "xc", "yc", "radius", "angle", "orientation", "dimension_type"):
         if key in geometry:
             parts.append(str(geometry.get(key)))
     return "|".join(parts)
@@ -5988,6 +5992,7 @@ def _cast_sketch_dimension_object(dimension, kind):
         "line": ("ILineDimension", "IDimension", "IDrawingObject"),
         "break_line": ("IBreakLineDimension", "ILineDimension", "IDimension", "IDrawingObject"),
         "diametral": ("IDiametralDimension", "IDimension", "IDrawingObject"),
+        "radial": ("IRadialDimension", "IDimension", "IDrawingObject"),
         "angle": ("IAngleDimension", "IDimension", "IDrawingObject"),
     }.get(str(kind or "").strip().lower(), ("IDimension", "IDrawingObject"))
     for interface_name in interfaces:
@@ -6081,12 +6086,12 @@ def _list_existing_sketch_dimensions(model_container, payload):
     sketch = _resolve_existing_sketch(model_container, sketch_ref)
     raw_kinds = payload.get("kinds") or payload.get("dimension_kinds")
     if raw_kinds in (None, ""):
-        kinds = ["line", "break_line", "diametral", "angle"]
+        kinds = ["line", "break_line", "diametral", "radial", "angle"]
     elif isinstance(raw_kinds, (list, tuple)):
         kinds = [_normalize_sketch_dimension_kind(item) for item in raw_kinds]
     else:
         kinds = [_normalize_sketch_dimension_kind(raw_kinds)]
-    allowed = {"line", "break_line", "diametral", "angle"}
+    allowed = {"line", "break_line", "diametral", "radial", "angle"}
     for kind in kinds:
         if kind not in allowed:
             raise RuntimeError("invalid input: unsupported sketch dimension kind: %s" % (kind or "<missing>"))
@@ -9952,6 +9957,58 @@ def handle_inspect_sketch_constraint(payload):
             "reference": item.get("reference"),
             "collection_index": item.get("collection_index"),
         },
+    }
+
+
+def handle_apply_existing_sketch_constraint(payload):
+    if payload.get("confirm_write") is not True:
+        raise ValueError("confirm_write=true is required")
+    constraint = payload.get("constraint") or {}
+    kind = str(constraint.get("kind") or "").strip().lower()
+    constraint_type = SKETCH_CONSTRAINT_TYPES.get(kind)
+    if constraint_type is None:
+        raise ValueError("Unsupported sketch constraint kind: %s" % kind)
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Document not found or no active document")
+    top_part = safe_get(document, "TopPart")
+    model_container = cast_model_container(top_part)
+    if model_container is None:
+        raise RuntimeError("Document TopPart cannot be used as a model container")
+    sketch_ref = payload.get("sketch_ref")
+    sketch = _resolve_existing_sketch(model_container, sketch_ref)
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("BeginEdit returned None")
+    try:
+        view = _get_sketch_system_view(sketch_doc)
+        drawing_container = cast_drawing_container(view)
+        target, target_kind, _ = _select_existing_sketch_entity(
+            drawing_container,
+            payload.get("target_entity") or {},
+        )
+        partner, partner_kind, _ = _select_existing_sketch_entity(
+            drawing_container,
+            payload.get("partner_entity") or {},
+        )
+        result = _apply_constraint_to_line(
+            _cast_sketch_entity_for_kind(target, target_kind),
+            constraint_type,
+            index=constraint.get("index"),
+            partner=_cast_sketch_entity_for_kind(partner, partner_kind),
+            partner_index=constraint.get("partner_index"),
+        )
+    finally:
+        sketch.EndEdit()
+    update_ok = bool(sketch.Update())
+    return {
+        "ok": bool(result.get("created") and result.get("valid") and update_ok),
+        "result": result,
+        "sketch_ref": safe_get(sketch, "Reference", sketch_ref),
+        "constraints_state": _describe_constraints_state(safe_get(sketch, "ConstraintsState")),
+        "update_ok": update_ok,
+        "document": describe_document(document, app),
     }
 
 
@@ -22967,7 +23024,7 @@ def _active_api5_primary_body_metrics():
     if _APP5 is None:
         raise RuntimeError("KOMPAS API5 application is unavailable for body verification")
     document5 = safe_get(_APP5, "ActiveDocument3D")
-    if callable(document5):
+    if callable(document5) and not callable(safe_get(document5, "GetPart")):
         try:
             document5 = document5()
         except Exception as exc:
@@ -26397,13 +26454,13 @@ def _v_belt_object_reference(model_object, role):
     }
 
 
-def _resolve_v_belt_circular_edge(part, edge_spec, tolerance):
+def _resolve_circular_body_edge(part, edge_spec, tolerance):
     import win32com.client
 
     point = list((edge_spec or {}).get("point") or [])
     role = str((edge_spec or {}).get("role") or "").strip()
     if len(point) != 3:
-        raise RuntimeError("V-belt fillet edge probe point must contain three coordinates: " + role)
+        raise RuntimeError("Fillet edge probe point must contain three coordinates: " + role)
     found = part.FindObjectsByPointEx(
         float(point[0]), float(point[1]), float(point[2]), True, float(tolerance)
     )
@@ -26445,7 +26502,7 @@ def _resolve_v_belt_circular_edge(part, edge_spec, tolerance):
         candidates.append(item)
     if len(candidates) != 1:
         raise RuntimeError(
-            "Expected one circular V-belt fillet edge for %s at %s, got %s; candidates=%s"
+            "Expected one circular body edge for %s at %s, got %s; candidates=%s"
             % (role, point, len(candidates), diagnostics)
         )
     edge = candidates[0]
@@ -26458,20 +26515,22 @@ def _resolve_v_belt_circular_edge(part, edge_spec, tolerance):
     }
 
 
-def _build_v_belt_top_edge_fillet(model_container, part, document3d, config, sharp_body_after):
+def _build_circular_edge_fillet(model_container, part, document3d, config, sharp_body_after, material_effect="remove"):
+    if material_effect not in ("remove", "add"):
+        raise ValueError("Unknown fillet material effect")
     radius = float((config or {}).get("radius") or 0.0)
     if radius <= 0.0:
-        raise RuntimeError("V-belt top-edge fillet radius must be positive")
+        raise RuntimeError("Circular-edge fillet radius must be positive")
     edge_specs = list((config or {}).get("edge_probe_points") or [])
     expected_edge_count = int((config or {}).get("expected_edge_count") or len(edge_specs))
     if expected_edge_count <= 0 or len(edge_specs) != expected_edge_count:
-        raise RuntimeError("V-belt top-edge fillet probe count does not match expected_edge_count")
+        raise RuntimeError("Circular-edge fillet probe count does not match expected_edge_count")
     tolerance = float((config or {}).get("probe_tolerance") or 1e-5)
 
     edges = []
     edge_reports = []
     for edge_spec in edge_specs:
-        edge, report = _resolve_v_belt_circular_edge(part, edge_spec, tolerance)
+        edge, report = _resolve_circular_body_edge(part, edge_spec, tolerance)
         edges.append(edge)
         edge_reports.append(report)
     references = [safe_get(edge, "Reference") for edge in edges]
@@ -26480,7 +26539,7 @@ def _build_v_belt_top_edge_fillet(model_container, part, document3d, config, sha
         for edge, reference in zip(edges, references)
     }
     if len(unique_keys) != expected_edge_count:
-        raise RuntimeError("V-belt top-edge fillet edge references are not unique")
+        raise RuntimeError("Circular-edge fillet edge references are not unique")
 
     fillets = safe_get(model_container, "Fillets")
     if fillets is None:
@@ -26488,23 +26547,23 @@ def _build_v_belt_top_edge_fillet(model_container, part, document3d, config, sha
     fillet = fillets.Add()
     if fillet is None:
         raise RuntimeError("IFillets.Add returned no feature")
-    fillet.Name = str((config or {}).get("name") or "V-belt top edge fillets")
+    fillet.Name = str((config or {}).get("name") or "Circular edge fillets")
     fillet.BaseObjects = tuple(edges)
     fillet.Radius1 = radius
     fillet.Radius2 = radius
     fillet.AutoSaveEdge = True
     if not fillet.Update():
-        raise RuntimeError("V-belt top-edge fillet Update returned False")
+        raise RuntimeError("Circular-edge fillet Update returned False")
     rebuild = document3d.RebuildDocument()
     if rebuild is False:
-        raise RuntimeError("Document rebuild after V-belt top-edge fillet returned False")
+        raise RuntimeError("Document rebuild after circular-edge fillet returned False")
     fillet_valid = safe_get(fillet, "Valid")
     radius1 = safe_get(fillet, "Radius1")
     radius2 = safe_get(fillet, "Radius2")
     if fillet_valid is False:
-        raise RuntimeError("V-belt top-edge fillet is invalid after rebuild")
+        raise RuntimeError("Circular-edge fillet is invalid after rebuild")
     if radius1 is None or radius2 is None or abs(float(radius1) - radius) > 1e-9 or abs(float(radius2) - radius) > 1e-9:
-        raise RuntimeError("V-belt top-edge fillet radius readback mismatch")
+        raise RuntimeError("Circular-edge fillet radius readback mismatch")
 
     final_body_after = _active_api5_primary_body_metrics()
     before_count = int(sharp_body_after.get("body_count") or 0)
@@ -26512,12 +26571,12 @@ def _build_v_belt_top_edge_fillet(model_container, part, document3d, config, sha
     sharp_volume = sharp_body_after.get("volume")
     final_volume = final_body_after.get("volume")
     if before_count != after_count:
-        raise RuntimeError("V-belt top-edge fillet changed body count")
+        raise RuntimeError("Circular-edge fillet changed body count")
     if sharp_volume is None or final_volume is None:
-        raise RuntimeError("V-belt top-edge fillet volume readback is unavailable")
+        raise RuntimeError("Circular-edge fillet volume readback is unavailable")
     fillet_removed_volume = float(sharp_volume) - float(final_volume)
-    if fillet_removed_volume <= 1e-9:
-        raise RuntimeError("V-belt top-edge fillet did not remove measurable material")
+    if (fillet_removed_volume if material_effect == "remove" else -fillet_removed_volume) <= 1e-9:
+        raise RuntimeError("Circular-edge fillet did not have the expected material effect: " + material_effect)
 
     return fillet, {
         "enabled": True,
@@ -26533,6 +26592,7 @@ def _build_v_belt_top_edge_fillet(model_container, part, document3d, config, sha
         "sharp_volume_cm3": float(sharp_volume),
         "final_volume_cm3": float(final_volume),
         "fillet_removed_volume_cm3": fillet_removed_volume,
+        "material_effect": material_effect,
         "rebuild": rebuild,
     }, final_body_after
 
@@ -26768,7 +26828,7 @@ def handle_apply_v_belt_grooves(payload):
     fillet_report = {"enabled": False}
     fillet_config = params.get("top_edge_fillet")
     if isinstance(fillet_config, dict) and bool(fillet_config.get("enabled", True)):
-        fillet_feature, fillet_report, body_after = _build_v_belt_top_edge_fillet(
+        fillet_feature, fillet_report, body_after = _build_circular_edge_fillet(
             model_container,
             part,
             doc3,
@@ -26956,6 +27016,334 @@ def _build_managed_flat_pulley(document, part, model_container, plan, steps_repo
         "relative_volume_error": volume_error,
         "feature_valid": feature_valid,
     }
+
+
+def _build_chain_row_layout(doc3, part, model_container, plan):
+    """Copy the finished first row, then join the rows by one revolved rim."""
+    import win32com.client
+    count = int(plan["row_count"])
+    step = float(plan["row_spacing"])
+    width = float(plan["tooth_width"])
+    total = float(plan["total_width"])
+    variables = _apply_part_variables(part, plan["variables"])
+    if not variables.get("ok"):
+        raise RuntimeError("Chain row variables could not be created")
+    report_progress(90, "chain_rows_source_body")
+    document = cast_document_3d(doc3)
+    if not document.RebuildDocument():
+        raise RuntimeError("First chain row rebuild failed")
+    # A cut's ResultBodies can be empty: select the evaluated body of the part,
+    # which already includes the cut pattern and both end roundings.
+    source_bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+    if len(source_bodies) != 1:
+        raise RuntimeError("Chain row pattern requires exactly one source body")
+    source = win32com.client.CastTo(source_bodies[0], "IBody7")
+
+    def bounds(body):
+        result = win32com.client.CastTo(body, "IBody7").GetGabarit()
+        if not result or not result[0] or len(result) != 7:
+            raise RuntimeError("Chain body bounding box readback failed")
+        return [float(value) for value in result[1:]]
+
+    source_bounds = bounds(source)
+    report_progress(90, "chain_rows_source_bounds_verified")
+    if abs(source_bounds[0] + width) > 1e-5 or abs(source_bounds[3]) > 1e-5:
+        raise RuntimeError("First chain row must occupy X=[-CH_B, 0]")
+    before = _active_api5_primary_body_metrics()
+    pattern = win32com.client.CastTo(model_container.FeaturePatterns.Add(528), "ILinearPattern")
+    report_progress(90, "chain_rows_pattern_parameters")
+    pattern.Name = str(plan["pattern_name"])
+    pattern.Axis1 = part.DefaultObject(71)
+    pattern.Axis2 = part.DefaultObject(72)
+    pattern.Count1, pattern.Count2 = count, 1
+    pattern.Step1, pattern.Step2 = step, 1.0
+    pattern.Direction1 = False  # The first YOZ row occupies negative global X.
+    pattern.BuildingType = 0
+    pattern.GeometryPattern = False
+    pattern.BoundaryInstancesStepFactor1 = False
+    pattern.BoundaryInstancesStepFactor2 = False
+    if not pattern.AddInitialObjects(source) or not pattern.Update():
+        raise RuntimeError("Chain body pattern creation failed")
+    bindings = _bind_operation_variables(pattern, plan["pattern_bindings"])
+    if not bindings.get("ok"):
+        raise RuntimeError("Chain body pattern parameter binding failed: " + str(bindings))
+    if not document.RebuildDocument():
+        raise RuntimeError("Chain body pattern rebuild failed")
+    actual_count = pattern.GetExemplarsCounts()
+    if (not bool(pattern.Valid) or not actual_count or not actual_count[0]
+            or int(actual_count[1]) != count or int(actual_count[2]) != 1
+            or abs(float(pattern.Step1) - step) > 1e-7):
+        raise RuntimeError("Chain row count or transverse pitch readback failed")
+    row_bounds = [source_bounds] + [bounds(body) for body in _ensure_dispatch_sequence(win32com.client.CastTo(pattern, "IFeature7").ResultBodies)]
+    row_bounds.sort(key=lambda box: box[3], reverse=True)
+    patterned = _active_api5_primary_body_metrics()
+    if len(row_bounds) != count or int(patterned["body_count"]) != count:
+        raise RuntimeError("Chain body pattern did not produce one body per row")
+    for index, box in enumerate(row_bounds):
+        if (abs(box[0] - (-index * step - width)) > 1e-5
+                or abs(box[3] - (-index * step)) > 1e-5
+                or any(abs(box[i] - source_bounds[i]) > 1e-5 for i in (1, 2, 4, 5))):
+            raise RuntimeError("Chain row placement differs from its axial plan")
+    connector_plan = plan["connector"]
+    report_progress(91, "chain_rows_connecting_rim")
+    connector_steps = []
+    connector = _build_stepped_shaft_feature(
+        part, model_container, connector_plan["params"], connector_plan["bridge_preview"],
+        connector_steps, operation_kind="boss",
+    )
+    connector["rotated"].Name = str(connector_plan["params"]["name"])
+    if not connector["rotated"].Update() or not document.RebuildDocument():
+        raise RuntimeError("Chain connecting rim rebuild failed")
+    final_bodies = _ensure_dispatch_sequence(win32com.client.CastTo(connector["rotated"], "IFeature7").ResultBodies)
+    final = _active_api5_primary_body_metrics()
+    if len(final_bodies) != 1 or int(final["body_count"]) != 1 or not final["solid"]:
+        raise RuntimeError("Connecting rim did not unite all chain rows")
+    final_bounds = bounds(final_bodies[0])
+    if abs(final_bounds[0] + total) > 1e-5 or abs(final_bounds[3]) > 1e-5:
+        raise RuntimeError("Multi-row sprocket total width readback failed")
+    expected_volume = count * float(before["volume"]) + float(plan["expected_gap_volume_cm3"])
+    if abs(float(final["volume"]) - expected_volume) > max(1e-6, expected_volume * 1e-5):
+        raise RuntimeError("Multi-row sprocket volume differs from copied rows plus connecting gaps")
+    report_progress(91, "chain_row_junction_fillets")
+    fillet_config = plan["junction_fillet"]
+    fillet, fillet_report, final = _build_circular_edge_fillet(
+        model_container, part, document, fillet_config, final, material_effect="add",
+    )
+    expected_added = float(fillet_config["expected_added_volume_cm3"])
+    actual_added = float(final["volume"]) - expected_volume
+    if abs(actual_added - expected_added) > max(1e-6, expected_added * 1e-4):
+        raise RuntimeError("Chain junction fillet added volume differs from the circular fillet geometry")
+    final_bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+    if len(final_bodies) != 1 or not final["solid"]:
+        raise RuntimeError("Chain junction fillets did not preserve one solid")
+    rounded_bounds = bounds(final_bodies[0])
+    if any(abs(a - b) > 1e-5 for a, b in zip(final_bounds, rounded_bounds)):
+        raise RuntimeError("Chain junction fillets changed the overall bounds")
+    expected_volume += expected_added
+    fillet_report["added_volume_cm3"] = actual_added
+    fillet_report["expected_added_volume_cm3"] = expected_added
+    return {
+        "id": "row_layout", "ok": True, "row_count": count, "row_spacing": step,
+        "total_width": total, "row_bounds": row_bounds, "final_bounds": final_bounds,
+        "pattern": _v_belt_object_reference(pattern, "row_pattern"),
+        "connector": _v_belt_object_reference(connector["rotated"], "connecting_rim"),
+        "connector_sketch": _v_belt_object_reference(connector["sketch"], "connecting_rim_sketch"),
+        "variables": variables, "pattern_bindings": bindings, "connector_steps": connector_steps,
+        "connector_parameterization": connector.get("parameterization"),
+        "expected_volume_cm3": expected_volume, "body": final,
+        "junction_fillet": fillet_report,
+    }
+
+
+def handle_create_chain_sprocket(payload):
+    if not bool(payload.get("execute", False)):
+        raise ValueError("create_chain_sprocket requires execute=true")
+    if payload.get("confirm_write") is not True:
+        raise ValueError("confirm_write=true is required when execute=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "managed_chain_sprocket_plan" or int(plan.get("plan_version") or 0) != 1:
+        raise ValueError("A managed_chain_sprocket_plan version 1 is required")
+    if plan.get("family") != "chain_sprocket":
+        raise ValueError("Managed chain-sprocket plan family must be chain_sprocket")
+    ownership = plan.get("ownership") or {}
+    if ownership.get("schema") != "geomwright.managed_chain_sprocket":
+        raise ValueError("Managed chain-sprocket ownership schema is missing")
+    workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
+    operations = list(workflow_params.get("operations") or [])
+    expected_scenarios = ["cylindrical_blank", "numeric_profile_sketch", "cut_extrusion", "circular_pattern"]
+    if [str(item.get("scenario") or "") for item in operations] != expected_scenarios:
+        raise ValueError("Managed chain sprocket requires blank, profile, cut, and circular-pattern operations")
+    axial_rounding = plan.get("axial_rounding") or {}
+    rounding_ends = list(axial_rounding.get("ends") or [])
+    row_layout = plan.get("row_layout") or {}
+    requested_rows = int((ownership.get("source_profile") or {}).get("row_count") or 1)
+    if requested_rows > 1:
+        if (row_layout.get("enabled") is not True or int(row_layout.get("row_count") or 0) != requested_rows
+                or not row_layout.get("connector") or not row_layout.get("junction_fillet") or not row_layout.get("catalog_complete")):
+            raise ValueError("Multi-row chain creation requires a complete axial row plan")
+    if axial_rounding.get("enabled") is not True or [item.get("id") for item in rounding_ends] != ["axial_rounding_left", "axial_rounding_right"]:
+        raise ValueError("Managed chain sprocket requires two axial rounding cut plans")
+    rounding_r3 = float(axial_rounding.get("r3") or 0.0)
+    rounding_h3 = float(axial_rounding.get("h3") or 0.0)
+    rounding_width = float((plan.get("geometry") or {}).get("face_width") or 0.0)
+    rounding_center_y = float((plan.get("geometry") or {}).get("outside_radius") or 0.0) - rounding_h3
+    if not all(math.isfinite(value) for value in (rounding_r3, rounding_h3, rounding_width, rounding_center_y)) or not 0.0 < rounding_h3 < rounding_r3:
+        raise ValueError("Invalid axial rounding radius or height")
+    rounding_sag = rounding_h3 ** 2 / (rounding_r3 + math.sqrt(rounding_r3 ** 2 - rounding_h3 ** 2))
+    if rounding_center_y <= 0.0 or 2.0 * rounding_sag >= rounding_width:
+        raise ValueError("Axial rounding requires positive centre height and face_width exceeding twice the sag")
+    rounding_engagement = float(((plan.get("profile_preview") or {}).get("profile") or {}).get("outside_diameter") or 0.0)
+    if (rounding_engagement <= 0.0 or rounding_r3 < 1.7 * rounding_engagement - 1e-8
+            or abs(rounding_h3 - 0.8 * rounding_engagement) > 1e-8
+            or rounding_width - 2.0 * rounding_sag < 0.2 * rounding_width - 1e-8):
+        raise ValueError("Axial rounding violates GOST radius/height or the generator 20 percent tip-land policy")
+
+    app = make_app()
+    doc3 = None
+    steps_report = []
+    current_stage = "create_part_document"
+    try:
+        report_progress(5, "create_part_document", name=str(plan.get("name") or "Geomwright chain sprocket"))
+        doc3, _part_from_helper, _model_container_from_helper = _create_part_document(
+            app, bool(payload.get("visible", True))
+        )
+        part = safe_get(doc3, "TopPart")
+        if part is None:
+            doc3_model = cast_document_3d(doc3)
+            part = safe_get(doc3_model, "TopPart")
+        if part is None:
+            raise RuntimeError("Failed to get top part from managed chain-sprocket document")
+        model_container = cast_model_container(part)
+        if model_container is None:
+            raise RuntimeError("Managed chain-sprocket top part does not expose a model container")
+        steps_report.append({"step": "create_part_document", "ok": True})
+
+        runtime_objects = {}
+        operation_count = len(operations)
+        for operation_index, operation in enumerate(operations):
+            current_stage = "execute_%s" % str(operation.get("id") or operation_index)
+            report_progress(
+                12 + int(70.0 * operation_index / max(1, operation_count)),
+                str(operation.get("scenario") or "workflow_operation"),
+                name=str((operation.get("params") or {}).get("name") or ""),
+            )
+            _execute_workflow_operation(part, model_container, operation, runtime_objects, steps_report)
+        exports = _resolve_runtime_workflow_exports(workflow_params.get("exports"), runtime_objects)
+
+        current_stage = "apply_ownership_metadata"
+        source_profile = dict(ownership.get("source_profile") or {})
+        preview = dict(plan.get("profile_preview") or {})
+        derived = dict(preview.get("derived") or {})
+        profile = dict(preview.get("profile") or {})
+        geometry = dict(plan.get("geometry") or {})
+        metadata_report = _apply_part_variables(part, [
+            {"name": "GW_MANAGED_VERSION", "value": 1, "expression": None, "note": "Geomwright managed schema version"},
+            {"name": "GW_FAMILY_CODE", "value": 6, "expression": None, "note": "Geomwright chain-sprocket family code"},
+            {"name": "CH_Z", "value": int(source_profile.get("tooth_count") or 0), "expression": None, "note": "Chain sprocket tooth count"},
+            {"name": "CH_P", "value": float(profile.get("pitch") or 0.0), "expression": None, "note": "Chain pitch"},
+            {"name": "CH_DA", "value": float(derived.get("outside_diameter") or 0.0), "expression": None, "note": "Sprocket outside diameter"},
+            {"name": "CH_DF", "value": float(derived.get("root_diameter") or 0.0), "expression": None, "note": "Sprocket root diameter"},
+            {"name": "CH_B", "value": float(geometry.get("face_width") or 0.0), "expression": None, "note": "Functional tooth width"},
+        ])
+        if not metadata_report.get("ok"):
+            raise RuntimeError("Managed chain-sprocket metadata variables could not be created")
+
+        current_stage = "axial_rounding"
+        body_before_rounding = _active_api5_primary_body_metrics()
+        previous_body = body_before_rounding
+        rounding_report = []
+        for end in rounding_ends:
+            current_stage = str(end["id"])
+            cut_steps = []
+            cut_params = dict(end.get("params") or {})
+            cut_result = _build_stepped_shaft_feature(
+                part, model_container, cut_params, end.get("bridge_preview") or {}, cut_steps,
+                operation_kind="cut",
+            )
+            cut = cut_result["rotated"]
+            sketch = cut_result["sketch"]
+            cut.Name = str(cut_params["name"])
+            if not cut.Update():
+                raise RuntimeError("Axial rounding cut Update returned False")
+            cut_ref = _v_belt_object_reference(cut, current_stage + ".feature")
+            sketch_ref = _v_belt_object_reference(sketch, current_stage + ".sketch")
+            for collection_name, reference in (("Rotateds", cut_ref), ("Sketchs", sketch_ref)):
+                if not reference.get("reference") or not any(
+                    int(safe_get(item, "Reference") or 0) == int(reference["reference"])
+                    for item in iter_collection(safe_get(model_container, collection_name))
+                ):
+                    raise RuntimeError("Axial rounding reference did not persist: " + collection_name)
+            after_body = _active_api5_primary_body_metrics()
+            before_volume = float(previous_body.get("volume") or 0.0)
+            after_volume = float(after_body.get("volume") or 0.0)
+            if not (0.0 < after_volume < before_volume) or int(after_body.get("body_count") or 0) != 1 or not after_body.get("solid"):
+                raise RuntimeError("Each axial rounding cut must decrease volume and retain one solid")
+            end_report = {
+                "id": current_stage, "step": "axial_rounding_cut", "ok": True,
+                "side": end["side"], "feature": cut_ref, "sketch": sketch_ref,
+                "update_ok": True, "references_persisted": True,
+                "body_before": previous_body, "body_after": after_body,
+                "removed_volume": before_volume - after_volume,
+                "parameterization": cut_result.get("parameterization"), "steps": cut_steps,
+            }
+            steps_report.append(end_report)
+            rounding_report.append(end_report)
+            exports[current_stage + "_cut"] = cut_ref
+            exports[current_stage + "_sketch"] = sketch_ref
+            previous_body = after_body
+
+        row_report = None
+        if requested_rows > 1:
+            current_stage = "build_chain_rows"
+            report_progress(90, "chain_row_body_pattern", name=str(row_layout.get("pattern_name") or ""))
+            row_report = _build_chain_row_layout(doc3, part, model_container, row_layout)
+            steps_report.append(row_report)
+            exports["row_pattern"] = row_report["pattern"]
+            exports["connecting_rim"] = row_report["connector"]
+            exports["connecting_rim_sketch"] = row_report["connector_sketch"]
+            exports["row_junction_fillets"] = row_report["junction_fillet"]
+
+        current_stage = "final_readback"
+        report_progress(92, "verify_result", name=str(plan.get("name") or "Geomwright chain sprocket"))
+        document = cast_document_3d(doc3)
+        rebuild = safe_get(document, "RebuildDocument")
+        rebuild_ok = bool(rebuild()) if callable(rebuild) else None
+        if rebuild_ok is not True:
+            raise RuntimeError("Managed chain sprocket final rebuild was not confirmed")
+        body = _active_api5_primary_body_metrics()
+        if int(body.get("body_count") or 0) != 1 or float(body.get("volume") or 0.0) <= 0.0 or not body.get("solid"):
+            raise RuntimeError("Managed chain sprocket must create one positive-volume solid body")
+        if requested_rows == 1 and float(body["volume"]) >= float(body_before_rounding.get("volume") or 0.0):
+            raise RuntimeError("Final rebuild did not retain the axial rounding volume decrease")
+        pattern_step = next((item for item in steps_report if item.get("id") == "tooth_space_pattern"), None)
+        expected_count = int((plan.get("verification") or {}).get("require_pattern_count") or 0)
+        if pattern_step is None or int(pattern_step.get("count") or 0) != expected_count:
+            raise RuntimeError("Managed chain-sprocket pattern count readback failed")
+
+        report_progress(100, "completed", name=str(plan.get("name") or "Geomwright chain sprocket"))
+        return {
+            "ok": True,
+            "success": True,
+            "stage": "executed",
+            "executed": True,
+            "saved": False,
+            "closed": False,
+            "document": describe_runtime_document(doc3, app),
+            "ownership": ownership,
+            "exports": exports,
+            "semantic_outputs": exports,
+            "verification": {
+                "ok": True,
+                "single_body": True,
+                "positive_volume": True,
+                "final_rebuild_ok": rebuild_ok,
+                "pattern_count": int(pattern_step.get("count") or 0),
+                "axial_rounding_cut_count": len(rounding_report),
+                "row_count": requested_rows,
+                "row_layout_verified": requested_rows == 1 or bool(row_report and row_report.get("ok")),
+                "axial_rounding_volume_decreased": True,
+            },
+            "axial_rounding": {
+                "source": axial_rounding.get("source"), "radius_selection": axial_rounding.get("radius_selection"),
+                "r3": rounding_r3, "h3": rounding_h3, "center_y": rounding_center_y, "sag": rounding_sag,
+                "minimum_radius": 1.7 * rounding_engagement,
+                "tip_land_width": rounding_width - 2.0 * rounding_sag,
+                "tip_land_policy_source": axial_rounding.get("tip_land_policy_source"),
+                "body_before": body_before_rounding, "ends": rounding_report,
+            },
+            "row_layout": row_report,
+            "body": body,
+            "metadata": metadata_report,
+            "steps": steps_report,
+        }
+    except Exception as exc:
+        raise RuntimeError(
+            "create_chain_sprocket failed at %s: %s | completed_steps=%s"
+            % (current_stage, exc, json.dumps([
+                {"id": item.get("id"), "step": item.get("step"), "ok": item.get("ok")}
+                for item in steps_report
+            ], ensure_ascii=False))
+        )
 
 
 def handle_create_managed_pulley(payload):
@@ -27806,10 +28194,10 @@ def handle_inspect_managed_pulley(payload):
     )
     extrusion_names = [str(item.get("name") or "") for item in extrusions]
     pattern_names = [str(item.get("name") or "") for item in feature_patterns]
-    timing_family_code = int(round(float(next((item.get("value") for item in variables if item["name"] == "GW_FAMILY_CODE"), 0) or 0)))
+    family_code = int(round(float(next((item.get("value") for item in variables if item["name"] == "GW_FAMILY_CODE"), 0) or 0)))
     has_timing_marker = (
         {"GW_MANAGED_VERSION", "GW_FAMILY_CODE", "GW_TIMING_DESIGNATION_CODE"}.issubset(variable_names)
-        and timing_family_code in (4, 5)
+        and family_code in (4, 5)
     )
     has_timing_parameter_set = {
         "TB_P", "TB_Z", "TB_B", "TB_OR", "TB_H", "TB_RR", "TB_W", "TB_RT", "TB_RF", "TB_CO", "TB_STEP"
@@ -27823,10 +28211,28 @@ def handle_inspect_managed_pulley(payload):
         and any(name.lower().endswith(" groove pattern") for name in pattern_names)
     )
     has_timing = has_timing_marker and has_timing_parameter_set and has_timing_sketches and has_timing_features
-    timing_family = "timing_trapezoidal" if timing_family_code == 4 else ("timing_curvilinear" if timing_family_code == 5 else None)
-    family = "v_belt" if has_v_belt else ("poly_v" if has_poly_v else ("flat_belt" if has_flat_belt else (timing_family if has_timing else None)))
+    timing_family = "timing_trapezoidal" if family_code == 4 else ("timing_curvilinear" if family_code == 5 else None)
+    has_chain_marker = (
+        {"GW_MANAGED_VERSION", "GW_FAMILY_CODE"}.issubset(variable_names)
+        and family_code == 6
+    )
+    has_chain_parameter_set = {"CH_Z", "CH_P", "CH_DA", "CH_DF", "CH_B"}.issubset(variable_names)
+    has_chain_sketches = any(name.lower().endswith(" blank sketch") for name in sketch_names) and any(
+        name.lower().endswith(" one tooth space") for name in sketch_names
+    )
+    has_chain_features = (
+        any(name.lower().endswith(" blank") for name in extrusion_names)
+        and any(name.lower().endswith(" one tooth space cut") for name in extrusion_names)
+        and any(name.lower().endswith(" tooth space pattern") for name in pattern_names)
+    )
+    has_chain = has_chain_marker and has_chain_parameter_set and has_chain_sketches and has_chain_features
+    family = "v_belt" if has_v_belt else ("poly_v" if has_poly_v else ("flat_belt" if has_flat_belt else (timing_family if has_timing else ("chain_sprocket" if has_chain else None))))
     if family in ("timing_trapezoidal", "timing_curvilinear"):
         has_blank_variables = {"TB_OR", "TB_B"}.issubset(variable_names)
+        has_blank_sketch = any(name.lower().endswith(" blank sketch") for name in sketch_names)
+        has_blank_feature = any(name.lower().endswith(" blank") for name in extrusion_names)
+    elif family == "chain_sprocket":
+        has_blank_variables = {"CH_DA", "CH_B"}.issubset(variable_names)
         has_blank_sketch = any(name.lower().endswith(" blank sketch") for name in sketch_names)
         has_blank_feature = any(name.lower().endswith(" blank") for name in extrusion_names)
     evidence = {
@@ -27917,6 +28323,16 @@ def handle_inspect_managed_pulley(payload):
                     }
                 )
             display_name = "Timing pulley %s Z%s" % (designation, profile_request["tooth_count"])
+    elif family == "chain_sprocket":
+        blank_name = next((name for name in extrusion_names if name.lower().endswith(" blank")), "")
+        profile_request = {
+            "designation": None,
+            "chain_type": None,
+            "tooth_count": int(round(float(values.get("CH_Z") or 0))),
+            "row_count": int(round(float(values.get("CH_N") or 1))),
+            "gost_profile_variant": None,
+        }
+        display_name = blank_name[:-6] if blank_name.lower().endswith(" blank") else "Chain sprocket"
     owned_references = sorted(
         int(item.get("reference"))
         for item in sketches + rotateds + fillets + extrusions + feature_patterns
@@ -27924,6 +28340,13 @@ def handle_inspect_managed_pulley(payload):
             " blank" in str(item.get("name") or "").lower()
             or str(item.get("name") or "").startswith(("V-belt grooves ", "Poly-V grooves ", "Flat-belt pulley "))
             or str(item.get("name") or "").lower().endswith((" one groove", " one groove cut", " groove pattern"))
+            or str(item.get("name") or "").lower().endswith((" one tooth space", " one tooth space cut", " tooth space pattern"))
+            or (family == "chain_sprocket" and str(item.get("name") or "").lower().endswith((
+                " axial rounding left sketch", " axial rounding right sketch",
+                " axial rounding left cut", " axial rounding right cut",
+                " row body pattern", " connecting rim", " connecting rim sketch",
+                " row junction fillets",
+            )))
         )
     )
     identity_references = list(owned_references)
@@ -27943,13 +28366,31 @@ def handle_inspect_managed_pulley(payload):
             if match is not None and match.get("reference"):
                 identity_objects.append(int(match["reference"]))
         identity_references = sorted(set(identity_objects))
+    elif family == "chain_sprocket":
+        identity_objects = []
+        for items, suffix in (
+            (sketches, " blank sketch"),
+            (sketches, " one tooth space"),
+            (extrusions, " blank"),
+            (extrusions, " one tooth space cut"),
+            (feature_patterns, " tooth space pattern"),
+        ):
+            match = next(
+                (item for item in items if str(item.get("name") or "").lower().endswith(suffix)),
+                None,
+            )
+            if match is not None and match.get("reference"):
+                identity_objects.append(int(match["reference"]))
+        identity_references = sorted(set(identity_objects))
+    managed_schema = "geomwright.managed_chain_sprocket" if family == "chain_sprocket" else "geomwright.managed_pulley"
+    block_prefix = "managed-chain-sprocket:" if family == "chain_sprocket" else "managed-pulley:"
     return {
         "ok": True,
         "recognized": managed,
-        "schema": "geomwright.managed_pulley" if managed else None,
+        "schema": managed_schema if managed else None,
         "version": 1 if managed else None,
         "family": family,
-        "block_id": ("managed-pulley:" + "-".join(str(item) for item in identity_references)) if managed else None,
+        "block_id": (block_prefix + "-".join(str(item) for item in identity_references)) if managed else None,
         "display_name": display_name,
         "profile_request": profile_request,
         "owned_references": owned_references,
@@ -28094,6 +28535,8 @@ def dispatch(request):
         return handle_list_sketch_constraints(payload)
     if action == "inspect_sketch_constraint":
         return handle_inspect_sketch_constraint(payload)
+    if action == "apply_existing_sketch_constraint":
+        return handle_apply_existing_sketch_constraint(payload)
     if action == "clear_sketch_entity_constraints":
         return handle_clear_sketch_entity_constraints(payload)
     if action == "repair_sketch":
@@ -28144,6 +28587,8 @@ def dispatch(request):
         return handle_apply_poly_v_grooves(payload)
     if action == "create_managed_pulley":
         return handle_create_managed_pulley(payload)
+    if action == "create_chain_sprocket":
+        return handle_create_chain_sprocket(payload)
     if action == "update_managed_pulley":
         return handle_update_managed_pulley(payload)
     if action == "inspect_managed_pulley":

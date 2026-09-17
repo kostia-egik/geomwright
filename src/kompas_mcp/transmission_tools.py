@@ -22,6 +22,9 @@ PolyVProfileDesignation = Literal["PH", "PJ", "PK", "PL", "PM"]
 FlatPulleyProfile = Literal["cylindrical", "crowned"]
 TimingPulleyDesignation = Literal["T2.5", "T5", "T10", "AT5", "HTD_3M", "HTD_5M", "HTD_8M", "CUSTOM"]
 TimingPulleyShape = Literal["trapezoidal", "curvilinear"]
+ChainDesignation = str
+ChainType = Literal["roller", "bush"]
+GostToothProfileVariant = Literal["offset", "non_offset"]
 
 
 class VGrooveOverrides(BaseModel):
@@ -183,6 +186,22 @@ class TimingCurvilinearPulleyPreviewRequest(BaseModel):
         if self.designation != "CUSTOM" and any(value is not None for value in all_values):
             raise ValueError("custom timing dimensions are allowed only for designation=CUSTOM")
         return self
+
+
+class ChainSprocketPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    designation: ChainDesignation = "ISO_08B"
+    chain_type: ChainType = "roller"
+    tooth_count: int = Field(default=19, ge=6, le=200)
+    row_count: int = Field(default=1, ge=1, le=8)
+    gost_profile_variant: GostToothProfileVariant = Field(
+        default="offset",
+        description=(
+            "KOMPAS-compatible tooth-gap profile for ISO and GOST chains: "
+            "with or without the GOST 591 arc-center offset"
+        ),
+    )
 
 
 class RotationalBlankParameterBaseContract(BaseModel):

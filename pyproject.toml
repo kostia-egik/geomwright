@@ -5,12 +5,31 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "geomwright"
 version = "0.1.0"
-description = "Local-first CAD automation, parametric modules, and MCP workflows"
+description = "Local-first KOMPAS-3D CAD automation with MCP tools and Studio"
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Kostia Egik" }]
 requires-python = ">=3.11"
 dependencies = [
   "mcp>=1,<2",
 ]
+
+keywords = ["cad", "kompas-3d", "mcp", "parametric-cad", "automation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Manufacturing",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/kostia-egik/geomwright"
+Repository = "https://github.com/kostia-egik/geomwright"
+Issues = "https://github.com/kostia-egik/geomwright/issues"
 
 [project.optional-dependencies]
 ui = [
@@ -45,3 +64,6 @@ geomwright = [
   "studio/static/icons/*.svg",
   "studio/templates/*.html",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -388,7 +388,100 @@ function createField(name, fieldSchema, required) {
   return wrapper;
 }
 
+function chainSelectionLabel(level, item) {
+  const value = typeof item === "string" ? item : item?.value;
+  if (typeof item === "object" && item) {
+    const localizedLabel = getLocale() === "ru" ? item.label_ru : item.label_en;
+    if (localizedLabel) return localizedLabel;
+  }
+  return t(`chain.selection.${value}`, humanize(value));
+}
+
+function createChainProfileSelector() {
+  const fieldset = document.createElement("fieldset");
+  fieldset.className = "chain-profile-selector";
+  fieldset.dataset.chainProfileSelector = "";
+  const legend = document.createElement("legend");
+  legend.textContent = t("chain.selection.title", "Профиль цепи");
+  fieldset.append(legend);
+
+  const standards = currentSpec?.module?.selection?.standards || [];
+  const currentDesignation = baselinePayload.designation || currentModule.defaults.designation;
+  const selectedStandard = standards.find((standard) =>
+    standard.families.some((family) => family.profiles.some((profile) => profile.value === currentDesignation)),
+  ) || standards[0];
+  const selectedFamily = selectedStandard?.families.find((family) =>
+    family.profiles.some((profile) => profile.value === currentDesignation),
+  ) || selectedStandard?.families[0];
+  const selectors = {};
+  for (const level of ["standard", "family", "profile"]) {
+    const wrapper = document.createElement("label");
+    wrapper.className = "field";
+    const heading = document.createElement("span");
+    heading.className = "field-heading";
+    const title = document.createElement("span");
+    title.className = "field-title";
+    title.dataset.chainSelectionLabel = level;
+    title.textContent = t(`chain.selection.${level}`, humanize(level));
+    heading.append(title);
+    wrapper.append(heading);
+    const select = document.createElement("select");
+    select.dataset.chainSelection = level;
+    select.name = `chain_${level}`;
+    wrapper.append(select);
+    fieldset.append(wrapper);
+    selectors[level] = select;
+  }
+  const fill = (select, items, selected, level) => {
+    select.replaceChildren();
+    for (const item of items || []) {
+      const option = document.createElement("option");
+      option.value = item.value;
+      option.textContent = chainSelectionLabel(level, item);
+      if (item.label_ru) option.dataset.chainLabelRu = item.label_ru;
+      if (item.label_en) option.dataset.chainLabelEn = item.label_en;
+      option.disabled = item.available === false;
+      if (level === "profile" && item.chain_type) option.dataset.chainType = item.chain_type;
+      if (level === "profile" && item.nominal_row_count) option.dataset.nominalRowCount = item.nominal_row_count;
+      option.selected = item.value === selected;
+      select.append(option);
+    }
+  };
+  const sync = (standardValue, familyValue, profileValue) => {
+    const standard = standards.find((item) => item.value === standardValue) || standards[0];
+    fill(selectors.standard, standards, standard?.value, "standard");
+    const family = standard?.families.find((item) => item.value === familyValue) || standard?.families[0];
+    fill(selectors.family, standard?.families, family?.value, "family");
+    const profile = family?.profiles.find((item) => item.value === profileValue) || family?.profiles[0];
+    fill(selectors.profile, family?.profiles, profile?.value, "profile");
+    const typeField = fieldsContainer.querySelector("[name='chain_type']");
+    if (profile?.chain_type && typeField) typeField.value = profile.chain_type;
+    const rowField = fieldsContainer.querySelector("[name='row_count']");
+    if (profile?.nominal_row_count && rowField) rowField.value = profile.nominal_row_count;
+    syncConditionalFields();
+  };
+  sync(selectedStandard?.value, selectedFamily?.value, currentDesignation);
+  selectors.standard.addEventListener("change", () => sync(selectors.standard.value, null, null));
+  selectors.family.addEventListener("change", () => sync(selectors.standard.value, selectors.family.value, null));
+  selectors.profile.addEventListener("change", () => {
+    const chainType = selectors.profile.selectedOptions[0]?.dataset.chainType;
+    const typeField = fieldsContainer.querySelector("[name='chain_type']");
+    if (chainType && typeField) typeField.value = chainType;
+    const nominalRowCount = selectors.profile.selectedOptions[0]?.dataset.nominalRowCount;
+    const rowField = fieldsContainer.querySelector("[name='row_count']");
+    if (nominalRowCount && rowField) rowField.value = nominalRowCount;
+  });
+  return fieldset;
+}
+
 function syncConditionalFields() {
+  const gostVariantWrapper = fieldsContainer.querySelector("[data-field-name='gost_profile_variant']");
+  if (gostVariantWrapper) {
+    const applies = currentModule?.kind === "chain_sprocket";
+    const input = gostVariantWrapper.querySelector("input, select, textarea");
+    gostVariantWrapper.hidden = !applies;
+    if (input) input.disabled = !applies;
+  }
   const designation = fieldsContainer.querySelector("[name='designation']")?.value;
   const customMode = designation === "CUSTOM";
   const existing = fieldsContainer.querySelector("[data-custom-profile-editor]");
@@ -430,8 +523,12 @@ function renderFields() {
   fieldsContainer.replaceChildren();
   const properties = currentSpec.schema.properties || {};
   const required = new Set(currentSpec.schema.required || []);
+  if (currentModule?.kind === "chain_sprocket") fieldsContainer.append(createChainProfileSelector());
   for (const [name, schema] of Object.entries(properties)) {
     if (name === "custom_profile" || name === "profile_overrides") continue;
+    if (currentModule?.kind === "chain_sprocket" && name === "designation") continue;
+    if (currentModule?.kind === "chain_sprocket" && name === "chain_type") continue;
+    if (currentModule?.kind === "chain_sprocket" && name === "row_count") continue;
     fieldsContainer.append(createField(name, schema, required.has(name)));
   }
   syncConditionalFields();
@@ -455,12 +552,29 @@ function localizeFields() {
     const help = wrapper.querySelector("[data-field-help]");
     if (help) help.textContent = localizedFieldHelp(name, schema);
   }
+  const selector = fieldsContainer.querySelector("[data-chain-profile-selector]");
+  if (selector) {
+    selector.querySelector("legend").textContent = t("chain.selection.title", "Профиль цепи");
+    for (const label of selector.querySelectorAll("[data-chain-selection-label]")) {
+      const level = label.dataset.chainSelectionLabel;
+      label.textContent = t(`chain.selection.${level}`, humanize(level));
+    }
+    for (const select of selector.querySelectorAll("[data-chain-selection]")) {
+      const level = select.dataset.chainSelection;
+      for (const option of select.options) {
+        option.textContent = getLocale() === "ru"
+          ? (option.dataset.chainLabelRu || chainSelectionLabel(level, option.value))
+          : (option.dataset.chainLabelEn || chainSelectionLabel(level, option.value));
+      }
+    }
+  }
 }
 
 function collectPayload() {
   const payload = {};
   for (const input of fieldsContainer.querySelectorAll("input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")) {
     if (input.dataset.customProfileField) continue;
+    if (input.dataset.chainSelection) continue;
     const type = input.dataset.schemaType;
     if (type === "boolean") {
       payload[input.name] = input.checked;
@@ -478,6 +592,14 @@ function collectPayload() {
     }
     else if (type === "object" || type === "array") payload[input.name] = JSON.parse(raw);
     else payload[input.name] = raw;
+  }
+  const chainProfile = fieldsContainer.querySelector("[data-chain-selection='profile']");
+  if (chainProfile) {
+    payload.designation = chainProfile.value;
+    const chainType = chainProfile.selectedOptions[0]?.dataset.chainType;
+    if (chainType) payload.chain_type = chainType;
+    const nominalRowCount = chainProfile.selectedOptions[0]?.dataset.nominalRowCount;
+    if (nominalRowCount) payload.row_count = Number(nominalRowCount);
   }
   if (currentModule?.kind === "v_belt" && payload.designation === "CUSTOM") {
     const customProfile = { designation: "CUSTOM", family: "custom" };
@@ -547,7 +669,7 @@ function renderSummary(values) {
     renderReadableSubscripts(dt, t(`summary.${key}`, humanize(key)));
     const dd = document.createElement("dd");
     if (typeof value === "number") dd.textContent = formatNumber(value, 2);
-    else if (["standard_system", "profile", "designation", "profile_shape"].includes(key)) dd.textContent = localizedEnumValue(key, value);
+    else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "gost_profile_variant", "profile_construction"].includes(key)) dd.textContent = localizedEnumValue(key, value);
     else dd.textContent = String(value);
     summary.append(dt, dd);
   }
@@ -1245,6 +1367,13 @@ function cadPlanDisplayDimensions(plan) {
     return {
       outerDiameter: derived.outer_diameter,
       faceWidth: derived.face_width,
+    };
+  }
+  const geometry = plan?.geometry || {};
+  if (Number.isFinite(geometry.outside_radius) && Number.isFinite(geometry.face_width)) {
+    return {
+      outerDiameter: 2 * geometry.outside_radius,
+      faceWidth: geometry.face_width,
     };
   }
   throw new Error(t("error.cad_plan_dimensions_missing"));

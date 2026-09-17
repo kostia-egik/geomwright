@@ -2718,9 +2718,19 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
         raise ValueError("wire_diameter must be positive")
 
     compression_params = dict(params)
-    if not any(key in compression_params for key in ("end_turns_per_side", "end_turns")):
+    has_v2_end_contract = any(
+        key in compression_params
+        for key in ("start_end_turns", "finish_end_turns", "start_ground_turns", "finish_ground_turns")
+    )
+    if (
+        not has_v2_end_contract
+        and not any(key in compression_params for key in ("end_turns_per_side", "end_turns"))
+    ):
         compression_params["end_turns_per_side"] = 0.75
-    if not any(key in compression_params for key in ("ground_turns_per_side", "ground_turns")):
+    if (
+        not has_v2_end_contract
+        and not any(key in compression_params for key in ("ground_turns_per_side", "ground_turns"))
+    ):
         compression_params["ground_turns_per_side"] = 0.75
     compression_params["mean_diameter"] = large_diameter if large_at_start else small_diameter
     preview = preview_compression_spring(compression_params)
@@ -3128,6 +3138,29 @@ def preview_conical_compression_spring(params: dict[str, Any]) -> dict[str, Any]
         normalized.get("wire_diameter_variable", "WD1"),
         local_center=True,
     )
+    # The conical rewrite changes segment coordinates after the base
+    # compression preview has built its selector map. Refresh the public
+    # selectors so downstream feature operations resolve the actual conical
+    # path rather than the pre-rewrite cylindrical coordinates.
+    if segment_plan:
+        working_segment = next(
+            (segment for segment in segment_plan if segment.get("role") == "working"),
+            segment_plan[0],
+        )
+        normalized["selector_points"] = {
+            **dict(normalized.get("selector_points") or {}),
+            "start_body_entry_point": list(working_segment["start_point"]),
+            "finish_body_exit_point": list(working_segment["end_point"]),
+            "working_start_point": list(working_segment["start_point"]),
+            "working_finish_point": list(working_segment["end_point"]),
+        }
+        preview["selectors"] = normalized["selector_points"]
+        preview["interface"] = _build_compression_spring_interface(
+            normalized,
+            [float(placement_origin[0]), float(placement_origin[1]), 0.0],
+            [float(placement_origin[0]) + total_height, float(placement_origin[1]), 0.0],
+            normalized["selector_points"],
+        )
     return preview
 
 

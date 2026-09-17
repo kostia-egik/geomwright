@@ -1,4 +1,5 @@
 .venv/
+.opencode/
 __pycache__/
 *.pyc
 *.pyo
@@ -8,11 +9,19 @@ tmp_*.py
 tmp/
 sample/generated/
 experiments/spikes/
+docs/archive/
+Новая папка/
 opencode.json
 sample/live_outputs/*
 *.m3~
 *.agent_backup
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+test-results/
 build/
 dist/

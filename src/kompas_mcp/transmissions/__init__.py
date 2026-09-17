@@ -13,6 +13,7 @@ from .poly_v import validate_poly_v_cut_target
 from .pulley import build_managed_pulley_plan
 from .flat_belt import build_flat_belt_pulley_plan, preview_flat_belt_pulley
 from .timing_belt import build_curvilinear_timing_pulley_plan, build_trapezoidal_timing_pulley_plan, list_timing_belt_profiles, preview_timing_belt_pulley
+from .chain import build_chain_sprocket_plan, chain_profile_selection, list_chain_profiles, preview_chain_sprocket
 
 __all__ = [
     "list_v_belt_profiles",
@@ -32,4 +33,8 @@ __all__ = [
     "preview_timing_belt_pulley",
     "build_trapezoidal_timing_pulley_plan",
     "build_curvilinear_timing_pulley_plan",
+    "list_chain_profiles",
+    "chain_profile_selection",
+    "preview_chain_sprocket",
+    "build_chain_sprocket_plan",
 ]

@@ -204,6 +204,139 @@ formula-bound dimensions. Studio module
 descriptors carry stable group/subgroup/family taxonomy so staged selectors can
 separate a family path from modules without coupling identity to display structure.
 
+The roller/bush-chain sprocket family has an initial create-only Layer 4 vertical
+slice for single-row ISO 606 and GOST 591 profiles. Layer 2 supplies the exact
+tangent-circle tooth-space contour and a standard-derived functional tooth width.
+Catalog rows within the supported engagement-ratio range use the detailed KOMPAS-compatible GOST 591 working
+construction: six arcs, two common-tangent segments, the unchanged `r`, `r1`,
+and `r2` formula set, and a user-selectable offset or non-offset pair of
+roller-seat arc centers. A separate three-segment cap closes the cut contour
+outside the functional profile. In the
+offset construction the physical right seat center is at `+e/2` and the physical
+left seat center is at `-e/2`; the secondary-flank centers are translated from
+their corresponding seat centers before tangent construction. ISO 606 and
+GOST chain dimensions remain separate from the shared tooth-construction
+algorithm; selecting the construction variant does not rewrite catalog pitch,
+roller diameter, or inner width.
+
+Layer 2 rejects tooth construction outside `1.4 <= pitch / engagement_diameter <= 2.0`
+before CAD writes: GOST 591-69 limits its scope to lambda <= 2 and its Table 1
+starts at 1.40. It never extrapolates the tooth-height coefficient for unsupported
+PRI rows. Catalog presence alone does not promise build support.
+`ISO_08A` (and its row-count variants) carries ISO 606:1994 dimensions from
+GOST 13568-97, mandatory Annex A, Table A.1; it is not an alias for the existing
+`ISO_40A` reference-catalog entry. The supplied ISO 606:2015 sample does not
+establish dimensional equivalence between those entries. The root diameter is
+`pitch_diameter - 2 * seating_radius`, per GOST 591-69 Table 1.
+
+The KOMPAS application catalog's special B-1 rows `081` through `085` are
+dimensionally separate from `08B-1` and carry their local provenance as
+`Таблица ГВС 005-2015`; they are not presented as additional normative ISO 606
+designations. These five simplex-only rows use the native
+`0.93*Bvn-0.15` tooth-width formula. The public request field retains its
+historical `gost_profile_variant` name for client compatibility, but Studio
+labels and applies the selector to both ISO and GOST chains.
+Layer 3 creates one cylindrical blank, one through-all tooth-space cut, and a full
+circular pattern. Live ISO and GOST creation verifies a fully defined closed arc
+sketch, pattern count, rebuild, and one positive-volume solid. In-place editing
+remains outside this slice. Workspace readback does
+recognize the create-only block from `GW_FAMILY_CODE=6`, the complete `CH_*`
+fingerprint, and five root objects; generated pattern copies are owned but do not
+participate in stable block identity. Because designation and profile variant are
+not yet persisted as reconstructable metadata, reopened chain blocks remain
+read-only.
+
+Multi-row creation is available for catalog rows with both transverse pitch and
+plate height. ISO 606:1994 A/B rows through 32A/32B are sourced from GOST
+13568-97 Annex A Table A.1; missing old-ISO A rows such as 10A were added as
+distinct profiles rather than aliased to ANSI-numbered entries. Axial data is
+attached only after pitch, roller diameter, and inner width all match, preventing
+the existing ANSI-derived `ISO_40A` key from being mistaken for old ISO 40A.
+GOST 13568 PR/PV multi-row rows use their own Table 2 dimensions. A shared
+Layer 2 axial layout supplies preview and CAD tooth width, pitch, total width,
+and connecting-rim diameter. Multi-row widths use GOST 591-69 Table 2;
+`Dc=floor(t*cot(pi/z)-1.3*h)` uses its maximum rim diameter and clause 1.5 rounding.
+The first row is built at its own width, including both axial roundings. A
+type-528 `ILinearPattern` copies the evaluated whole body along negative X;
+`CH_N` and `CH_A` bind its count and pitch. After explicit rebuild, every row's
+bounding box and the temporary body count must match the plan. A separate,
+parameterized connecting-rim revolution then unites the rows. Final verification
+checks one solid, total width, and volume against N finished rows plus cylindrical
+gap material. Ownership includes the body pattern and rim but preserves the five
+original identity references. Reopened models recover `row_count` from `CH_N`;
+legacy models without that variable remain single-row. Missing catalog data is
+a preflight error, not permission to estimate row pitch. Two- and three-row 08B
+Z25 have live create/save/reopen and pattern-expression readback evidence. For
+three rows the total width is 34.665 mm and the rim sketch reads fully defined
+after reopen. In the two-row sample the rim sketch read
+fully defined at creation and code 1 after reopen; that solver state still needs
+UI confirmation. The connecting rim receives one circular-edge fillet feature
+on all `2*(row_count-1)` internal ring junctions. GOST 591-69 Table 2 sets
+`r4=1.6 mm` for pitch <=35 mm and `2.5 mm` above it. Preflight requires room
+between adjacent fillets and below the root/rounding envelope. Edge resolution
+uses unique circular body edges at the planned axial positions/rim radius, not
+collection indexes. The concave fillets must add the analytically expected stock
+and preserve overall bounds and one solid. The circular-edge helper is shared
+with V-belt finishing, whose convex fillets retain their material-removal check.
+Three-row 08B Z25 has create/save/reopen evidence for all four r4 junctions and
+their radius, persisted ownership and body volume.
+Three-row 10A Z25 and four-row 4PR-38.1 Z25 also have live create/save/reopen
+evidence; the latter verifies six junction edges and the `r4=2.5 mm` branch.
+
+Creation also appends two axial tooth-end cut revolutions, using GOST 591-69
+Fig. 3/Table 2: minimum `r3 = 1.7 * engagement_diameter` and centre drop
+`h3 = 0.8 * engagement_diameter`. These are functional axial profiles, not
+constant-radius edge fillets. Each has a closed arc/three-line sketch with
+constraints applied before its formula-bound dimensions. The owned YOZ blank
+occupies global X `[-CH_B, 0]`; the two profiles enter that interval from its
+opposite ends. Every cut must remove material and preserve a single solid.
+The new sketches/rotations are owned, but the original five root references
+remain the identity for both new and older chain blocks. Radius selection keeps
+at least 20% of the face width as a flat tooth-tip land: this is an explicit
+generator policy, not a GOST-prescribed dimension. It retains `r3=1.7D` when
+`b >= 0.5D`; otherwise `r3=h3*h3/(0.8b)+0.2b`, derived from circular sag
+`s=0.4b`. Both radii meet the normative minimum; width and h3 remain unchanged.
+The selection is formula-bound in CAD, including the branch condition.
+ISO 081 Z25 has live create/save/reopen evidence with b=2.919 mm,
+r3=17.044916820829 mm and a 0.5838 mm tip land; both axial sketches read fully
+defined after reopen. ISO 08A-1 Z25 has live create/save/reopen evidence
+for both cuts and their radii, end placement, closed topology and ownership.
+Both axial sketches read fully defined during creation; after reopen one read
+code 1 and the other code 2, so the former still needs UI state confirmation.
+
+The tooth-space sketch now exposes its independent construction through named
+datum circles, centre spans, geometric constraints, and formula-linked dimensions.
+The offset construction applies 41 in-sketch constraints and 17 sketch
+dimensions; the degenerate `e=0` construction applies 35 and 14 respectively.
+Both receive one additional post-build type-2 `point_on_curve`, so their final
+constraint totals are 42 and 36. In the offset variant, one horizontal common
+lower tangent joins the two trimmed roller-seat arcs, replacing their intersecting
+bottom endpoints. Its length follows the centre span `CH_E`; two tangencies and
+the existing centre/radius dimensions own it without another driving length.
+This gives 12 contour entities (six arcs, six segments); the non-offset variant
+retains 11 and never creates a zero-length bottom segment. Master
+roller-seat, flank, and head arcs carry formula-bound driving radii `CH_R`,
+`CH_R1`, and `CH_R2`; their mirrored dependents inherit equal radii. Six tangent
+relations determine the working branch junctions in addition to the contour's
+merge topology. The production workflow adds one `point_on_curve` from the start
+of the right technical side line to the outside datum after blank, sketch, cut,
+and pattern creation. This call is isolated and followed by independent readback
+of the exact entity-reference pair, closed topology, gaps, and
+self-intersections. A timeout is accepted only when that readback proves the
+relation. The user confirmed both the saved and unsaved candidate sketches fully
+defined in visible KOMPAS. API `ConstraintsState` may still report code 1 outside
+that UI context and is therefore returned as diagnostics rather than used as the
+sole verdict. The
+non-working outer branch is deliberately linear: two equal
+vertical `CH_CO` overshoots raise the horizontal closure to exactly
+`CH_RA + 0.5 mm`, guaranteeing 0.5 mm radial clearance from the blank even for
+small diameters. The horizontal line carries a visible reference width dimension
+`CH_CW`; making that dimension driving creates a redundant closed-loop ownership
+cycle in KOMPAS. The branch has no closure arc, auxiliary closure circle, or
+intermediate top node. Both variants require exact initial applied counts,
+post-build relation readback, radial-dimension readback, closed topology, full
+feature completion, positive body, rebuild, and save/reopen evidence.
+
 Geomwright Studio owns document/session navigation above Layer 4 modules. Its
 workspace discovers open KOMPAS documents, opens saved files, presents managed
 blocks together with surrounding unmanaged KOMPAS operations, and routes a
@@ -270,7 +403,9 @@ snapshot/readback там, где это поддержано. KOMPAS остаё�
 ## Production boundary
 
 Production surface состоит только из модулей, импортируемых зарегистрированным
-MCP server и описанных канонической документацией.
+MCP server и описанных канонической документацией. Research-only native-module
+tools регистрируются только при явном `GEOMWRIGHT_ENABLE_RESEARCH_TOOLS=1` и не
+входят в обычную публичную MCP-сессию.
 
 Опциональные presentation adapters могут поставляться в том же Python package,
 но не становятся частью MCP production surface автоматически. Их capability
@@ -301,9 +436,9 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | parametric part workflows | L2–L4 | experimental, family-specific live evidence |
 | managed spring families | L2–L4 | implemented, see family contracts |
 | diaphragm module | L2–L4 | complete and live-verified |
-| mechanical-transmission platform | L2–L4 | managed V-belt and Poly-V pulley workflow plus completed cylindrical/crowned flat-belt pulley; flat-pulley create, inspect, update, save, and reopen live-verified |
+| mechanical-transmission platform | L2–L4 | managed V-belt, Poly-V, timing and flat-belt pulley workflows plus live-verified create-only single-row ISO/GOST chain sprockets |
 | Geomwright Studio | presentation over L2–L4 | experimental; preview plus confirmed creation of a new unsaved managed pulley; no arbitrary-body write path |
-| native module inspection/launch | L1–L3 | research, explicit opt-in for launch |
+| native module inspection/launch | L1–L3 | research, explicit opt-in for registration and launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |
 
 ## Документационная иерархия
@@ -312,7 +447,8 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 2. этот файл — ownership и production boundaries;
 3. `CAD_PATTERNS.md` — переносимые CAD-инварианты;
 4. `docs/README.md` — индекс тематических контрактов;
-5. `docs/archive/` — только исторические freezes, backlogs и evidence.
+5. `experiments/spikes/` — локальная ignored-зона для исторических и незавершённых
+   материалов, не входящих в публичный runtime.
 
 ## Связанные документы
 

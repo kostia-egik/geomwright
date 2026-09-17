@@ -1,70 +1,65 @@
-# Documentation index
+# Geomwright documentation
 
-This directory contains the current engineering contracts for Geomwright.
-Documents are grouped by authority so that completed runtime behavior is not
-confused with research evidence or historical implementation plans.
+Use this index to find the right level of detail. The README is the quickest
+way to install and run the project; the documents below are contracts for a
+specific task, not a changelog or a dump of live CAD experiments.
 
-## Project contracts
+## Start here
 
-| Document | Authority | Purpose |
+| Document | For | What it answers |
 | --- | --- | --- |
-| [README](../README.md) | current | Installation, runtime status, and first workflow |
-| [Architecture](../ARCHITECTURE.md) | current | Layer ownership and production boundaries |
-| [CAD patterns](../CAD_PATTERNS.md) | current | Reusable CAD invariants backed by implementation evidence |
-| [Write operations](write_operations.md) | current | Write safety and supported mutation contracts |
-| [Low-level runtime](low-level-runtime.md) | experimental | Snapshot/readback and direct feature/sketch runtime |
+| [Project README](../README.md) | New user | What Geomwright is, requirements, install, first run |
+| [Write operations](write_operations.md) | Operator or agent | Which writes need preflight/confirmation and how to verify them |
+| [Geomwright Studio](geomwright-studio.md) | Studio user | How previews, managed blocks, save, and close work |
+| [Low-level runtime](low-level-runtime.md) | Advanced user | Inspection and readback tools for sketches and features |
 
-## Sketch authoring and diagnostics
+## Build and inspect geometry
 
-| Document | Status | Purpose |
+| Document | Status | Scope |
 | --- | --- | --- |
-| [Sketch authoring agent protocol](sketch-authoring-agent-protocol.md) | current | Plan → Execute → Verify → Correct workflow for agents |
-| [Sketch authoring geometry protocol](sketch-authoring-protocol.md) | design draft | Human geometry, constraint, and dimension planning |
-| [Sketch runtime strategy](sketch-runtime-strategy.md) | current | Runtime ownership and adapter/bridge boundaries |
-| [Sketch diagnostics](sketch-diagnostics.md) | experimental | Diagnostic modes and correction workflow |
-| [`inspect_sketch_full` report](inspect-sketch-full-report.md) | current | Complete readback schema and interpretation |
-| [Curve trimming contract](curve-trimming-contract.md) | current | Trimmed/connect-curve ownership and readback |
+| [Sketch authoring agent protocol](sketch-authoring-agent-protocol.md) | Current | Plan → Execute → Verify → Correct for sketch changes |
+| [Sketch runtime strategy](sketch-runtime-strategy.md) | Current | Ownership of host-side geometry and KOMPAS bridge calls |
+| [Inspect sketch full report](inspect-sketch-full-report.md) | Current | `inspect_sketch_full` result shape and diagnostics |
+| [Curve trimming contract](curve-trimming-contract.md) | Current | Trimmed and connected curve ownership |
+| [Parametric workflows](parametric-workflows.md) | Experimental | Part plans, parameters, previews, and verification |
 
-## Parametric parts
+## Springs
 
-| Document | Status | Purpose |
+| Document | Status | Scope |
 | --- | --- | --- |
-| [Parametric workflows](parametric-workflows.md) | current | Supported operation graph and public parameters |
-| [Diaphragm spring workflow](diaphragm-spring.md) | current | Implemented workflow and S-bend cut compensation |
-| [Spring workflows](spring-workflows.md) | current | Spring-family status and navigation |
+| [Spring workflows](spring-workflows.md) | Experimental | Family selection and common entry points |
+| [Compression spring](compression-spring.md) | Current family contract | Compression spring geometry and evidence |
+| [Conical spring](conical-spring.md) | Current family contract | Conical spring parameters and limitations |
+| [Torsion spring](torsion-spring.md) | Current family contract | Torsion spring construction and readback |
+| [Diaphragm spring](diaphragm-spring.md) | Live-verified | Flat, bent, S-bend, relief, and cut workflow |
+| [Spring size catalogs](spring-size-catalogs.md) | Current | Catalog selection and validation |
 
-## Mechanical transmissions
+## Transmissions
 
-| Document | Status | Purpose |
+| Document | Status | Scope |
 | --- | --- | --- |
-| [Transmission platform concept](transmission-platform-concept.md) | approved concept | Composition contract, family map, cutter-aware geometry, and delivery phases |
-| [Flat-belt pulley](flat-belt-pulley.md) | complete, live-verified | Cylindrical/crowned managed rim geometry and Studio workflow |
-| [Timing-belt pulley](timing-belt-pulley.md) | Studio preview implemented | End-view tooth catalog, custom profile boundary, and planned cut/pattern CAD workflow |
-| [Native transmission audit](native-transmission-audit.md) | research evidence | Installed Shaft command map and interactive automation boundary |
-| [V-belt groove profile and CAD builder](v-belt-groove.md) | Layers 2/3 implemented | Profile catalog, deterministic groove geometry, and verified cut-from-body workflow |
-| [Poly-V groove profile and CAD builder](poly-v-groove.md) | Layers 2/3 implemented | ISO 9982 catalog, live master/dependent rounded profile, and mutation/save/reopen-verified cut workflow |
-| [Geomwright Studio](geomwright-studio.md) | experimental; managed CAD creation plus timing previews | Local schema-driven UI for owned belt-pulley modules |
+| [Transmission platform](transmission-platform-concept.md) | Approved architecture | Shared boundaries and composition rules |
+| [V-belt grooves](v-belt-groove.md) | Implemented, live-verified | DIN/ISO and GOST functional groove profiles |
+| [Poly-V grooves](poly-v-groove.md) | Implemented, live-verified | ISO 9982 rounded profiles and managed cuts |
+| [Flat-belt pulley](flat-belt-pulley.md) | Implemented, live-verified | Cylindrical/crowned managed rim |
+| [Timing-belt pulley](timing-belt-pulley.md) | Experimental | T/AT and HTD preview and managed Studio path |
+| [Chain transmission](chain-transmission-concept.md) | Experimental, create-verified | ISO/GOST roller and bush sprocket profiles; create-only family slice |
 
-## Spring-family documents
+## Maintainer references
 
-- [Compression spring](compression-spring.md)
-- [Conical spring](conical-spring.md)
-- [Torsion spring](torsion-spring.md)
-- [Extension hook inventory](extension-hook-type-inventory.md)
-- [Extension native-fillet audit](extension-hook-native-fillet-audit.md)
-- [Self-wrapping hook phase 1 report](self-wrapping-hook-phase1-report.md)
-- [Bent-coil coordinate system](bent-coil-sketch-coordinate-system.md)
-- [Bent-coil parametrization report](bent-coil-parametrize-report.md)
-- [Spring size catalogs](spring-size-catalogs.md)
-- [Native spring strategy](native-spring-strategy.md) — research surface, not a
-  substitute for the managed workflows
+- [Architecture](../ARCHITECTURE.md) — Layer 1–4 ownership, runtime topology,
+  production boundary, and compatibility namespaces.
+- [CAD patterns](../CAD_PATTERNS.md) — verified KOMPAS COM/CAD behavior and
+  reusable failure-prevention rules.
+- Human planning drafts and raw investigation notes are kept outside the public
+  documentation tree until they become stable runtime contracts.
 
-## Archive policy
+The maintainer references are intentionally more detailed than the user guides.
+Start with the relevant contract above instead of reading them front to back.
 
-`docs/archive/` is reserved for historical records intentionally retained in
-Git. Archive files may explain why a decision was made, but they do not define
-current behavior. Promote a result into a canonical document before using it as
-a runtime contract.
+## What is not in this index
 
-Local unfinished prototypes and historical work briefs belong under the ignored
-`experiments/spikes/` quarantine, not in this documentation tree.
+Roadmaps, work-process notes, raw audits, generated CAD, and disposable probes are
+development material. Unfinished local work belongs in the ignored
+`experiments/spikes/` quarantine and is not included in the package or MCP tool
+catalog.

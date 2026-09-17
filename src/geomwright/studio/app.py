@@ -496,6 +496,8 @@ def create_app(
             request = module.request_model.model_validate(dict(payload.get("profile") or {}))
             if payload.get("confirm_write") is not True:
                 raise HTTPException(status_code=409, detail="confirm_write=true is required")
+            if module.kind == "chain_sprocket":
+                managed_pulley_plan(module.kind, request.model_dump(exclude_none=True))
             job_id = uuid4().hex
             now = time.time()
             with cad_jobs_lock:

@@ -12,7 +12,7 @@ a research surface.
 | Compression | `preview_compression_spring`, `create_compression_spring` | implemented and live-verified | [compression-spring.md](compression-spring.md) |
 | Conical | parametric workflow operations | implemented and live-verified | [conical-spring.md](conical-spring.md) |
 | Torsion | parametric workflow operations | implemented and live-verified | [torsion-spring.md](torsion-spring.md) |
-| Extension | hook-family parametric scenarios | implemented across the current hook matrix | [extension-hook-type-inventory.md](extension-hook-type-inventory.md) |
+| Extension | hook-family parametric scenarios | experimental family coverage | See the runtime catalog and `parametric-workflows.md` |
 | Disc/Belleville | `disc_spring` | implemented in the shared workflow | [parametric-workflows.md](parametric-workflows.md) |
 | Diaphragm | `diaphragm_spring` plus cut/relief/pattern operations | complete | [diaphragm-spring.md](diaphragm-spring.md) |
 
@@ -35,13 +35,10 @@ parameter set, not a replacement for the workflow definition.
 
 ## Native module research
 
-The `native_modules` catalog category can inspect installed applications and,
-with explicit opt-in, launch registered native commands. It does not replace the
-managed spring generators and must not be used as an unattended production path.
-See [native-spring-strategy.md](native-spring-strategy.md).
+Native KOMPAS module inspection is outside the managed spring contract. If it is
+needed for local investigation, enable the research-only tools explicitly as
+described in the project README. They are disabled by default and are not an
+unattended production path.
 
-## Historical material
-
-Intentionally retained historical records belong in `docs/archive/`; raw local
-evidence and uncommitted work briefs stay in the ignored experiment quarantine.
-Current family documents and this index take precedence.
+Raw evidence and uncommitted work briefs stay in the ignored experiment
+quarantine; current family documents and this index take precedence.

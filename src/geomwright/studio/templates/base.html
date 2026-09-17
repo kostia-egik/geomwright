@@ -153,9 +153,21 @@
         </div>
       </header>
       <div class="canvas-wrap">
+        <div class="profile-view">
         <canvas id="profile-canvas" aria-label="Геометрический предпросмотр"></canvas>
         <div class="canvas-help" data-i18n="canvas.help">Колесо — масштаб · перетаскивание — панорама · двойной щелчок — сброс вида</div>
         <div id="canvas-empty" class="canvas-empty" data-i18n="canvas.empty">Выберите модуль и задайте параметры</div>
+        </div>
+        <div id="axial-preview-rail" class="axial-preview-rail" hidden>
+          <button id="axial-preview-toggle" type="button" aria-controls="axial-preview" aria-expanded="true"><span aria-hidden="true">›</span></button>
+          <span class="axial-rail-caption" data-i18n="chain.axial_title">Осевой разрез · схема</span>
+        </div>
+        <section id="axial-preview" class="axial-preview" hidden>
+          <header><h3 data-i18n="chain.axial_title">Осевой разрез · схема</h3><span id="axial-row-count"></span></header>
+          <p id="axial-preview-note"></p>
+          <canvas id="side-section-canvas" aria-label="Расположение венцов звёздочки" data-i18n-label="chain.axial_label"></canvas>
+          <p class="axial-legend" data-i18n="chain.axial_legend">b — ширина венца · A — шаг рядов · B — общая ширина</p>
+        </section>
       </div>
       <footer class="statusbar">
         <span id="status-dot" class="status-dot"></span>
@@ -167,6 +179,7 @@
   </main>
 
   <script type="module" src="{{ url_for('static', path='/canvas.js') }}"></script>
+  <script type="module" src="{{ url_for('static', path='/side-section.js') }}"></script>
   <script type="module" src="{{ url_for('static', path='/app.js') }}"></script>
 </body>
 </html>

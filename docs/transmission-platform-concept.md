@@ -315,7 +315,8 @@ No public headless calculation API or documented COM object model for GEARS was
 found. Command dispatch is available through the registered native application,
 but the caller context is essential. Direct command 202 dispatch is useful only
 for standalone calculations or saved calculation files; it is not a model-build
-workflow. See `native-transmission-audit.md`.
+workflow. Native KOMPAS command inspection is a separate research-only surface
+and is not required for the managed workflow.
 
 Native UI experiments are never run in a shared working KOMPAS session. Command
 206 successfully opened the Shaft 3D host during the first pulley audit, but the

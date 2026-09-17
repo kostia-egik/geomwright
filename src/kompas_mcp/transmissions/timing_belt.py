@@ -635,6 +635,47 @@ def _break_contour(outside_radius: float, radius: float, angle_start: float, ang
     return points
 
 
+def build_curvilinear_preview_sector(
+    *,
+    pitch: float,
+    outside_radius: float,
+    groove_width: float,
+    groove_depth: float,
+    tip_radius: float,
+    root_fillet_radius: float,
+) -> dict[str, Any]:
+    """Build the same cropped rounded sector used by the HTD Studio preview."""
+
+    sector, fillets = _sector_profile(
+        pitch=pitch,
+        outside_radius=outside_radius,
+        groove_width=groove_width,
+        groove_depth=groove_depth,
+        shape="curvilinear",
+        tip_radius=tip_radius,
+        root_fillet_radius=root_fillet_radius,
+    )
+    sector_half_angle = math.atan2(sector[-1][0], sector[-1][1])
+    root_radius = outside_radius - groove_depth
+    break_radius = max(root_radius - groove_depth * 1.5, root_radius * 0.72)
+    break_path = _break_contour(
+        outside_radius,
+        break_radius,
+        -sector_half_angle,
+        sector_half_angle,
+        groove_depth * 0.08,
+    )
+    return {
+        "outline": [*sector, *break_path],
+        "profile_path": sector,
+        "break_path": break_path,
+        "fillets": fillets,
+        "outside_circle": _arc(outside_radius, -sector_half_angle, sector_half_angle),
+        "sector_half_angle": sector_half_angle,
+        "break_radius": break_radius,
+    }
+
+
 def preview_timing_belt_pulley(
     *,
     designation: TimingProfileDesignation,

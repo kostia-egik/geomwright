@@ -1,17 +1,19 @@
 # Sketch Authoring Agent Protocol
 
 Status: current agent workflow contract for staged sketch generation and
-readback. Geometry-design guidance remains in the companion draft.
+readback.
 
-Machine-oriented companion to [`sketch-authoring-protocol.md`](sketch-authoring-protocol.md).
+This is the machine-oriented authoring checklist. Human geometry planning notes
+are kept in the local development quarantine until they become a stable runtime
+contract.
 
 Audience: coding agent working on KOMPAS sketches in Geomwright.
 
 Purpose: force a complex sketch to pass through an explicit contract and staged
 verification before implementation grows into debugging by accident.
 
-This document is agent-executable. Prefer this file during implementation. Use
-the human protocol when deciding whether the rules themselves need to change.
+This document is agent-executable. Prefer it during implementation; the public
+geometry and family contracts remain the source of user-facing behavior.
 
 ## Required references
 
@@ -21,9 +23,7 @@ Before creating or changing a complex sketch, consult these project rules:
   `SKETCH-004`, `SKETCH-005`, `SKETCH-006`, `SKETCH-008`, `SKETCH-009`,
   `OP-001`, `OP-002`,
   `PROFILE-001`, `VAR-001`, `VERIFY-001`.
-- `docs/sketch-authoring-protocol.md` for human rationale.
-- `docs/sketch-diagnostics.md` and `docs/inspect-sketch-full-report.md` for
-  diagnostics/readback vocabulary.
+- `docs/inspect-sketch-full-report.md` for diagnostics/readback vocabulary.
 
 Do not treat successful `Update()` as proof of correctness. Sketch success must
 be supported by style/contour checks, constraints/dimensions state, operation

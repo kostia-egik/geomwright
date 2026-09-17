@@ -7,8 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from kompas_mcp.transmission_tools import FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, TimingCurvilinearPulleyPreviewRequest, TimingTrapezoidalPulleyPreviewRequest, VGroovePreviewRequest
-from kompas_mcp.transmissions import preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
+from kompas_mcp.transmission_tools import ChainSprocketPreviewRequest, FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, TimingCurvilinearPulleyPreviewRequest, TimingTrapezoidalPulleyPreviewRequest, VGroovePreviewRequest
+from kompas_mcp.transmissions import build_chain_sprocket_plan, chain_profile_selection, preview_chain_sprocket, preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
 
 
@@ -30,7 +30,8 @@ class PreviewModule:
     subgroup: str = "belt_drives"
     family: str = "belt_pulleys"
     build: bool = True
-    icon: str = ""
+    icon: str | None = ""
+    selection: dict[str, Any] | None = None
 
     def descriptor(self) -> dict[str, Any]:
         return {
@@ -41,7 +42,8 @@ class PreviewModule:
             "group": self.group,
             "subgroup": self.subgroup,
             "family": self.family,
-            "icon": self.icon or f"/static/icons/{self.kind}.svg",
+            "icon": self.icon,
+            "selection": self.selection,
             "capabilities": {"preview": True, "build": self.build, "inspect": False},
             "spec_url": f"/modules/{self.kind}/spec",
             "preview_url": f"/modules/{self.kind}/preview",
@@ -87,6 +89,10 @@ def _build_timing_curvilinear_preview(payload: dict[str, Any]) -> dict[str, Any]
     return preview_timing_belt_pulley(**payload, custom_shape="curvilinear" if payload.get("designation") == "CUSTOM" else None)
 
 
+def _build_chain_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return preview_chain_sprocket(**payload)
+
+
 def _points(value: Any) -> list[list[float]]:
     result: list[list[float]] = []
     for point in list(value or []):
@@ -98,6 +104,103 @@ def _points(value: Any) -> list[list[float]]:
 
 def _polar(radius: float, angle: float) -> list[float]:
     return [radius * math.sin(angle), radius * math.cos(angle)]
+
+
+def _rotate_path(points: list[list[float]], angle: float) -> list[list[float]]:
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    return [
+        [point[0] * cosine + point[1] * sine, point[1] * cosine - point[0] * sine]
+        for point in points
+    ]
+
+
+def _radial_arc(radius: float, start_angle: float, end_angle: float, count: int = 16) -> list[list[float]]:
+    return [
+        _polar(radius, start_angle + (end_angle - start_angle) * index / count)
+        for index in range(count + 1)
+    ]
+
+
+def _section_break_contour(
+    *,
+    outside_radius: float,
+    break_radius: float,
+    left_angle: float,
+    right_angle: float,
+    wave_depth: float,
+) -> list[list[float]]:
+    """Close a cropped end-view sector with the timing-pulley break style."""
+    points: list[list[float]] = []
+    side_samples = 24
+    for index in range(side_samples + 1):
+        progress = index / side_samples
+        smooth = progress * progress * (3.0 - 2.0 * progress)
+        radius = outside_radius + (break_radius - outside_radius) * smooth
+        radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
+        angle = right_angle + math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
+        points.append(_polar(radius, angle))
+    bottom_samples = 96
+    for index in range(1, bottom_samples + 1):
+        progress = index / bottom_samples
+        angle = right_angle + (left_angle - right_angle) * progress
+        radius = break_radius + math.sin(progress * math.pi * 8.0) * wave_depth
+        points.append(_polar(radius, angle))
+    for index in range(1, side_samples + 1):
+        progress = index / side_samples
+        smooth = progress * progress * (3.0 - 2.0 * progress)
+        radius = break_radius + (outside_radius - break_radius) * smooth
+        radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
+        angle = left_angle - math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
+        points.append(_polar(radius, angle))
+    return points
+
+
+def _chain_section_preview(
+    *,
+    tooth_gap: list[list[float]],
+    pitch_radius: float,
+    outside_radius: float,
+    root_radius: float,
+    tooth_count: int,
+) -> dict[str, Any]:
+    pitch_angle = 2.0 * math.pi / tooth_count
+    sector: list[list[float]] = []
+    for center_angle in (-pitch_angle, 0.0, pitch_angle):
+        gap = _rotate_path(tooth_gap, center_angle)
+        if sector:
+            previous_angle = math.atan2(sector[-1][0], sector[-1][1])
+            next_angle = math.atan2(gap[0][0], gap[0][1])
+            if next_angle - previous_angle > 1e-9:
+                sector.extend(_radial_arc(outside_radius, previous_angle, next_angle, count=10)[1:-1])
+            if math.dist(sector[-1], gap[0]) <= 1e-9:
+                gap = gap[1:]
+        sector.extend(gap)
+    left_angle = math.atan2(sector[0][0], sector[0][1])
+    right_angle = math.atan2(sector[-1][0], sector[-1][1])
+    groove_depth = outside_radius - root_radius
+    break_radius = max(root_radius - groove_depth * 1.5, root_radius * 0.72)
+    break_path = _section_break_contour(
+        outside_radius=outside_radius,
+        break_radius=break_radius,
+        left_angle=left_angle,
+        right_angle=right_angle,
+        wave_depth=max(groove_depth * 0.08, outside_radius * 0.0015),
+    )
+    break_path[0] = list(sector[-1])
+    break_path[-1] = list(sector[0])
+    return {
+        "profile_path": sector,
+        "break_path": break_path,
+        "outline": [*sector, *break_path[1:]],
+        "pitch_circle": _radial_arc(pitch_radius, left_angle, right_angle, count=96),
+        "outside_circle": _radial_arc(outside_radius, left_angle, right_angle, count=96),
+        "break_radius": break_radius,
+        "left_angle": left_angle,
+        "right_angle": right_angle,
+        "tooth_gap_count": 3,
+        "visible_tooth_count": 2,
+    }
 
 
 def _bounds(closed_points: list[list[list[float]]], guide_paths: list[list[list[float]]]) -> dict[str, float]:
@@ -943,6 +1046,127 @@ def _adapt_timing_belt(preview: dict[str, Any], request: dict[str, Any]) -> dict
     }
 
 
+def _adapt_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    geometry = dict(preview.get("geometry") or {})
+    derived = dict(preview.get("derived") or {})
+    tooth_gap = _points(geometry.get("profile_path"))
+    pitch_radius = float(derived.get("pitch_diameter") or 0.0) / 2.0
+    outside_radius = float(derived.get("outside_diameter") or 0.0) / 2.0
+    root_radius = float(derived.get("root_diameter") or 0.0) / 2.0
+    standard_parameters = dict(derived.get("standard_parameters") or {})
+    profile = dict(preview.get("profile") or {})
+    row_count = int(request.get("row_count") or 1)
+    axial_layout = derived["axial_layout"]
+    tooth_width = axial_layout["tooth_width"]
+    row_spacing = axial_layout["row_spacing"]
+    secondary_view = {
+        "view_mode": "side_section", "row_count": row_count,
+        "tooth_width_mm": tooth_width,
+        "row_spacing_mm": row_spacing,
+        "total_width_mm": axial_layout["total_width"],
+        "engagement_diameter_mm": profile["outside_diameter"],
+        "width_source": "GOST 591-69 Table 2",
+        "row_spacing_source": profile.get("row_spacing_source", profile.get("dimensions_source")),
+        "axial_layout_status": "dimensioned" if row_spacing else "schematic_missing_row_spacing",
+        "connector_status": "schematic_not_dimensioned",
+    }
+    tooth_count = int(request.get("tooth_count") or 1)
+    groove_angle = 2.0 * math.pi / tooth_count
+    section = _chain_section_preview(
+        tooth_gap=tooth_gap,
+        pitch_radius=pitch_radius,
+        outside_radius=outside_radius,
+        root_radius=root_radius,
+        tooth_count=tooth_count,
+    )
+    profile_path = section["profile_path"]
+    break_path = section["break_path"]
+    closed = section["outline"]
+    pitch_circle = section["pitch_circle"]
+    dimension_start_radius = float(section["break_radius"])
+    radial_dimensions = [
+        {
+            "key": "outside_diameter",
+            "symbol": "Dₐ",
+            "orientation": "radial",
+            "start": _polar(dimension_start_radius, -groove_angle * 0.5),
+            "end": _polar(outside_radius, -groove_angle * 0.5),
+            "value": derived.get("outside_diameter"),
+            "unit": "mm",
+            "label_normal": 38,
+            "label_tangent": 8,
+        },
+        {
+            "key": "pitch_diameter",
+            "symbol": "Dₚ",
+            "orientation": "radial",
+            "start": _polar(dimension_start_radius, groove_angle * 1.28),
+            "end": _polar(pitch_radius, groove_angle * 1.28),
+            "value": derived.get("pitch_diameter"),
+            "unit": "mm",
+            "label_normal": -36,
+            "label_tangent": -8,
+        },
+        {
+            "key": "root_diameter",
+            "symbol": "Dᵣ",
+            "orientation": "radial",
+            "start": _polar(dimension_start_radius, -groove_angle),
+            "end": _polar(root_radius, -groove_angle),
+            "value": derived.get("root_diameter"),
+            "unit": "mm",
+            "label_normal": 34,
+            "label_tangent": -8,
+        },
+    ]
+    bounds = _bounds([closed], [pitch_circle, section["outside_circle"]])
+    return {
+        "ok": bool(preview.get("success")),
+        "family": "chain_sprocket",
+        "view_mode": "end",
+        "secondary_view": secondary_view if row_count > 1 else None,
+        "closed_points": [closed] if closed else [],
+        "feature_paths": [profile_path] if profile_path else [],
+        "guide_paths": [break_path] if break_path else [],
+        "reference_paths": [
+            {"key": "pitch_circle", "points": pitch_circle},
+            {"key": "outside_circle", "points": section["outside_circle"]},
+        ],
+        "phantom_bodies": [],
+        "bounds": bounds,
+        "coordinate_system": "end_view",
+        "summary": {
+            "designation": request.get("designation"),
+            "chain_type": request.get("chain_type"),
+            "row_count": request.get("row_count", 1),
+            "standard": preview.get("standard"),
+            "profile_family": preview.get("profile_family"),
+            "gost_profile_variant": preview.get("gost_profile_variant"),
+            "tooth_gap_center_offset_mm": derived.get("tooth_gap_center_offset_mm"),
+            "tooth_count": request.get("tooth_count"),
+            "chain_pitch_mm": dict(preview.get("profile") or {}).get("pitch"),
+            "pitch_diameter_mm": derived.get("pitch_diameter"),
+            "outside_diameter_mm": derived.get("outside_diameter"),
+            "root_diameter_mm": derived.get("root_diameter"),
+            "roller_seating_radius_mm": derived.get("roller_seating_radius"),
+            "tooth_flank_radius_mm": derived.get("tooth_flank_radius"),
+            "profile_construction": standard_parameters.get("construction"),
+        },
+        "dimensions": radial_dimensions,
+        "warnings": _warnings(preview),
+        "preview_window": {
+            "tooth_gap_count": section["tooth_gap_count"],
+            "visible_tooth_count": section["visible_tooth_count"],
+            "section_style": "broken_out",
+        },
+        "warning_items": [
+            {"code": "chain_profile_standard_scope", "message": _warnings(preview)[0]},
+            {"code": "chain_downstream_operations_external", "message": _warnings(preview)[1]},
+            {"code": "chain_multirow_axial_preview_pending", "message": _warnings(preview)[2]},
+        ],
+    }
+
+
 _MODULES: dict[str, PreviewModule] = {
     "v_belt": PreviewModule(
         kind="v_belt",
@@ -1019,6 +1243,27 @@ _MODULES: dict[str, PreviewModule] = {
         build=True,
         icon="/static/icons/crc.svg",
     ),
+    "chain_sprocket": PreviewModule(
+        kind="chain_sprocket",
+        name="Втулочно-роликовая звездочка",
+        description="Общий модуль для стандартных цепей: ISO 606, ГОСТ 13568 и ГОСТ 21834.",
+        standard="ISO 606:2015 / ГОСТ 13568-2017 / ГОСТ 21834-87",
+        request_model=ChainSprocketPreviewRequest,
+        defaults={
+            "designation": "ISO_08B",
+            "chain_type": "roller",
+            "tooth_count": 19,
+            "row_count": 1,
+            "gost_profile_variant": "offset",
+        },
+        builder=_build_chain_preview,
+        adapter=_adapt_chain,
+        subgroup="chain_drives",
+        family="chain_sprockets",
+        build=True,
+        icon=None,
+        selection=chain_profile_selection(),
+    ),
 }
 
 
@@ -1046,4 +1291,6 @@ def managed_pulley_plan(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"{module.kind} is preview-only; CAD planning is not implemented")
     request = module.request_model.model_validate(payload)
     normalized_request = request.model_dump(exclude_none=True)
+    if module.kind == "chain_sprocket":
+        return build_chain_sprocket_plan(**normalized_request)
     return build_managed_pulley_plan(module.kind, normalized_request)

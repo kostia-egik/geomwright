@@ -235,8 +235,11 @@ def get_mcp_tool_catalog(
     *,
     category: str | None = None,
     stability: str | None = None,
+    include_research: bool = False,
 ) -> dict[str, Any]:
     categories = deepcopy(TOOL_CATEGORIES)
+    if not include_research:
+        categories = [item for item in categories if item["stability"] != "research"]
     if category is not None:
         categories = [item for item in categories if item["name"] == category]
     if stability is not None:
@@ -246,6 +249,7 @@ def get_mcp_tool_catalog(
         "ok": bool(categories),
         "category": category,
         "stability": stability,
+        "include_research": include_research,
         "category_count": len(categories),
         "tool_count": tool_count,
         "categories": categories,

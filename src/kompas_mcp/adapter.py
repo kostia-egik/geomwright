@@ -10,7 +10,7 @@ from typing import Any
 from .batch import build_file_list
 from .batch import scan_model_files as scan_model_files_payload
 from .batch import summarize_batch_results
-from .bridge_runner import BridgeRunner
+from .bridge_runner import BridgeError, BridgeRunner
 from .analyzers import analyze_naming_issues
 from .analyzers import analyze_spec_issues
 from .composition import read_file_composition
@@ -40,6 +40,7 @@ from .specification import SPW_ENGINEERING_FIELDS
 from .transmissions import build_v_belt_cut_plan
 from .transmissions import build_poly_v_cut_plan
 from .transmissions import build_managed_pulley_plan
+from .transmissions import build_chain_sprocket_plan
 from .transmissions import preview_poly_v_groove
 from .transmissions import preview_v_belt_groove
 from .transmissions import validate_poly_v_cut_target
@@ -371,6 +372,8 @@ def _normalize_sketch_dimension_kind(value: Any) -> str:
         return "break_line"
     if kind in {"diameter", "diametral", "circle_diameter"}:
         return "diametral"
+    if kind in {"radius", "radial", "circle_radius", "arc_radius"}:
+        return "radial"
     if kind in {"angle", "angle_between_lines"}:
         return "angle"
     return kind
@@ -383,7 +386,7 @@ def _normalize_sketch_dimension_kinds(value: Any, *, name: str = "kinds") -> lis
     normalized: list[str] = []
     for index, item in enumerate(raw_values):
         kind = _normalize_sketch_dimension_kind(item)
-        if kind not in {"line", "break_line", "diametral", "angle"}:
+        if kind not in {"line", "break_line", "diametral", "radial", "angle"}:
             raise ValueError(f"{name}[{index}] is unsupported")
         if kind not in normalized:
             normalized.append(kind)
@@ -394,7 +397,7 @@ def _normalize_sketch_dimension_selector(value: Any, *, name: str) -> dict[str, 
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be an object")
     kind = _normalize_sketch_dimension_kind(value.get("kind") or value.get("type"))
-    if kind not in {"line", "break_line", "diametral", "angle"}:
+    if kind not in {"line", "break_line", "diametral", "radial", "angle"}:
         raise ValueError(f"{name}.kind is unsupported")
     row = dict(value)
     row["kind"] = kind
@@ -417,6 +420,7 @@ _SKETCH_CONSTRAINT_KINDS = {
     "parallel",
     "perpendicular",
     "equal_length",
+    "equal_radius",
     "merge_points",
     "tangent",
     "collinear",
@@ -2835,13 +2839,20 @@ class KompasAdapter:
     ) -> dict[str, Any]:
         if execute and confirm_write is not True:
             raise ValueError("confirm_write=true is required when execute=true")
-        plan = build_managed_pulley_plan(
-            family,
-            dict(profile_request),
-            name=name,
-            top_edge_fillet_radius=top_edge_fillet_radius,
-            include_standard_top_edge_fillet=include_standard_top_edge_fillet,
-        )
+        if family == "chain_sprocket":
+            if top_edge_fillet_radius is not None:
+                raise ValueError("top_edge_fillet_radius is not supported for chain_sprocket")
+            plan = build_chain_sprocket_plan(**dict(profile_request), name=name)
+            bridge_action = "create_chain_sprocket"
+        else:
+            plan = build_managed_pulley_plan(
+                family,
+                dict(profile_request),
+                name=name,
+                top_edge_fillet_radius=top_edge_fillet_radius,
+                include_standard_top_edge_fillet=include_standard_top_edge_fillet,
+            )
+            bridge_action = "create_managed_pulley"
         if not execute:
             return {
                 "ok": True,
@@ -2857,13 +2868,142 @@ class KompasAdapter:
             "visible": bool(visible),
         }
         if progress_callback is None:
-            result = self.runner.call("create_managed_pulley", bridge_payload)
+            result = self.runner.call(bridge_action, bridge_payload)
         else:
             result = self.runner.call(
-                "create_managed_pulley",
+                bridge_action,
                 bridge_payload,
                 progress_callback=progress_callback,
             )
+        if family == "chain_sprocket" and result.get("success"):
+            sketch_step = next(
+                (item for item in list(result.get("steps") or []) if item.get("id") == "tooth_space_sketch"),
+                None,
+            )
+            if sketch_step is None:
+                raise RuntimeError("Managed chain-sprocket result is missing tooth-space sketch readback")
+            if sketch_step is not None:
+                entity_results = {
+                    str(item.get("id")): item
+                    for item in list(sketch_step.get("entities") or [])
+                    if isinstance(item, dict) and item.get("id")
+                }
+                sketch_ref = (sketch_step.get("sketch") or {}).get("reference")
+                document = result.get("document") or {}
+                document_id = document.get("runtime_id") or document.get("id")
+                target_result = entity_results.get("outside_overshoot_right") or {}
+                partner_result = entity_results.get("chain_outside_datum") or {}
+                sketch_operation = next(
+                    (
+                        item
+                        for item in list((((plan.get("workflow") or {}).get("params") or {}).get("operations") or []))
+                        if item.get("id") == "tooth_space_sketch"
+                    ),
+                    {},
+                )
+                post_constraints = list(
+                    (sketch_operation.get("params") or {}).get("post_build_constraints") or []
+                )
+                target_index = target_result.get("collection_index")
+                partner_index = partner_result.get("collection_index")
+                if not (
+                    sketch_ref
+                    and document_id
+                    and target_index is not None
+                    and partner_index is not None
+                    and len(post_constraints) == 1
+                ):
+                    raise RuntimeError(
+                        "Managed chain-sprocket transition constraint contract is incomplete"
+                    )
+                if sketch_ref and document_id and target_index is not None and partner_index is not None and post_constraints:
+                    constraint = dict(post_constraints[0])
+                    finalize_timed_out = False
+                    try:
+                        self.runner.call(
+                            "apply_existing_sketch_constraint",
+                            {
+                                "document_id": document_id,
+                                "sketch_ref": sketch_ref,
+                                "target_entity": {"kind": "segment", "index": target_index},
+                                "partner_entity": {"kind": "circle", "index": partner_index},
+                                "constraint": constraint,
+                                "confirm_write": True,
+                            },
+                            timeout_seconds=15.0,
+                        )
+                    except BridgeError as exc:
+                        if "timed out" not in str(exc).lower():
+                            raise
+                        finalize_timed_out = True
+                    inspection = self.runner.call(
+                        "inspect_sketch_full",
+                        {
+                            "document_id": document_id,
+                            "target": {"mode": "existing_sketch", "sketch_ref": str(sketch_ref)},
+                            "include_dimensions": True,
+                            "include_constraints": True,
+                            "include_diagnostics": True,
+                            "max_items": 300,
+                        },
+                        timeout_seconds=60.0,
+                    )
+                    inspected_entities = list(inspection.get("entities") or [])
+                    target_live = next(
+                        (
+                            item for item in inspected_entities
+                            if item.get("kind") == "segment"
+                            and int(item.get("index", -1)) == int(target_index)
+                        ),
+                        {},
+                    )
+                    partner_live = next(
+                        (
+                            item for item in inspected_entities
+                            if item.get("kind") == "circle"
+                            and int(item.get("index", -1)) == int(partner_index)
+                        ),
+                        {},
+                    )
+                    target_reference = target_live.get("reference")
+                    partner_reference = partner_live.get("reference")
+                    point_on_curve = [
+                        item
+                        for item in list(((inspection.get("constraints") or {}).get("all_items") or []))
+                        if (item.get("properties") or {}).get("constraint_kind") == "point_on_curve"
+                        and {
+                            str((item.get("owner_object") or {}).get("reference") or ""),
+                            str((item.get("partner_object") or {}).get("reference") or ""),
+                        } == {str(target_reference), str(partner_reference)}
+                    ]
+                    state = inspection.get("constraints_state") or {}
+                    summary = inspection.get("summary") or {}
+                    verified = (
+                        bool(target_reference)
+                        and bool(partner_reference)
+                        and bool(point_on_curve)
+                        and bool(summary.get("closure_primary_closed"))
+                        and int(summary.get("closure_primary_gap_count") or 0) == 0
+                        and int(summary.get("closure_primary_self_intersection_count") or 0) == 0
+                    )
+                    if not verified:
+                        raise RuntimeError(
+                            "Managed chain-sprocket transition constraint verification failed"
+                        )
+                    result["transition_constraint"] = {
+                        "ok": True,
+                        "kind": "point_on_curve",
+                        "target": "outside_overshoot_right",
+                        "target_reference": target_reference,
+                        "partner": "chain_outside_datum",
+                        "partner_reference": partner_reference,
+                        "apply_call_timed_out": finalize_timed_out,
+                        "constraints_state_readback": state,
+                        "constraints_state_requires_ui_confirmation": int(state.get("code") or 0) != 2,
+                        "closed": True,
+                        "gap_count": 0,
+                        "self_intersection_count": 0,
+                    }
         return {**result, "plan": plan}
 
     def inspect_managed_pulley(self, *, document_id: str) -> dict[str, Any]:
