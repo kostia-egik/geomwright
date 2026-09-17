@@ -28481,7 +28481,7 @@ def handle_studio_workspace_snapshot(payload):
     }
 
 
-def dispatch(request):
+def _dispatch_action(request):
     global _REQUIRE_VISIBLE_KOMPAS
     action = request.get("action")
     payload = dict(request.get("payload") or {})
@@ -28596,6 +28596,20 @@ def dispatch(request):
     if action == "studio_workspace_snapshot":
         return handle_studio_workspace_snapshot(payload)
     raise RuntimeError("Unsupported action: %s" % action)
+
+
+def dispatch(request):
+    action = str(request.get("action") or "unknown")
+    payload = request.get("payload") or {}
+    document_id = payload.get("document_id") if isinstance(payload, dict) else None
+    report_progress(0, "action_started", document_id=document_id, target=action)
+    try:
+        result = _dispatch_action(request)
+    except Exception as exc:
+        report_progress(100, "action_failed", document_id=document_id, target=action, error=str(exc)[:500])
+        raise
+    report_progress(100, "action_completed", document_id=document_id, target=action)
+    return result
 
 
 def main():

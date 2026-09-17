@@ -83,6 +83,30 @@ These helpers are intended for future small primitive operations:
   before/after snapshots around an operation callback and verifies the expected
   delta.
 
+## BridgeRunner Modes And Progress
+
+`BridgeRunner` is the Layer 1 process boundary around the KOMPAS-bundled Python
+runtime. Its default `normal` mode uses a bounded 300-second timeout and removes
+the temporary request/response files after each call. A caller can still set a
+different timeout on the runner or one call.
+
+The explicit `diagnostic` mode keeps the complete request, response, progress,
+stdout, and stderr artifacts under `KOMPAS_MCP_DIAGNOSTIC_DIR` or the operating
+system temporary directory. Their paths are available through
+`runner.last_diagnostic_artifacts`; diagnostic mode is never selected
+implicitly after a failure.
+
+Progress callbacks receive one compatible bounded envelope with `stage`,
+`operation`, `percent`, `document_id`, `target`, and host-measured `elapsed_ms`.
+Legacy bridge events that only provide `operation` and `name` are normalized by
+the runner. Timeout, cancellation, and bridge errors include the last progress
+checkpoint when one was observed.
+
+The bridge dispatch layer adds a bounded `action_started`, `action_completed`,
+or `action_failed` checkpoint around every action, including low-level handlers
+that do not yet expose their own internal milestones. Family-specific handlers
+may publish additional checkpoints between these outer events.
+
 ## Readback Manifest
 
 `document_readback.build_document_readback_manifest()` normalizes COM output

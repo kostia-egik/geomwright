@@ -51,6 +51,8 @@ specific task, not a changelog or a dump of live CAD experiments.
   production boundary, and compatibility namespaces.
 - [CAD patterns](../CAD_PATTERNS.md) — verified KOMPAS COM/CAD behavior and
   reusable failure-prevention rules.
+- [Agent navigation map](agent-navigation.yaml) — compact file/symbol/test entry
+  points for bounded repository navigation.
 - Human planning drafts and raw investigation notes are kept outside the public
   documentation tree until they become stable runtime contracts.
 

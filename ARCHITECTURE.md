@@ -54,6 +54,14 @@ preview-функции и адаптирует их результат для HT
 копия — `src/kompas_mcp/assets/bridge/kompas_bridge.py`. Эти файлы обязаны быть
 byte-identical.
 
+`BridgeRunner` является Layer 1 process boundary. Штатный `normal` режим имеет
+ограниченный timeout и удаляет временный transport state; явный `diagnostic`
+режим сохраняет request/response/progress/stdout/stderr как внешние артефакты.
+Progress callbacks получают единый компактный envelope, а timeout/cancellation
+ошибки содержат последний доступный checkpoint. Это реализует `SESSION-002` без
+изменения публичных CAD-result schemas. Bridge dispatch дополнительно публикует
+bounded start/completed/failed checkpoints вокруг каждой action.
+
 ## Четыре слоя
 
 ### Layer 1 — атомарные инструменты и readback

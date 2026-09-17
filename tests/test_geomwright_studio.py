@@ -1170,6 +1170,10 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert health["product"] == "geomwright_studio"
     assert health["mode"] == "managed_cad"
     assert health["contract_version"] == 2
+    assert len(health["static_version"]) == 12
+    page = client.get("/").text
+    assert f"styles.css?v={health['static_version']}" in page
+    assert f"app.js?v={health['static_version']}" in page
     assert "managed_pulley_create_job" in health["capabilities"]
     assert client.get("/modules").json()["count"] == 6
 

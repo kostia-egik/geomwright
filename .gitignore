@@ -9,6 +9,7 @@ tmp_*.py
 tmp/
 sample/generated/
 experiments/spikes/
+experiments/standards/
 docs/archive/
 Новая папка/
 opencode.json

@@ -1,0 +1,77 @@
+# Compact navigation map for agents. Locate exact symbols with grep, then read a
+# bounded range. This file is not an architecture or API reference.
+
+bootstrap:
+  mcp_server:
+    owner: src/geomwright/server.py
+    symbols: [main]
+  kompas_registry:
+    owner: src/geomwright/kompas/server.py
+    symbols: [mcp, adapter]
+  studio_app:
+    owner: src/geomwright/studio/app.py
+    symbols: [create_app]
+
+runtime:
+  host_adapter:
+    owner: src/kompas_mcp/adapter.py
+    symbols: [KompasAdapter]
+  bridge_runner:
+    owner: src/kompas_mcp/bridge_runner.py
+    symbols: [BridgeRunner]
+  cad_bridge:
+    owner: bridge/kompas_bridge.py
+    note: keep byte-identical with src/kompas_mcp/assets/bridge/kompas_bridge.py
+
+transmissions:
+  chain:
+    owner: src/kompas_mcp/transmissions/chain.py
+    symbols: [preview_chain_sprocket, build_chain_sprocket_plan]
+    bridge_symbols: [handle_create_chain_sprocket, _build_chain_row_layout]
+    studio_symbol: _adapt_chain
+    focused_test: tests/test_geomwright_studio.py -k chain
+  v_belt:
+    owner: src/kompas_mcp/transmissions/v_belt.py
+    focused_test: tests/test_v_belt_transmission.py
+  poly_v:
+    owner: src/kompas_mcp/transmissions/poly_v.py
+    focused_test: tests/test_poly_v_transmission.py
+  timing_belt:
+    owner: src/kompas_mcp/transmissions/timing_belt.py
+    focused_test: tests/test_geomwright_studio.py -k timing
+  flat_belt:
+    owner: src/kompas_mcp/transmissions/flat_belt.py
+    focused_test: tests/test_geomwright_studio.py -k flat_belt
+
+studio:
+  module_registry:
+    owner: src/geomwright/studio/registry.py
+    symbols: [PreviewModule, preview_module, managed_pulley_plan]
+  controller:
+    owner: src/geomwright/studio/static/app.js
+  primary_canvas:
+    owner: src/geomwright/studio/static/canvas.js
+  chain_axial_canvas:
+    owner: src/geomwright/studio/static/side-section.js
+  translations:
+    owner: src/geomwright/studio/static/i18n.js
+
+verification:
+  focused_gate:
+    owner: scripts/check_change.ps1
+  cad_acceptance:
+    owner: scripts/verify_cad_scenario.py
+  evidence_summary:
+    owner: scripts/summarize_evidence.py
+  junit_summary:
+    owner: scripts/summarize_junit.py
+  work_card:
+    owner: docs/templates/work-card.yaml
+
+standards_research:
+  pdf_index:
+    owner: scripts/index_standards.py
+    output: experiments/standards/index.json
+  bounded_search:
+    owner: scripts/search_standards.py
+    note: search the cached text by document and page; do not load whole PDFs into context

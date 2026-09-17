@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import threading
 import time
@@ -22,6 +23,14 @@ from kompas_mcp.adapter import KompasAdapter
 
 
 _ROOT = Path(__file__).resolve().parent
+
+
+def _static_content_version() -> str:
+    digest = hashlib.sha256()
+    for path in sorted((_ROOT / "static").glob("*.css")) + sorted((_ROOT / "static").glob("*.js")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
 
 
 def _validation_detail(exc: ValidationError) -> list[dict[str, Any]]:
@@ -96,6 +105,7 @@ def create_app(
         description="Local preview and managed KOMPAS build UI for registered Geomwright modules.",
     )
     templates = Jinja2Templates(directory=str(_ROOT / "templates"))
+    static_version = _static_content_version()
     app.mount("/static", StaticFiles(directory=str(_ROOT / "static")), name="static")
     cad_jobs: dict[str, dict[str, Any]] = {}
     cad_jobs_lock = threading.Lock()
@@ -237,7 +247,7 @@ def create_app(
         return templates.TemplateResponse(
             request=request,
             name="base.html",
-            context={"module_count": len(list_modules())},
+            context={"module_count": len(list_modules()), "static_version": static_version},
         )
 
     @app.get("/health")
@@ -247,6 +257,7 @@ def create_app(
             "product": "geomwright_studio",
             "mode": "managed_cad",
             "contract_version": 2,
+            "static_version": static_version,
             "capabilities": [
                 "managed_pulley_plan",
                 "managed_pulley_create_job",

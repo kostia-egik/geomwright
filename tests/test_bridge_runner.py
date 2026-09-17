@@ -62,6 +62,68 @@ class BridgeRunnerResponseTests(unittest.TestCase):
                     runner.call("apply_existing_sketch_constraint", timeout_seconds=1.0)
         self.assertTrue(process.terminated)
 
+    def test_normalizes_progress_to_bounded_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            progress_path = Path(temp_dir) / "progress.jsonl"
+            progress_path.write_text(
+                json.dumps({"percent": 120, "operation": "rebuild", "name": "Pulley"}) + "\n",
+                encoding="utf-8",
+            )
+            events = []
+            with patch("kompas_mcp.bridge_runner.time.monotonic", return_value=1.25):
+                consumed, last = BridgeRunner._report_progress(progress_path, 0, events.append, 1.0, None)
+
+        self.assertEqual(consumed, 1)
+        self.assertEqual(last, events[0])
+        self.assertEqual(
+            {key: events[0][key] for key in ("stage", "operation", "percent", "document_id", "target", "elapsed_ms")},
+            {
+                "stage": "rebuild",
+                "operation": "rebuild",
+                "percent": 100,
+                "document_id": None,
+                "target": "Pulley",
+                "elapsed_ms": 250,
+            },
+        )
+
+    def test_diagnostic_mode_keeps_full_call_artifacts(self) -> None:
+        with self._runner_context({"ok": True, "data": {"documents": []}}) as runner:
+            runner.mode = "diagnostic"
+            runner.diagnostic_artifact_dir = runner.kompas_python.parent / "diagnostics"
+            self.assertEqual(runner.call("list_documents"), {"documents": []})
+            artifacts = runner.last_diagnostic_artifacts
+            self.assertIsNotNone(artifacts)
+            assert artifacts is not None
+            self.assertTrue(Path(artifacts["request"]).exists())
+            self.assertTrue(Path(artifacts["response"]).exists())
+            self.assertTrue(Path(artifacts["stdout"]).exists())
+            self.assertTrue(Path(artifacts["stderr"]).exists())
+
+    def test_rejects_unknown_runner_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "normal.*diagnostic"):
+            BridgeRunner(mode="verbose")  # type: ignore[arg-type]
+
+    def test_timeout_reports_last_progress_checkpoint(self) -> None:
+        process = _WaitingFakeProcess()
+
+        def fake_popen(_args, **kwargs):
+            progress_path = Path(kwargs["env"]["KOMPAS_MCP_PROGRESS_FILE"])
+            progress_path.write_text(
+                json.dumps({"percent": 78, "operation": "row_pattern_rebuild", "name": "Rows"}) + "\n",
+                encoding="utf-8",
+            )
+            return process
+
+        with self._runner_context({"ok": True, "data": {}}) as runner:
+            with (
+                patch("kompas_mcp.bridge_runner.subprocess.Popen", side_effect=fake_popen),
+                patch("kompas_mcp.bridge_runner.time.monotonic", side_effect=[0.0, 0.25, 2.0]),
+            ):
+                with self.assertRaisesRegex(BridgeError, '"stage":"row_pattern_rebuild"'):
+                    runner.call("create_chain_sprocket", progress_callback=lambda _event: None, timeout_seconds=1.0)
+        self.assertTrue(process.terminated)
+
 
 class _WaitingFakeProcess:
     def __init__(self) -> None:

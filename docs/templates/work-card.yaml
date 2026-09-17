@@ -1,0 +1,21 @@
+# Copy this file to ignored experiments/spikes/current-work.yaml.
+scope: ""
+mode: ""  # host-code | standards | live-cad | studio-ui | audit
+
+accepted_facts: []
+
+changed_symbols: []
+
+evidence_files: []
+
+focused_tests: []
+
+live_artifacts: []
+
+open_questions: []
+
+do_not_repeat: []
+
+acceptance: []
+
+out_of_scope: []
