@@ -1391,16 +1391,26 @@ def iter_collection(collection):
 
 _APP5 = None
 _REQUIRE_VISIBLE_KOMPAS = False
+_ACTIVE_API7_DIRECT = False
 
 
 def make_app():
     import win32com.client
-    global _APP5
+    global _APP5, _ACTIVE_API7_DIRECT
+    _ACTIVE_API7_DIRECT = False
     if _REQUIRE_VISIBLE_KOMPAS:
         try:
             _APP5 = win32com.client.GetActiveObject("KOMPAS.Application.5")
         except Exception:
-            raise RuntimeError("No running visible KOMPAS-3D instance. Start KOMPAS-3D and keep its main window open; Studio will reconnect automatically.")
+            # KOMPAS v23 may register the visible interactive controller only
+            # under Application.7.  Do not call Dispatch(Application.5) here:
+            # that creates a second hidden KOMPAS process and leaves Studio
+            # talking to the wrong document collection.
+            try:
+                _APP5 = win32com.client.GetActiveObject("KOMPAS.Application.7")
+                _ACTIVE_API7_DIRECT = True
+            except Exception:
+                raise RuntimeError("No running visible KOMPAS-3D instance. Start KOMPAS-3D and keep its main window open; Studio will reconnect automatically.")
         if not bool(safe_get(_APP5, "Visible", False)):
             try:
                 _APP5.Visible = True
@@ -1415,6 +1425,8 @@ def make_app():
         controller_api()
     else:
         controller_api
+    if _ACTIVE_API7_DIRECT:
+        return _APP5
     app7 = getattr(_APP5, "ksGetApplication7", None)
     if callable(app7):
         try:

@@ -227,10 +227,15 @@ GOST chain dimensions remain separate from the shared tooth-construction
 algorithm; selecting the construction variant does not rewrite catalog pitch,
 roller diameter, or inner width.
 
-Layer 2 rejects tooth construction outside `1.4 <= pitch / engagement_diameter <= 2.0`
-before CAD writes: GOST 591-69 limits its scope to lambda <= 2 and its Table 1
-starts at 1.40. It never extrapolates the tooth-height coefficient for unsupported
-PRI rows. Catalog presence alone does not promise build support.
+Layer 2 rejects ordinary tooth construction outside
+`1.4 <= pitch / engagement_diameter <= 2.0` before CAD writes: GOST 591-69
+limits its scope to lambda <= 2 and its Table 1 starts at 1.40. ПРИ rows above
+that range use a separately labelled native-KOMPAS compatibility profile with
+`K=0.532`. Five measured diameters for ПРИ-78.1-360 and one `z=60` diameter for
+each remaining ПРИ row reproduce that rule to the displayed 0.01 mm. Layer 2
+also verifies that the outside circle precedes the intersection of neighboring
+`r2` branches, so the full circular pattern retains a blunt outside arc rather
+than a pointed overlap. This policy is not presented as normative GOST 591 geometry.
 `ISO_08A` (and its row-count variants) carries ISO 606:1994 dimensions from
 GOST 13568-97, mandatory Annex A, Table A.1; it is not an alias for the existing
 `ISO_40A` reference-catalog entry. The supplied ISO 606:2015 sample does not
@@ -260,9 +265,18 @@ plate height. ISO 606:1994 A/B rows through 32A/32B are sourced from GOST
 distinct profiles rather than aliased to ANSI-numbered entries. Axial data is
 attached only after pitch, roller diameter, and inner width all match, preventing
 the existing ANSI-derived `ISO_40A` key from being mistaken for old ISO 40A.
+ANSI-numbered A-series rows 25A through 240A carry a separate ANSI B29.1
+transverse-pitch and plate-height schedule converted with the exact 25.4 mm/in
+factor. For narrow catalog gaps such as 05B, the normal GOST 591 `r4` remains
+the preferred radius; when two such arcs cannot fit, the plan uses the largest
+equal fitted radius while preserving a ten-percent central land and records the
+selection policy in readback.
 GOST 13568 PR/PV multi-row rows use their own Table 2 dimensions. A shared
 Layer 2 axial layout supplies preview and CAD tooth width, pitch, total width,
 and connecting-rim diameter. Multi-row widths use GOST 591-69 Table 2;
+GOST 21834-87 NP/TP rows use the corresponding catalogue transverse-pitch and
+plate-height schedule, so all three published chain-standard branches have
+multi-row representatives in the same plan contract.
 `Dc=floor(t*cot(pi/z)-1.3*h)` uses its maximum rim diameter and clause 1.5 rounding.
 The first row is built at its own width, including both axial roundings. A
 type-528 `ILinearPattern` copies the evaluated whole body along negative X;

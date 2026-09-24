@@ -25,8 +25,11 @@ _SOURCE = {
         "https://files.stroyinf.ru/Index2/1/4294831/4294831887.htm",
         "https://files.stroyinf.ru/Data2/1/4293733/4293733500.pdf",
         "https://files.stroyinf.ru/Data2/1/4294831/4294831887.pdf",
+        "https://rosgosts.ru/file/gost/21/220/gost_591-69.pdf",
         "https://mechcodex.com/reference/roller-chain-dimensions-bs-iso",
         "https://mechcodex.com/reference/roller-chain-dimensions-ansi",
+        "https://www.nitrochain.com/roller-chain-dimension-charts",
+        "https://promcocepi.ru/catalog/privodnye-tsepi/tsepi-privodnye-rolikovye-povyshennoy-prochnosti-np-tp/",
     ],
 }
 _PROFILES: dict[str, dict[str, Any]] = {
@@ -108,6 +111,34 @@ for _series, (_pitch, _roller, _inner, _spacing, _height) in _ISO_1994_DIMENSION
         "row_spacing_source": "GOST 13568-97, Annex A, Table A.1 (ISO 606:1994)",
         "plate_height_source": "GOST 13568-97, Annex A, Table A.1, maximum of inner/outer plate heights",
     })
+
+# ANSI B29.1 / ISO A-series duplex dimensions. Values published in inches are
+# converted with the exact 25.4 mm/in factor. Keying by the full radial row
+# prevents the ANSI-numbered A series from being confused with old ISO A rows.
+_ANSI_A_AXIAL_DATA = {
+    (6.35, 3.30, 3.18): (0.252 * 25.4, 0.228 * 25.4),
+    (9.525, 5.08, 4.78): (0.399 * 25.4, 0.346 * 25.4),
+    (12.7, 7.92, 7.92): (0.566 * 25.4, 0.469 * 25.4),
+    (15.875, 10.16, 9.53): (0.713 * 25.4, 0.585 * 25.4),
+    (19.05, 11.91, 12.70): (0.896 * 25.4, 0.709 * 25.4),
+    (25.4, 15.88, 15.88): (1.153 * 25.4, 0.949 * 25.4),
+    (31.75, 19.05, 19.05): (1.408 * 25.4, 1.188 * 25.4),
+    (38.1, 22.23, 25.40): (1.789 * 25.4, 1.425 * 25.4),
+    (44.45, 25.40, 25.40): (1.924 * 25.4, 1.663 * 25.4),
+    (50.8, 28.58, 31.75): (2.305 * 25.4, 1.889 * 25.4),
+    (57.15, 35.71, 35.71): (2.592 * 25.4, 2.047 * 25.4),
+    (63.5, 39.67, 38.10): (2.816 * 25.4, 2.375 * 25.4),
+    (76.2, 47.63, 47.63): (3.457 * 25.4, 2.791 * 25.4),
+}
+for _profile in _PROFILES.values():
+    if _profile.get("standard") != "iso_606" or _profile.get("profile_family") != "iso_a":
+        continue
+    _key = tuple(float(_profile[field]) for field in ("pitch", "outside_diameter", "inner_width"))
+    if _key not in _ANSI_A_AXIAL_DATA:
+        continue
+    _profile["row_spacing"], _profile["plate_height"] = _ANSI_A_AXIAL_DATA[_key]
+    _profile["row_spacing_source"] = "ANSI B29.1 A-series duplex transverse pitch (25.4 mm/in conversion)"
+    _profile["plate_height_source"] = "ANSI B29.1 A-series link plate height (25.4 mm/in conversion)"
 
 for _designation, _profile in list(_PROFILES.items()):
     if _profile["standard"] == "iso_606":
@@ -199,14 +230,33 @@ _GOST_13568_AXIAL_DATA = {
     (50.8, 28.58, 31.75): (58.55, 48.30),
     (9.525, 6.0, 5.20): (10.75, 9.85),
 }
+# GOST 21834-87 NP/TP axial dimensions.  The catalogue uses the same chain
+# envelope for NP and TP at a given pitch; the transverse pitch and plate
+# height are therefore keyed by the radial dimensions shared by both families.
+# Values are cross-checked against the published NP/TP catalogue table.
+_GOST_21834_AXIAL_DATA = {
+    (25.4, 15.88, 15.88): (29.29, 24.13),
+    (31.75, 19.05, 19.05): (35.76, 30.18),
+    (38.1, 22.23, 25.40): (45.44, 36.10),
+    (44.45, 25.40, 25.40): (48.87, 42.24),
+    (50.8, 28.58, 31.75): (58.55, 48.26),
+    (57.15, 35.70, 35.72): (61.90, 60.32),
+    (63.5, 39.68, 39.67): (61.90, 60.32),
+}
 for _profile in _PROFILES.values():
-    if _profile.get("profile_family") not in ("pr", "pv") or int(_profile.get("nominal_row_count", 1)) == 1:
+    if int(_profile.get("nominal_row_count", 1)) == 1:
         continue
     _key = tuple(float(_profile[field]) for field in ("pitch", "outside_diameter", "inner_width"))
-    if _key in _GOST_13568_AXIAL_DATA:
+    if _profile.get("profile_family") in ("pr", "pv") and _key in _GOST_13568_AXIAL_DATA:
         _profile["row_spacing"], _profile["plate_height"] = _GOST_13568_AXIAL_DATA[_key]
         _profile["row_spacing_source"] = "GOST 13568-97 Table 2"
         _profile["plate_height_source"] = "GOST 13568-97 Table 2"
+    if _profile.get("standard") == "gost_21834_87" and int(_profile.get("nominal_row_count", 1)) > 1:
+        _key = tuple(float(_profile[field]) for field in ("pitch", "outside_diameter", "inner_width"))
+        if _key in _GOST_21834_AXIAL_DATA:
+            _profile["row_spacing"], _profile["plate_height"] = _GOST_21834_AXIAL_DATA[_key]
+            _profile["row_spacing_source"] = "GOST 21834-87 NP/TP dimensional table"
+            _profile["plate_height_source"] = "GOST 21834-87 NP/TP dimensional table"
 
 _FAMILY_STRATEGIES = {
     "iso_a": {
@@ -319,14 +369,15 @@ def chain_profile_selection() -> dict[str, Any]:
             if profile["selection_family"] in families
         )
         family = profile["selection_family"]
-        standards[standard]["families"][family]["profiles"].append({
+        item = {
             "value": designation,
             "label_ru": profile.get("label_ru", profile.get("label", designation)),
             "label_en": profile.get("label_en", profile.get("label", designation)),
             "pitch": profile["pitch"],
             "chain_type": profile.get("chain_type", "roller"),
             "nominal_row_count": profile.get("nominal_row_count", 1),
-        })
+        }
+        standards[standard]["families"][family]["profiles"].append(item)
         standards[standard]["families"][family]["available"] = True
     return {
         "standards": [
@@ -440,6 +491,7 @@ def _kompas_native_tooth_geometry(
     tooth_count: int,
     profile_variant: ToothProfileVariant,
     dimensions_standard: str,
+    allow_extended_lambda: bool = False,
 ) -> dict[str, Any]:
     """Build the detailed GOST 591 working profile and its technical CAD closure."""
     half_pitch_angle = math.pi / tooth_count
@@ -447,8 +499,13 @@ def _kompas_native_tooth_geometry(
     pitch_radius = pitch_diameter / 2.0
     engagement_ratio = pitch / roller_diameter
     # GOST 591-69 scope limits lambda to <= 2; Table 1 starts at 1.40.
-    # Never extrapolate K (including PRI rows outside this range).
-    if not 1.4 <= engagement_ratio <= 2.0:
+    # PRI is explicitly listed by GOST 13568-2017 but is outside the GOST
+    # 591 tooth-profile scope. The native KOMPAS module uses K=0.532 for those
+    # rows; five measured diameters for PRI-78.1-360 and one z=60 diameter for
+    # each other catalog row reproduce that policy to the displayed 0.01 mm.
+    # Ordinary ISO/PR/PV/NP/TP profiles still fail closed outside the table.
+    extended_lambda = bool(allow_extended_lambda and engagement_ratio > 2.0)
+    if (not 1.4 <= engagement_ratio <= 2.0) and not extended_lambda:
         raise ValueError(
             f"GOST 591-69 tooth construction requires 1.4 <= lambda = pitch / "
             f"engagement diameter <= 2.0; got {engagement_ratio:.6g} "
@@ -456,7 +513,9 @@ def _kompas_native_tooth_geometry(
             "A separate validated tooth-profile method is required; K is not extrapolated."
         )
     # Shared endpoints use the interval starting at that endpoint; 2.0 is included.
-    if engagement_ratio >= 1.8:
+    if extended_lambda:
+        outside_coefficient = 0.532
+    elif engagement_ratio >= 1.8:
         outside_coefficient = 0.565
     elif 1.7 <= engagement_ratio < 1.8:
         outside_coefficient = 0.575
@@ -468,7 +527,6 @@ def _kompas_native_tooth_geometry(
         outside_coefficient = 0.480
     outside_diameter = pitch * (outside_coefficient + 1.0 / math.tan(half_pitch_angle))
     outside_radius = outside_diameter / 2.0
-    closure_radius = outside_radius + 0.01
 
     alpha = math.radians(55.0 - 60.0 / tooth_count)
     beta = math.radians(18.0 - 56.0 / tooth_count)
@@ -538,17 +596,49 @@ def _kompas_native_tooth_geometry(
     )
 
     outside_candidates = _circle_intersections(
-        right_secondary_center, secondary_radius, (0.0, 0.0), closure_radius
+        right_secondary_center, secondary_radius, (0.0, 0.0), outside_radius
     )
     right_outside_candidates = [point for point in outside_candidates if point[0] >= 0.0]
     if not right_outside_candidates:
         raise ValueError(
-            "KOMPAS GOST 591 tooth-head arc does not intersect the outside closure circle"
+            "KOMPAS chain tooth-head arc does not intersect the functional outside circle"
         )
     right_outside = max(
         right_outside_candidates,
         key=lambda point: point[1],
     )
+
+    # Verify the repeated sprocket boundary, not only one closed cutter. The
+    # right r2 branch of this gap and the rotated left r2 branch of the next gap
+    # must reach the outside circle before they meet each other. Otherwise the
+    # circular cut pattern creates a pointed tooth even though every individual
+    # tooth-space sketch is valid and closed.
+    full_pitch_angle = 2.0 * half_pitch_angle
+    cosine = math.cos(full_pitch_angle)
+    sine = math.sin(full_pitch_angle)
+    next_left_secondary_center = (
+        -right_secondary_center[0] * cosine + right_secondary_center[1] * sine,
+        right_secondary_center[1] * cosine + right_secondary_center[0] * sine,
+    )
+    neighboring_head_intersections = _circle_intersections(
+        right_secondary_center,
+        secondary_radius,
+        next_left_secondary_center,
+        secondary_radius,
+    )
+    if not neighboring_head_intersections:
+        raise ValueError("neighboring tooth-head arcs do not admit a topology intersection check")
+    tooth_head_crossing = max(
+        neighboring_head_intersections,
+        key=lambda point: math.hypot(*point),
+    )
+    tooth_head_crossing_radius = math.hypot(*tooth_head_crossing)
+    tooth_tip_radial_clearance = tooth_head_crossing_radius - outside_radius
+    if tooth_tip_radial_clearance <= 1e-6:
+        raise ValueError(
+            "KOMPAS chain outside circle must precede the "
+            f"neighboring r2-arc crossing; clearance={tooth_tip_radial_clearance:.6g} mm"
+        )
     closure_line_clearance = 0.5
     closure_line_y = outside_radius + closure_line_clearance
     right_closure = [right_outside[0], closure_line_y]
@@ -617,11 +707,23 @@ def _kompas_native_tooth_geometry(
         "secondary_radius": secondary_radius,
         "center_offset": center_offset,
         "standard_parameters": {
-            "standard": f"{dimensions_standard} dimensions / GOST 591-69 tooth construction",
-            "construction": f"kompas_native_gost_591_{profile_variant}",
+            "standard": (
+                f"{dimensions_standard} dimensions / native KOMPAS PRI compatibility"
+                if extended_lambda
+                else f"{dimensions_standard} dimensions / GOST 591-69 tooth construction"
+            ),
+            "construction": (
+                f"kompas_native_pri_compatibility_{profile_variant}"
+                if extended_lambda else f"kompas_native_gost_591_{profile_variant}"
+            ),
             "engagement_ratio": engagement_ratio,
             "outside_coefficient": outside_coefficient,
-            "outside_coefficient_range_clamped": False,
+            "outside_coefficient_source": (
+                "native_kompas_pri_compatibility" if extended_lambda else "gost_591_table_1"
+            ),
+            "extended_lambda_policy": "native_kompas_pri_k_0_532" if extended_lambda else None,
+            "neighboring_tooth_head_crossing_radius": tooth_head_crossing_radius,
+            "tooth_tip_radial_clearance": tooth_tip_radial_clearance,
             "seating_radius": seating_radius,
             "flank_radius": flank_radius,
             "secondary_radius": secondary_radius,
@@ -631,7 +733,7 @@ def _kompas_native_tooth_geometry(
             "fg_distance": fg_distance,
             "center_offset": center_offset,
             "closure_offset": closure_line_y - right_outside[1],
-            "closure_radial_overshoot": 0.01,
+            "closure_radial_overshoot": 0.0,
             "closure_line_clearance": closure_line_clearance,
         },
         "profile_path": profile_path,
@@ -663,6 +765,7 @@ def _chain_tooth_profile_geometry(
     tooth_count: int,
     dimensions_standard: str,
     gost_profile_variant: GostToothProfileVariant,
+    allow_extended_lambda: bool = False,
 ) -> dict[str, Any]:
     """Calculate one KOMPAS-compatible detailed tooth gap."""
     return _kompas_native_tooth_geometry(
@@ -671,6 +774,7 @@ def _chain_tooth_profile_geometry(
         tooth_count=tooth_count,
         profile_variant=gost_profile_variant,
         dimensions_standard=dimensions_standard,
+        allow_extended_lambda=allow_extended_lambda,
     )
 
 
@@ -712,6 +816,7 @@ def preview_chain_sprocket(
         tooth_count=tooth_count,
         dimensions_standard=dimensions_standard,
         gost_profile_variant=gost_profile_variant,
+        allow_extended_lambda=profile["profile_family"] == "pri",
     )
     pitch_diameter = tooth_geometry["pitch_diameter"]
     pitch_radius = tooth_geometry["pitch_radius"]
@@ -725,6 +830,15 @@ def preview_chain_sprocket(
         _polar(pitch_radius, -math.pi / tooth_count + 2.0 * math.pi / tooth_count * index / 64.0)
         for index in range(65)
     ]
+    warnings = [
+        "Catalog dimensions come from the selected ISO or GOST chain family; the tooth gap uses the KOMPAS-compatible GOST 591 construction, and selecting its variant does not make the dimensional catalogs interchangeable.",
+        "Hub, bore, keyway, shaft interface, and downstream manufacturing operations are outside this module.",
+        "End-view preview shows the radial tooth profile only; multi-row axial rim geometry is not shown yet.",
+    ]
+    if profile["profile_family"] == "pri" and tooth_geometry["standard_parameters"].get("extended_lambda_policy"):
+        warnings.append(
+            "ПРИ uses the measured native KOMPAS compatibility rule K=0.532 when lambda > 2: GOST 13568-2017 defines the chain dimensions, while GOST 591-69 does not cover this tooth-profile range."
+        )
     return {
         "success": True,
         "standard": profile["standard"],
@@ -761,11 +875,7 @@ def preview_chain_sprocket(
             "pitch_circle": pitch_circle,
             "cad_entities": tooth_geometry.get("cad_entities"),
         },
-        "warnings": [
-            "Catalog dimensions come from the selected ISO or GOST chain family; the tooth gap uses the KOMPAS-compatible GOST 591 construction, and selecting its variant does not make the dimensional catalogs interchangeable.",
-            "Hub, bore, keyway, shaft interface, and downstream manufacturing operations are outside this module.",
-            "End-view preview shows the radial tooth profile only; multi-row axial rim geometry is not shown yet.",
-        ],
+        "warnings": warnings,
     }
 
 
@@ -1166,9 +1276,15 @@ def _build_chain_row_layout_plan(layout: dict[str, Any], *, root_radius: float, 
     radius = float(layout["connector_diameter"]) / 2.0
     if not 0.0 < radius < min(root_radius, float(rounding["center_y"])):
         raise ValueError("connecting rim must remain below the tooth roots and axial roundings")
-    r4 = float(layout["junction_fillet_radius"])
-    if (2.0 * r4 >= layout["row_spacing"] - layout["tooth_width"]
-            or radius + r4 >= min(root_radius, float(rounding["center_y"]))):
+    nominal_r4 = float(layout["junction_fillet_radius"])
+    row_gap = float(layout["row_spacing"]) - float(layout["tooth_width"])
+    # GOST 591 Table 2 gives the normal transition radius. Very small ISO
+    # chains (05B) have a catalogued transverse pitch whose gap is narrower
+    # than two normal r4 arcs. Preserve a 10% central land and use the largest
+    # fitting equal radius instead of rejecting a valid multi-strand chain.
+    r4 = min(nominal_r4, 0.45 * row_gap)
+    fitted_r4 = r4 < nominal_r4 - 1e-12
+    if radius + r4 >= min(root_radius, float(rounding["center_y"])):
         raise ValueError("GOST r4 junction fillets do not fit between rows and below the tooth roots")
     edge_specs = []
     for index in range(layout["row_count"] - 1):
@@ -1206,7 +1322,11 @@ def _build_chain_row_layout_plan(layout: dict[str, Any], *, root_radius: float, 
         "pattern_name": f"{name} row body pattern",
         "junction_fillet": {
             "name": f"{name} row junction fillets", "radius": r4,
-            "source": "GOST 591-69 Table 2, r4", "edge_probe_points": edge_specs,
+            "nominal_radius": nominal_r4,
+            "radius_selection": "width_fitted_10_percent_land" if fitted_r4 else "gost_591_table_2",
+            "source": "GOST 591-69 Table 2, r4; fitted to catalogued ISO row gap when required",
+            "minimum_land": row_gap - 2.0 * r4,
+            "edge_probe_points": edge_specs,
             "expected_edge_count": len(edge_specs), "probe_tolerance": 1e-5,
             "expected_added_volume_cm3": added_volume,
         },
@@ -1411,10 +1531,13 @@ def build_chain_sprocket_plan(
         outside_radius=float(derived["outside_diameter"]) / 2.0,
         face_width=resolved_face_width, name=requested_name,
     )
-    row_layout = _build_chain_row_layout_plan(
-        axial_layout, root_radius=float(derived["root_diameter"]) / 2.0,
-        rounding=axial_rounding, name=requested_name,
-    )
+    try:
+        row_layout = _build_chain_row_layout_plan(
+            axial_layout, root_radius=float(derived["root_diameter"]) / 2.0,
+            rounding=axial_rounding, name=requested_name,
+        )
+    except ValueError as exc:
+        raise ValueError(f"{designation}: {exc}") from exc
     row_spacing = axial_layout["row_spacing"]
     total_face_width = axial_layout["total_width"]
     entities = _chain_tooth_space_entities({

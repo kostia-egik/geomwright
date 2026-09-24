@@ -1059,16 +1059,18 @@ def _adapt_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, 
     axial_layout = derived["axial_layout"]
     tooth_width = axial_layout["tooth_width"]
     row_spacing = axial_layout["row_spacing"]
+    connector_diameter = axial_layout.get("connector_diameter")
     secondary_view = {
         "view_mode": "side_section", "row_count": row_count,
         "tooth_width_mm": tooth_width,
         "row_spacing_mm": row_spacing,
         "total_width_mm": axial_layout["total_width"],
         "engagement_diameter_mm": profile["outside_diameter"],
-        "width_source": "GOST 591-69 Table 2",
+        "connector_diameter_mm": connector_diameter,
+        "width_source": axial_layout.get("width_source"),
         "row_spacing_source": profile.get("row_spacing_source", profile.get("dimensions_source")),
         "axial_layout_status": "dimensioned" if row_spacing else "schematic_missing_row_spacing",
-        "connector_status": "schematic_not_dimensioned",
+        "connector_status": "dimensioned" if connector_diameter else "schematic_missing_plate_height",
     }
     tooth_count = int(request.get("tooth_count") or 1)
     groove_angle = 2.0 * math.pi / tooth_count
@@ -1159,11 +1161,15 @@ def _adapt_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, 
             "visible_tooth_count": section["visible_tooth_count"],
             "section_style": "broken_out",
         },
-        "warning_items": [
-            {"code": "chain_profile_standard_scope", "message": _warnings(preview)[0]},
-            {"code": "chain_downstream_operations_external", "message": _warnings(preview)[1]},
-            {"code": "chain_multirow_axial_preview_pending", "message": _warnings(preview)[2]},
-        ],
+        "warning_items": _warning_items(
+            preview,
+            [
+                "chain_profile_standard_scope",
+                "chain_downstream_operations_external",
+                "chain_multirow_axial_preview_pending",
+                "chain_pri_extended_profile",
+            ],
+        ),
     }
 
 

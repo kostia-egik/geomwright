@@ -153,6 +153,34 @@ class BridgeVisibilityTests(unittest.TestCase):
             else:
                 client.GetActiveObject = original
 
+    def test_make_app_falls_back_to_active_api7_without_dispatching_api5(self) -> None:
+        client = sys.modules["win32com.client"]
+        original = getattr(client, "GetActiveObject", None)
+        app7 = types.SimpleNamespace(Visible=True)
+        requested_progids: list[str] = []
+
+        def get_active_object(progid: str):
+            requested_progids.append(progid)
+            if progid == "KOMPAS.Application.5":
+                raise RuntimeError("API5 running object is not registered")
+            return app7
+
+        client.GetActiveObject = get_active_object
+        BRIDGE._REQUIRE_VISIBLE_KOMPAS = True
+        try:
+            self.assertIs(BRIDGE.make_app(), app7)
+            self.assertIs(BRIDGE._APP5, app7)
+            self.assertEqual(
+                requested_progids,
+                ["KOMPAS.Application.5", "KOMPAS.Application.7"],
+            )
+        finally:
+            BRIDGE._REQUIRE_VISIBLE_KOMPAS = False
+            if original is None:
+                del client.GetActiveObject
+            else:
+                client.GetActiveObject = original
+
     def test_set_model_object_hidden_updates_hidden_flag(self) -> None:
         obj = _FakeHiddenObject(hidden=False)
 

@@ -89,6 +89,11 @@ Rule:
   document reads or writes. KOMPAS may register only one active object even
   when several process windows exist, so process enumeration cannot select a
   different visible COM object reliably.
+- KOMPAS v23 can expose the visible interactive controller only as
+  `KOMPAS.Application.7`. Interactive bridge code must try the active `.7`
+  object after `.5` and use that API7 object directly; it must not fall back to
+  `Dispatch("KOMPAS.Application.5")`, because that creates a second hidden
+  process and a separate document collection.
 - Absence of a running object is a recoverable disconnected state, not
   permission to create an application.
 - Non-interactive MCP workflows retain their explicit existing session policy.
@@ -1337,6 +1342,19 @@ Known example:
   bottom. Bounded comparison against native PR/PV/NP/TP/08B examples confirms
   centres, radii and internal junctions within 0.000001 mm after removing it.
   This is native-reference evidence, not independent normative certification.
+- A chain tooth-head endpoint constrained to the outside datum must be seeded
+  on that exact circle. Intersecting `r2` with a larger technical closure circle
+  makes Studio draw a radial bridge and asks KOMPAS to repair the contour during
+  the final `point_on_curve`; at high tooth counts that relation can be
+  impossible and leave pointed teeth. Keep the three-segment cap outside the
+  body, but compute the working head endpoint on the functional outside circle.
+  Checking one head arc is not sufficient: compare the outside radius with the
+  outer intersection of that branch and the rotated opposite `r2` branch from
+  the neighboring tooth space. If the outside circle comes later, the circular
+  pattern overlaps the cuts and leaves a pointed tooth although every seed
+  sketch is closed. For PRI with `lambda > 2`, the measured native KOMPAS rule
+  `K=0.532` keeps a positive radial margin through `z=6..200`; report that rule
+  as compatibility behavior rather than normative GOST 591 geometry.
 - do not classify a bridge timeout as a failed CAD constraint without preserving
   and inspecting the live document. For the chain sketch, a final type-2
   `point_on_curve` from point 0 of the right technical side line to the outside
