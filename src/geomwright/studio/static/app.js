@@ -974,7 +974,42 @@ function createGearFields() {
   append(createField("face_width_mm", properties.face_width_mm, required.has("face_width_mm")));
   append(note);
   for (const name of coefficientNames) append(coefficientFields[name]);
-  append(createField("pin_diameter_mm", properties.pin_diameter_mm, required.has("pin_diameter_mm")));
+  const pinField = createField("pin_diameter_mm", properties.pin_diameter_mm, required.has("pin_diameter_mm"));
+  const pinNumber = pinField.querySelector("input");
+  const pinMode = document.createElement("select");
+  pinMode.dataset.customProfileField = "pin_mode";
+  for (const [value, key, fallback] of [
+    ["auto", "gear.pin_auto", "Автоматически (1,44m / 1,68m)"],
+    ["custom", "gear.pin_custom", "Пользовательский размер…"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.dataset.i18n = key;
+    option.textContent = t(key, fallback);
+    pinMode.append(option);
+  }
+  const initialPin = baselinePayload.pin_diameter_mm;
+  pinMode.value = initialPin != null ? "custom" : "auto";
+  pinField.insertBefore(pinMode, pinNumber);
+  const pinNote = document.createElement("small");
+  pinNote.dataset.i18n = "gear.pin_note";
+  pinNote.textContent = t(
+    "gear.pin_note",
+    "Диаметр влияет только на измерение по роликам. Стандартные ряды ГОСТ 2475-88, 25255-82 и 22696-77 будут добавлены после проверки таблиц.",
+  );
+  pinField.append(pinNote);
+  const applyPinMode = () => {
+    const custom = pinMode.value === "custom";
+    pinNumber.disabled = !custom;
+    pinNumber.hidden = !custom;
+    pinNumber.required = custom;
+    if (custom && !pinNumber.value.trim() && initialPin != null) {
+      pinNumber.value = String(initialPin);
+    }
+  };
+  pinMode.addEventListener("change", applyPinMode);
+  append(pinField);
+  applyPinMode();
 
   const standardSelect = standardField.querySelector("select");
   const modificationSelect = modificationField.querySelector("select");

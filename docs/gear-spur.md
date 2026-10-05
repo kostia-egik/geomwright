@@ -22,7 +22,7 @@ for the user-defined modification.
 | `tooth_count` | Number of teeth `z` | 6–400 |
 | `profile_shift` | Rack shift `x` | User input; the module does not recommend `x1/x2` yet |
 | `face_width_mm` | Functional rim width `b` | Hub, bore, and keyway are separate modules |
-| `pin_diameter_mm` | Over-pin measurement pin | Empty selects a nominal pin that fits below the tips |
+| `pin_diameter_mm` | Over-pin measurement pin | Measurement only; does not enter the profile or CAD. Auto (1.44 m / 1.68 m) or an explicit size |
 
 Named modifications supply the profile angle and the head, clearance, and
 fillet coefficients automatically:
@@ -37,6 +37,22 @@ fillet coefficients automatically:
 For `custom`, the pressure angle, addendum, clearance, and root-fillet
 coefficients become editable and are required. Any custom coefficient set
 removes the standard-conformity claim.
+
+The pin diameter is a **measurement-only** input: it changes the over-pin size
+`M` and its fit check, never the generated profile or the CAD body. Studio
+offers the automatic nominal pin or an explicit size. The standard roller/wire
+size lists of ГОСТ 2475-88 (проволочки и ролики), ГОСТ 25255-82 (длинные
+ролики) and ГОСТ 22696-77 (короткие ролики) will be added as selectable rows
+once those tables are acquired into the verified standards cache; until then the
+module does not claim a standard pin.
+
+The tool type that will manufacture the gear (червячная фреза, долбяк, дисковый
+модульный инструмент) is deliberately **outside this slice**. The current module
+builds the nominal profile of the standard basic rack; selecting a real tool
+changes the generated root, protuberance, and undercut and belongs to the later
+`generated_exact` phase with its own standards (ГОСТ 9324-80, ГОСТ 9323-79 and
+related). A tool selector without tool-parameter-driven geometry would be a
+non-functional control, so it is not exposed yet.
 
 ## Preview
 

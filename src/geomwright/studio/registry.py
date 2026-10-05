@@ -1372,7 +1372,7 @@ def _build_gear_spur_preview(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _gear_sector_outline(period: list[list[float]], tooth_count: int, visible_pitches: int = 3) -> list[list[float]]:
-    """Repeat one high-resolution tooth period into a cropped sector outline."""
+    """Repeat one high-resolution tooth period into a symmetric cropped sector."""
     if len(period) < 8 or tooth_count < 4:
         return []
     core = period[:-1] if math.dist(period[0], period[-1]) <= 1e-9 else list(period)
@@ -1385,7 +1385,9 @@ def _gear_sector_outline(period: list[list[float]], tooth_count: int, visible_pi
             rotated = rotated[1:]
         points.extend(rotated)
     points.append(_rotate_path([core[0]], (offset + visible_pitches) * step)[0])
-    return _dedupe_points(points)
+    # The middle tooth center must sit on the vertical axis. The period starts
+    # at a gap center, so the assembled sector needs a half-pitch rotation.
+    return _dedupe_points(_rotate_path(points, -0.5 * step))
 
 
 def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
@@ -1425,39 +1427,40 @@ def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[s
     ]
     bounds = _bounds([closed] if closed else [], [item["points"] for item in reference_paths])
     dimension_start = max(1.0, break_radius * 1.12)
+    gap_angle = 0.5 * step
     dimensions = [
         {
             "key": "outside_diameter",
             "symbol": "dₐ",
             "orientation": "radial",
-            "start": _polar(dimension_start, right_angle * 0.62),
-            "end": _polar(outside_radius, right_angle * 0.62),
+            "start": _polar(dimension_start, 0.0),
+            "end": _polar(outside_radius, 0.0),
             "value": summary.get("outside_diameter_mm"),
             "unit": "mm",
             "label_normal": 26,
-            "label_tangent": 5,
+            "label_tangent": 0,
         },
         {
             "key": "pitch_diameter",
             "symbol": "d",
             "orientation": "radial",
-            "start": _polar(dimension_start, left_angle * 0.62),
-            "end": _polar(pitch_radius, left_angle * 0.62),
+            "start": _polar(dimension_start, -gap_angle),
+            "end": _polar(pitch_radius, -gap_angle),
             "value": summary.get("pitch_diameter_mm"),
             "unit": "mm",
-            "label_normal": -24,
-            "label_tangent": -5,
+            "label_normal": -26,
+            "label_tangent": 0,
         },
         {
             "key": "root_diameter",
             "symbol": "d_f",
             "orientation": "radial",
-            "start": _polar(dimension_start, step * -0.35),
-            "end": _polar(root_radius, step * -0.35),
+            "start": _polar(dimension_start, gap_angle),
+            "end": _polar(root_radius, gap_angle),
             "value": summary.get("root_diameter_mm"),
             "unit": "mm",
-            "label_normal": -22,
-            "label_tangent": 6,
+            "label_normal": 24,
+            "label_tangent": 0,
         },
     ]
     warning_items = list(preview.get("warning_items") or [])
