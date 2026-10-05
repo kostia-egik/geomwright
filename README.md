@@ -14,12 +14,15 @@ turning KOMPAS into an uncontrolled scripting target.
   constraints;
 - create and edit selected sketch and feature entities with explicit targets;
 - preview and build supported parametric parts and spring families;
-- preview and build managed V-belt, Poly-V, flat-belt, timing-belt, and selected
-  roller/bush-chain transmission geometry;
+- preview and build managed V-belt, Poly-V, flat-belt, timing-belt, selected
+  roller/bush-chain transmission geometry, and an external spur gear with a
+  nominal involute/trochoid profile;
 - create specifications, relink assembly paths, run quality checks, and export
   safe working copies;
 - use Geomwright Studio to preview transmission geometry and edit recognized
-  managed blocks.
+  managed blocks, or calculate and build one create-only cam without shaft/hub/bore.
+  Cam recipes persist in new models: restore a Studio form for a new build or read
+  the recipe through MCP `inspect_cam`; engineering limits do not inherit CAD slack.
 
 The public MCP surface is discovered at runtime. Call `get_mcp_tool_catalog`
 from an MCP client instead of relying on an unversioned list copied into a
@@ -39,6 +42,8 @@ within the scope stated by their contracts and live verification evidence.
 | Sketch and feature runtime | Experimental | Low-level tools; inspect before writing |
 | Parametric parts and springs | Experimental | Family-specific parameters and verification |
 | Geomwright Studio | Experimental | Local UI; no arbitrary-body write path |
+| Spur gear | Experimental, live-verified | External cylindrical spur gear; nominal preview and create-only managed part |
+| Cam profiles | Experimental | Shared Studio/MCP create-only build, native curve/contact and solid readback |
 | Native KOMPAS module inspection | Research-only | Disabled by default; explicit opt-in for local investigation |
 
 An experimental status is a contract boundary, not a promise that every catalog
@@ -52,9 +57,9 @@ verification stop the operation before an unsafe write where possible.
 - Python 3.11 or newer for the host;
 - an MCP-capable client for the agent interface.
 
-The host Python and the KOMPAS bridge have separate compatibility constraints.
-Normal package code follows `pyproject.toml`; the bridge must also run in the
-Python runtime bundled with KOMPAS-3D v23.
+The host Python and the KOMPAS bridge can use separate interpreters. The bridge
+needs a modern Windows Python with `pywin32`; the old bundled Python 3.2 cannot
+run the current source. Prefer a standard Python installation for the CAD runtime.
 
 ## Install
 
@@ -64,6 +69,22 @@ From PowerShell in a clone:
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[ui]"
 ```
+
+Configure the CAD interpreter before starting Studio or MCP. If the project
+interpreter is a standard Windows Python, it can run both host and bridge:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pywin32
+$env:KOMPAS_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
+$env:KOMPAS_REQUIRE_VISIBLE = "1"
+```
+
+Alternatively point `KOMPAS_PYTHON` at a separate Python with `pywin32` installed.
+Use an actual interpreter path rather than a bare execution alias.
+`KOMPAS_REQUIRE_VISIBLE=1` makes
+MCP attach to the already running visible KOMPAS instead of starting a COM server.
+Cam creation requires this running session. For an MCP client, put these variables
+in the local server's `environment` configuration so a restart preserves them.
 
 The UI dependency group is optional. For MCP-only use:
 
@@ -90,11 +111,36 @@ The easiest Windows path is:
 .\start-geomwright-studio.cmd
 ```
 
-Or run it directly:
+Or run it in a terminal you control (foreground; keep that terminal open):
 
 ```powershell
 .\.venv\Scripts\python.exe -m geomwright.studio --port 8765
 ```
+
+For an agent or an unattended session, use the bounded background launcher:
+
+```powershell
+.\.venv\Scripts\python.exe -m geomwright.studio --background --no-browser --startup-timeout 15
+```
+
+It launches without a console window, closes stdin, redirects output to unique
+log files, checks the new instance's `/health`, and returns its URL and PIDs.
+Logs default to local Geomwright state (`%LOCALAPPDATA%\Geomwright\studio` on
+Windows); override with `--log-dir`. Startup failure reports the stderr path
+and stops only the newly launched process tree. Do not use PowerShell
+`Start-Process` to launch Studio through an agent terminal tool.
+
+For potentially blocking **finite** commands, use the independent watchdog:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_bounded.py --timeout 30 -- .\.venv\Scripts\python.exe -m pytest tests/test_bridge_runner.py -q
+```
+
+The watchdog returns exit code `124` on timeout, closes stdin, captures bounded
+output through files, and stops owned descendants. On Windows it uses a Job
+Object plus cleanup of the launcher tree; it does not rely on the terminal tool's
+timeout message. Never wrap Studio `--background` or another persistent server
+in this watchdog: it cleans descendants even when the command finishes normally.
 
 Studio opens `http://127.0.0.1:8765` unless `--no-browser` is supplied. Start
 KOMPAS first and keep it visible: Studio attaches to the already running
@@ -121,6 +167,10 @@ For an MCP client, use the Python executable inside that clone. The tracked
         "geomwright"
       ],
       "enabled": true,
+      "environment": {
+        "KOMPAS_PYTHON": "C:\\path\\to\\geomwright\\.venv\\Scripts\\python.exe",
+        "KOMPAS_REQUIRE_VISIBLE": "1"
+      },
       "timeout": 600000
     }
   }
@@ -167,12 +217,16 @@ not part of the public repository.
 ## Documentation
 
 - [Documentation index](docs/README.md) — choose a guide by task and audience;
+- [Camshaft calculation and CAD](docs/en/camshaft.md) / [Кулачки ГРМ](docs/ru/camshaft.md) —
+  timing conventions, strict CAD checks, recipe reuse, recovery, and reference data;
 - [Write operations and safety](docs/write_operations.md) — mutation rules;
 - [Geomwright Studio](docs/geomwright-studio.md) — UI workflow and HTTP contract;
 - [Parametric workflows](docs/parametric-workflows.md) — supported part families;
 - [Spring workflows](docs/spring-workflows.md) — spring-family navigation;
-- [Transmission contracts](docs/transmission-platform-concept.md) — pulley and
-  sprocket boundaries;
+- [Transmission contracts](docs/transmission-platform-concept.md) — pulley,
+  sprocket, and gear boundaries;
+- [External spur gear](docs/gear-spur.md) — inputs, nominal representation,
+  create-only CAD, and live evidence;
 - [Architecture](ARCHITECTURE.md) — layer ownership for maintainers;
 - [CAD patterns](CAD_PATTERNS.md) — verified KOMPAS-specific invariants.
 

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DOHC valvetrain mechanism" shape-rendering="geometricPrecision" color="#8d9aa7">
+  <defs>
+    <!-- Tangent circular cam arcs, not a freehand spline. -->
+    <path id="dohc-cam" d="M -9.916771 -1.287500 A 30 30 0 0 1 -2.619524 -17.321226 A 3.5 3.5 0 0 1 2.619524 -17.321226 A 30 30 0 0 1 9.916771 -1.287500 A 10 10 0 1 1 -9.916771 -1.287500 Z" />
+    <g id="dohc-tappet">
+      <rect x="-8" y="10" width="16" height="7" />
+      <path d="M -1.3 17 L -1.3 44 M 1.3 17 L 1.3 44" />
+    </g>
+    <clipPath id="dohc-crop"><rect x="2" y="2" width="60" height="60" /></clipPath>
+  </defs>
+  <!-- Enlarged cam / bucket / stem detail; valve heads and chamber are cropped. -->
+  <g clip-path="url(#dohc-crop)" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="butt" stroke-linejoin="miter">
+    <g transform="translate(16 25) rotate(-18)">
+      <use href="#dohc-cam" transform="rotate(-25)" />
+      <circle r="3.1" />
+      <use href="#dohc-tappet" />
+    </g>
+    <g transform="translate(48 25) rotate(18)">
+      <use href="#dohc-cam" transform="rotate(25)" />
+      <circle r="3.1" />
+      <use href="#dohc-tappet" />
+    </g>
+  </g>
+</svg>

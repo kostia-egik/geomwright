@@ -42,6 +42,12 @@ transmissions:
   flat_belt:
     owner: src/kompas_mcp/transmissions/flat_belt.py
     focused_test: tests/test_geomwright_studio.py -k flat_belt
+  spur_gear:
+    owner: src/kompas_mcp/gears/
+    symbols: [build_spur_gear_preview, build_gear_spur_plan, SpurGearRequest]
+    bridge_symbols: [handle_create_gear_spur, _inspect_gear_spur_block]
+    studio_symbol: _adapt_gear_spur
+    focused_test: tests/test_geomwright_studio.py -k gear
 
 studio:
   module_registry:

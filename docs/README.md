@@ -44,6 +44,20 @@ specific task, not a changelog or a dump of live CAD experiments.
 | [Flat-belt pulley](flat-belt-pulley.md) | Implemented, live-verified | Cylindrical/crowned managed rim |
 | [Timing-belt pulley](timing-belt-pulley.md) | Experimental | T/AT and HTD preview and managed Studio path |
 | [Chain transmission](chain-transmission-concept.md) | Experimental, create-verified | ISO/GOST roller and bush sprocket profiles; create-only family slice |
+| [Spur gear](gear-spur.md) | Implemented, live-verified | External cylindrical spur gear: nominal involute/trochoid preview and create-only managed part |
+| [Gear transmission plan](gear-transmission-concept.md) | Planned, research-backed | Cylindrical, bevel, hypoid, and worm families; native baseline, CAD/Studio split, phases |
+| [Gear standards register](gear-standards.md) | Reference | GOST/ISO/DIN/AGMA designations, applicability, and acquisition status |
+
+## Camshafts
+
+- [English: camshaft calculation and CAD](en/camshaft.md)
+- [Русский: расчёт и CAD кулачков](ru/camshaft.md)
+
+Localized guides use `docs/<language>/<topic>.md` with matching topic names and
+cross-language links. Add another language directory to extend the pool; do not
+embed translations in the same page. Keep parameters, limits, and verification
+claims aligned across versions. Older root guides remain canonical until their
+localized replacements exist; they are not all translated yet.
 
 ## Maintainer references
 

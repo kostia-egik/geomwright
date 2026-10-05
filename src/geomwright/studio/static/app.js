@@ -18,7 +18,7 @@ const liveIndicator = document.querySelector("#live-indicator");
 const summary = document.querySelector("#summary");
 const standardBadge = document.querySelector("#standard-badge");
 const warningsSection = document.querySelector("#warnings-section");
-const warningsList = document.querySelector("#warnings");
+const warningsList = document.querySelector("#status-warnings") || document.querySelector("#warnings");
 const statusDot = document.querySelector("#status-dot");
 const statusText = document.querySelector("#status-text");
 const languageButtons = [...document.querySelectorAll("[data-language]")];
@@ -60,6 +60,7 @@ const workspaceInspectorEmpty = document.querySelector("#workspace-inspector-emp
 const workspaceInspectorContent = document.querySelector("#workspace-inspector-content");
 const workspaceBlockName = document.querySelector("#workspace-block-name");
 const workspaceBlockSummary = document.querySelector("#workspace-block-summary");
+const workspaceBlockReadonly = document.querySelector("#workspace-block-readonly");
 const workspaceEditBlockButton = document.querySelector("#workspace-edit-block");
 const workspaceStatus = document.querySelector("#workspace-status");
 const workspaceBusy = document.querySelector("#workspace-busy");
@@ -73,12 +74,16 @@ const editorSaveAsDocumentButton = document.querySelector("#editor-save-as-docum
 const moduleHeading = document.querySelector("#module-heading");
 const editorModePill = document.querySelector("#editor-mode-pill");
 const editorModeText = document.querySelector("#editor-mode-text");
+const editorTitle = document.querySelector("#editor-shell .topbar h1");
+const selectionNote = document.querySelector("#selection-note");
 
 let currentModule = null;
 let currentSpec = null;
 let moduleCatalog = [];
 let selectorGroup = null;
 let selectorSubgroup = null;
+let camshaftStep = "phases";
+let camshaftModuleKind = null;
 let baselinePayload = {};
 let baselinePayloadKey = "{}";
 let lastSuccessfulPayloadKey = null;
@@ -123,7 +128,7 @@ async function requestJson(url, options = {}) {
     const detail = payload.detail;
     const message = Array.isArray(detail)
       ? detail.map((item) => localizeValidationError(item)).join("; ")
-      : detail || `HTTP ${response.status}`;
+      : (detail && typeof detail === "object" ? localizeWarning(detail) : detail) || `HTTP ${response.status}`;
     throw new Error(message);
   }
   return payload;
@@ -377,6 +382,8 @@ function createField(name, fieldSchema, required) {
   input.dataset.schemaType = schema.type || "string";
   input.required = required && input.type !== "checkbox";
   wrapper.append(input);
+  // A fixed value belongs to the request, not to the user's choice of inputs.
+  if (input.tagName === "SELECT" && input.options.length === 1) wrapper.hidden = true;
 
   const help = localizedFieldHelp(name, schema);
   if (help) {
@@ -397,22 +404,37 @@ function chainSelectionLabel(level, item) {
   return t(`chain.selection.${value}`, humanize(value));
 }
 
+function updateChainSelectionDetails() {
+  const context = document.createElement("canvas").getContext("2d");
+  for (const select of fieldsContainer.querySelectorAll("[data-chain-selection]")) {
+    const text = select.selectedOptions[0]?.textContent || "";
+    select.title = text;
+    const detail = select.parentElement.querySelector("[data-chain-selection-detail]");
+    if (!detail) continue;
+    detail.textContent = text;
+    if (context) context.font = getComputedStyle(select).font;
+    detail.hidden = !text || !select.clientWidth || (context && context.measureText(text).width <= select.clientWidth - 40);
+  }
+}
+
+window.addEventListener("resize", updateChainSelectionDetails);
+
 function createChainProfileSelector() {
   const fieldset = document.createElement("fieldset");
   fieldset.className = "chain-profile-selector";
   fieldset.dataset.chainProfileSelector = "";
   const legend = document.createElement("legend");
-  legend.textContent = t("chain.selection.title", "Профиль цепи");
+  legend.textContent = t(currentModule.kind === "silent_chain_sprocket" ? "silent.selection.title" : "chain.selection.title", "Профиль цепи");
   fieldset.append(legend);
 
   const standards = currentSpec?.module?.selection?.standards || [];
   const currentDesignation = baselinePayload.designation || currentModule.defaults.designation;
-  const selectedStandard = standards.find((standard) =>
-    standard.families.some((family) => family.profiles.some((profile) => profile.value === currentDesignation)),
-  ) || standards[0];
-  const selectedFamily = selectedStandard?.families.find((family) =>
-    family.profiles.some((profile) => profile.value === currentDesignation),
-  ) || selectedStandard?.families[0];
+  const selectedStandard = standards.find((standard) => standard.value === baselinePayload.standard)
+    || standards.find((standard) => standard.families.some((family) => family.profiles.some((profile) => profile.value === currentDesignation)))
+    || standards[0];
+  const selectedFamily = selectedStandard?.families.find((family) => family.value === baselinePayload.family)
+    || selectedStandard?.families.find((family) => family.profiles.some((profile) => profile.value === currentDesignation))
+    || selectedStandard?.families[0];
   const selectors = {};
   for (const level of ["standard", "family", "profile"]) {
     const wrapper = document.createElement("label");
@@ -422,16 +444,26 @@ function createChainProfileSelector() {
     const title = document.createElement("span");
     title.className = "field-title";
     title.dataset.chainSelectionLabel = level;
-    title.textContent = t(`chain.selection.${level}`, humanize(level));
+    title.textContent = t(`${currentModule.kind === "silent_chain_sprocket" ? "silent" : "chain"}.selection.${level}`, humanize(level));
     heading.append(title);
     wrapper.append(heading);
     const select = document.createElement("select");
     select.dataset.chainSelection = level;
     select.name = `chain_${level}`;
     wrapper.append(select);
+    const detail = document.createElement("small");
+    detail.className = "chain-selection-detail";
+    detail.dataset.chainSelectionDetail = "";
+    detail.hidden = true;
+    wrapper.append(detail);
     fieldset.append(wrapper);
     selectors[level] = select;
   }
+  const hint = document.createElement("p");
+  hint.className = "chain-selection-hint";
+  hint.dataset.chainSelectionHint = "";
+  hint.hidden = true;
+  fieldset.append(hint);
   const fill = (select, items, selected, level) => {
     select.replaceChildren();
     for (const item of items || []) {
@@ -441,11 +473,12 @@ function createChainProfileSelector() {
       if (item.label_ru) option.dataset.chainLabelRu = item.label_ru;
       if (item.label_en) option.dataset.chainLabelEn = item.label_en;
       option.disabled = item.available === false;
-      if (level === "profile" && item.chain_type) option.dataset.chainType = item.chain_type;
+      if (level === "profile" && item.chain_type !== undefined) option.dataset.chainType = item.chain_type;
       if (level === "profile" && item.nominal_row_count) option.dataset.nominalRowCount = item.nominal_row_count;
       option.selected = item.value === selected;
       select.append(option);
     }
+    select.parentElement.hidden = (items || []).filter(item => item.available !== false).length <= 1;
   };
   const sync = (standardValue, familyValue, profileValue) => {
     const standard = standards.find((item) => item.value === standardValue) || standards[0];
@@ -454,24 +487,56 @@ function createChainProfileSelector() {
     fill(selectors.family, standard?.families, family?.value, "family");
     const profile = family?.profiles.find((item) => item.value === profileValue) || family?.profiles[0];
     fill(selectors.profile, family?.profiles, profile?.value, "profile");
+    const standardField = fieldsContainer.querySelector("[name='standard']");
+    if (standardField) standardField.value = standard?.value || "";
+    const familyField = fieldsContainer.querySelector("[name='family']");
+    if (familyField) familyField.value = family?.value || "";
     const typeField = fieldsContainer.querySelector("[name='chain_type']");
     if (profile?.chain_type && typeField) typeField.value = profile.chain_type;
     const rowField = fieldsContainer.querySelector("[name='row_count']");
     if (profile?.nominal_row_count && rowField) rowField.value = profile.nominal_row_count;
+    syncSilentToothCount(profile, standard?.value);
     syncConditionalFields();
+    requestAnimationFrame(updateChainSelectionDetails);
   };
   sync(selectedStandard?.value, selectedFamily?.value, currentDesignation);
   selectors.standard.addEventListener("change", () => sync(selectors.standard.value, null, null));
   selectors.family.addEventListener("change", () => sync(selectors.standard.value, selectors.family.value, null));
   selectors.profile.addEventListener("change", () => {
+    const standard = standards.find((item) => item.value === selectors.standard.value);
+    const family = standard?.families.find((item) => item.value === selectors.family.value);
+    const standardField = fieldsContainer.querySelector("[name='standard']");
+    if (standardField) standardField.value = selectors.standard.value;
+    const familyField = fieldsContainer.querySelector("[name='family']");
+    if (familyField) familyField.value = selectors.family.value;
     const chainType = selectors.profile.selectedOptions[0]?.dataset.chainType;
     const typeField = fieldsContainer.querySelector("[name='chain_type']");
     if (chainType && typeField) typeField.value = chainType;
     const nominalRowCount = selectors.profile.selectedOptions[0]?.dataset.nominalRowCount;
     const rowField = fieldsContainer.querySelector("[name='row_count']");
     if (nominalRowCount && rowField) rowField.value = nominalRowCount;
+    syncSilentToothCount({ chain_type: chainType }, selectors.standard.value);
+    syncConditionalFields();
+    updateChainSelectionDetails();
   });
   return fieldset;
+}
+
+function syncSilentToothCount(profile, standardValue = fieldsContainer.querySelector("[data-chain-selection='standard']")?.value) {
+  if (currentModule?.kind !== "silent_chain_sprocket") return;
+  const input = fieldsContainer.querySelector("[name='physical_tooth_count']");
+  if (!input) return;
+  const type = Number(profile?.chain_type || 1);
+  if (standardValue === "gost_13552_81_13576_81") {
+    input.min = type === 1 ? 17 : 11;
+    input.max = type === 1 ? 96 : 48;
+  } else {
+    input.min = standardValue === "din_8190_8191_open" ? 15 : 17;
+    input.max = 114;
+  }
+  if (input.value && (input.valueAsNumber < Number(input.min) || input.valueAsNumber > Number(input.max))) {
+    input.value = input.min;
+  }
 }
 
 function syncConditionalFields() {
@@ -481,6 +546,48 @@ function syncConditionalFields() {
     const input = gostVariantWrapper.querySelector("input, select, textarea");
     gostVariantWrapper.hidden = !applies;
     if (input) input.disabled = !applies;
+  }
+  if (currentModule?.kind === "silent_chain_sprocket") {
+    const standardValue = fieldsContainer.querySelector("[data-chain-selection='standard']")?.value;
+    const familyValue = fieldsContainer.querySelector("[data-chain-selection='family']")?.value;
+    const toothHelp = fieldsContainer.querySelector("[data-field-name='physical_tooth_count'] [data-field-help]");
+    if (toothHelp) {
+      const helpKey = standardValue === "gost_13552_81_13576_81"
+        ? `silent.tooth_count.${familyValue === "type_2" ? "gost_2" : "gost_1"}`
+        : standardValue === "din_8190_8191_open" ? "silent.tooth_count.din" : "silent.tooth_count.asme";
+      toothHelp.textContent = t(helpKey);
+    }
+    const accuracy = fieldsContainer.querySelector("[data-field-name='accuracy_class']");
+    if (accuracy) {
+      const applies = standardValue === "gost_13552_81_13576_81";
+      accuracy.hidden = !applies;
+      const control = accuracy.querySelector("input, select, textarea");
+      if (control) control.disabled = !applies;
+    }
+    const faceWidth = fieldsContainer.querySelector("[data-field-name='face_width_mm']");
+    if (faceWidth) faceWidth.hidden = standardValue !== "asme_b29_2m_open";
+    const tipShape = fieldsContainer.querySelector("[data-field-name='tooth_tip_shape']");
+    const standard = currentSpec?.module?.selection?.standards?.find((item) => item.value === standardValue);
+    const family = standard?.families.find((item) => item.value === familyValue);
+    const profileValue = fieldsContainer.querySelector("[data-chain-selection='profile']")?.value;
+    const profile = family?.profiles.find((item) => item.value === profileValue);
+    const asme = standardValue === "asme_b29_2m_open";
+    const axialSource = fieldsContainer.querySelector("[data-field-name='axial_source']");
+    if (axialSource) axialSource.hidden = !asme;
+    const gbAxial = axialSource?.querySelector("select")?.value === "gb_10855_2016";
+    const smallPitch = asme && Number(profile?.pitch_mm) === 4.7625;
+    if (tipShape) tipShape.hidden = !asme || smallPitch;
+    const hint = fieldsContainer.querySelector("[data-chain-selection-hint]");
+    if (hint) {
+      const missingAxial = asme && ((smallPitch && profile?.chain_type === "two_center_guide")
+        || (!gbAxial && Number(profile?.pitch_mm) === 31.75 && ["center_guide", "two_center_guide"].includes(profile?.chain_type))
+        || (gbAxial && Number(profile?.pitch_mm) > 12.7 && profile?.chain_type === "side_guide"));
+      hint.textContent = [smallPitch ? t("silent.small_pitch_tip_hint") : "", missingAxial ? t("silent.missing_axial_hint") : ""].filter(Boolean).join(" ");
+      hint.hidden = !hint.textContent;
+    }
+    selectionNote.textContent = getLocale() === "ru"
+      ? (standard?.warning_ru || t("silent.preview_note_gost"))
+      : (standard?.warning_en || t("silent.preview_note_gost"));
   }
   const designation = fieldsContainer.querySelector("[name='designation']")?.value;
   const customMode = designation === "CUSTOM";
@@ -519,19 +626,388 @@ function syncConditionalFields() {
   if (!existing) fieldsContainer.append(createCustomProfileEditor());
 }
 
+function createCamshaftFieldsPanel(names) {
+  const panel = document.createElement("div");
+  panel.className = "camshaft-fields";
+  const properties = currentSpec.schema.properties || {};
+  const required = new Set(currentSpec.schema.required || []);
+  for (const name of names) {
+    if (properties[name]) panel.append(createField(name, properties[name], required.has(name)));
+  }
+  return panel;
+}
+
+function createCamshaftPhaseFields() {
+  const layout = document.createElement("div");
+  layout.className = "camshaft-layout";
+  const properties = currentSpec.schema.properties || {};
+  const required = new Set(currentSpec.schema.required || []);
+  if (properties.active_lobe) {
+    const activeField = createField("active_lobe", properties.active_lobe, required.has("active_lobe"));
+    activeField.classList.add("camshaft-active");
+    layout.append(activeField);
+  }
+  const columns = document.createElement("div");
+  columns.className = "camshaft-columns";
+  const groups = [
+    {
+      tone: "intake",
+      legendKey: "camshaft.column.intake",
+      legend: "Впуск",
+      fields: ["intake_open_deg", "intake_close_deg"],
+    },
+    {
+      tone: "exhaust",
+      legendKey: "camshaft.column.exhaust",
+      legend: "Выпуск",
+      fields: ["exhaust_open_deg", "exhaust_close_deg"],
+    },
+  ];
+  for (const group of groups) {
+    const fieldset = document.createElement("fieldset");
+    fieldset.className = "camshaft-column";
+    fieldset.dataset.tone = group.tone;
+    const legend = document.createElement("legend");
+    legend.textContent = t(group.legendKey, group.legend);
+    legend.dataset.i18n = group.legendKey;
+    fieldset.append(legend);
+    for (const name of group.fields) {
+      if (properties[name]) fieldset.append(createField(name, properties[name], required.has(name)));
+    }
+    columns.append(fieldset);
+  }
+  layout.append(columns);
+  return layout;
+}
+
+function createCamshaftWizard() {
+  const wizard = document.createElement("div");
+  wizard.className = "camshaft-wizard";
+
+  const stepInput = document.createElement("input");
+  stepInput.type = "hidden";
+  stepInput.name = "step";
+  stepInput.dataset.schemaType = "string";
+  stepInput.value = camshaftStep;
+
+  const steps = [
+    { key: "phases", labelKey: "camshaft.step.phases", label: "Фазы" },
+    { key: "kinematics", labelKey: "camshaft.step.kinematics", label: "Кинематика" },
+    { key: "cam", labelKey: "camshaft.step.cam", label: "Кулачок" },
+  ];
+  const content = {
+    phases: createCamshaftPhaseFields(),
+    kinematics: createCamshaftKinematicsFields(),
+    cam: createCamshaftFieldGroups([
+      {
+        key: "law",
+        legendKey: "camshaft.group.law",
+        legend: "Закон движения",
+        fields: ["law"],
+      },
+      {
+        key: "curvature",
+        legendKey: "camshaft.group.curvature",
+        legend: "Кривизна профиля",
+        fields: ["min_curvature_radius", "nose_radius"],
+      },
+      {
+        key: "limits",
+        legendKey: "camshaft.group.limits",
+        legend: "Ограничения движения",
+        fields: ["max_acceleration", "max_jerk"],
+      },
+      {
+        key: "ramps",
+        legendKey: "camshaft.group.ramps",
+        legend: "Подъём и рампы",
+        fields: ["max_lift", "ramp_open_deg", "ramp_close_deg"],
+      },
+      {
+        key: "cad",
+        legendKey: "camshaft.group.cad",
+        legend: "CAD: один кулачок",
+        fields: ["cam_width", "cam_rotation_deg", "cad_tolerance"],
+      },
+    ]),
+  };
+
+  const nav = document.createElement("div");
+  nav.className = "camshaft-steps";
+  const buttons = {};
+  const panels = {};
+  for (const step of steps) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "camshaft-step-button";
+    button.textContent = t(step.labelKey, step.label);
+    button.dataset.i18n = step.labelKey;
+    button.addEventListener("click", () => {
+      camshaftStep = step.key;
+      applyStep();
+    });
+    buttons[step.key] = button;
+    nav.append(button);
+
+    const panel = document.createElement("div");
+    panel.className = "camshaft-panel";
+    panel.dataset.step = step.key;
+    panel.append(content[step.key]);
+    panels[step.key] = panel;
+  }
+
+  function applyStep(trigger = true) {
+    stepInput.value = camshaftStep;
+    document.querySelector(".cad-controls").hidden = camshaftStep !== "cam";
+    cadPlanKey = null;
+    cadCreateButton.disabled = true;
+    if (camshaftStep !== "cam") window.dispatchEvent(new Event("geomwright-cam-motion-reset"));
+    for (const step of steps) {
+      panels[step.key].hidden = step.key !== camshaftStep;
+      buttons[step.key].classList.toggle("selected", step.key === camshaftStep);
+      buttons[step.key].setAttribute("aria-pressed", String(step.key === camshaftStep));
+    }
+    if (trigger) runPreview({ force: true });
+  }
+
+  wizard.append(stepInput, nav);
+  for (const step of steps) wizard.append(panels[step.key]);
+  const syncProfile = () => {
+    const direct = wizard.querySelector("[name='mechanism']")?.value === "direct";
+    const law = wizard.querySelector("[name='law']");
+    const curvature = wizard.querySelector("[data-group='curvature']");
+    if (curvature) curvature.hidden = !["curvature_spline", "motion_spline", "bounded_auto"].includes(law?.value);
+    const nose = wizard.querySelector("[data-field-name='nose_radius']");
+    if (nose) nose.hidden = !direct || law?.value !== "curvature_spline";
+    const contextualOption = law?.querySelector("option[value='curvature_spline']");
+    if (contextualOption) contextualOption.disabled = !direct;
+  };
+  wizard.querySelector("[name='law']")?.addEventListener("change", syncProfile);
+  wizard.querySelector("[name='mechanism']")?.addEventListener("change", syncProfile);
+  syncProfile();
+  applyStep(false);
+  return wizard;
+}
+
+function createCamshaftFieldGroups(groups) {
+  const layout = document.createElement("div");
+  layout.className = "camshaft-groups";
+  const properties = currentSpec.schema.properties || {};
+  const required = new Set(currentSpec.schema.required || []);
+  for (const group of groups) {
+    const fieldset = document.createElement("fieldset");
+    fieldset.className = "camshaft-group";
+    fieldset.dataset.group = group.key;
+    const legend = document.createElement("legend");
+    legend.textContent = t(group.legendKey, group.legend);
+    legend.dataset.i18n = group.legendKey;
+    const body = document.createElement("div");
+    body.className = "camshaft-fields";
+    for (const name of group.fields) {
+      if (properties[name]) body.append(createField(name, properties[name], required.has(name)));
+    }
+    fieldset.append(legend, body);
+    layout.append(fieldset);
+  }
+  return layout;
+}
+
+function createCamshaftKinematicsFields() {
+  const panel = createCamshaftFieldGroups([
+    {
+      key: "mechanism",
+      legendKey: "camshaft.group.mechanism",
+      legend: "Механизм",
+      fields: ["mechanism", "base_diameter", "lash", "tappet_diameter", "tappet_edge_margin"],
+    },
+    {
+      key: "cam",
+      legendKey: "camshaft.group.cam",
+      legend: "Кулачок",
+      fields: ["cam_x", "cam_y", "offset"],
+    },
+    {
+      key: "valve",
+      legendKey: "camshaft.group.valve",
+      legend: "Клапан",
+      fields: ["valve_tip_x", "valve_tip_y", "valve_pad_radius"],
+    },
+    {
+      key: "roller",
+      legendKey: "camshaft.group.roller",
+      legend: "Ролик",
+      fields: ["roller_arm", "roller_radius"],
+    },
+  ]);
+  const update = () => {
+    const mechanism = panel.querySelector("[name='mechanism']")?.value || "rocker";
+    const rocker = mechanism === "rocker";
+    const show = (name, visible) => {
+      const element = panel.querySelector(`[data-field-name='${name}']`);
+      if (element) element.hidden = !visible;
+    };
+    show("offset", !rocker);
+    show("tappet_diameter", !rocker);
+    show("tappet_edge_margin", !rocker);
+    for (const name of ["cam_x", "cam_y", "roller_arm", "valve_tip_x", "valve_tip_y", "valve_pad_radius", "roller_radius"]) {
+      show(name, rocker);
+    }
+    for (const fieldset of panel.querySelectorAll(".camshaft-group")) {
+      const fields = Array.from(fieldset.querySelectorAll("[data-field-name]"));
+      fieldset.hidden = !fields.some((field) => !field.hidden);
+    }
+  };
+  panel.querySelector("[name='mechanism']")?.addEventListener("change", () => {
+    update();
+    runPreview({ force: true });
+  });
+  update();
+  return panel;
+}
+
+
 function renderFields() {
   fieldsContainer.replaceChildren();
   const properties = currentSpec.schema.properties || {};
   const required = new Set(currentSpec.schema.required || []);
-  if (currentModule?.kind === "chain_sprocket") fieldsContainer.append(createChainProfileSelector());
+  if (currentModule?.kind === "camshaft_lobe") {
+    if (camshaftModuleKind !== currentModule.kind) {
+      camshaftStep = "phases";
+      camshaftModuleKind = currentModule.kind;
+    }
+    fieldsContainer.append(createCamshaftWizard());
+    return;
+  }
+  if (["chain_sprocket", "silent_chain_sprocket"].includes(currentModule?.kind)) fieldsContainer.append(createChainProfileSelector());
   for (const [name, schema] of Object.entries(properties)) {
     if (name === "custom_profile" || name === "profile_overrides") continue;
-    if (currentModule?.kind === "chain_sprocket" && name === "designation") continue;
+    if (currentModule?.kind === "silent_chain_sprocket" && ["standard", "family"].includes(name)) continue;
+    if (["chain_sprocket", "silent_chain_sprocket"].includes(currentModule?.kind) && name === "designation") continue;
     if (currentModule?.kind === "chain_sprocket" && name === "chain_type") continue;
     if (currentModule?.kind === "chain_sprocket" && name === "row_count") continue;
     fieldsContainer.append(createField(name, schema, required.has(name)));
   }
+  if (currentModule?.kind === "silent_chain_sprocket") {
+    createSilentCompletionPanel();
+    const profile = currentSpec.module.selection.standards[0].families
+      .flatMap((family) => family.profiles)
+      .find((item) => item.value === fieldsContainer.querySelector("[data-chain-selection='profile']")?.value);
+    syncSilentToothCount(profile);
+  }
   syncConditionalFields();
+  syncSilentCompletion();
+}
+
+const silentCompletionNames = new Set([
+  "body_depth_mm", "guide_depth_mm", "guide_bottom_radius_mm",
+  "guide_width_mm", "guide_spacing_mm", "entrance_height_mm", "axial_round_radius_mm",
+  "tool_root_radius_mm", "tool_floor_depth_mm", "din_rack_resolution", "square_tip_resolution", "square_tip_diameter_mm",
+]);
+let silentCompletionEpoch = 0;
+let silentCompletionStale = false;
+
+function createSilentCompletionPanel() {
+  const panel = document.createElement("details");
+  panel.className = "silent-completion";
+  panel.dataset.silentCompletion = "";
+  const summary = document.createElement("summary");
+  summary.textContent = t("silent.completion_title");
+  panel.append(summary);
+  const body = document.createElement("div");
+  body.className = "silent-completion-fields";
+  panel.append(body);
+  for (const name of silentCompletionNames) {
+    const wrapper = fieldsContainer.querySelector(`[data-field-name='${name}']`);
+    if (wrapper) body.append(wrapper);
+  }
+  const button = document.createElement("button");
+  button.type = "button"; button.dataset.silentPropose = "";
+  button.textContent = t("silent.completion_propose");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    const epoch = silentCompletionEpoch;
+    const moduleKind = currentModule.kind;
+    try {
+      // Obtain proposals for the CURRENT source inputs, even after an invalid
+      // edited construction. Old successful preview values are not a fallback.
+      const payload = collectPayload({ withoutCompletion: true });
+      for (const name of silentCompletionNames) delete payload[name];
+      const result = await requestJson(currentModule.preview_url, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      if (!panel.isConnected || currentModule.kind !== moduleKind || epoch !== silentCompletionEpoch) return;
+      for (const [name, field] of Object.entries(result.completion.fields)) {
+        const input = panel.querySelector(`[name='${name}']`);
+        if (input) input.value = field.suggested;
+      }
+      panel.open = true;
+      silentCompletionStale = true;
+      syncSilentCompletion(result);
+      schedulePreview({ immediate: true });
+    } catch (error) {
+      renderWarnings([{ message: error.message }]);
+    } finally { button.disabled = false; }
+  });
+  const note = document.createElement("p");
+  note.className = "field-help"; note.dataset.silentCompletionNote = "";
+  body.prepend(button);
+  body.append(note);
+  fieldsContainer.append(panel);
+  const hint = document.createElement("p");
+  hint.className = "silent-completion-hint";
+  hint.dataset.silentCompletionHint = "";
+  fieldsContainer.append(hint);
+}
+
+function syncSilentCompletion(result = lastPreviewResult) {
+  if (currentModule?.kind !== "silent_chain_sprocket") return;
+  const panel = fieldsContainer.querySelector("[data-silent-completion]");
+  if (!panel) return;
+  const report = result?.family === "silent_chain_sprocket" ? result.completion : null;
+  const applicable = new Set(Object.keys(report?.fields || {}));
+  if (applicable.has("square_tip_resolution")) {
+    if (panel.querySelector("[name='square_tip_resolution']")?.value === "custom_diameter") applicable.add("square_tip_diameter_mm");
+    else applicable.delete("square_tip_diameter_mm");
+  }
+  for (const name of silentCompletionNames) {
+    const wrapper = panel.querySelector(`[data-field-name='${name}']`);
+    if (!wrapper) continue;
+    const visible = applicable.has(name);
+    wrapper.hidden = !visible;
+    const input = wrapper.querySelector("input,select");
+    input.disabled = !visible;
+  }
+  panel.hidden = !!report && applicable.size === 0;
+  const hint = fieldsContainer.querySelector("[data-silent-completion-hint]");
+  hint.hidden = panel.hidden;
+  hint.textContent = t("silent.completion_hint");
+  panel.querySelector("summary").textContent = t("silent.completion_title");
+  panel.querySelector("[data-silent-propose]").textContent = t("silent.completion_propose");
+  const missing = (report?.missing_fields || []).map(name => localizedFieldName(name, {})).join("; ");
+  panel.querySelector("[data-silent-completion-note]").textContent = t("silent.completion_explanation")
+    + (report ? ` ${t(`silent.completion_status.${silentCompletionStale ? "pending_changes" : report.status}`)}` : "")
+    + (missing ? ` ${t("silent.completion_missing", "", { fields: missing })}` : "");
+}
+
+function invalidateSilentGeometry(event) {
+  if (currentModule?.kind !== "silent_chain_sprocket") return;
+  silentCompletionEpoch += 1;
+  silentCompletionStale = true;
+  if (lastPreviewResult?.family === "silent_chain_sprocket") {
+    renderSummary({ ...lastPreviewResult.summary, construction_status: "pending_changes" });
+  }
+  if (event.target.dataset.chainSelection || event.target.name === "axial_source") {
+    for (const name of silentCompletionNames) {
+      const input = fieldsContainer.querySelector(`[name='${name}']`);
+      if (input) input.value = input.tagName === "SELECT" ? "unresolved" : "";
+    }
+    fieldsContainer.querySelector("[data-silent-completion]").open = false;
+  }
+  if (event.target.name === "tooth_tip_shape") {
+    fieldsContainer.querySelector("[name='square_tip_resolution']").value = "unresolved";
+    fieldsContainer.querySelector("[name='square_tip_diameter_mm']").value = "";
+  }
+  syncSilentCompletion();
 }
 
 function localizeFields() {
@@ -554,10 +1030,10 @@ function localizeFields() {
   }
   const selector = fieldsContainer.querySelector("[data-chain-profile-selector]");
   if (selector) {
-    selector.querySelector("legend").textContent = t("chain.selection.title", "Профиль цепи");
+    selector.querySelector("legend").textContent = t(currentModule.kind === "silent_chain_sprocket" ? "silent.selection.title" : "chain.selection.title", "Профиль цепи");
     for (const label of selector.querySelectorAll("[data-chain-selection-label]")) {
       const level = label.dataset.chainSelectionLabel;
-      label.textContent = t(`chain.selection.${level}`, humanize(level));
+      label.textContent = t(`${currentModule.kind === "silent_chain_sprocket" ? "silent" : "chain"}.selection.${level}`, humanize(level));
     }
     for (const select of selector.querySelectorAll("[data-chain-selection]")) {
       const level = select.dataset.chainSelection;
@@ -568,11 +1044,14 @@ function localizeFields() {
       }
     }
   }
+  if (currentModule?.kind === "silent_chain_sprocket") { syncConditionalFields(); syncSilentCompletion(); }
+  updateChainSelectionDetails();
 }
 
-function collectPayload() {
+function collectPayload({ withoutCompletion = false } = {}) {
   const payload = {};
   for (const input of fieldsContainer.querySelectorAll("input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")) {
+    if (withoutCompletion && silentCompletionNames.has(input.name)) continue;
     if (input.dataset.customProfileField) continue;
     if (input.dataset.chainSelection) continue;
     const type = input.dataset.schemaType;
@@ -583,7 +1062,7 @@ function collectPayload() {
     const raw = input.value.trim();
     if (!raw) continue;
     if (type === "number" || type === "integer") {
-      const value = input.valueAsNumber;
+      const value = input.tagName === "SELECT" ? Number(raw) : input.valueAsNumber;
       if (!Number.isFinite(value)) throw new Error(`${localizedFieldName(input.name, {})}: ${t("error.invalid_number")}`);
       if (type === "integer" && !Number.isInteger(value)) {
         throw new Error(`${localizedFieldName(input.name, {})}: ${t("error.integer_required")}`);
@@ -595,9 +1074,13 @@ function collectPayload() {
   }
   const chainProfile = fieldsContainer.querySelector("[data-chain-selection='profile']");
   if (chainProfile) {
+    if (currentModule?.kind === "silent_chain_sprocket") {
+      payload.standard = fieldsContainer.querySelector("[data-chain-selection='standard']")?.value;
+      payload.family = fieldsContainer.querySelector("[data-chain-selection='family']")?.value;
+    }
     payload.designation = chainProfile.value;
     const chainType = chainProfile.selectedOptions[0]?.dataset.chainType;
-    if (chainType) payload.chain_type = chainType;
+    if (chainType && currentModule.kind === "chain_sprocket") payload.chain_type = chainType;
     const nominalRowCount = chainProfile.selectedOptions[0]?.dataset.nominalRowCount;
     if (nominalRowCount) payload.row_count = Number(nominalRowCount);
   }
@@ -662,23 +1145,63 @@ function renderReadableSubscripts(element, value) {
 }
 
 function renderSummary(values) {
+  if (currentModule?.kind === "silent_chain_sprocket" && silentCompletionStale) values = { ...values, construction_status: "pending_changes" };
   summary.replaceChildren();
   for (const [key, value] of Object.entries(values || {})) {
     if (value === null || value === undefined) continue;
+    if (key === "tooth_tip_shape" && currentModule?.kind === "silent_chain_sprocket"
+      && fieldsContainer.querySelector("[data-field-name='tooth_tip_shape']")?.hidden) continue;
     const dt = document.createElement("dt");
     renderReadableSubscripts(dt, t(`summary.${key}`, humanize(key)));
     const dd = document.createElement("dd");
-    if (typeof value === "number") dd.textContent = formatNumber(value, 2);
-    else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "gost_profile_variant", "profile_construction"].includes(key)) dd.textContent = localizedEnumValue(key, value);
+    if (typeof value === "number") dd.textContent = formatNumber(value, key === "chain_pitch_mm" ? 4 : 2);
+    else if (typeof value === "boolean") dd.textContent = t(value ? "value.yes" : "value.no");
+    else if (key === "selected_law") dd.textContent = localizedEnumValue("law", value);
+    else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "family", "gost_profile_variant", "profile_construction", "profile_mechanics", "tooth_tip_shape", "profile_status", "axial_status", "construction_status"].includes(key)) dd.textContent = localizedEnumValue(key, value);
     else dd.textContent = String(value);
     summary.append(dt, dd);
   }
 }
 
+function renderSelectionSummary() {
+  const designation = fieldsContainer.querySelector("[data-chain-selection='profile']")?.value;
+  const standardValue = fieldsContainer.querySelector("[data-chain-selection='standard']")?.value;
+  const familyValue = fieldsContainer.querySelector("[data-chain-selection='family']")?.value;
+  const standard = currentSpec.module.selection.standards.find((item) => item.value === standardValue);
+  const family = standard?.families.find((item) => item.value === familyValue);
+  const profile = (family?.profiles || [])
+    .find((item) => item.value === designation);
+  if (!profile) return;
+  renderSummary({
+    silent_standard: getLocale() === "ru" ? standard.label_ru : standard.label_en,
+    silent_family: getLocale() === "ru" ? family.label_ru : family.label_en,
+    silent_designation: profile.designation_available === false
+      ? t("silent.no_designation")
+      : (getLocale() === "ru" ? profile.label_ru : profile.label_en),
+    silent_type: standardValue === "gost_13552_81_13576_81"
+      ? t(`silent.type_${profile.chain_type}`)
+      : t(`silent.guide_${profile.chain_type}`, String(profile.chain_type || familyValue).replaceAll("_", " ")),
+    silent_pitch_mm: profile.pitch_mm,
+    silent_working_width_mm: profile.working_width_mm,
+    silent_overall_width_mm: profile.overall_width_mm,
+    silent_min_breaking_load_kn: profile.min_breaking_load_kn,
+    silent_breaking_load_n: profile.breaking_load_n,
+    silent_physical_tooth_count: fieldsContainer.querySelector("[name='physical_tooth_count']")?.value || "—",
+    silent_accuracy_class: standardValue === "gost_13552_81_13576_81"
+      ? fieldsContainer.querySelector("[name='accuracy_class']")?.value || "—"
+      : null,
+    silent_data_source: getLocale() === "ru"
+      ? (profile.source_ru || (standardValue === "gost_13552_81_13576_81" ? "ГОСТ 13552-81" : profile.source))
+      : (profile.source || null),
+    silent_confidence: profile.confidence === "open_reconstruction" ? t("silent.open_reconstruction") : (profile.confidence || null),
+  });
+}
+
 function renderWarnings(items, remember = true) {
   if (remember) displayedWarnings = items || [];
   warningsList.replaceChildren();
-  warningsSection.hidden = !displayedWarnings.length;
+  warningsList.hidden = !displayedWarnings.length;
+  if (warningsSection) warningsSection.hidden = true;
   for (const warning of displayedWarnings) {
     const item = document.createElement("li");
     item.textContent = localizeWarning(warning);
@@ -700,7 +1223,17 @@ async function runPreview({ force = false } = {}) {
   clearTimeout(previewTimer);
   previewTimer = null;
   invalidatePreviewRequest();
+  if (!currentModule?.capabilities.preview) {
+    updateDirtyState();
+    renderSelectionSummary();
+    setStatus(form.checkValidity() ? "silent.selection_ready" : "status.incomplete", form.checkValidity() ? "ready" : "error");
+    return;
+  }
   const revision = ++previewRevision;
+  cadPlanController?.abort();
+  cadPlanController = null;
+  cadPlanKey = null;
+  cadCreateButton.disabled = true;
   const controller = new AbortController();
   previewController = controller;
 
@@ -728,6 +1261,10 @@ async function runPreview({ force = false } = {}) {
 
   const key = payloadKey(payload);
   if (!force && key === lastSuccessfulPayloadKey) {
+    silentCompletionStale = false;
+    syncSilentCompletion();
+    renderSummary(lastPreviewResult?.summary);
+    renderWarnings(previewResultWarnings(lastPreviewResult));
     const components = lastPreviewResult?.closed_points?.length || 0;
     setStatus(dirty ? "status.updated_dirty" : "status.updated", dirty ? "dirty" : "ready", { count: components });
     window.dispatchEvent(new CustomEvent("geomwright-preview-state", { detail: { state: "ready" } }));
@@ -749,6 +1286,8 @@ async function runPreview({ force = false } = {}) {
 
     lastSuccessfulPayloadKey = key;
     lastPreviewResult = result;
+    silentCompletionStale = false;
+    syncSilentCompletion(result);
     if (result.family === "v_belt" && result.editable_profile && result.request?.designation !== "CUSTOM") {
       customProfileDraft = { ...result.editable_profile };
       customProfileBaseValues = { ...result.editable_profile };
@@ -774,6 +1313,10 @@ async function runPreview({ force = false } = {}) {
 }
 
 function schedulePreview({ immediate = false } = {}) {
+  if (!currentModule?.capabilities.preview) {
+    runPreview();
+    return;
+  }
   clearTimeout(previewTimer);
   invalidatePreviewRequest();
   const dirty = updateDirtyState();
@@ -806,9 +1349,13 @@ function selectorLabel(kind, value) {
 const selectorIcons = {
   group: {
     mechanical_transmissions: "/static/icons/transmission.svg",
+    valvetrain: "/static/icons/valvetrain.svg",
   },
   subgroup: {
     belt_drives: "/static/icons/frictional.svg",
+    chain_drives: "/static/icons/chain-drive.svg",
+    gear_drives: "/static/icons/transmission.svg",
+    valvetrain: "/static/icons/cam.svg",
   },
 };
 
@@ -851,6 +1398,7 @@ function renderModuleSelector() {
     const row = document.createElement("div");
     row.className = "selector-row";
     row.dataset.level = level.key;
+    row.style.setProperty("--selector-button-count", Math.max(1, level.values.length));
     const heading = document.createElement("p");
     heading.className = "selector-row-label";
     heading.textContent = t(`selector.level.${level.key}`, humanize(level.key));
@@ -878,12 +1426,14 @@ function renderModuleSelector() {
   const moduleRow = document.createElement("div");
   moduleRow.className = "selector-row";
   moduleRow.dataset.level = "module";
+  const selectedModules = groupModules.filter((item) => item.subgroup === selectorSubgroup);
+  moduleRow.style.setProperty("--selector-button-count", Math.max(1, selectedModules.length));
   const moduleHeading = document.createElement("p");
   moduleHeading.className = "selector-row-label";
   moduleHeading.textContent = t("selector.level.module", "Модуль");
   const moduleButtonsRow = document.createElement("div");
   moduleButtonsRow.className = "selector-row-buttons module-selector-buttons";
-  for (const module of groupModules.filter((item) => item.subgroup === selectorSubgroup)) {
+  for (const module of selectedModules) {
     moduleButtonsRow.append(selectorButton({
       label: moduleName(module),
       selected: currentModule?.kind === module.kind,
@@ -937,11 +1487,14 @@ function managedBlockName(block) {
     flat_belt: "block.flat_belt",
     timing_trapezoidal: "block.timing_trapezoidal",
     timing_curvilinear: "block.timing_curvilinear",
+    gear_spur: "block.gear_spur",
+    camshaft_lobe: "block.camshaft_lobe",
   }[block.module] || "block.generic";
   return t(family, block.name || block.module, {
     designation: profile.designation || "",
     count: profile.groove_count || profile.tooth_count || "",
     crown: formatNumber(profile.crown_height || 0),
+    module: profile.module_mm != null ? formatNumber(profile.module_mm) : "",
   });
 }
 
@@ -951,7 +1504,16 @@ function selectWorkspaceBlock(block) {
   workspaceInspectorContent.hidden = false;
   workspaceBlockName.textContent = managedBlockName(block);
   renderWorkspaceBlockSummary(block);
-  workspaceEditBlockButton.disabled = !block.editable;
+  workspaceEditBlockButton.disabled = !block.editable && !block.recreatable;
+  workspaceEditBlockButton.dataset.i18n = block.recreatable
+    ? (block.module === "camshaft_lobe" ? "camshaft.cad.recreate" : "app.recreate_block")
+    : "workspace.edit";
+  workspaceEditBlockButton.textContent = t(workspaceEditBlockButton.dataset.i18n);
+  workspaceBlockReadonly.hidden = block.module !== "camshaft_lobe" || block.editable;
+  workspaceBlockReadonly.dataset.i18n = block.status === "partial" ? "camshaft.cad.partial"
+    : block.status === "legacy_unverified" ? "camshaft.cad.legacy"
+    : block.recipe_error ? "camshaft.cad.recipe_unavailable" : "camshaft.cad.readonly";
+  workspaceBlockReadonly.textContent = t(workspaceBlockReadonly.dataset.i18n);
   for (const item of workspaceTree.querySelectorAll("button.workspace-tree-item")) {
     item.classList.toggle("selected", item.dataset.blockId === block.id);
   }
@@ -1234,27 +1796,46 @@ function showEditor({ locked = false } = {}) {
   moduleHeading.classList.toggle("locked", locked);
   moduleHeading.dataset.lockedName = locked ? moduleName(currentModule) : "";
   setModulePickerDisabled(locked);
-  document.querySelector(".cad-controls").hidden = !currentModule.capabilities.build;
-  editorModePill.title = t(currentModule.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
-  editorModeText.textContent = t(currentModule.capabilities.build ? "app.managed_cad" : "app.preview_only");
+  document.querySelector(".cad-controls").hidden = !currentModule.capabilities.build
+    || (currentModule.kind === "camshaft_lobe" && camshaftStep !== "cam");
+  updateEditorPresentation();
   cadTitle.textContent = t(locked ? "cad.update_title" : "cad.title");
-  cadDescription.textContent = t(locked ? "cad.update_description" : "cad.description");
+  cadDescription.dataset.i18n = currentModule.kind === "camshaft_lobe"
+    ? "camshaft.cad.description" : locked ? "cad.update_description" : "cad.description";
+  cadDescription.textContent = t(cadDescription.dataset.i18n);
   cadCreateButton.textContent = t(locked ? "cad.update" : "cad.create");
   editorDocumentActions.hidden = !locked;
   window.dispatchEvent(new Event("resize"));
 }
 
+function updateEditorPresentation() {
+  if (!currentModule) return;
+  const selectionOnly = !currentModule.capabilities.preview;
+  editorShell.classList.toggle("selection-only", selectionOnly);
+  selectionNote.hidden = !selectionOnly;
+  document.querySelector('[data-i18n="controls.preview_note"]').hidden = !currentModule.capabilities.build;
+  document.querySelector("#editor-shell .preview-panel").setAttribute("aria-label", t(selectionOnly ? "silent.selection.title" : "app.preview_region"));
+  document.querySelector("#editor-shell .controls-panel").setAttribute("aria-label", t(selectionOnly ? "silent.selection.title" : "app.parameters_region"));
+  const mode = selectionOnly ? "app.selection_only" : currentModule.capabilities.build ? "app.managed_cad" : "app.preview_only";
+  editorModePill.title = t(`${mode}_title`);
+  editorModeText.textContent = t(mode);
+  editorTitle.textContent = moduleName(currentModule);
+}
+
 async function openSelectedBlockEditor() {
   if (!selectedWorkspaceBlock) return;
-  editorContext = {
+  const block = selectedWorkspaceBlock;
+  if (!block.editable && !block.recreatable) return;
+  editorContext = block.recreatable ? null : {
     documentId: selectedWorkspaceDocumentId,
     block: selectedWorkspaceBlock,
   };
   await selectModule(selectedWorkspaceBlock.module, false);
-  baselinePayload = { ...baselinePayload, ...(selectedWorkspaceBlock.profile || {}) };
+  baselinePayload = { ...baselinePayload, ...(block.recreatable ? block.recipe.studio_profile : block.profile || {}) };
+  if (block.recreatable && block.module === "camshaft_lobe") camshaftStep = "cam";
   baselinePayloadKey = payloadKey(baselinePayload);
   renderFields();
-  showEditor({ locked: true });
+  showEditor({ locked: !block.recreatable });
   await runPreview({ force: true });
 }
 
@@ -1285,6 +1866,7 @@ async function selectModule(kind, autoPreview = true) {
     baselinePayloadKey = payloadKey(baselinePayload);
     lastSuccessfulPayloadKey = null;
     lastPreviewResult = null;
+    window.dispatchEvent(new Event("geomwright-cam-motion-reset"));
     customProfileDraft = null;
     customProfileBase = null;
     customProfileBaseValues = null;
@@ -1298,21 +1880,23 @@ async function selectModule(kind, autoPreview = true) {
     moduleCurrentName.textContent = moduleName(module);
     moduleDescription.textContent = moduleDescriptionText(module);
     standardBadge.textContent = moduleStandard(module);
-    document.querySelector(".cad-controls").hidden = !module.capabilities.build;
-    editorModePill.title = t(module.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
-    editorModeText.textContent = t(module.capabilities.build ? "app.managed_cad" : "app.preview_only");
+    document.querySelector(".cad-controls").hidden = !module.capabilities.build
+      || (module.kind === "camshaft_lobe" && camshaftStep !== "cam");
+    updateEditorPresentation();
     renderFields();
+    if (!module.capabilities.preview) baselinePayloadKey = payloadKey(collectPayload());
     renderSummary({});
     renderWarnings([]);
     updateDirtyState();
     setStatus("status.module_ready", "idle", { module: moduleName(module) });
-    if (autoPreview) await runPreview({ force: true });
+    if (autoPreview || !module.capabilities.preview) await runPreview({ force: true });
   } finally {
     if (revision === selectionRevision) setModulePickerDisabled(wasModuleSelectDisabled);
   }
 }
 
 async function prepareCadPlan(payload, key = payloadKey(payload)) {
+  if (currentModule.kind === "camshaft_lobe" && payload.step !== "cam") return;
   if (!currentModule.capabilities.build) {
     cadPlanKey = null;
     cadCreateButton.disabled = true;
@@ -1337,17 +1921,32 @@ async function prepareCadPlan(payload, key = payloadKey(payload)) {
     cadPlanKey = key;
     cadCreateButton.disabled = cadBuildActive || (Boolean(editorContext) && !currentDirtyState());
     cadResult.dataset.state = "ready";
-    const planDimensions = cadPlanDisplayDimensions(plan);
-    cadResult.textContent = t("cad.plan_ready", "CAD plan ready", {
+    if (currentModule.kind === "camshaft_lobe") {
+      cadResult.textContent = t("camshaft.cad.ready", undefined, {
+        width: formatNumber(plan.width),
+        error: Number(plan.fit.max_sampled_error_mm).toLocaleString(getLocale(), {maximumSignificantDigits: 3}),
+      });
+      if (plan.verification.curvature_shortfall_mm > 0) {
+        cadResult.textContent += " " + t("camshaft.cad.curvature", undefined, {
+          radius: plan.verification.min_sampled_curvature_radius_mm.toLocaleString(getLocale(), {maximumSignificantDigits: 4}),
+          shortfall: plan.verification.curvature_shortfall_mm.toLocaleString(getLocale(), {maximumSignificantDigits: 3}),
+        });
+      }
+    } else {
+      const planDimensions = cadPlanDisplayDimensions(plan);
+      cadResult.textContent = t("cad.plan_ready", "CAD plan ready", {
       elapsed: formatPlanElapsed(performance.now() - planStartedAt),
       diameter: formatNumber(planDimensions.outerDiameter),
       width: formatNumber(planDimensions.faceWidth),
     });
+    }
   } catch (error) {
     if (error.name === "AbortError" || controller !== cadPlanController) return;
     cadPlanKey = null;
     cadResult.dataset.state = "error";
-    cadResult.textContent = t("cad.error", error.message, { message: error.message });
+    cadResult.textContent = currentModule.kind === "camshaft_lobe" && error.message.includes("cam build rejected:")
+      ? t("camshaft.cad.rejected")
+      : t("cad.plan_error", error.message, { message: error.message });
   } finally {
     if (controller === cadPlanController) cadPlanController = null;
   }
@@ -1451,6 +2050,7 @@ async function waitForCreatedBlock(result, moduleKind, timeoutMilliseconds = 150
 }
 
 async function createManagedPulley() {
+  const buildModule = currentModule;
   const profile = collectPayload();
   if (cadPlanKey !== payloadKey(profile)) {
     await prepareCadPlan(profile);
@@ -1464,8 +2064,9 @@ async function createManagedPulley() {
       (workspaceSnapshot.documents || []).map((item) => item.document.runtime_id),
     );
   }
-  const modelName = editorContext?.block?.name || "Geomwright pulley";
-  if (!window.confirm(t(updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
+  const isCam = buildModule.kind === "camshaft_lobe";
+  const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : "Geomwright pulley");
+  if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
   cadBuildActive = true;
   cadCancelButton.hidden = false;
   cadCreateButton.disabled = true;
@@ -1474,8 +2075,8 @@ async function createManagedPulley() {
   const startedAt = Date.now();
   try {
     const jobUrl = updating
-      ? `/modules/${currentModule.kind}/cad/update-jobs`
-      : currentModule.cad_job_url;
+      ? `/modules/${buildModule.kind}/cad/update-jobs`
+      : buildModule.cad_job_url;
     const startedJob = await requestJson(jobUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1490,13 +2091,16 @@ async function createManagedPulley() {
     });
     activeCadJobId = startedJob.id;
     const job = await waitForCadJob(startedJob, startedAt);
-    if (job.status === "failed") throw new Error(job.error || "CAD job failed");
-    if (job.status === "cancelled") throw new Error(t("cad.cancelled"));
+    if (["failed", "cancelled"].includes(job.status)) {
+      const error = new Error(job.status === "cancelled" ? t("cad.cancelled") : (job.error || "CAD job failed").split(" | partial_result=")[0]);
+      error.partialResult = job.partial_result;
+      throw error;
+    }
     await new Promise((resolve) => setTimeout(resolve, 1000));
     const elapsed = formatElapsed(Date.now() - startedAt);
     cadResult.dataset.state = "ready";
     cadResult.textContent = t(
-      updating ? "cad.updated" : "cad.created",
+      isCam ? "camshaft.cad.created" : updating ? "cad.updated" : "cad.created",
       updating ? "Model rebuilt and verified" : "Pulley created and verified",
       { elapsed },
     );
@@ -1516,7 +2120,7 @@ async function createManagedPulley() {
       editorSaveDocumentButton.disabled = false;
       editorSaveAsDocumentButton.disabled = false;
     } else {
-      const created = await waitForCreatedBlock(job.result, currentModule.kind, 15000, documentsBeforeCreate);
+      const created = await waitForCreatedBlock(job.result, buildModule.kind, 15000, documentsBeforeCreate);
       if (!created) {
         throw new Error(t("cad.created_block_missing", "The created managed block was not found in KOMPAS readback."));
       }
@@ -1525,6 +2129,18 @@ async function createManagedPulley() {
       const createdBlock = created.block;
       selectedWorkspaceDocumentId = createdEntry.document.runtime_id;
       selectedWorkspaceBlock = createdBlock;
+      if (isCam) {
+        editorContext = null;
+        if (currentModule.kind === buildModule.kind) {
+          baselinePayload = { ...profile };
+          baselinePayloadKey = payloadKey(profile);
+          updateDirtyState();
+        }
+        renderWorkspace();
+        showWorkspace();
+        return;
+      }
+      currentModule = buildModule;
       editorContext = { documentId: createdEntry.document.runtime_id, block: createdBlock };
       baselinePayload = { ...profile };
       baselinePayloadKey = payloadKey(profile);
@@ -1535,6 +2151,11 @@ async function createManagedPulley() {
   } catch (error) {
     cadResult.dataset.state = "error";
     cadResult.textContent = t("cad.error", error.message, { message: error.message });
+    if (error.partialResult) {
+      const partial = error.partialResult;
+      const target = partial.document?.runtime_id || partial.document_id;
+      cadResult.textContent += ` ${t("camshaft.cad.partial")} ${target || t("camshaft.cad.partial_unknown")}`;
+    }
   } finally {
     cadBuildActive = false;
     activeCadJobId = null;
@@ -1586,10 +2207,10 @@ function refreshLanguage() {
     }
   }
   if (lastPreviewResult) renderSummary(lastPreviewResult.summary);
+  if (currentModule && !currentModule.capabilities.preview) renderSelectionSummary();
   renderWarnings(displayedWarnings, false);
   if (currentModule) {
-    editorModePill.title = t(currentModule.capabilities.build ? "app.managed_cad_title" : "app.preview_only_title");
-    editorModeText.textContent = t(currentModule.capabilities.build ? "app.managed_cad" : "app.preview_only");
+    updateEditorPresentation();
   }
   refreshStatusLanguage();
   if (workspaceActionActive) updateWorkspaceBusy();
@@ -1629,7 +2250,7 @@ moduleSelect.addEventListener("change", async () => {
     renderWarnings([{ message: error.message }]);
   }
 });
-form.addEventListener("input", () => schedulePreview());
+form.addEventListener("input", (event) => { invalidateSilentGeometry(event); schedulePreview(); });
 form.addEventListener("wheel", (event) => {
   const input = event.target.closest("input[type='number']");
   if (!input || input.disabled || input.readOnly || event.deltaY === 0) return;
@@ -1650,6 +2271,8 @@ form.addEventListener("wheel", (event) => {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }, { passive: false });
 form.addEventListener("change", (event) => {
+  invalidateSilentGeometry(event);
+  if (event.target.name === "axial_source") syncConditionalFields();
   if (event.target.name === "designation") {
     customProfileDraft = readCustomProfileDraft();
     syncConditionalFields();

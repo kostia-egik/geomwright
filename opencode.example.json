@@ -9,6 +9,10 @@
         "geomwright"
       ],
       "enabled": true,
+      "environment": {
+        "KOMPAS_PYTHON": "C:\\path\\to\\geomwright\\.venv\\Scripts\\python.exe",
+        "KOMPAS_REQUIRE_VISIBLE": "1"
+      },
       "timeout": 600000
     }
   }

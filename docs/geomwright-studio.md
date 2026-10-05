@@ -1,5 +1,32 @@
 # Geomwright Studio
 
+## Unattended startup
+
+Run `python -m geomwright.studio --background --no-browser` from the installed
+environment. `--startup-timeout` bounds startup/readiness (default 15 seconds,
+maximum 60); `--log-dir` selects file logs. The launcher creates no Windows
+console, does not inherit terminal stdin or output pipes, and verifies both the
+source fingerprint and a per-launch ID before accepting `/health`. Successful
+new launches report the launcher PID, actual server PID, URL and log paths.
+An already running current instance is reused; an explicit occupied port is an
+error, not permission to kill its owner. Startup errors stop only the new tree.
+On Windows the launcher calls the actual Python image and preserves its venv,
+avoiding Store/App Execution Alias redirection. Each health request has a bounded
+caller wait even if HTTP blocks or drips data; a stalled request cannot retain the
+launcher for the lifetime of the server.
+
+Manual foreground use is still supported in a user-controlled terminal.
+Agents must not launch Studio with PowerShell `Start-Process`, a foreground
+server command, or the interactive `.cmd` launcher. Such launches have retained
+the agent's terminal call well beyond its displayed timeout. Use the background
+CLI directly, not inside `scripts/run_bounded.py`: that watchdog is for finite
+commands and stops their descendants at completion.
+
+The local `.opencode/plugins/process-launch-guard.js` rejects unsafe launch
+patterns before execution. It is a local accidental-launch guard, not a shell
+security boundary or a fix to the compiled OpenCodez timeout implementation.
+Restart OpenCodez after changing local plugins/rules so the guard is loaded.
+
 Geomwright Studio is the standalone local UI for Geomwright modules. It does not
 require an AI agent: modules expose deterministic schemas and operations that
 the UI can invoke directly. An agent is an optional client of the same contracts,
@@ -8,6 +35,60 @@ not a required intermediary between the UI and CAD.
 The current experimental slice supports V-belt, Poly-V, flat-belt, and two
 shape-specific timing-pulley preview modules through one schema-driven form and
 one HTML5 Canvas renderer.
+The separate `silent_chain_sprocket` leaf under Chain drives is preview-only.
+It renders two host-side views: an end-view tooth fragment with radial diameters
+and an axial width/guide view. Each system has separate profile mechanics (GOST
+equations with measuring-section positioning, DIN rolling-rack envelope and
+shifted involute, and ASME-compatible straight working faces with distinct tips);
+the module still has no CAD build path. It offers the GOST 13552-81 type 1/2 catalog and GOST 13576-81 accuracy class,
+the 60-row secondary DIN 8190 A/B table, and ASME-compatible pitch/guide choices
+from an open reconstruction. DIN and ASME carry a persistent source/conformity
+warning; the ASME choices intentionally have no invented chain designations.
+Its descriptor reports `preview=true` and `build=false`. Host-side radial and
+axial builders supply the two canvas views; there is no CAD plan or KOMPAS write.
+GOST axial sections use C1, h2/h3, guide-throat widths and rib spacing, hatching
+only the cut material. GOST type II uses the Figure 2 18 mm rib spacing and
+integral plate-packet count. The same plate packets repeat at 6s in GOST 13552-81,
+establishing a common relative angular phase for the ribs; this is not a full
+articulated-chain collision simulation. Figure 2's 1.5 mm shoulder belongs to
+the hub, which is outside this functional-rim module. It is not drawn or included
+in the rim boundary or editable dimensions. b4 is the toothed-rim width.
+DIN A/B sections distinguish the upper g and lower f1
+slot widths and the h/h1/h2 levels; inferred short fillet placement is dashed.
+ASME-compatible axial views identify Ramsey RP/SC dimensions separately from
+GB/T evidence. `axial_source` selects `ramsey_rp_sc` (compatibility default) or
+`gb_10855_2016` without changing the radial geometry. The GB source uses recovered
+Figures 4/5 and Tables 2/3: circle-center depth A, rounding radius R, maximum
+throat C, and two-guide spacing D. It selects the permitted rounded outer-edge
+alternative, not the H-dimensioned chamfer. User width is labelled F*/B*, not a
+selected catalog chain dimension. Unsupported guide rows remain unavailable;
+no cross-source fallback is performed. Figure 5 prints pitch 4.762 mm, whereas
+the open radial 3/16-inch selection uses exact 4.7625 mm; no catalog equivalence
+is asserted. DIN roots and undercut transitions come from the rounded
+30-degree rack in Figure 3/Table 4, retaining W-derived thickness. Series 06
+retains a dashed candidate because its printed rack height differs by about
+0.03 mm from that construction. Equations (3)/(5) have been checked against
+DIN 8191 Berichtigung 1:2006-11 and already match its corrected expressions;
+the corrigendum does not change rack height. ASME-compatible round tips use the source circle/face
+intersection, including the separate 35-degree 3/16-inch profile. Square tips
+use the Table 7 maximum diameter (footnote a), trimming the straight working faces
+at its circle rather than exceeding it with the figure-coordinate construction.
+Official page images confirm the inconsistent z91/z96 values in the printed
+standard, not merely its text extraction. Independently corroborating Ramsey
+values remain provisional substitutes, with dashed caps and a specific warning;
+they are not official corrections. Below the
+dimensioned working faces, a selected tangent-filleted flat-floor tool variant
+is shown in teal and its diameter is labelled Dᵢ*. This is a generator choice,
+not a claim that the standard prescribes one unique root. The square-tip printed
+equation/table discrepancy remains explicit. Unsupported axial chamfer
+placement and groove depth remain partial reconstructions. A maximum groove diameter gives
+a minimum-depth bound, not an exact groove floor. Unsupported guide selections
+can still show their radial preview with an unavailable axial envelope.
+Separate GB/T Table 2 axial dimensions and tolerances are shown as reference
+facts, including pitches with no Ramsey data. They do not replace Ramsey GW/S/R
+or silently position the selected Ramsey contour. For the GB source, guide
+bottom shape and actual depth remain cutter-dependent and dashed; no material
+occupancy is inferred below the dimensioned entrance.
 For the flat-belt pulley, Studio exposes one continuous `crown_height` parameter:
 zero means a cylindrical rim and a positive value means a crowned rim. The
 internal CAD plan still records the inferred profile kind for ownership/readback.
@@ -89,16 +170,21 @@ Double-click `start-geomwright-studio.cmd` in the repository root. The launcher:
 1. uses the repository `.venv`, or creates it with Python 3.11 on first launch;
 2. installs the local editable `geomwright` package with its `ui` extra only
    when the package or UI dependencies are missing;
-3. starts the server on `http://127.0.0.1:8765` and opens the default browser.
+3. starts the server on `http://127.0.0.1:8765` when available and opens the
+   default browser at the URL of the current Studio instance.
 
 Keep the console window open while using the UI. Close it or press `Ctrl+C` to
-stop the server. Starting the launcher again while the UI is already running
-opens another browser tab instead of starting a second server.
+stop the server. Starting the launcher again while the current Studio version
+is already running opens another browser tab instead of starting a second server.
 
-If the default port `8765` belongs to an older Studio process or another local
-application, the one-click launcher selects the next free port and reports the
-chosen URL. An explicit `--port` remains strict: if that exact port is occupied,
-Studio stops and asks for a different value instead of silently changing it.
+If `8765` is occupied, the launcher compares the running Studio source version
+with this checkout. It reuses a matching instance on a nearby port or starts a
+new one on the next free port and opens that URL. It never stops an older process:
+running CAD jobs in that process are left untouched. An explicit `--port` remains
+strict: if that exact port is occupied by another version, Studio stops and asks
+for a different value instead of silently changing it. Copy the URL printed in
+the console when checking which instance a browser is showing; reloading a tab
+connected to an older process does not update its Python code.
 
 Python 3.11 or newer must be installed and available through `py` or `python`.
 The first launch may require internet access to install dependencies.
@@ -123,6 +209,43 @@ environment created under the former package name receives the new entry points
 on its next launch.
 
 ## Working with the preview
+
+### Camshaft module
+
+**Valve train → Camshafts → Camshaft lobe** opens a three-step
+editor: Phases, Kinematics, Cam. The kinematic drawing is illustrative; the Cam
+tab shows the computed contact envelope and offers create-only CAD after accepted
+preflight. It builds one numeric cam profile and extrusion, without shaft/hub/bore.
+Width, additional global-X rotation and sampled CAD accuracy belong to this tab.
+Persisted cam geometry is read-only; changed profiles require a new build.
+Version-2 blocks preserve the calculation recipe and Studio form. **Create a new
+cam from these settings** restores a new-part draft without binding it to the source
+document. MCP-only layouts not supported by the form retain their recipe for MCP
+reuse; legacy version-1 blocks have no recoverable full recipe. Cam job failures
+carry `partial_result` when a new document may remain open. Inspect it before retry;
+cancellation does not roll back or close KOMPAS documents. The persisted verified
+marker is published only after native and host checks.
+Read the [English contract](en/camshaft.md) or [Russian guide](ru/camshaft.md)
+for angle units, clearance, source comparisons, and engineering limits.
+
+### Spur gear module
+
+**Mechanical transmissions → Gear drives → External spur gear** opens the
+spur-gear editor. The canvas shows the complete end view with pitch and base
+reference circles, outside/pitch/root dimensions, and the first tooth space
+highlighted. The summary lists control measurements (span length, constant
+chord, over-pin size, base pitch) and the verification status.
+
+Enter a basic-rack contour, module, tooth count, pressure angle, profile shift,
+and face width; the preview recalculates automatically. Off-row modules,
+small-module contours, undercut, low tip thickness, and unusable span or
+over-pin measurements are reported instead of silently corrected. **Create in
+KOMPAS** builds a new unsaved part with a cylindrical blank, one numeric
+tooth-space cut, and a full circular pattern; the bridge verifies volume,
+bounds, and pattern count against the plan. A recognized gear block is
+create-only: the editor restores its recipe for a new part, and in-place
+parameter editing is not available yet. See
+[spur gear](gear-spur.md) for inputs, representation limits, and evidence.
 
 - Parameter edits trigger a new preview automatically after a short debounce.
   If inputs change again while a request is running, the old request is
@@ -180,6 +303,61 @@ presentation change does not alter the deterministic transmission contract.
 Raw `profile_overrides` are intentionally hidden from the ordinary Studio form;
 they remain part of the programmatic API and are preserved when Studio edits a
 model that already contains them.
+
+## Silent-chain completion before CAD
+
+Without additional input values, the preview remains a source reference. Its
+schematic breaks and provisional reconstructions are not manufacturing geometry.
+Entering all applicable additional dimensions closes the functional rim's
+geometric degrees of freedom without claiming those dimensions came from a
+standard. Readiness is inferred automatically and does not enable CAD creation.
+
+1. Select the source, chain/pitch, tooth count and applicable width.
+2. Expand **Additional dimensions** and use **Fill with suggested values**, or enter the
+   applicable values manually. The section is collapsed by default; fixed-value
+   selectors and non-applicable fields are hidden.
+   Suggestions are geometric candidates, not standard values or strength advice.
+3. Review the complete axial boundary and the selected rules. Complete valid
+   inputs become planning-ready automatically; there is no geometry-mode selector
+   or confirmation checkbox. Changing the source/profile clears additional values.
+   Invalid/pending edits are marked unvalidated; a previous successful snapshot
+   does not validate the changed form. Returning to an identical validated request
+   may safely reuse that snapshot. In-flight proposals are discarded after edits.
+
+Applicable user choices include approximate GOST C1/r values; tangent
+DIN entrance construction and two alternative resolutions of the series-06 rack
+conflict; exact ASME tooth-floor depth/corner radius; guide depth and bottom
+radius; missing guide widths/spacing/entrance dimensions; and an explicitly
+accepted Ramsey or custom square-tip diameter for the conflicting GB rows.
+Missing dimensions are never filled from a different selected source.
+
+A guide bottom radius of zero defines a square floor; half the throat width
+defines a semicircular floor. Intermediate radii define a flat floor with tangent
+corner arcs. The selected conservative clearance rule retains the full throat
+width through the maximum-dg bound before starting those arcs. Entered tooth-floor
+depths are exact: insufficient depth is rejected rather than silently increased.
+
+Radial rim thickness specifies a physical inner surface (inner diameter equals
+outside diameter minus twice that thickness). It is not a shaft-seat/bore design.
+Positive common material must remain below every tooth and guide cut. Invalid
+depths, overlapping entrances and impossible radii are
+rejected; source dimensions are retained except explicitly resolved conflicts
+and source-marked approximate dimensions selected by the user.
+
+Responses include `completion` and `construction_spec`. Reference/missing-input
+results have no construction spec. Complete validated input values make
+`ready_for_cad_planning` true automatically; `cad_build_available` stays false.
+This is calculation readiness, not permission to create a model. A warning at
+the future model-creation action is deferred until that CAD flow is implemented.
+The specification records source/selection, exact values, accepted rules, axis
+and coordinate mapping, radial period, closed axial material outline, grooves,
+rib phase and geometric checks. It is the input boundary for a future Layer 4
+planner, not a claim of live KOMPAS verification or authorization to write CAD.
+Hub, shaft seat, keyway, strength and full chain-fit verification are separate.
+For GOST II, the axial rim extent is b4, with no hub shoulder or projection.
+Construction outlines coalesce only numerical duplicate vertices;
+no engineering dimensions are silently fitted or rounded. Suggestions alone are
+formatted to six decimal places before the user accepts them.
 
 ## HTTP contract
 

@@ -6,6 +6,12 @@ from typing import Any
 
 TOOL_CATEGORIES: list[dict[str, Any]] = [
     {
+        "name": "cam_design",
+        "stability": "experimental",
+        "purpose": "Plan and create one verified create-only cam, without shaft or hub.",
+        "tools": ["create_cam", "inspect_cam"],
+    },
+    {
         "name": "server_guidance",
         "stability": "stable",
         "purpose": "Discover the MCP tool surface and choose the right workflow.",

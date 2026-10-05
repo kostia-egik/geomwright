@@ -28,8 +28,11 @@ KOMPAS-3D document/model
 ```
 
 MCP host работает на Python, указанном в `pyproject.toml`. Bridge запускается
-отдельным Python runtime из установки КОМПАС-3D v23 и поэтому не должен получать
-синтаксис или зависимости, недоступные этому runtime.
+отдельным интерпретатором из `KOMPAS_PYTHON` с `pywin32` и доступом к KOMPAS COM.
+Его синтаксис должен поддерживаться выбранным интерпретатором. Старый встроенный
+Python 3.2 не поддерживает текущий bridge; настройка современного runtime описана
+в README. `KOMPAS_REQUIRE_VISIBLE=1` задаёт attach-only режим для MCP так же, как
+Studio: отсутствие работающего КОМПАС — ошибка подключения, не создание скрытой копии.
 
 Продукт, Python distribution и публичный application namespace называются
 Geomwright. `geomwright.server` предоставляет MCP entry point,
@@ -46,7 +49,8 @@ KOMPAS-specific implementation modules временно сохраняются �
 Экспериментальный Geomwright Studio — отдельный host-side presentation adapter.
 Entry point `geomwright.studio` вызывает существующие Layer 2
 preview-функции и адаптирует их результат для HTML5 Canvas. Он не регистрируется
-в MCP tool catalog, не запускает bridge и не выполняет CAD write-операции.
+в MCP tool catalog. Preview-only модули не запускают bridge; managed-CAD модули
+вызывают ограниченные workflows адаптера с явным подтверждением записи.
 Старые entry points `kompas_mcp.studio` и `kompas_mcp.mechanics.ui` сохранены
 только как compatibility aliases.
 
@@ -97,6 +101,57 @@ Layer 1 не выбирает семейство детали и не строи
   quality workflows, но не универсальный Rule Engine.
 
 Layer 2 не владеет документом КОМПАС и не должен сам выполнять COM.
+
+`kompas_mcp/cams/` owns host-only lift laws, fixed-arm rocker kinematics,
+contact envelopes, timing conversion, and sampled geometric diagnostics.
+Its contact-aware `curvature_spline` is a direct-flat-only Layer 2 synthesis:
+positive piecewise-linear curvature integrates the support ODE analytically,
+enforcing C2 flank/nose matching and a bounded monotone family search with
+optional analytic acceleration/jerk limits. Tappet
+edge reach is a separate finite-face check; no dynamics optimizer or COM is involved.
+Its separate `motion_spline` family integrates piecewise-linear valve acceleration
+into cubic C2 spans, solving lift/velocity endpoint conditions with a shared nose
+acceleration. A fixed 48-shape budget is filtered by exact angular derivative
+limits, then by the actual follower/contact geometry; promising candidates receive
+a denser sampled contact check. This is bounded host-only synthesis, not a global
+optimizer or an application of the flat support ODE to rockers. `bounded_auto`
+compares standard laws and these eligible synthesis families without relaxing inputs.
+`geomwright/studio/camshaft.py` owns the three-step presentation adapter.
+The kinematics view is an explicitly labelled illustrative layout, not the
+calculated manufacturing contour. The separate Cam view uses the Layer 2
+profile. Its create-only Layer 4 CAD family uses the same Layer 2 calculation
+for Studio and the public `create_cam` tool. Host-side `cams/cad.py` owns
+preflight, arc-length cubic interpolation and verification; the bridge owns only
+the native NURBS/base arc, extrusion and actual curve/body readback. It creates
+one new part, not a shaft assembly, and exports sketch/feature references for
+subsequent standard operations. The numeric profile is not sketch-parameterized;
+changed inputs require a new build. Studio recognizes a persisted `GW_CAM_VERSION`
+and `CAM_*` fingerprint with the two root operations as a read-only block.
+Version-2 metadata retains a bounded, checksum-verified calculation recipe and
+optional Studio form; Studio restores it only into a new-part draft. Read-only
+`inspect_cam` exposes the recipe to MCP. Legacy version-1 blocks remain readable
+without pretending their original recipe or verification stamp can be recovered. Native creation leaves
+`CAM_VERIFIED=0`; after host checks, a strictly targeted finalization verifies curve
+identity and body bounds again before publishing `CAM_VERIFIED=1`. Errors carry
+owned-document partial-result diagnostics; cancellation is not a rollback.
+The final curve is checked against held-out contact samples, base tangency,
+cubic stationary curvature points, sampled self-intersection and global
+flat/roller contact recovery at sampled follower positions. Contact extrema use
+the continuous cubic/base curve; pressure angles use all source-grid positions.
+Bounds, extrusion direction, positive single-solid volume and rebuild are read
+from KOMPAS; save/reopen acceptance covers direct C2 and rocker examples.
+Engineering limits are strict with independent numerical comparison floors;
+CAD tolerance only bounds profile/contact accuracy, not curvature or finite-face
+slack. Contact-angle and topology checks are sampled rather than a global
+manufacturing proof. Studio's Cam view
+and CAD preflight use the same 10-samples-per-degree synthesis density.
+The Layer 2 preview also returns a complete `motion_chart` command curve including
+lash ramps, with sampled S/V/A/J, separate net valve lift, stage windows and
+derivative-break metadata. Studio renders it without numerical differentiation;
+the chart coordinate is valve-side lift for rockers, not roller-centre motion.
+Its graphical view never launches bridge and labels stale data after input errors.
+Its user contract and verification limits are in [English](docs/en/camshaft.md) and
+[Russian](docs/ru/camshaft.md).
 
 ### Layer 3 — управляемые workflows
 
@@ -359,6 +414,36 @@ intermediate top node. Both variants require exact initial applied counts,
 post-build relation readback, radial-dimension readback, closed topology, full
 feature completion, positive body, rebuild, and save/reopen evidence.
 
+The `gear_spur` Studio module is the first cylindrical-gear family slice. Layer 2
+`src/kompas_mcp/gears/` owns the ГОСТ 13755-2015 basic-rack catalog, ГОСТ
+9563-60 module rows, the analytic involute flank, the theoretical sharp-rack
+trochoid root with undercut trimming, control measurements (span length,
+constant chord, over-pin), and a structured check report; the representation is
+`nominal`, not `generated_exact`. Layer 3 `gears/cad.py` builds a create-only
+numeric plan from a Ramer-Douglas-Peucker-bounded tooth-space contour:
+cylindrical blank, one through-all cut, and a full circular pattern. The bridge
+adds `GW_GEAR_VERSION=1`, `GW_FAMILY_CODE=8`, a `GEAR_*` readback fingerprint,
+and a checksummed recipe; reopened blocks are read-only and can recreate a new
+part from the persisted Studio profile. Live create, volume/bounds/pattern
+verification, save/reopen recognition, and an odd-tooth-count profile-shift case
+are accepted. Rounded cutter-tip `generated_exact` roots, internal and helical
+families, pairs, and ISO small-module contours remain outside this slice.
+
+`silent_chain_sprocket` Studio preview adapts separate host-side GOST, DIN and
+ASME-compatible profile mechanics plus their axial layout metadata into two
+canvas views. Its catalogs cover GOST 13552-81/13576-81, secondary DIN 8190 A/B
+rows, and ASME-compatible open-reconstruction pitch/guide metadata. DIN/ASME
+choices retain explicit provenance and no-conformity warnings. The
+descriptor advertises `preview=true`, `build=false`; this adds no Layer 4 CAD
+family.
+Its Layer 2 completion owner `studio/silent_chain_completion.py` separates source
+data from explicit user construction choices. It exports a bounded completeness
+report and a validated functional-rim geometry specification for future CAD
+planning, never a COM action. Construction intent is inferred from actual input
+values; no mode selector or confirmation checkbox is required. Missing values
+and unresolved radial conflicts cannot become CAD-planning-ready; this is not conformity,
+strength, native sketch or B-Rep verification.
+
 Geomwright Studio owns document/session navigation above Layer 4 modules. Its
 workspace discovers open KOMPAS documents, opens saved files, presents managed
 blocks together with surrounding unmanaged KOMPAS operations, and routes a
@@ -457,9 +542,10 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | `sketch_runtime/` | L2 | current deterministic core |
 | parametric part workflows | L2–L4 | experimental, family-specific live evidence |
 | managed spring families | L2–L4 | implemented, see family contracts |
+| cam profiles | L2–L4 | create-only single cam, shared Studio/MCP plan, actual curve/contact/body verification |
 | diaphragm module | L2–L4 | complete and live-verified |
-| mechanical-transmission platform | L2–L4 | managed V-belt, Poly-V, timing and flat-belt pulley workflows plus live-verified create-only single-row ISO/GOST chain sprockets |
-| Geomwright Studio | presentation over L2–L4 | experimental; preview plus confirmed creation of a new unsaved managed pulley; no arbitrary-body write path |
+| mechanical-transmission platform | L2–L4 | managed V-belt, Poly-V, timing and flat-belt pulley workflows plus live-verified create-only single-row ISO/GOST chain sprockets and external spur gears |
+| Geomwright Studio | presentation over L2–L4 | experimental; preview-only GOST/DIN/ASME-compatible silent-chain profiles, managed pulley previews/build, create-only gear blocks, and no arbitrary-body write path |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for registration and launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |
 

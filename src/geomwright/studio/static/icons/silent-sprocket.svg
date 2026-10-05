@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Silent-chain sprocket rim sector" shape-rendering="geometricPrecision" color="#8d9aa7">
+  <defs>
+    <!-- Four radial teeth on concentric R40 / R30 circles; 30-degree pitch. -->
+    <path id="silent-rim" d="M -29.7258 -26.7652 A 40 40 0 0 1 -26.7652 -29.7258 L -15.8976 -25.4414 A 30 30 0 0 1 -14.0841 -26.4884 L -12.3607 -38.0423 A 40 40 0 0 1 -8.3165 -39.1259 L -1.0470 -29.9817 A 30 30 0 0 1 1.0470 -29.9817 L 8.3165 -39.1259 A 40 40 0 0 1 12.3607 -38.0423 L 14.0841 -26.4884 A 30 30 0 0 1 15.8976 -25.4414 L 26.7652 -29.7258 A 40 40 0 0 1 29.7258 -26.7652" />
+  </defs>
+  <!-- Same circular sector and projection as roller sprocket, 7 px face width. -->
+  <g transform="matrix(0.78 -0.78 0.45 0.60 48 51)" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="miter">
+    <use href="#silent-rim" transform="translate(-1.282051 -13.333333)" />
+    <path d="M -29.7258 -26.7652 l -1.282051 -13.333333 M -26.7652 -29.7258 l -1.282051 -13.333333 M -12.3607 -38.0423 l -1.282051 -13.333333 M -8.3165 -39.1259 l -1.282051 -13.333333 M 8.3165 -39.1259 l -1.282051 -13.333333 M 12.3607 -38.0423 l -1.282051 -13.333333 M 26.7652 -29.7258 l -1.282051 -13.333333 M 29.7258 -26.7652 l -1.282051 -13.333333" />
+    <use href="#silent-rim" />
+  </g>
+</svg>

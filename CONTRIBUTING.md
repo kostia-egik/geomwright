@@ -19,13 +19,20 @@ dependencies:
 
 ```powershell
 py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[ui]"
-\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pip install -e ".[ui]" pytest
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 The test suite covers deterministic host-side behavior. KOMPAS COM behavior
 also needs a live KOMPAS-3D v23 check, including readback and save/reopen when
 the affected workflow claims that level of support.
+
+Host tests must not touch the running CAD session. `tests/conftest.py` blocks
+the real bridge for the entire pytest process, including background jobs. A
+swallowed bridge exception still fails the session. Inject a fake adapter into
+`create_app` before testing confirmed CAD-job routes, and wait for the fake job
+to finish. Live KOMPAS checks run separately and must name the target and obtain
+write confirmation; they are not part of the default test suite.
 
 ## Pull requests
 

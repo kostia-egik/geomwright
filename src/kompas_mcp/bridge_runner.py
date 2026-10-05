@@ -36,7 +36,7 @@ class BridgeRunner:
         self,
         kompas_python: str | None = None,
         bridge_script: str | None = None,
-        require_visible_kompas: bool = False,
+        require_visible_kompas: bool | None = None,
         timeout_seconds: float | None = DEFAULT_NORMAL_TIMEOUT_SECONDS,
         cancel_event: threading.Event | None = None,
         mode: BridgeMode = "normal",
@@ -44,7 +44,10 @@ class BridgeRunner:
     ) -> None:
         self.kompas_python = Path(kompas_python or os.environ.get("KOMPAS_PYTHON") or DEFAULT_KOMPAS_PYTHON)
         self.bridge_script = Path(bridge_script or os.environ.get("KOMPAS_BRIDGE_SCRIPT") or default_bridge_script_path())
-        self.require_visible_kompas = bool(require_visible_kompas)
+        self.require_visible_kompas = (
+            os.environ.get("KOMPAS_REQUIRE_VISIBLE", "").strip().lower() in {"1", "true", "yes"}
+            if require_visible_kompas is None else bool(require_visible_kompas)
+        )
         self.timeout_seconds = timeout_seconds
         self.cancel_event = cancel_event
         self.mode = self._validate_mode(mode)
@@ -105,6 +108,9 @@ class BridgeRunner:
 
             process = subprocess.Popen(
                 [str(self.kompas_python), str(self.bridge_script), str(request_path), str(response_path)],
+                # The bridge reads JSON files, never stdin. Inheriting the MCP
+                # client's Windows async pipe can stall child Python startup.
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

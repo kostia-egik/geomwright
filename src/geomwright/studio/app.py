@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import threading
 import time
@@ -19,7 +20,10 @@ from pydantic import ValidationError
 
 from .registry import get_module, list_modules, preview_module
 from .registry import managed_pulley_plan
+from .camshaft import CamshaftGeometryError, CamshaftPhasesRequest, cam_profile_request
 from kompas_mcp.adapter import KompasAdapter
+from kompas_mcp import cams
+from kompas_mcp.cams.errors import CamSynthesisError
 
 
 _ROOT = Path(__file__).resolve().parent
@@ -33,12 +37,34 @@ def _static_content_version() -> str:
     return digest.hexdigest()[:12]
 
 
+def _studio_content_version() -> str:
+    """Fingerprint the Studio source that a running process keeps in memory."""
+    digest = hashlib.sha256()
+    paths = (
+        list(_ROOT.glob("*.py"))
+        + list((_ROOT / "templates").glob("*.html"))
+        + list((_ROOT / "static").glob("*.js"))
+        + list((_ROOT / "static").glob("*.css"))
+    )
+    for path in sorted(paths):
+        digest.update(path.relative_to(_ROOT).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    # A process also retains the cam calculation modules, not just the UI.
+    # Otherwise a calculation-only fix can silently reuse an outdated server.
+    for path in sorted(Path(cams.__file__).parent.glob("*.py")):
+        digest.update(f"cams/{path.name}".encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
 def _validation_detail(exc: ValidationError) -> list[dict[str, Any]]:
     return [
         {
             "loc": list(error.get("loc") or []),
             "msg": str(error.get("msg") or "Invalid value"),
             "type": str(error.get("type") or "value_error"),
+            "ctx": {key: value for key, value in (error.get("ctx") or {}).items()
+                    if key in {"gt", "ge", "lt", "le"}},
         }
         for error in exc.errors()
     ]
@@ -106,7 +132,17 @@ def create_app(
     )
     templates = Jinja2Templates(directory=str(_ROOT / "templates"))
     static_version = _static_content_version()
+    studio_version = _studio_content_version()
     app.mount("/static", StaticFiles(directory=str(_ROOT / "static")), name="static")
+
+    @app.middleware("http")
+    async def _revalidate_static(request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
     cad_jobs: dict[str, dict[str, Any]] = {}
     cad_jobs_lock = threading.Lock()
     cad_build_lock = threading.Lock()
@@ -149,15 +185,8 @@ def create_app(
                     started_at=time.time(),
                     progress={"percent": 0, "operation": "starting", "name": name, "names": []},
                 )
-                result = studio_adapter(cancel_event).create_managed_pulley(
-                    family=module_kind,
-                    profile_request=profile,
-                    name=name,
-                    execute=True,
-                    confirm_write=True,
-                    visible=True,
-                    progress_callback=report_bridge_progress,
-                )
+                result = create_module(studio_adapter(cancel_event), module_kind, profile, name,
+                                       progress_callback=report_bridge_progress)
                 update_job(
                     job_id,
                     status="completed",
@@ -174,7 +203,42 @@ def create_app(
                 stage="cancelled" if cancelled else "failed",
                 finished_at=time.time(),
                 error=str(exc),
+                partial_result=getattr(exc,"partial_result",None),
             )
+
+    def create_module(adapter: Any, module_kind: str, profile: dict[str, Any], name: str,
+                       progress_callback: Any = None) -> dict[str, Any]:
+        if module_kind == "silent_chain_sprocket":
+            plan = managed_pulley_plan(module_kind, profile)
+            plan["name"] = name
+            return adapter.create_silent_chain_sprocket(
+                plan, execute=True, confirm_write=True, visible=True,
+                progress_callback=progress_callback,
+            )
+        if module_kind == "gear_spur":
+            plan = managed_pulley_plan(module_kind, profile)
+            plan["name"] = name
+            return adapter.create_gear_spur(
+                plan, execute=True, confirm_write=True, visible=True,
+                progress_callback=progress_callback,
+            )
+        if module_kind == "camshaft_lobe":
+            request = CamshaftPhasesRequest.model_validate(profile)
+            if request.step != "cam":
+                raise ValueError("Open the Cam step to build the calculated cam profile")
+            return adapter.create_cam(cam_profile_request(request),width=request.cam_width,
+                                      rotation_deg=request.cam_rotation_deg,tolerance=request.cad_tolerance,
+                                       name=name,execute=True,confirm_write=True,visible=True,
+                                       progress_callback=progress_callback,studio_profile=request.model_dump(mode="json"))
+        return adapter.create_managed_pulley(
+                    family=module_kind,
+                    profile_request=profile,
+                    name=name,
+                    execute=True,
+                    confirm_write=True,
+                    visible=True,
+                    progress_callback=progress_callback,
+                )
 
     def run_update_job(
         job_id: str,
@@ -255,9 +319,12 @@ def create_app(
         return {
             "ok": True,
             "product": "geomwright_studio",
+            "pid":os.getpid(),
+            "launch_id":os.environ.get("GEOMWRIGHT_STUDIO_LAUNCH_ID"),
             "mode": "managed_cad",
             "contract_version": 2,
             "static_version": static_version,
+            "studio_version": studio_version,
             "capabilities": [
                 "managed_pulley_plan",
                 "managed_pulley_create_job",
@@ -461,6 +528,9 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=_validation_detail(exc)) from exc
+        except (CamshaftGeometryError, CamSynthesisError) as exc:
+            raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc),
+                "params": getattr(exc, "params", {})}) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -479,18 +549,14 @@ def create_app(
     def module_cad_create(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             module = get_module(kind)
+            if not module.build:
+                raise HTTPException(status_code=409, detail=f"{module.kind} has no CAD build yet")
             profile_payload = dict(payload.get("profile") or {})
             request = module.request_model.model_validate(profile_payload)
             if payload.get("confirm_write") is not True:
                 raise HTTPException(status_code=409, detail="confirm_write=true is required")
-            return studio_adapter().create_managed_pulley(
-                family=module.kind,
-                profile_request=request.model_dump(exclude_none=True),
-                name=str(payload.get("name") or "Geomwright pulley"),
-                execute=True,
-                confirm_write=True,
-                visible=True,
-            )
+            return create_module(studio_adapter(),module.kind,request.model_dump(exclude_none=True),
+                                 str(payload.get("name") or ("Geomwright cam" if kind == "camshaft_lobe" else "Geomwright pulley")))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValidationError as exc:
@@ -498,16 +564,20 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            partial = getattr(exc,"partial_result",None)
+            detail = {"message":str(exc),"partial_result":partial} if partial is not None else str(exc)
+            raise HTTPException(status_code=502, detail=detail) from exc
 
     @app.post("/modules/{kind}/cad/jobs", status_code=202)
     def start_module_cad_job(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             module = get_module(kind)
+            if not module.build:
+                raise HTTPException(status_code=409, detail=f"{module.kind} has no CAD build yet")
             request = module.request_model.model_validate(dict(payload.get("profile") or {}))
             if payload.get("confirm_write") is not True:
                 raise HTTPException(status_code=409, detail="confirm_write=true is required")
-            if module.kind == "chain_sprocket":
+            if module.kind in {"chain_sprocket", "silent_chain_sprocket", "camshaft_lobe"}:
                 managed_pulley_plan(module.kind, request.model_dump(exclude_none=True))
             job_id = uuid4().hex
             now = time.time()
@@ -515,13 +585,15 @@ def create_app(
                 finished_jobs = [
                     item
                     for item in cad_jobs.values()
-                    if item.get("status") in {"completed", "failed"}
+                    if item.get("status") in {"completed", "failed", "cancelled"}
                 ]
                 for expired in sorted(
                     finished_jobs,
                     key=lambda item: float(item.get("finished_at") or 0.0),
                 )[:-99]:
-                    cad_jobs.pop(str(expired["id"]), None)
+                    expired_id = str(expired["id"])
+                    cad_jobs.pop(expired_id, None)
+                    cad_cancel_events.pop(expired_id, None)
                 cad_jobs[job_id] = {
                     "id": job_id,
                     "status": "queued",
@@ -539,7 +611,7 @@ def create_app(
                     job_id,
                     module.kind,
                     request.model_dump(exclude_none=True),
-                    str(payload.get("name") or "Geomwright pulley"),
+                    str(payload.get("name") or ("Geomwright cam" if kind == "camshaft_lobe" else "Geomwright pulley")),
                 ),
                 name=f"geomwright-cad-{job_id[:8]}",
                 daemon=True,
@@ -557,6 +629,10 @@ def create_app(
     def start_module_update_job(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             module = get_module(kind)
+            if module.kind == "camshaft_lobe":
+                raise HTTPException(status_code=409, detail="Cam profiles are create-only; build a new cam instead")
+            if not module.build:
+                raise HTTPException(status_code=409, detail=f"{module.kind} has no CAD build yet")
             request = module.request_model.model_validate(dict(payload.get("profile") or {}))
             previous_request = module.request_model.model_validate(dict(payload.get("previous_profile") or {}))
             document_id = str(payload.get("document_id") or "").strip()

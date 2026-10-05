@@ -13735,6 +13735,8 @@ def _apply_part_variables(part, planned_variables):
 
 def _create_part_document(app, visible):
     doc3 = app.Documents.Add(4, bool(visible))
+    if doc3 is None and _REQUIRE_VISIBLE_KOMPAS:
+        raise RuntimeError("The visible KOMPAS instance could not create a part. Finish active editing and retry; no substitute instance was started.")
     fallback_error = None
     if doc3 is None:
         try:
@@ -27358,6 +27360,663 @@ def handle_create_chain_sprocket(payload):
         )
 
 
+def _inspect_silent_chain_block(doc3):
+    part = safe_get(doc3, "TopPart")
+    variables = {str(safe_get(v, "Name") or ""): v for v in _iter_operation_variables(part)}
+    if safe_get(variables.get("GW_SILENT_VERSION"), "Value") != 1:
+        return None
+    model = cast_model_container(part)
+    roots = []
+    for collection, name in (("Sketchs", "Silent rim profile"), ("Rotateds", "Silent functional rim"),
+                             ("Sketchs", "Silent radial period"), ("Extrusions", "Silent radial cut"),
+                             ("FeaturePatterns", "Silent tooth pattern")):
+        matches = [item for item in iter_collection(safe_get(model, collection)) if safe_get(item, "Name") == name]
+        if len(matches) != 1 or safe_get(matches[0], "Valid") is False:
+            return None
+        roots.append(matches[0])
+    required = {"SC_Z", "SC_DA", "SC_DI", "SC_B", "SC_REQUEST"}
+    if not required.issubset(variables):
+        return None
+    profile = None
+    try:
+        text = str(safe_get(variables["SC_REQUEST"], "Note") or "")
+        if len(text) <= 8192:
+            profile = json.loads(text)
+            if not isinstance(profile, dict) or int(profile.get("physical_tooth_count") or 0) != int(safe_get(variables["SC_Z"], "Value")):
+                profile = None
+    except Exception:
+        profile = None
+    refs = sorted(int(safe_get(item, "Reference")) for item in roots)
+    owned = set(refs)
+    for collection in ("Sketchs", "Extrusions", "FeaturePatterns"):
+        for item in iter_collection(safe_get(model, collection)):
+            if str(safe_get(item, "Name") or "").startswith("Silent ") and safe_get(item, "Reference"):
+                owned.add(int(safe_get(item, "Reference")))
+    return {"id": "managed-silent-chain:" + "-".join(str(r) for r in refs),
+            "schema": "geomwright.managed_silent_chain_sprocket", "version": 1,
+            "module": "silent_chain_sprocket", "name": "Silent-chain sprocket",
+            "profile": profile, "recipe": {"studio_profile": profile} if profile else None,
+            "editable": False, "recreatable": profile is not None,
+            "owned_references": sorted(owned), "identity_references": refs,
+            "verification_scope": "ownership_and_recipe_recognition_not_fresh_geometry_audit"}
+
+
+def handle_create_silent_chain_sprocket(payload):
+    if payload.get("execute") is not True or payload.get("confirm_write") is not True:
+        raise ValueError("Silent-chain creation requires execute=true and confirm_write=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "silent_chain_cad_plan" or plan.get("plan_version") != 1:
+        raise ValueError("A silent_chain_cad_plan version 1 is required")
+    operations = list(plan.get("operations") or [])
+    if [op.get("scenario") for op in operations] != ["numeric_profile_sketch", "cut_extrusion", "circular_pattern"]:
+        raise ValueError("Silent-chain plan requires one profile, cut and circular pattern")
+    recipe = json.dumps(plan["profile_request"], ensure_ascii=True, sort_keys=True, allow_nan=False)
+    if len(recipe) > 8192:
+        raise ValueError("Silent-chain recipe exceeds metadata budget")
+    app, doc3, stage, steps = make_app(), None, "create_document", []
+    try:
+        doc3, part, model = _create_part_document(app, bool(payload.get("visible", True)))
+        part = safe_get(cast_document_3d(doc3), "TopPart")
+        model = cast_model_container(part)
+        names = plan["entity_names"]
+        stage = "axial_rim_sketch"
+        report_progress(10, stage, name=names["rim_sketch"])
+        axis = {"id": "rim_axis", "kind": "segment", "start": [-5., 0.],
+                "end": [float(plan["target"]["axial_max"])+5., 0.], "style": 3}
+        sketch, target, entities, parameterization = _create_sketch_entities(model, part, {
+            "name": names["rim_sketch"], "plane": "XOY", "create_new_sketch": True,
+            "entities": list(plan["rim_entities"])+[axis],
+        })
+        preflight = _audit_sketch_profile_preflight(model, sketch, closure_style=1,
+            expected_component_count=1, profile_entities=list(plan["rim_entities"]))
+        if not preflight.get("ok"):
+            raise RuntimeError("Silent axial profile preflight failed")
+        stage = "axial_rim_revolution"
+        rotated = model.Rotateds.Add(28)
+        rotated.Name = names["rim"]
+        rotated.Profile = sketch
+        rotated.SetProfile(sketch)
+        rotated.Axis = part.DefaultObject(71)
+        rotated.Direction = 0
+        rotated.ToroidShapeType = False
+        rotated.SetAngle(True, 360.)
+        rotated.SetRotatedType(True, 0)
+        if not rotated.Update():
+            raise RuntimeError("Silent axial rim revolution failed")
+        before = _active_api5_primary_body_metrics()
+        runtime = {"rim": {"scenario": "stepped_shaft", "feature": rotated,
+                            "axis": part.DefaultObject(71), "sketch": sketch}}
+        steps.append({"id": "rim", "sketch": _v_belt_object_reference(sketch, "rim_sketch"),
+                      "feature": _v_belt_object_reference(rotated, "rim"), "profile_preflight": preflight})
+        for i, operation in enumerate(operations):
+            stage = operation["id"]
+            report_progress(30+20*i, stage, name=operation["params"]["name"])
+            _execute_workflow_operation(part, model, operation, runtime, steps)
+        stage = "rebuild_and_body_verification"
+        if not cast_document_3d(doc3).RebuildDocument():
+            raise RuntimeError("Silent-chain final rebuild failed")
+        body = _active_api5_primary_body_metrics()
+        import win32com.client
+        bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+        if len(bodies) != 1 or not body["solid"] or not 0 < body["volume"] < before["volume"]:
+            raise RuntimeError("Silent-chain result must be one positive-volume solid after material removal")
+        box = win32com.client.CastTo(bodies[0], "IBody7").GetGabarit()
+        if not box or not box[0] or len(box) != 7:
+            raise RuntimeError("Silent-chain body bounds unavailable")
+        body["bounds_mm"] = [float(v) for v in box[1:]]
+        verify = plan["verification"]
+        error = abs(body["volume"]*1000/float(verify["expected_volume_mm3"])-1)
+        if error > float(verify["volume_relative_tolerance"]):
+            raise RuntimeError("Silent-chain body volume disagrees with the completed radial/axial geometry: " + str(error))
+        if any(abs(a-b) > float(verify["bounds_tolerance_mm"]) for a, b in zip(body["bounds_mm"], verify["expected_bounds_mm"])):
+            raise RuntimeError("Silent-chain body bounds disagree with the plan: " + str(body["bounds_mm"]))
+        pattern = next(s for s in steps if s.get("id") == "tooth_pattern")
+        if int(pattern.get("count") or 0) != int(verify["pattern_count"]):
+            raise RuntimeError("Silent-chain physical tooth count readback failed")
+        stage = "persist_ownership"
+        spec = plan["construction_spec"]
+        metadata = _apply_part_variables(part, [
+            {"name": "GW_SILENT_VERSION", "value": 1, "note": "Create-only silent-chain rim"},
+            {"name": "SC_Z", "value": verify["pattern_count"]},
+            {"name": "SC_DA", "value": spec["outside_diameter_mm"]},
+            {"name": "SC_DI", "value": spec["inner_rim_diameter_mm"]},
+            {"name": "SC_B", "value": spec["functional_width_mm"]},
+            {"name": "SC_REQUEST", "value": 1, "note": recipe},
+        ])
+        block = _inspect_silent_chain_block(cast_document_3d(doc3))
+        if not metadata.get("ok") or not block or block["profile"] != plan["profile_request"]:
+            raise RuntimeError("Silent-chain ownership/recipe readback failed")
+        report_progress(100, "completed", name=plan["name"])
+        return {"ok": True, "success": True, "executed": True, "stage": "verified",
+                "saved": False, "closed": False, "document": describe_runtime_document(doc3, app),
+                "block": block, "body": body, "steps": steps,
+                "exports": {s["id"]: s.get("feature") or s.get("sketch") for s in steps if s.get("id")},
+                "verification": {"ok": True, "final_rebuild_ok": True, "pattern_count": pattern["count"],
+                                 "relative_volume_error": error, "bounds_verified": True},
+                "accuracy": plan["accuracy"]}
+    except Exception as exc:
+        raise RuntimeError("create_silent_chain_sprocket failed at %s: %s | partial_document=%s" %
+                           (stage, exc, json.dumps(describe_runtime_document(doc3, app) if doc3 else None)))
+
+
+GEAR_CONTOUR_CODES = {"gost_a": 1, "gost_b": 2, "gost_c": 3, "gost_d": 4, "custom": 0}
+GEAR_RECIPE_CHUNK = 800
+
+
+def _gear_recipe_variables(plan):
+    import hashlib
+    recipe = {
+        "schema": "geomwright.gear.recipe",
+        "version": 1,
+        "studio_profile": dict(plan.get("profile_request") or {}),
+        "name": str(plan.get("name") or ""),
+    }
+    encoded = json.dumps(recipe, ensure_ascii=True, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    chunks = [encoded[index:index + GEAR_RECIPE_CHUNK] for index in range(0, len(encoded), GEAR_RECIPE_CHUNK)] or [""]
+    if len(chunks) > 120:
+        raise RuntimeError("Gear recipe exceeds the metadata budget")
+    variables = [{"name": "GEAR_RECIPE_COUNT", "value": len(chunks), "note": None}]
+    for index, chunk in enumerate(chunks):
+        variables.append({"name": "GEAR_RECIPE_%03d" % index, "value": 0, "note": chunk})
+    variables.append({
+        "name": "GEAR_RECIPE_HASH",
+        "value": 0,
+        "note": hashlib.sha256(encoded.encode("ascii")).hexdigest(),
+    })
+    return variables
+
+
+def _read_gear_recipe(items):
+    import hashlib
+    try:
+        count = int(float(safe_get(items.get("GEAR_RECIPE_COUNT"), "Value") or 0))
+        if not 1 <= count <= 120:
+            raise ValueError("invalid gear recipe chunk count")
+        encoded = "".join(
+            str(safe_get(items.get("GEAR_RECIPE_%03d" % index), "Note") or "")
+            for index in range(count)
+        )
+        digest = str(safe_get(items.get("GEAR_RECIPE_HASH"), "Note") or "")
+        if hashlib.sha256(encoded.encode("ascii")).hexdigest() != digest:
+            raise ValueError("gear recipe checksum differs")
+        recipe = json.loads(encoded)
+        if recipe.get("schema") != "geomwright.gear.recipe" or recipe.get("version") != 1:
+            raise ValueError("unsupported gear recipe version")
+        return recipe, None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _inspect_gear_spur_block(doc3):
+    part = safe_get(doc3, "TopPart")
+    if part is None:
+        return None
+    items = {str(safe_get(variable, "Name") or ""): variable for variable in _iter_operation_variables(part)}
+    variables = {name: safe_get(variable, "Value") for name, variable in items.items()}
+    if variables.get("GW_GEAR_VERSION") != 1:
+        return None
+    required = {
+        "GEAR_M", "GEAR_Z", "GEAR_X", "GEAR_ALPHA_DEG", "GEAR_CONTOUR",
+        "GEAR_DA", "GEAR_DF", "GEAR_B", "GEAR_VERIFIED",
+    }
+    if not required.issubset(variables):
+        return None
+    model = cast_model_container(part)
+    if model is None:
+        return None
+    sketches = [
+        item for item in iter_collection(safe_get(model, "Sketchs"))
+        if str(safe_get(item, "Name") or "").lower().endswith(" one tooth space")
+        or str(safe_get(item, "Name") or "").lower().endswith(" blank sketch")
+    ]
+    blank_sketch = [
+        item for item in sketches
+        if str(safe_get(item, "Name") or "").lower().endswith(" blank sketch")
+    ]
+    gap_sketch = [
+        item for item in sketches
+        if str(safe_get(item, "Name") or "").lower().endswith(" one tooth space")
+    ]
+    extrusions = list(iter_collection(safe_get(model, "Extrusions")))
+    blanks = [item for item in extrusions if str(safe_get(item, "Name") or "").lower().endswith(" blank")]
+    cuts = [
+        item for item in extrusions
+        if str(safe_get(item, "Name") or "").lower().endswith(" one tooth space cut")
+    ]
+    patterns = [
+        item for item in iter_collection(safe_get(model, "FeaturePatterns"))
+        if str(safe_get(item, "Name") or "").lower().endswith(" tooth space pattern")
+    ]
+    if len(blank_sketch) != 1 or len(gap_sketch) != 1 or len(blanks) != 1 or not cuts or len(patterns) != 1:
+        return None
+    recipe, recipe_error = _read_gear_recipe(items)
+    contour_codes = {value: key for key, value in GEAR_CONTOUR_CODES.items()}
+    profile = {
+        "contour": contour_codes.get(int(round(float(variables.get("GEAR_CONTOUR") or 0))), "custom"),
+        "module_mm": variables.get("GEAR_M"),
+        "tooth_count": int(round(float(variables.get("GEAR_Z") or 0))),
+        "pressure_angle_deg": variables.get("GEAR_ALPHA_DEG"),
+        "profile_shift": variables.get("GEAR_X"),
+        "face_width_mm": variables.get("GEAR_B"),
+    }
+    if recipe and recipe.get("studio_profile"):
+        profile = dict(recipe["studio_profile"])
+    owned = [
+        safe_get(item, "Reference")
+        for item in [blank_sketch[0], gap_sketch[0], blanks[0]] + list(cuts) + [patterns[0]]
+        if safe_get(item, "Reference")
+    ]
+    verified = bool(variables.get("GEAR_VERIFIED") == 1)
+    return {
+        "id": "gear:" + str(owned[0]) if owned else "gear:unknown",
+        "schema": "geomwright.managed_gear_spur",
+        "version": 1,
+        "module": "gear_spur",
+        "name": str(safe_get(part, "Name") or "Geomwright spur gear"),
+        "profile": profile,
+        "editable": False,
+        "verified": verified,
+        "status": "verified" if verified else "partial",
+        "recipe": recipe,
+        "recipe_error": recipe_error,
+        "recreatable": bool(recipe and recipe.get("studio_profile")),
+        "owned_references": owned,
+    }
+
+
+def handle_create_gear_spur(payload):
+    if payload.get("execute") is not True or payload.get("confirm_write") is not True:
+        raise ValueError("Spur-gear creation requires execute=true and confirm_write=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "gear_spur_cad_plan" or int(plan.get("plan_version") or 0) != 1:
+        raise ValueError("A gear_spur_cad_plan version 1 is required")
+    if plan.get("family") != "gear_spur":
+        raise ValueError("Managed spur-gear plan family must be gear_spur")
+    if (plan.get("ownership") or {}).get("schema") != "geomwright.managed_gear_spur":
+        raise ValueError("Managed spur-gear ownership schema is missing")
+    workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
+    operations = list(workflow_params.get("operations") or [])
+    expected_scenarios = ["cylindrical_blank", "numeric_profile_sketch", "cut_extrusion", "circular_pattern"]
+    if [str(item.get("scenario") or "") for item in operations] != expected_scenarios:
+        raise ValueError("Managed spur gear requires blank, profile, cut, and circular-pattern operations")
+    name = str(plan.get("name") or "").strip()
+    if not name:
+        raise ValueError("Gear plan name must not be empty")
+    app = make_app()
+    doc3 = None
+    steps_report = []
+    stage = "create_document"
+    try:
+        doc3, part, model = _create_part_document(app, bool(payload.get("visible", True)))
+        part = safe_get(cast_document_3d(doc3), "TopPart")
+        model = cast_model_container(part)
+        if part is None or model is None:
+            raise RuntimeError("Managed spur-gear document has no top part or model container")
+        part.Name = name
+        if not part.Update():
+            raise RuntimeError("Gear part name update failed")
+        runtime_objects = {}
+        for index, operation in enumerate(operations):
+            stage = str(operation.get("id") or "operation_%d" % index)
+            report_progress(
+                10 + int(70.0 * index / max(1, len(operations))),
+                str(operation.get("scenario") or "workflow_operation"),
+                name=str((operation.get("params") or {}).get("name") or ""),
+            )
+            _execute_workflow_operation(part, model, operation, runtime_objects, steps_report)
+        stage = "rebuild_and_body_verification"
+        if not cast_document_3d(doc3).RebuildDocument():
+            raise RuntimeError("Gear final rebuild failed")
+        import win32com.client
+        bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+        body = _active_api5_primary_body_metrics()
+        if len(bodies) != 1 or not body["solid"] or not 0.0 < float(body["volume"]):
+            raise RuntimeError("Gear result must be one positive-volume solid")
+        box = win32com.client.CastTo(bodies[0], "IBody7").GetGabarit()
+        if not box or not box[0] or len(box) != 7:
+            raise RuntimeError("Gear body bounds unavailable")
+        body["bounds_mm"] = [float(value) for value in box[1:]]
+        verify = plan.get("verification") or {}
+        expected_volume = float(verify.get("expected_volume_mm3") or 0.0)
+        if expected_volume <= 0.0:
+            raise RuntimeError("Gear plan expected volume is missing")
+        error = abs(float(body["volume"]) * 1000.0 / expected_volume - 1.0)
+        if error > float(verify.get("volume_relative_tolerance") or 0.01):
+            raise RuntimeError("Gear body volume disagrees with the plan: " + str(error))
+        expected_bounds = [float(value) for value in (verify.get("expected_bounds_mm") or [])]
+        bound_candidates = [
+            [float(value) for value in candidate]
+            for candidate in (verify.get("expected_bounds_candidates_mm") or [expected_bounds])
+            if len(candidate) == 6
+        ]
+        bounds_tolerance = float(verify.get("bounds_tolerance_mm") or 0.05)
+        width = float(verify.get("face_width_mm") or 0.0)
+        max_radius = float(verify.get("max_radius_mm") or 0.0)
+        actual = [float(value) for value in body["bounds_mm"]]
+        extent_ok = (
+            max_radius > 0.0
+            and abs(actual[0] + width) <= bounds_tolerance
+            and abs(actual[3]) <= bounds_tolerance
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) <= max_radius + bounds_tolerance
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) >= 0.5 * max_radius
+        )
+        if not extent_ok and not any(
+            all(abs(actual_value - expected) <= bounds_tolerance for actual_value, expected in zip(actual, candidate))
+            for candidate in bound_candidates
+        ):
+            raise RuntimeError("Gear body bounds disagree with the plan: " + str(body["bounds_mm"]))
+        pattern_step = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
+        if pattern_step is None or int(pattern_step.get("count") or 0) != int(verify.get("pattern_count") or 0):
+            raise RuntimeError("Gear physical tooth count readback failed")
+        stage = "persist_ownership"
+        profile_request = dict(plan.get("profile_request") or {})
+        geometry = plan.get("geometry") or {}
+        metadata = _apply_part_variables(part, [
+            {"name": "GW_GEAR_VERSION", "value": 1, "expression": None, "note": "Create-only spur gear"},
+            {"name": "GW_FAMILY_CODE", "value": 8, "expression": None, "note": "Geomwright gear family code"},
+            {"name": "GEAR_M", "value": float(profile_request.get("module_mm") or 0.0), "expression": None},
+            {"name": "GEAR_Z", "value": int(profile_request.get("tooth_count") or 0), "expression": None},
+            {"name": "GEAR_X", "value": float(profile_request.get("profile_shift") or 0.0), "expression": None},
+            {"name": "GEAR_ALPHA_DEG", "value": float(profile_request.get("pressure_angle_deg") or 20.0), "expression": None},
+            {"name": "GEAR_CONTOUR", "value": GEAR_CONTOUR_CODES.get(str(profile_request.get("contour")), 0), "expression": None},
+            {"name": "GEAR_DA", "value": 2.0 * float(geometry.get("outside_radius") or 0.0), "expression": None},
+            {"name": "GEAR_DF", "value": 2.0 * float(geometry.get("root_radius") or 0.0), "expression": None},
+            {"name": "GEAR_B", "value": float(geometry.get("face_width") or 0.0), "expression": None},
+            {"name": "GEAR_VERIFIED", "value": 1, "expression": None, "note": "Host and native checks passed"},
+        ] + _gear_recipe_variables(plan))
+        if not metadata.get("ok"):
+            raise RuntimeError("Gear metadata variables could not be created")
+        block = _inspect_gear_spur_block(cast_document_3d(doc3))
+        if not block or block.get("module") != "gear_spur" or block.get("profile") != profile_request:
+            raise RuntimeError("Gear ownership/recipe readback failed")
+        report_progress(100, "completed", name=name)
+        return {
+            "ok": True,
+            "success": True,
+            "executed": True,
+            "stage": "verified",
+            "saved": False,
+            "closed": False,
+            "document": describe_runtime_document(doc3, app),
+            "block": block,
+            "body": body,
+            "steps": steps_report,
+            "exports": {
+                step["id"]: step.get("feature") or step.get("sketch")
+                for step in steps_report
+                if step.get("id")
+            },
+            "verification": {
+                "ok": True,
+                "final_rebuild_ok": True,
+                "pattern_count": pattern_step["count"],
+                "relative_volume_error": error,
+                "bounds_verified": True,
+            },
+            "accuracy": plan.get("accuracy"),
+        }
+    except Exception as exc:
+        raise RuntimeError("create_gear_spur failed at %s: %s | partial_document=%s" %
+                           (stage, exc, json.dumps(describe_runtime_document(doc3, app) if doc3 else None)))
+
+
+def _cam_curve_readback(sketch):
+    sketch_doc = sketch.BeginEdit()
+    if sketch_doc is None:
+        raise RuntimeError("Cam sketch readback BeginEdit failed")
+    try:
+        container = _get_sketch_drawing_container(sketch_doc)
+        if int(container.Nurbses.Count) != 1 or int(container.Arcs.Count) != 1:
+            raise RuntimeError("Cam must have one working NURBS and one base arc")
+        import win32com.client
+        nurbs = win32com.client.CastTo(container.Nurbses.Item(0), "INurbs")
+        values = nurbs.GetNurbsParams()
+        if not values or not values[0]:
+            raise RuntimeError("Cam NURBS parameter readback failed")
+        coordinates = list(values[1])
+        arc = win32com.client.CastTo(container.Arcs.Item(0), "IArc")
+        start = [float(arc.X1), float(arc.Y1)]
+        end = [float(arc.X2), float(arc.Y2)]
+        center = [float(arc.Xc), float(arc.Yc)]
+        angle = math.atan2(start[1]-center[1], start[0]-center[0])
+        direction = bool(arc.Direction)
+        span = (math.atan2(end[1]-center[1], end[0]-center[0])-angle) % (2*math.pi)
+        if direction:
+            span = (2*math.pi-span) % (2*math.pi)
+        return {"curve": {"order": int(nurbs.Degree), "points": [coordinates[i:i+2] for i in range(0,len(coordinates),2)],
+                          "weights": list(values[2]), "knots": list(values[3])},
+                "base": {"radius": float(arc.Radius), "center": center, "start": start,
+                         "end": end, "direction": direction, "start_angle": angle, "span": span}}
+    finally:
+        sketch.EndEdit()
+
+
+def _inspect_cam_block(doc3):
+    part = safe_get(doc3, "TopPart")
+    items = {str(safe_get(v,"Name") or ""): v for v in _iter_operation_variables(part)}
+    variables = {name:safe_get(v,"Value") for name,v in items.items()}
+    version = variables.get("GW_CAM_VERSION")
+    if version not in (1,2):
+        return None
+    model = cast_model_container(part)
+    sketches = [s for s in iter_collection(safe_get(model,"Sketchs")) if safe_get(s,"Name") == "Sketch Cam Profile"]
+    features = [f for f in iter_collection(safe_get(model,"Extrusions")) if safe_get(f,"Name") == "Extrusion Cam"]
+    if len(sketches) != 1 or len(features) != 1 or not {"CAM_WIDTH","CAM_ROTATION","CAM_TOLERANCE"}.issubset(variables):
+        return None
+    refs = [safe_get(sketches[0],"Reference"),safe_get(features[0],"Reference")]
+    recipe = None
+    recipe_error = None
+    if version == 2:
+        try:
+            import hashlib
+            count = int(variables.get("CAM_RECIPE_COUNT") or 0)
+            if not 1 <= count <= 120:
+                raise ValueError("Invalid cam recipe chunk count")
+            encoded = "".join(str(safe_get(items["CAM_RECIPE_%03d"%i],"Note") or "") for i in range(count))
+            digest = str(safe_get(items.get("CAM_RECIPE_HASH"),"Note") or "")
+            if hashlib.sha256(encoded.encode("ascii")).hexdigest() != digest:
+                raise ValueError("Cam recipe checksum differs")
+            recipe = json.loads(encoded)
+            if recipe.get("schema") != "geomwright.cam.recipe" or recipe.get("version") != 1:
+                raise ValueError("Unsupported cam recipe version")
+        except Exception as exc:
+            recipe_error = str(exc)
+            recipe = None
+    verified = version == 2 and variables.get("CAM_VERIFIED") == 1
+    return {"id": "cam:"+str(refs[0]), "schema": "geomwright.cam", "version": int(version),
+            "module": "camshaft_lobe", "name": str(safe_get(part,"Name") or "Geomwright cam"),
+            "profile": {"cam_width": variables["CAM_WIDTH"], "cam_rotation_deg": variables["CAM_ROTATION"],
+                        "cad_tolerance": variables["CAM_TOLERANCE"]},
+            "editable": False, "verified":verified,
+            "status":"legacy_unverified" if version == 1 else "verified" if verified else "partial",
+            "recipe":recipe,"recipe_error":recipe_error,
+            "recreatable":bool(recipe and recipe.get("studio_profile")), "owned_references": refs}
+
+
+def handle_create_cam(payload):
+    if payload.get("execute") is not True or payload.get("confirm_write") is not True:
+        raise ValueError("Cam creation requires execute=true and confirm_write=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "cam_plan" or plan.get("plan_version") != 1:
+        raise ValueError("A cam_plan version 1 is required")
+    import pythoncom
+    import win32com.client
+    app = make_app()
+    report_progress(5,"create_part_document",name=plan["name"])
+    doc, part, model = _create_part_document(app,bool(payload.get("visible",True)))
+    # This workflow owns only this new document. On failure keep it unsaved and
+    # visible for diagnosis; never alter the previously active document.
+    document = describe_runtime_document(doc,app)
+    report_progress(8,"cam_document_created",document_id=document["runtime_id"],
+                    part_reference=safe_get(part,"Reference"),name=plan["name"])
+    try:
+        part.Name = plan["name"]
+        if not part.Update():
+            raise RuntimeError("Cam part name update failed")
+        report_progress(10,"cam_document_named",document_id=document["runtime_id"],
+                        part_reference=safe_get(part,"Reference"),name=plan["name"])
+        return _execute_create_cam(plan,app,doc,part,model)
+    except Exception as exc:
+        return {"ok":False,"executed":True,"error":str(exc),
+                "partial_result":{"status":"partial","verified":False,"document":document,
+                                  "action":"inspect_owned_document_before_retry"}}
+
+
+def _execute_create_cam(plan,app,doc,part,model):
+    import pythoncom
+    import win32com.client
+    document = describe_runtime_document(doc,app)
+    progress = lambda percent,stage,**details: report_progress(percent,stage,document_id=document["runtime_id"],
+                                                            part_reference=safe_get(part,"Reference"),**details)
+    sketch, _ = _create_sketch_on_plane(model,part,"Sketch Cam Profile","YOZ")
+    edit = sketch.BeginEdit()
+    if edit is None:
+        raise RuntimeError("Cam sketch BeginEdit failed")
+    try:
+        progress(25,"cam_profile",name="Sketch Cam Profile")
+        container = _get_sketch_drawing_container(edit)
+        curve = plan["curve"]
+        arr = lambda values: win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8,values)
+        nurbs = container.Nurbses.Add()
+        if not nurbs.SetNurbsParams(arr([v for point in curve["points"] for v in point]),
+                                   arr(curve["weights"]),arr(curve["knots"]),4,False):
+            raise RuntimeError("Cam NURBS SetNurbsParams failed")
+        nurbs.Style = 1
+        if not nurbs.Update():
+            raise RuntimeError("Cam NURBS Update failed")
+        base = plan["base"]
+        _add_sketch_arc(container,base["center"],base["radius"],base["start"],base["end"],base["direction"],1)
+    finally:
+        sketch.EndEdit()
+    progress(50,"cam_extrusion",name="Extrusion Cam")
+    feature = model.Extrusions.Add(25)
+    feature.Name = "Extrusion Cam"
+    assigned = False
+    for setter in ("SetSketch","SetProfile"):
+        method = safe_get(feature,setter)
+        if callable(method):
+            method(sketch)
+            assigned = True
+            break
+    if not assigned:
+        for attr in ("Sketch", "Profile"):
+            try:
+                setattr(feature, attr, sketch)
+                assigned = True
+                break
+            except Exception:
+                continue
+    if not assigned:
+        raise RuntimeError("Cam extrusion cannot bind its sketch")
+    feature.Direction = 0
+    feature.SetExtrusionType(True,0)
+    feature.SetDepth(True,float(plan["width"]))
+    if not feature.Update() or not feature.Valid:
+        raise RuntimeError("Cam extrusion did not produce a valid feature")
+    progress(70,"cam_readback",name="Sketch Cam Profile")
+    if not cast_document_3d(doc).RebuildDocument():
+        raise RuntimeError("Cam final rebuild failed")
+    actual = _cam_curve_readback(sketch)
+    progress(85,"cam_body_readback",name="Extrusion Cam")
+    bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part,"IFeature7").ResultBodies)
+    if len(bodies) != 1:
+        raise RuntimeError("Cam must produce exactly one body")
+    box = win32com.client.CastTo(bodies[0],"IBody7").GetGabarit()
+    if not box or not box[0] or len(box) != 7:
+        raise RuntimeError("Cam body bounds readback failed")
+    if describe_runtime_document(safe_get(app,"ActiveDocument"),app)["runtime_id"] != document["runtime_id"]:
+        raise RuntimeError("Active document changed during cam creation; refusing unrelated body readback")
+    body = _active_api5_primary_body_metrics()
+    body["bounds"] = [float(v) for v in box[1:]]
+    if body["body_count"] != 1 or not body["solid"] or body["volume"] <= 0:
+        raise RuntimeError("Cam must produce one positive-volume solid")
+    expected = plan["verification"]
+    if abs(body["volume"]-expected["expected_volume_cm3"]) > max(1e-7,expected["expected_volume_cm3"]*1e-5):
+        raise RuntimeError("Cam final body volume differs from the planned curve extrusion")
+    bounds = expected["bounds_2d"]
+    expected_box = [-plan["width"],-bounds[3],-bounds[2],0,-bounds[1],-bounds[0]]
+    if max(abs(a-b) for a,b in zip(body["bounds"],expected_box)) > plan["tolerance_mm"]:
+        raise RuntimeError("Cam final body has wrong orientation or width")
+    for field in ("points","weights","knots"):
+        wanted = plan["curve"][field]
+        got = actual["curve"][field]
+        if field == "points":
+            wanted = [v for p in wanted for v in p]
+            got = [v for p in got for v in p]
+        if len(wanted) != len(got) or max(abs(a-b) for a,b in zip(wanted,got))>1e-8:
+            raise RuntimeError("Cam final NURBS parameters differ from the checked plan")
+    import hashlib
+    encoded = json.dumps(plan["recipe"],ensure_ascii=True,allow_nan=False,separators=(",",":"))
+    if len(encoded)>24000:
+        raise ValueError("Cam recipe exceeds metadata budget")
+    chunks = [encoded[i:i+200] for i in range(0,len(encoded),200)]
+    planned_metadata = [
+        {"name":"GW_CAM_VERSION","value":2,"expression":None,"note":"Create-only cam schema"},
+        {"name":"CAM_VERIFIED","value":0,"expression":None,"note":"Host verification completed"},
+        {"name":"CAM_RECIPE_COUNT","value":len(chunks),"note":"Recipe chunk count"},
+        {"name":"CAM_RECIPE_HASH","value":1,"note":hashlib.sha256(encoded.encode("ascii")).hexdigest()},
+        {"name":"CAM_WIDTH","value":plan["width"],"expression":None,"note":"Source width, metadata only"},
+        {"name":"CAM_ROTATION","value":plan["rotation_deg"],"expression":None,"note":"Source rotation, metadata only"},
+        {"name":"CAM_TOLERANCE","value":plan["tolerance_mm"],"expression":None,"note":"Profile accuracy, not engineering slack"}]
+    planned_metadata += [{"name":"CAM_RECIPE_%03d"%i,"value":1,"note":chunk} for i,chunk in enumerate(chunks)]
+    metadata = _apply_part_variables(part,planned_metadata)
+    if not metadata.get("ok"):
+        raise RuntimeError("Cam metadata creation failed")
+    block = _inspect_cam_block(cast_document_3d(doc))
+    if not block or block.get("recipe") != plan["recipe"]:
+        raise RuntimeError("Cam recipe persistence readback failed")
+    progress(95,"cam_native_verified",name=plan["name"])
+    return {"ok":True,"executed":True,"saved":False,"closed":False,
+            "document":describe_runtime_document(doc,app), "body":body,
+            "exports":{"sketch_ref":safe_get(sketch,"Reference"),"feature_ref":safe_get(feature,"Reference"),
+                       "axis":"global_x","plane":"YOZ","axial_interval":plan["axial_interval"]},
+            "curve_readback":actual,"verification":{"ok":True,"single_solid":True,"rebuild_ok":True,
+            "parameterization":"create_only_numeric_profile"}}
+
+
+def handle_finalize_cam(payload):
+    if payload.get("confirm_write") is not True:
+        raise ValueError("Cam finalization requires confirm_write=true")
+    app = make_app()
+    doc = resolve_document_strict(app,payload.get("document_id"))
+    doc3 = cast_document_3d(doc)
+    block = _inspect_cam_block(doc3)
+    wanted = [payload.get("sketch_ref"),payload.get("feature_ref")]
+    if not block or block["version"] != 2 or block["owned_references"] != wanted or not block.get("recipe"):
+        raise RuntimeError("Cam finalization target or recipe changed")
+    import hashlib
+    model = cast_model_container(safe_get(doc3,"TopPart"))
+    sketch = _resolve_existing_sketch(model,payload["sketch_ref"])
+    actual = _cam_curve_readback(sketch)
+    digest = hashlib.sha256(json.dumps(actual,sort_keys=True,separators=(",",":")).encode("ascii")).hexdigest()
+    if digest != payload.get("curve_digest"):
+        raise RuntimeError("Cam curve changed after host verification")
+    import win32com.client
+    part = safe_get(doc3,"TopPart")
+    bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part,"IFeature7").ResultBodies)
+    if len(bodies) != 1:
+        raise RuntimeError("Cam body count changed after host verification")
+    bounds = win32com.client.CastTo(bodies[0],"IBody7").GetGabarit()
+    if not bounds or not bounds[0] or len(bounds) != 7 or len(payload.get("body_bounds") or []) != 6:
+        raise RuntimeError("Cam final bounds readback failed")
+    if max(abs(a-b) for a,b in zip(bounds[1:],payload["body_bounds"]))>1e-7:
+        raise RuntimeError("Cam body bounds changed after host verification")
+    report = _apply_part_variables(safe_get(doc3,"TopPart"),[{"name":"CAM_VERIFIED","value":1}])
+    if not report.get("ok") or not _inspect_cam_block(doc3).get("verified"):
+        raise RuntimeError("Cam verification marker readback failed")
+    report_progress(100,"cam_host_verified",document_id=payload["document_id"])
+    return {"ok":True,"document":describe_runtime_document(doc,app)}
+
+
+def handle_inspect_cam(payload):
+    app = make_app()
+    if not payload.get("document_id"):
+        raise ValueError("Exact document_id is required for cam inspection")
+    doc = resolve_document_strict(app,payload["document_id"])
+    block = _inspect_cam_block(cast_document_3d(doc))
+    return {"ok":True,"document":describe_runtime_document(doc,app),"recognized":block is not None,"block":block}
+
+
 def handle_create_managed_pulley(payload):
     if not bool(payload.get("execute", False)):
         raise ValueError("create_managed_pulley requires execute=true")
@@ -28457,6 +29116,18 @@ def handle_studio_workspace_snapshot(payload):
                     }
                 )
             owned = set(inspection.get("owned_references") or [])
+            cam_block = _inspect_cam_block(doc3)
+            if cam_block is not None:
+                entry["blocks"].append(cam_block)
+                owned.update(cam_block["owned_references"])
+            silent_block = _inspect_silent_chain_block(doc3)
+            if silent_block is not None:
+                entry["blocks"].append(silent_block)
+                owned.update(silent_block["owned_references"])
+            gear_block = _inspect_gear_spur_block(doc3)
+            if gear_block is not None:
+                entry["blocks"].append(gear_block)
+                owned.update(gear_block["owned_references"])
             model_container = cast_model_container(safe_get(doc3, "TopPart"))
             for collection_name, accessors in MODEL_OBJECT_COLLECTION_SPECS:
                 collection, _accessor, _errors = _resolve_model_object_collection(model_container, accessors)
@@ -28501,6 +29172,12 @@ def _dispatch_action(request):
 
     if action == "get_session_state":
         return get_session_state()
+    if action == "create_cam":
+        return handle_create_cam(payload)
+    if action == "finalize_cam":
+        return handle_finalize_cam(payload)
+    if action == "inspect_cam":
+        return handle_inspect_cam(payload)
     if action == "list_documents":
         return handle_list_documents()
     if action == "activate_document":
@@ -28601,6 +29278,10 @@ def _dispatch_action(request):
         return handle_create_managed_pulley(payload)
     if action == "create_chain_sprocket":
         return handle_create_chain_sprocket(payload)
+    if action == "create_silent_chain_sprocket":
+        return handle_create_silent_chain_sprocket(payload)
+    if action == "create_gear_spur":
+        return handle_create_gear_spur(payload)
     if action == "update_managed_pulley":
         return handle_update_managed_pulley(payload)
     if action == "inspect_managed_pulley":

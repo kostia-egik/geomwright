@@ -2824,6 +2824,46 @@ class KompasAdapter:
             "host_preflight": host_preflight,
         }
 
+    def create_cam(self, request: dict[str, Any], **options: Any) -> dict[str, Any]:
+        from .cams.cad import create_cam
+        return create_cam(self, request, **options)
+
+    def inspect_cam(self, document_id: str) -> dict[str, Any]:
+        return self.runner.call("inspect_cam",{"document_id":document_id,"_require_visible_kompas":True})
+
+    def create_silent_chain_sprocket(
+        self, plan: dict[str, Any], *, execute: bool = False,
+        confirm_write: bool = False, visible: bool = True,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Execute a completed create-only functional rim plan in a new part."""
+        if plan.get("stage") != "silent_chain_cad_plan" or plan.get("plan_version") != 1:
+            raise ValueError("A silent_chain_cad_plan version 1 is required")
+        if not execute:
+            return {"ok": True, "success": True, "executed": False, "stage": "planned", "plan": plan}
+        if confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+        result = self.runner.call("create_silent_chain_sprocket", {
+            "plan": plan, "execute": True, "confirm_write": True, "visible": bool(visible),
+        }, progress_callback=progress_callback)
+        return result
+
+    def create_gear_spur(
+        self, plan: dict[str, Any], *, execute: bool = False,
+        confirm_write: bool = False, visible: bool = True,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Execute a create-only managed spur-gear plan in a new part."""
+        if plan.get("stage") != "gear_spur_cad_plan" or plan.get("plan_version") != 1:
+            raise ValueError("A gear_spur_cad_plan version 1 is required")
+        if not execute:
+            return {"ok": True, "success": True, "executed": False, "stage": "planned", "plan": plan}
+        if confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+        return self.runner.call("create_gear_spur", {
+            "plan": plan, "execute": True, "confirm_write": True, "visible": bool(visible),
+        }, progress_callback=progress_callback)
+
     def create_managed_pulley(
         self,
         *,

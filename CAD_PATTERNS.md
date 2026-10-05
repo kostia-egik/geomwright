@@ -34,6 +34,7 @@ Evidence levels used by this file:
 | Arc through 3 points is mirrored or goes the long way | `ARC-001`, `VERIFY-001` |
 | COM field rejects a formula or silently resets it | `PARAM-001`, `VAR-001` |
 | Need formula-driven CAD parameters | `PARAM-001`, `VAR-001` |
+| Text supplied to AddVariable disappears from metadata readback | `VAR-002` |
 | Need a local coordinate system for parameterization | `CS-001` |
 | Axis direction changes after switching CS / plane | `CS-002`, `DIR-001`, `VERIFY-001` |
 | Changing an early CS breaks dependent geometry | `CS-003` |
@@ -56,6 +57,7 @@ Evidence levels used by this file:
 | Composite path mixes sketch edges and 3D edges | `EDGE-002` |
 | Sketch cannot be assigned to extrude/revolve/evolution | `OP-001` |
 | Operation uses wrong sketch contour or rejects a valid-looking sketch | `OP-002`, `OP-001` |
+| Numeric cam NURBS fails creation or silently changes its order | `CURVE-001`, `VERIFY-001` |
 | Bent coil / hook spiral phase is wrong | `SPIRAL-001`, `VAR-001` |
 | Native curve fillet needs a source cut point but raw spiral endpoints cannot be read | `FILLET-003` |
 | Cut sketch rounds the cutter when the retained body edge must be rounded | `FILLET-004`, `OP-002`, `VERIFY-001` |
@@ -63,8 +65,145 @@ Evidence levels used by this file:
 | UI opens files in a hidden or different KOMPAS instance | `SESSION-001` |
 | CAD job remains queued after a completed-looking operation | `SESSION-002` |
 | CAD model is created but Studio reports that the managed block is missing | `SESSION-003` |
+| Host tests create duplicate CAD models during unrelated work | `SESSION-004` |
+| Bridge fails with `SyntaxError` although the project venv accepts the file | `BRIDGE-001` |
+| Numeric sketch creation times out with hundreds of entities | `OP-004`, `BRIDGE-001` |
 
 ## Rules
+
+### BRIDGE-001: The Bridge Must Parse Under KOMPAS Python 3.2
+
+Applies when:
+- editing `bridge/kompas_bridge.py` or its packaged copy;
+- adding any syntax that is newer than Python 3.2;
+- debugging a bridge that fails before any handler runs.
+
+Symptom:
+- every bridge call fails at import time with an error such as
+  `SyntaxError: can use starred expression only as assignment target`;
+- the Studio workspace returns HTTP 502 and no action executes;
+- the same file imports and compiles cleanly in the project `.venv`.
+
+Cause:
+- `bridge/kompas_bridge.py` runs under KOMPAS's bundled interpreter,
+  `C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe`, which reports
+  Python 3.2.5. Generalised unpacking, f-strings, `yield from`, and other
+  post-3.2 syntax abort the whole module before the requested action is read.
+  The project `.venv` is Python 3.11, so ordinary host-side checks do not catch
+  this failure class.
+
+Rule:
+- Treat the bridge as Python 3.2 source. Keep f-strings, starred unpacking, and
+  modern typing conveniences outside the bridge.
+- Write `[a] + list(b) + [c]` instead of `(a, *b, c)`; keep `%` formatting for
+  bridge-side messages.
+- Verify with the KOMPAS interpreter, not the project venv:
+  `& "C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe" -m py_compile bridge\kompas_bridge.py`.
+
+Verification:
+- A clean `py_compile` exit under the KOMPAS interpreter before any live run.
+- One live action through the production Studio path.
+
+Known example:
+- `_inspect_gear_spur_block` used `(blank, gap, *cuts, pattern)`; the host venv
+  compiled it, and the Studio workspace failed until it was rewritten as a list
+  concatenation.
+
+Related:
+- `SESSION-002`
+- `OP-004`
+
+---
+
+### CURVE-001: Native NURBS Uses Order And Typed Numeric Arrays
+
+Evidence: live-verified on direct C2 and roller-rocker cam profiles, including
+rebuild and save/reopen curve readback.
+
+Symptom:
+- `INurbs.SetNurbsParams` returns false with ordinary Python arrays or the
+  mathematical degree; no usable curve reaches the extrusion.
+- `Nurbses.Item` sometimes exposes only `IDrawingObject`, so readback methods
+  disappear between calls.
+
+Cause:
+- API7 expects `SAFEARRAY | VT_R8`; coordinates are flat `(x0,y0,x1,y1,...)`.
+- Its `Degree` field denotes **order**: a cubic Bezier/NURBS uses `4`, not `3`.
+- Indexed collection items require an explicit interface cast for stable methods.
+
+Rule and implementation:
+- Pass explicit `win32com.client.VARIANT(VT_ARRAY | VT_R8, values)` for points,
+  weights and knots; use order 4 for a cubic curve.
+- Cast indexed items to `INurbs`/`IArc` before calling their readback methods.
+- Read all poles, weights and knots after rebuild. Do not count `Update()` as
+  proof of curve accuracy or correct base-arc direction.
+- For sampled motion envelopes, arc-length interpolation avoids tangential
+  acceleration jumps corrupting curvature at piecewise motion knots. Keep a true
+  circular base arc separate and verify global contact and final solid volume.
+
+Verification:
+- Compare native NURBS parameters with the checked plan and held-out profile
+  samples, then verify actual bounds, extrusion direction and integrated volume.
+- Reopen the saved part and repeat the curve/contact and body checks.
+- A valid extrusion with the wrong base-arc branch can still be the wrong cam;
+  volume/bounds verification must reject it.
+
+Known example: `kompas_mcp/cams/cad.py` and bridge `handle_create_cam`.
+
+### VAR-002: Read AddVariable Text From Note, Not ParameterNote
+
+Evidence: live-verified on direct and rocker cam recipes, including save/reopen.
+
+Symptom:
+- numeric variables exist, but a saved recipe checksum fails because all text
+  fragments read back as empty strings.
+
+Cause:
+- API7 `IVariable7` exposes both `Note` and `ParameterNote`. Text passed as the
+  third `AddVariable(name, value, note)` argument appears in `Note`; on the
+  verified runtime `ParameterNote` is empty.
+
+Rule and implementation:
+- read the actual `Note` property for AddVariable text metadata; do not substitute
+  a planned-note fallback and call that persistence verification;
+- keep structured text bounded, versioned and checksum-verified;
+- metadata is not a geometry-driving formula or evidence of a fresh audit.
+
+Verification:
+- compare decoded actual text with the complete recipe at creation and after
+  save/reopen. Direct and rocker recipes, including Studio form settings, match.
+
+Known example: `_inspect_cam_block` and `_execute_create_cam`.
+
+### SESSION-004: Host Tests Must Not Reach the Live CAD Adapter
+
+Evidence: implementation-backed; unintended repeated sprocket creation reported
+in the interactive session and explained by the confirmed source path.
+
+Symptom:
+- running ordinary Studio tests creates repeated roller-chain sprockets in the
+  user's running KOMPAS, including while another module is being developed.
+
+Cause:
+- a `TestClient(create_app())` used the default live `KompasAdapter` and submitted
+  a confirmed `/modules/chain_sprocket/cad/jobs` request;
+- checking only HTTP 202 or accepting a failed job did not isolate the executor
+  or wait for its background thread, so a nominal host test performed a CAD write.
+
+Rule:
+- host HTTP tests inject a fake adapter before any write-route request;
+- background fake jobs must finish before the test exits;
+- the pytest process must reject the real bridge, even if an application layer
+  catches the exception. Live verification runs separately with an explicit target.
+
+Implementation and verification:
+- `tests/conftest.py` installs a session-wide `BridgeRunner.call` guard for the
+  production/configured bridge and KOMPAS interpreter; it remains active through
+  interpreter shutdown and fails the session on blocked attempts;
+- `test_http_api_serves_ui_catalog_preview_and_structured_errors` injects a fake
+  creator, checks its single chain call and waits for the fake job to complete;
+- focused HTTP and fake-process bridge tests pass without calling KOMPAS. Do not
+  reproduce this failure by creating or deleting live models.
 
 ### SESSION-001: Interactive Hosts Must Attach to a Visible Running KOMPAS
 
@@ -131,6 +270,11 @@ Cause:
 Rule:
 - run every Studio bridge write in an isolated child process with a hard timeout
   and a user-visible cancellation event;
+- set that child's stdin to `subprocess.DEVNULL`: the bridge reads request files,
+  not the MCP transport. Inheriting a Windows async MCP pipe can stall Python
+  startup before even the first progress checkpoint; changing Python alone does
+  not fix this. Live stdio-MCP creation/save and read-only session calls verify
+  the isolated-input path;
 - cancellation terminates only the child bridge, never KOMPAS or the document;
 - queued jobs must observe cancellation before entering COM;
 - place progress checkpoints around risky post-operation rebuild/readback steps;
@@ -655,6 +799,10 @@ Cause:
 
 Rule:
 - Every production sketch must be fully constrained.
+- Explicit create-only numeric cam profiles are an exception: they promise no
+  dimension-driven editing and use native curve/arc readback plus rebuild/reopen
+  stability instead of a fully-defined solver status. Do not label such a profile
+  parameterized or turn its source metadata into driving variables.
 - Create sketch constraints inside the original `BeginEdit()` block, directly
   after creating the relevant geometry. `AddConstraint` after `EndEdit()` can
   return `None` without applying anything.
@@ -1809,6 +1957,53 @@ Known example:
 Related:
 - `OP-001`
 - `VAR-001`
+
+---
+
+### OP-004: Bound Numeric Sketch Entity Count Before Patterning
+
+Applies when:
+- a create-only numeric profile is repeated by a circular or linear pattern;
+- the contour is sampled from analytic curves rather than built from true arcs;
+- a bridge create call approaches the timeout without reporting an error.
+
+Symptom:
+- a few hundred sketch entities do not finish inside the 300 s bridge timeout;
+- the partial document contains the sketch with all entities but no cut or
+  pattern;
+- the same geometry with tens of entities completes in seconds.
+
+Cause:
+- `_create_sketch_entities` adds one COM entity at a time, so creation cost
+  scales with the entity count; the circular pattern then copies that cost
+  implicitly. A dense preview-quality sampling is not a CAD-quality plan.
+
+Rule:
+- Keep separate sampling densities: high resolution for host-side preview and
+  analysis, a documented chord tolerance for the CAD contour.
+- Simplify the closed CAD contour with Ramer-Douglas-Peucker (or an equivalent
+  bounded deviation method) before creating entities; compact exact circular
+  runs into single arcs.
+- Measure the one-sided deviation of the simplified contour, not only the
+  entity count. A sensible starting tolerance is `max(0.01 mm, 0.002 m)`.
+- Verify the expected volume from the simplified contour clipped to the blank,
+  not from a coarsely decimated preview polygon.
+
+Verification:
+- Record entity count, maximum chord deviation, create time, and the live body
+  volume error.
+- The spur-gear default contour was reduced from 264 to ~44 entities with
+  0.01 mm maximum deviation; create time fell below 10 s and the live volume
+  error was 0.0012 %.
+
+Known example:
+- `gear_spur` G2 slice: one tooth-space contour repeated 20 times; the first
+  dense attempt timed out, the bounded contour passed create and reopen.
+
+Related:
+- `OP-002`
+- `SESSION-002`
+- `BRIDGE-001`
 
 ---
 

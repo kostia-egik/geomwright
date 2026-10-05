@@ -24,5 +24,7 @@ sample/live_outputs/*
 htmlcov/
 *.log
 test-results/
+.playwright-mcp/
+artifacts/
 build/
 dist/

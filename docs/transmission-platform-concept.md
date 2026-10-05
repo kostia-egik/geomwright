@@ -364,6 +364,9 @@ modules.
 
 ## 7. Cylindrical gear platform
 
+The detailed gear-family plan, native KOMPAS baseline, standards register, and
+CAD/Studio split are in `gear-transmission-concept.md` and `gear-standards.md`.
+
 Planned progression:
 
 1. `involute_profile`

@@ -14,14 +14,23 @@ from kompas_mcp.transmissions import build_chain_sprocket_plan, list_chain_profi
 def test_registry_exposes_schema_driven_transmission_modules() -> None:
     modules = list_modules()
 
-    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket"]
-    assert all(item["group"] == "mechanical_transmissions" for item in modules)
-    assert all(item["subgroup"] == "belt_drives" for item in modules[:-1])
-    assert modules[-1]["subgroup"] == "chain_drives"
-    assert modules[-1]["icon"] is None
+    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket", "silent_chain_sprocket", "gear_spur", "camshaft_lobe"]
+    transmissions = [item for item in modules if item["group"] == "mechanical_transmissions"]
+    valvetrain = [item for item in modules if item["group"] == "valvetrain"]
+    assert [item["kind"] for item in valvetrain] == ["camshaft_lobe"]
+    assert valvetrain[0]["subgroup"] == "valvetrain"
+    assert all(item["subgroup"] == "belt_drives" for item in transmissions[:-3])
+    assert all(item["subgroup"] == "chain_drives" for item in transmissions[-3:-1])
+    assert transmissions[-1]["subgroup"] == "gear_drives"
+    assert [item["icon"] for item in transmissions[-3:-1]] == [
+        "/static/icons/roller-sprocket.svg", "/static/icons/silent-sprocket.svg",
+    ]
+    assert transmissions[-1]["icon"] == "/static/icons/gear-spur.svg"
+    assert valvetrain[0]["icon"] == "/static/icons/cam.svg"
     assert get_module("timing_trapezoidal").descriptor()["capabilities"]["build"] is True
     assert get_module("timing_curvilinear").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
-    for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear"):
+    assert get_module("gear_spur").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "gear_spur"):
         module = get_module(kind)
         spec = module.spec()
         validated = module.request_model.model_validate(spec["defaults"])
@@ -33,10 +42,412 @@ def test_registry_exposes_schema_driven_transmission_modules() -> None:
         assert validated.model_dump(exclude_none=True) == spec["defaults"]
 
 
-def test_chain_sprocket_exposes_hierarchical_catalog_and_preview_without_icon() -> None:
+def test_silent_chain_catalog_selection_is_distinct_from_roller_chain_and_has_no_cad() -> None:
+    module = get_module("silent_chain_sprocket")
+    descriptor = module.descriptor()
+    assert descriptor["capabilities"] == {"preview": True, "build": False, "inspect": False}
+    assert descriptor["subgroup"] == "chain_drives"
+    assert descriptor["preview_url"] == "/modules/silent_chain_sprocket/preview"
+    assert descriptor["cad_plan_url"] is None
+    assert module.request_model.model_validate(module.defaults).model_dump() == module.defaults
+    standards = module.spec()["module"]["selection"]["standards"]
+    assert [item["value"] for item in standards] == [
+        "gost_13552_81_13576_81", "din_8190_8191_open", "asme_b29_2m_open",
+    ]
+    families = standards[0]["families"]
+    assert [item["value"] for item in families] == ["type_1", "type_2"]
+    assert [len(item["profiles"]) for item in families] == [17, 8]
+    assert families[0]["profiles"][0]["label_ru"] == "ПЗ-1-12,7-26-22,5"
+    assert families[1]["profiles"][0]["pitch_mm"] == 25.4
+    assert families[1]["profiles"][0]["working_width_mm"] == 57.0
+    assert module.request_model.model_validate({"family": "type_2", "designation": "PZ-2-25.4-101-57", "physical_tooth_count": 11, "accuracy_class": 2})
+    din = standards[1]
+    assert [len(family["profiles"]) for family in din["families"]] == [30, 30]
+    assert din["reconstruction"] is True
+    assert "secondary table" in din["warning_en"]
+    din_profile = din["families"][0]["profiles"][0]
+    assert din_profile["source"] == "MDESIGN/INGGO secondary reproduction of DIN 8190"
+    assert din_profile["confidence"] == "medium"
+    assert module.request_model.model_validate({
+        "standard": "din_8190_8191_open", "family": "outer", "designation": "06-015A",
+        "physical_tooth_count": 15,
+    })
+    asme = standards[2]
+    assert asme["reconstruction"] is True
+    assert "not established" in asme["warning_en"]
+    asme_profile = asme["families"][0]["profiles"][0]
+    assert asme_profile["designation_available"] is False
+    assert module.request_model.model_validate({
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-4.7625-side_guide", "physical_tooth_count": 17,
+    })
+    for invalid in (
+        {"designation": "ISO_08B", "physical_tooth_count": 23},
+        {"designation": "PZ-1-19.05-74-45", "physical_tooth_count": 11},
+        {"family": "type_2", "designation": "PZ-2-25.4-101-57", "physical_tooth_count": 49, "accuracy_class": 1},
+        {"standard": "din_8190_8191_open", "family": "outer", "designation": "06-015A", "physical_tooth_count": 14},
+        {"standard": "asme_b29_2m_open", "family": "pitch_and_guide", "designation": "asme-6.35-side_guide", "physical_tooth_count": 20},
+    ):
+        with pytest.raises(ValueError):
+            module.request_model.model_validate(invalid)
+    with pytest.raises(ValueError, match="no CAD planning"):
+        managed_pulley_plan(module.kind, module.defaults)
+
+    gost_preview = preview_module(module.kind, module.defaults)
+    assert gost_preview["family"] == "silent_chain_sprocket"
+    assert gost_preview["view_mode"] == "end"
+    assert gost_preview["secondary_view"]["view_mode"] == "side_section"
+    assert len(gost_preview["closed_points"][0]) > 20
+    assert gost_preview["closed_points"][0][0] == pytest.approx(gost_preview["closed_points"][0][-1])
+    assert gost_preview["preview_window"] == {
+        "tooth_gap_count": 3,
+        "visible_tooth_count": 2,
+        "section_style": "broken_out",
+    }
+    assert gost_preview["summary"]["calculation_tooth_count"] == 23
+    assert gost_preview["summary"]["tooth_width_mm"] == pytest.approx(51.0)
+    gost_gap = gost_preview["feature_paths"][0]
+    gost_radii = [math.hypot(point[0], point[1]) for point in gost_gap]
+    assert min(gost_radii) == pytest.approx(gost_preview["summary"]["root_diameter_mm"] / 2)
+    assert max(gost_radii) == pytest.approx(gost_preview["summary"]["outside_diameter_mm"] / 2)
+    assert gost_gap[0][0] < 0 < gost_gap[-1][0]
+    assert gost_preview["secondary_view"]["guide_grooves_mm"] == [{
+        "center_mm": pytest.approx(25.5), "width_mm": 6.0, "depth_mm": pytest.approx(14.2875),
+    }]
+    assert {item["key"] for item in gost_preview["dimensions"]} == {
+        "outside_diameter", "pitch_diameter", "root_diameter",
+    }
+    assert {item["code"] for item in gost_preview["warning_items"]} == {
+        "silent_gost_profile_verified",
+    }
+    # Independent Table-1 measuring section: catches the former 8.57 mm tooth.
+    from geomwright.studio.silent_chain_preview import build_silent_chain_preview
+    raw = build_silent_chain_preview(module.defaults)
+    angle = math.pi / 23
+    flank = raw["geometry"]["working_flank_paths"][1]
+    rotated = [[x * math.cos(angle) - y * math.sin(angle),
+                x * math.sin(angle) + y * math.cos(angle)] for x, y in flank]
+    gamma = math.radians(30 - 360 / 23)
+    measuring_y = 7.14 * math.sin(gamma) + 1.905 * math.cos(gamma)
+    expected_ty = 19.05 - 2 * (7.14 * math.cos(gamma) - 1.905 * math.sin(gamma))
+    cut_y = gost_preview["summary"]["outside_diameter_mm"] / 2 - measuring_y
+    a, b = rotated[0], rotated[-1]
+    cut_x = a[0] + (b[0] - a[0]) * (cut_y - a[1]) / (b[1] - a[1])
+    assert -2 * cut_x == pytest.approx(expected_ty, abs=1e-8)
+    drawing = gost_preview["secondary_view"]["drawing"]
+    assert drawing["section_polygons"] and drawing["visible_paths"]
+    assert {d["symbol"] for d in drawing["dimensions"]} >= {"s₁", "b₃", "h₂", "h₃"}
+
+    gost_type_2 = preview_module(module.kind, {
+        "standard": "gost_13552_81_13576_81", "family": "type_2",
+        "designation": "PZ-2-25.4-101-57", "physical_tooth_count": 23, "accuracy_class": 1,
+    })
+    assert gost_type_2["summary"]["calculation_tooth_count"] == 46
+    assert gost_type_2["secondary_view"]["row_count"] == 4
+    assert gost_type_2["secondary_view"]["row_spacing_mm"] == 18.0
+    assert gost_type_2["secondary_view"]["total_width_mm"] == pytest.approx(61.74)
+    assert gost_type_2["secondary_view"]["end_round_radius_mm"] == 50.0
+    axial = gost_type_2["secondary_view"]
+    assert axial["rib_centers_mm"] == pytest.approx([3.87, 21.87, 39.87, 57.87])
+    assert axial["relative_rib_phases_deg"] == [0.0] * 4
+    assert not any(d["symbol"] == "Δb" for d in axial["drawing"]["dimensions"])
+    assert "lower_body_projection_mm" not in axial
+    assert max(p[1] for poly in axial["drawing"]["section_polygons"] for p in poly) == pytest.approx(.75 * 25.4)
+    from geomwright.studio.silent_chain_axial import build_axial_view
+    type2_raw = build_silent_chain_preview({
+        "standard": "gost_13552_81_13576_81", "family": "type_2",
+        "designation": "PZ-2-25.4-101-57", "physical_tooth_count": 23,
+    })
+    with pytest.raises(ValueError, match="angular phase"):
+        build_axial_view({"standard": "gost_13552_81_13576_81"}, type2_raw["profile"], type2_raw["derived"],
+                         {**type2_raw["axial"], "relative_rib_phases_deg": [0, 1, 0, 0]})
+
+    din_preview = preview_module(module.kind, {
+        "standard": "din_8190_8191_open", "family": "outer", "designation": "06-015A",
+        "physical_tooth_count": 21,
+    })
+    assert din_preview["summary"]["profile_mechanics"] == "din_shifted_involute"
+    assert din_preview["secondary_view"]["total_width_mm"] == pytest.approx(12.0)
+    assert din_preview["summary"]["tooth_width_mm"] == pytest.approx(12.0)
+    assert "not a conformity claim" in din_preview["warnings"][0]
+    assert len(din_preview["closed_points"][0]) > 200
+
+    din_inner = preview_module(module.kind, {
+        "standard": "din_8190_8191_open", "family": "inner", "designation": "06-025B",
+        "physical_tooth_count": 21,
+    })
+    assert din_inner["secondary_view"]["axial_layout_status"] == "width_only"
+    assert din_inner["secondary_view"]["guide_grooves_mm"] == [{
+        "center_mm": pytest.approx(15.4), "width_mm": 4.0, "depth_mm": None,
+    }]
+    assert {d["symbol"]: d["value"] for d in din_inner["secondary_view"]["drawing"]["dimensions"]}["f₁"] == 3.0
+    assert any(item["dashed"] for item in din_preview["tone_paths"])
+    assert "root_diameter_mm" not in din_preview["summary"]
+
+    asme_preview = preview_module(module.kind, {
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-9.525-side_guide", "physical_tooth_count": 23,
+        "face_width_mm": 24.0, "tooth_tip_shape": "square",
+    })
+    assert asme_preview["summary"]["profile_mechanics"] == "asme_straight_flanks"
+    assert asme_preview["secondary_view"]["total_width_mm"] == 24.0
+    assert asme_preview["summary"]["outside_diameter_mm"] > 0
+    assert len(asme_preview["closed_points"][0]) > 50
+    assert "not a conformity claim" in asme_preview["warnings"][0]
+    expected_root_center_d = 9.525 * math.sqrt(
+        1.515213 + (1 / math.tan(math.pi / 23) - 1.1) ** 2
+    )
+    asme_raw = build_silent_chain_preview({
+        "standard": "asme_b29_2m_open", "designation": "asme-9.525-side_guide",
+        "physical_tooth_count": 23, "face_width_mm": 24.0, "tooth_tip_shape": "square",
+    })
+    assert asme_raw["derived"]["root_arc_center_diameter_mm"] == pytest.approx(expected_root_center_d)
+    assert "root_diameter_mm" not in asme_preview["summary"]
+    assert asme_raw["derived"]["tip_round_radius_mm"] == pytest.approx(0.15 * 9.525)
+    assert asme_preview["summary"]["profile_status"] == "source_profile_with_tool_choice"
+    assert asme_preview["summary"]["generator_root_diameter_mm"] > 0
+    assert any(item["tone"] == "intake" for item in asme_preview["tone_paths"])
+    # Check pin tangency against generated points, not only returned metadata.
+    pin_center_y = 9.525 / (2 * math.sin(math.pi / 23)) - 0.0625 * 9.525 / math.sin(math.radians(30 - 180 / 23))
+    a, b = asme_raw["geometry"]["working_flank_paths"][1][::len(asme_raw["geometry"]["working_flank_paths"][1]) - 1]
+    pin_distance = abs((b[0] - a[0]) * (pin_center_y - a[1]) + (b[1] - a[1]) * a[0]) / math.dist(a, b)
+    assert pin_distance == pytest.approx(0.625 * 9.525 / 2, abs=1e-8)
+    period = asme_raw["geometry"]["period_path"]
+    angle = 2 * math.pi / 23
+    x, y = period[0]
+    assert period[-1] == pytest.approx([x * math.cos(angle) + y * math.sin(angle), -x * math.sin(angle) + y * math.cos(angle)])
+
+    asme_center = preview_module(module.kind, {
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-9.525-center_guide", "physical_tooth_count": 23,
+        "face_width_mm": 24.0, "tooth_tip_shape": "round",
+    })
+    center_groove = asme_center["secondary_view"]["guide_grooves_mm"][0]
+    assert center_groove["center_mm"] == pytest.approx(12.0)
+    assert center_groove["width_mm"] == 3.2
+    assert center_groove["depth_mm"] is None
+    assert center_groove["depth_relation"] == ">="
+    assert center_groove["minimum_depth_mm"] == pytest.approx(
+        (asme_center["summary"]["outside_diameter_mm"] - 9.525 * (1 / math.tan(math.pi / 23) - 1.16)) / 2
+    )
+    with pytest.raises(ValueError, match="too small to contain"):
+        preview_module(module.kind, {
+            "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+            "designation": "asme-9.525-center_guide", "physical_tooth_count": 23,
+            "face_width_mm": 3.0, "tooth_tip_shape": "round",
+        })
+
+    asme_two_center = preview_module(module.kind, {
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-9.525-two_center_guide", "physical_tooth_count": 23,
+        "face_width_mm": 40.0, "tooth_tip_shape": "round",
+    })
+    assert [groove["center_mm"] for groove in asme_two_center["secondary_view"]["guide_grooves_mm"]] == pytest.approx([7.3, 32.7])
+
+    asme_round = preview_module("silent_chain_sprocket", {
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-9.525-side_guide", "physical_tooth_count": 23,
+        "face_width_mm": 24.0, "tooth_tip_shape": "round",
+    })
+    assert asme_round["feature_paths"] != asme_preview["feature_paths"]
+    assert "root_diameter_mm" not in asme_round["summary"]
+
+    asme_3_16 = preview_module("silent_chain_sprocket", {
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-4.7625-side_guide", "physical_tooth_count": 23,
+        "face_width_mm": 12.0, "tooth_tip_shape": "round",
+    })
+    assert "root_diameter_mm" not in asme_3_16["summary"]
+    assert asme_3_16["summary"]["tooth_tip_shape"] == "round"
+    assert "silent_asme_small_pitch_unverified" not in {item["code"] for item in asme_3_16["warning_items"]}
+    missing_guides = preview_module("silent_chain_sprocket", {
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-4.7625-two_center_guide", "physical_tooth_count": 23,
+        "face_width_mm": 20.0, "tooth_tip_shape": "square",
+    })
+    assert missing_guides["secondary_view"]["drawing"]["status"] == "guide_data_unavailable"
+    assert not missing_guides["secondary_view"]["drawing"]["section_polygons"]
+
+
+def test_silent_chain_source_envelope_and_tool_policy() -> None:
+    from geomwright.studio.silent_chain_asme import build_asme_space
+    from geomwright.studio.silent_chain_preview import build_silent_chain_preview
+
+    # DIN Table 5, 08 z18: y=.6 gives two measuring teeth, not three.
+    din = build_silent_chain_preview({
+        "standard": "din_8190_8191_open", "family": "outer", "designation": "08-020A",
+        "physical_tooth_count": 18,
+    })
+    d, geometry, check = din["derived"], din["geometry"], din["diagnostics"]
+    assert d["span_tooth_count"] == 2
+    assert d["span_measurement_mm"] == pytest.approx(14.95, abs=0.01)
+    assert not geometry["partial"] and not geometry["construction_closure_path"]
+    assert check["root_join_type"] == "tangent"
+    assert check["root_join_position_error_mm"] < 1e-8
+    assert check["root_join_tangent_angle_deg"] < 1e-4
+    # Figure-3 cutter tip at the space centre: independent root-radius relation.
+    assert d["root_diameter_mm"] / 2 == pytest.approx(
+        d["pitch_diameter_mm"] / 2 + d["profile_shift_coefficient"] * d["module_mm"]
+        - 12.7 / (4 * math.tan(math.pi / 6)) + 1.0,
+    )
+    assert max(p[1] for p in geometry["root_path"]) > min(p[1] for p in geometry["root_path"])
+
+    # Figure 6 and Table 7: round-tip and over-pin factors at z23.
+    asme = build_asme_space({"pitch_mm": 9.525}, 23, "round")
+    a, g = asme["updates"], asme["geometry"]
+    assert a["outside_diameter_mm"] / 9.525 == pytest.approx(7.356, abs=0.001)
+    assert a["over_pins_mm"] / 9.525 == pytest.approx(7.621, abs=0.001)
+    assert a["construction_circle_diameter_mm"] == pytest.approx(0.75 * 9.525)
+    h = math.pi / 23
+    circle = [a["tip_arc_center_diameter_mm"] / 2 * math.sin(h),
+              a["tip_arc_center_diameter_mm"] / 2 * math.cos(h)]
+    assert all(math.dist(p, circle) == pytest.approx(0.15 * 9.525) for p in g["tooth_tip_path"])
+    assert g["tooth_tip_path"] in g["supported_paths"]
+    assert g["tool_policy_paths"] and not asme["diagnostics"]["root_policy"]["standard_nominal_root_claim"]
+    square = build_asme_space({"pitch_mm": 12.7}, 17, "square")
+    assert square["updates"]["outside_diameter_mm"] == pytest.approx(2.649 * 25.4)
+    assert all(math.hypot(*point) <= 5.298 * 12.7 / 2 + 1e-9 for point in square["geometry"]["tooth_tip_path"])
+    corrected = preview_module("silent_chain_sprocket", {
+        "standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+        "designation": "asme-12.7-side_guide", "physical_tooth_count": 96,
+        "face_width_mm": 24.0, "tooth_tip_shape": "square",
+    })
+    assert corrected["summary"]["outside_diameter_mm"] == pytest.approx(30.590 * 12.7)
+    assert corrected["summary"]["profile_status"] == "source_faces_with_provisional_tip"
+    assert "silent_asme_table_transcription" in {w["code"] for w in corrected["warning_items"]}
+    provisional = build_asme_space({"pitch_mm": 12.7}, 96, "square")
+    assert provisional["updates"]["tip_status"] == "vendor_provisional_square_tip"
+    assert provisional["geometry"]["tooth_tip_path"] not in provisional["geometry"]["supported_paths"]
+    assert provisional["diagnostics"]["square_construction"]["table_text_factor"] == 30.900
+    assert provisional["diagnostics"]["square_construction"]["table_text_status"] == "printed_source_conflict_with_vendor_substitute"
+    assert any(p.get("dashed") for p in corrected["tone_paths"])
+
+    # Figure 7: .107p radius and .123p centre drop; .16p is a MAXIMUM RADIUS.
+    small = build_asme_space({"pitch_mm": 4.7625, "tool_root_radius_mm": .12 * 4.7625}, 17, "round")
+    assert small["updates"]["tip_round_radius_mm"] == pytest.approx(.107 * 4.7625)
+    assert small["updates"]["outside_diameter_mm"] == pytest.approx(4.7625 * (1 / math.tan(math.pi / 17) - .032))
+    assert small["diagnostics"]["root_policy"]["floor_depth_in_tooth_frame_mm"] >= .597 * 4.7625 - 1e-10
+    # Figure 7's .5298p MINIMUM must also hold for the actual policy points,
+    # transformed into each neighbouring tooth's frame, not just its metadata.
+    h = math.pi / 17
+    chord = 4.7625 / (2 * math.tan(h))
+    policy_depths = [chord - y * math.cos(h) - abs(x) * math.sin(h)
+                     for path in small["geometry"]["tool_policy_paths"] for x, y in path]
+    assert min(policy_depths) >= .5298 * 4.7625 - 1e-9
+    with pytest.raises(ValueError, match="radius must not exceed"):
+        build_asme_space({"pitch_mm": 4.7625, "tool_root_radius_mm": .17 * 4.7625}, 17, "round")
+
+    # Recovered Figure 4 is an independent axial source, not a Ramsey patch.
+    request = {"standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+               "designation": "asme-31.75-center_guide", "physical_tooth_count": 23,
+               "face_width_mm": 24.0, "tooth_tip_shape": "round"}
+    ramsey = build_silent_chain_preview(request)
+    gb = build_silent_chain_preview({**request, "axial_source": "gb_10855_2016"})
+    assert gb["geometry"] == ramsey["geometry"]
+    assert ramsey["axial"]["drawing"]["status"] == "guide_data_unavailable"
+    axial = gb["axial"]
+    assert axial["guide_groove_width_mm"] == 4.57
+    assert axial["guide_grooves_mm"][0]["depth_mm"] is None
+    drawing = axial["drawing"]
+    assert drawing["axial_source_system"] == "gb_10855_2016"
+    assert not drawing["outline"] and not drawing["section_polygons"]
+    assert {d["symbol"] for d in drawing["dimensions"]} >= {"A", "C max", "F*"}
+    a, radius, left = 6.96, 9.14, 12.0 - 4.57 / 2
+    entrance = drawing["visible_paths"][1]
+    assert entrance[0][0] == pytest.approx(left - radius + math.sqrt(radius**2 - a**2))
+    assert all(math.hypot(x - (left - radius), y - a) == pytest.approx(radius)
+               for x, y in entrance if y <= a)
+    assert max(p[1] for path in drawing["visible_paths"] for p in path) <= a
+    with pytest.raises(ValueError, match="rounded guide entrances"):
+        build_silent_chain_preview({**request, "face_width_mm": 6.0, "axial_source": "gb_10855_2016"})
+    small_gb = build_silent_chain_preview({**request, "designation": "asme-4.7625-center_guide", "axial_source": "gb_10855_2016"})
+    assert small_gb["axial"]["guide_groove_width_mm"] == 1.27
+    assert next(r for r in small_gb["axial"]["drawing"]["external_references"]
+                if "source_pitch_mm" in r)["source_pitch_mm"] == 4.762
+
+
+def test_silent_chain_explicit_completion_gate_and_geometry() -> None:
+    from geomwright.studio.silent_chain_preview import build_silent_chain_preview
+
+    def propose(request):
+        base = preview_module("silent_chain_sprocket", request)
+        assert not base["completion"]["ready_for_cad_planning"]
+        assert base["construction_spec"] is None
+        choices = {name: f["suggested"] for name, f in base["completion"]["fields"].items()}
+        return {**request, **choices}
+
+    gost = {"standard": "gost_13552_81_13576_81", "family": "type_2",
+            "designation": "PZ-2-25.4-101-57", "physical_tooth_count": 23, "accuracy_class": 1}
+    choices = propose(gost)
+    ready = preview_module("silent_chain_sprocket", choices)
+    assert ready["completion"]["geometry_complete"]
+    assert ready["completion"]["ready_for_cad_planning"]
+    assert not ready["completion"]["cad_build_available"]
+    spec = ready["construction_spec"]
+    assert spec["axial_material_outline"][0] == spec["axial_material_outline"][-1]
+    assert spec["relative_rib_phases_deg"] == [0.0]*4
+    assert spec["inner_rim_diameter_mm"] > 0
+    assert ready["summary"]["overall_width_mm"] == pytest.approx(spec["functional_width_mm"])
+    assert spec["axial_extent_mm"] == pytest.approx([0.0, spec["functional_width_mm"]])
+    assert not any("projection" in name for name in ready["completion"]["fields"])
+    assert all(math.dist(a, b) > 1e-9 for a, b in zip(spec["axial_material_outline"], spec["axial_material_outline"][1:]))
+    assert not ready["secondary_view"]["drawing"]["break_paths"]
+    assert ready["feature_paths"] == preview_module("silent_chain_sprocket", gost)["feature_paths"]
+    assert {"construction_mode", "construction_confirmed"}.isdisjoint(get_module("silent_chain_sprocket").request_model.model_json_schema()["properties"])
+    with pytest.raises(ValueError, match="Body depth"):
+        preview_module("silent_chain_sprocket", {**choices, "body_depth_mm": .1})
+    missing = preview_module("silent_chain_sprocket", {**choices, "body_depth_mm": None})
+    assert not missing["completion"]["geometry_complete"] and missing["construction_spec"] is None
+    assert not missing["completion"]["ready_for_cad_planning"]
+
+    din = {"standard": "din_8190_8191_open", "family": "inner", "designation": "06-025B", "physical_tooth_count": 21}
+    choices = propose(din)
+    unresolved = preview_module("silent_chain_sprocket", {**choices, "din_rack_resolution": "unresolved"})
+    assert not unresolved["completion"]["ready_for_cad_planning"]
+    assert "din_rack_resolution" in unresolved["completion"]["missing_fields"]
+    choices.update(din_rack_resolution="keep_height")
+    ready = preview_module("silent_chain_sprocket", choices)
+    assert ready["completion"]["ready_for_cad_planning"]
+    assert ready["construction_spec"]["resolved_dimensions"]["tool_tooth_height_mm"] == 5.519
+    assert ready["construction_spec"]["resolved_dimensions"]["tool_tip_radius_mm"] == pytest.approx(9.525/(2*math.tan(math.pi/6))-2-5.519)
+    assert any(p["tone"] == "intake" for p in ready["tone_paths"])
+    assert ready["construction_spec"]["guide_grooves"][0]["depth_mm"] is not None
+    assert ready["construction_spec"]["guide_grooves"][0]["width_mm"] == 3.0
+
+    asme = {"standard": "asme_b29_2m_open", "family": "pitch_and_guide",
+            "designation": "asme-31.75-center_guide", "physical_tooth_count": 23,
+            "face_width_mm": 160, "tooth_tip_shape": "round", "axial_source": "gb_10855_2016"}
+    choices = propose(asme)
+    raw = build_silent_chain_preview(choices)
+    assert raw["completion"]["ready_for_cad_planning"]
+    assert raw["diagnostics"]["root_policy"]["floor_depth_in_tooth_frame_mm"] == pytest.approx(choices["tool_floor_depth_mm"])
+    groove = raw["construction_spec"]["guide_grooves"][0]
+    assert groove["depth_mm"] == choices["guide_depth_mm"]
+    assert groove["bottom_radius_mm"] == pytest.approx(groove["width_mm"]/2)
+    with pytest.raises(ValueError, match="maximum guide-diameter"):
+        preview_module("silent_chain_sprocket", {**choices, "guide_depth_mm": .1})
+    with pytest.raises(ValueError, match="too shallow"):
+        preview_module("silent_chain_sprocket", {**choices, "tool_floor_depth_mm": .55*31.75})
+
+    manual = propose({**asme, "axial_source": "ramsey_rp_sc"})
+    assert "guide_width_mm" in manual and "entrance_height_mm" in manual
+    assert preview_module("silent_chain_sprocket", manual)["completion"]["ready_for_cad_planning"]
+
+    conflict = {**asme, "designation": "asme-12.7-side_guide", "physical_tooth_count": 96,
+                "tooth_tip_shape": "square"}
+    choices = propose(conflict)
+    ready = preview_module("silent_chain_sprocket", choices)
+    assert ready["completion"]["ready_for_cad_planning"]
+    assert ready["construction_spec"]["user_parameters"]["square_tip_resolution"] == "accept_ramsey"
+    custom = {**choices, "square_tip_resolution": "custom_diameter",
+               "square_tip_diameter_mm": ready["summary"]["outside_diameter_mm"]-.01}
+    assert preview_module("silent_chain_sprocket", custom)["completion"]["ready_for_cad_planning"]
+
+
+def test_chain_sprocket_exposes_hierarchical_catalog_preview_and_icon() -> None:
     module = get_module("chain_sprocket")
     assert module.descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
-    assert module.descriptor()["icon"] is None
+    assert module.descriptor()["icon"] == "/static/icons/roller-sprocket.svg"
     assert module.request_model.model_validate(module.defaults).model_dump() == module.defaults
     assert "face_width" not in module.spec()["schema"]["properties"]
     assert module.spec()["schema"]["properties"]["gost_profile_variant"]["enum"] == ["offset", "non_offset"]
@@ -1247,7 +1658,16 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
 
     from geomwright.studio.app import create_app
 
-    client = TestClient(create_app())
+    import time
+
+    class HostOnlyAdapter:
+        calls: list[dict] = []
+
+        def create_managed_pulley(self, **kwargs):
+            type(self).calls.append(kwargs)
+            return {"ok": True, "host_test_double": True}
+
+    client = TestClient(create_app(adapter_factory=HostOnlyAdapter))
 
     root = client.get("/")
     assert root.status_code == 200
@@ -1261,11 +1681,75 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert health["mode"] == "managed_cad"
     assert health["contract_version"] == 2
     assert len(health["static_version"]) == 12
+    assert len(health["studio_version"]) == 12
     page = client.get("/").text
     assert f"styles.css?v={health['static_version']}" in page
     assert f"app.js?v={health['static_version']}" in page
     assert "managed_pulley_create_job" in health["capabilities"]
-    assert client.get("/modules").json()["count"] == 6
+    assert client.get("/modules").json()["count"] == 9
+    gear_spec = client.get("/modules/gear_spur/spec").json()
+    assert gear_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    gear_preview = client.post("/modules/gear_spur/preview", json=gear_spec["defaults"])
+    assert gear_preview.status_code == 200
+    gear_body = gear_preview.json()
+    assert gear_body["family"] == "gear_spur"
+    assert len(gear_body["closed_points"][0]) > 200
+    assert gear_body["summary"]["pitch_diameter_mm"] == 40.0
+    assert gear_body["summary"]["verification_status"] == "ok"
+    gear_plan = client.post("/modules/gear_spur/cad/plan", json=gear_spec["defaults"])
+    assert gear_plan.status_code == 200
+    assert gear_plan.json()["stage"] == "gear_spur_cad_plan"
+    assert gear_plan.json()["verification"]["pattern_count"] == 20
+    assert gear_plan.json()["geometry"]["entity_count"] < 200
+    invalid_gear = client.post("/modules/gear_spur/preview", json={"tooth_count": 3})
+    assert invalid_gear.status_code == 422
+
+    cam_spec = client.get("/modules/camshaft_lobe/spec").json()
+    assert cam_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    cam_preview = client.post("/modules/camshaft_lobe/preview", json={"step": "cam"})
+    assert cam_preview.status_code == 200
+    assert not cam_preview.json()["warning_items"]
+    assert cam_preview.json()["summary"]["selected_law"]
+    assert cam_preview.json()["motion_chart"]["coordinate"] == "valve_command_with_lash"
+    assert 'id="cam-chart-view"' in root.text
+    assert "cam-motion.js?v=" in root.text
+    motion_failure = client.post("/modules/camshaft_lobe/preview",
+        json={"step": "cam", "law": "motion_spline", "max_jerk": 1.0})
+    assert motion_failure.status_code == 422
+    assert motion_failure.json()["detail"]["code"] == "cam_motion_no_kinematic_solution"
+    invalid_cam = client.post("/modules/camshaft_lobe/preview", json={"base_diameter": -1})
+    assert invalid_cam.status_code == 422
+    assert invalid_cam.json()["detail"][0]["ctx"] == {"gt": 0.0}
+    invalid_phases = client.post("/modules/camshaft_lobe/preview", json={"intake_open_deg": 300})
+    assert invalid_phases.status_code == 422
+    assert invalid_phases.json()["detail"]["code"] == "camshaft_phase_range"
+    unreachable_cam = client.post("/modules/camshaft_lobe/preview", json={"step": "cam", "cam_y": 500})
+    assert unreachable_cam.status_code == 422
+    assert unreachable_cam.json()["detail"]["code"] == "camshaft_unreachable"
+    contact_cam = {"step": "cam", "mechanism": "direct", "law": "curvature_spline",
+        "base_diameter": 30, "max_lift": 18, "intake_open_deg": -70,
+        "intake_close_deg": 70, "tappet_diameter": 42}
+    contact_result = client.post("/modules/camshaft_lobe/preview", json=contact_cam)
+    assert contact_result.status_code == 200
+    assert contact_result.json()["summary"]["contact_width_verified"] is True
+    contact_error = client.post("/modules/camshaft_lobe/preview",
+        json={**contact_cam, "intake_open_deg": -10, "intake_close_deg": 50})
+    assert contact_error.status_code == 422
+    assert contact_error.json()["detail"]["code"] == "cam_flat_support_bound"
+    assert contact_error.json()["detail"]["params"]["angle"] > 60
+
+    silent_spec = client.get("/modules/silent_chain_sprocket/spec").json()
+    assert silent_spec["module"]["capabilities"]["preview"] is True
+    silent_preview = client.post("/modules/silent_chain_sprocket/preview", json=silent_spec["defaults"])
+    assert silent_preview.status_code == 200
+    assert silent_preview.json()["family"] == "silent_chain_sprocket"
+    for suffix, payload, status in (
+        ("cad/plan", silent_spec["defaults"], 422),
+        ("cad/create", {"profile": silent_spec["defaults"], "confirm_write": True}, 409),
+        ("cad/jobs", {"profile": silent_spec["defaults"], "confirm_write": True}, 409),
+        ("cad/update-jobs", {"profile": silent_spec["defaults"], "confirm_write": True}, 409),
+    ):
+        assert client.post(f"/modules/silent_chain_sprocket/{suffix}", json=payload).status_code == status
 
     spec = client.get("/modules/poly_v/spec")
     assert spec.status_code == 200
@@ -1302,7 +1786,15 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
         json={"profile": multirow_chain, "confirm_write": True},
     )
     assert multirow_job.status_code == 202
-    assert multirow_job.json()["status"] in {"queued", "running", "completed", "failed"}
+    for _ in range(100):
+        job = client.get(f"/cad/jobs/{multirow_job.json()['id']}").json()
+        if job["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+    assert job["status"] == "completed"
+    assert job["result"]["host_test_double"] is True
+    assert len(HostOnlyAdapter.calls) == 1
+    assert HostOnlyAdapter.calls[0]["family"] == "chain_sprocket"
 
     unconfirmed = client.post(
         "/modules/poly_v/cad/create",
@@ -1315,6 +1807,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert invalid.json()["detail"][0]["loc"] == ["datum_diameter"]
     assert client.get("/modules/missing/spec").status_code == 404
     assert client.post("/modules/poly_v/build", json={}).status_code == 404
+    client.close()
 
 
 def test_workspace_api_routes_snapshot_activation_and_file_opening() -> None:
@@ -1601,6 +2094,37 @@ def test_curvilinear_timing_cad_create_job_reports_real_lifecycle_without_blocki
     assert client.post("/modules/timing_curvilinear/cad/jobs", json={"profile": profile}).status_code == 409
 
 
+def test_cam_job_preserves_recipe_partial_result_and_releases_lock() -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from geomwright.studio.app import create_app
+    from kompas_mcp.cams.cad import CamBuildError
+
+    calls = []
+    class FakeCamAdapter:
+        def create_cam(self, request, **options):
+            calls.append(options)
+            assert options["studio_profile"]["step"] == "cam"
+            if len(calls) == 1:
+                raise CamBuildError("Native failed",{"status":"partial","verified":False,
+                                    "document":{"runtime_id":"@document:7"}})
+            return {"ok":True,"verification":{"ok":True}}
+
+    client = TestClient(create_app(adapter_factory=FakeCamAdapter))
+    for expected_status in ("failed","completed"):
+        job = client.post("/modules/camshaft_lobe/cad/jobs",json={
+            "profile":{"step":"cam"},"confirm_write":True}).json()
+        deadline = time.monotonic()+2.0
+        while job["status"] not in {"failed","completed"} and time.monotonic()<deadline:
+            time.sleep(0.01)
+            job = client.get(f"/cad/jobs/{job['id']}").json()
+        assert job["status"] == expected_status
+        if expected_status == "failed":
+            assert job["partial_result"]["document"]["runtime_id"] == "@document:7"
+            assert job["partial_result"]["verified"] is False
+    assert len(calls) == 2
+
+
 def test_curvilinear_timing_cad_update_job_targets_existing_managed_block() -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
@@ -1642,14 +2166,63 @@ def test_curvilinear_timing_cad_update_job_targets_existing_managed_block() -> N
     assert calls[0]["confirm_write"] is True
 
 
+def test_studio_background_launcher_closes_streams_and_bounds_startup(tmp_path,monkeypatch) -> None:
+    from geomwright.studio import background
+    import subprocess
+    import os
+    calls = []
+    stopped = []
+    class Process:
+        pid = 12345
+        def poll(self):
+            return None
+    process = Process()
+    def spawn(command,**kwargs):
+        calls.append((command,kwargs))
+        return process
+    monkeypatch.setattr(background.subprocess,"Popen",spawn)
+    monkeypatch.setattr(background,"_stop_owned_startup",stopped.append)
+    result = background.launch_background(port=8765,expected_version="current",timeout=0.03,
+        log_dir=tmp_path,health=lambda _: {"ok":True,"product":"geomwright_studio","studio_version":"current",
+                                         "launch_id":calls[-1][1]["env"]["GEOMWRIGHT_STUDIO_LAUNCH_ID"]})
+    assert result["pid"] == 12345
+    assert calls[0][1]["stdin"] == subprocess.DEVNULL
+    assert calls[0][1]["stdout"].closed and calls[0][1]["stderr"].closed
+    assert calls[0][1]["close_fds"] is True
+    if os.name == "nt":
+        assert calls[0][1]["creationflags"] & subprocess.CREATE_NO_WINDOW
+        assert not calls[0][1]["creationflags"] & subprocess.DETACHED_PROCESS
+    with pytest.raises(RuntimeError,match="did not become ready"):
+        background.launch_background(port=8765,expected_version="current",timeout=0.03,
+                                     log_dir=tmp_path,health=lambda _: {
+                                         "ok":True,"product":"geomwright_studio","studio_version":"current",
+                                         "launch_id":"some-other-process"})
+    assert stopped == [process]
+    from geomwright.studio import __main__ as cli
+    import threading
+    release = threading.Event()
+    def stalled_response(*args,**kwargs):
+        release.wait()
+        raise OSError("simulated stalled HTTP")
+    monkeypatch.setattr(cli,"urlopen",stalled_response)
+    started = time.monotonic()
+    try:
+        assert cli._ui_health("http://127.0.0.1:8765/") is None
+        assert time.monotonic()-started<1.0
+    finally:
+        release.set()
+
+
 def test_cli_starts_or_reopens_ui_and_reports_foreign_port_conflict(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from geomwright.studio import __main__ as ui_main
+    from geomwright.studio.app import _studio_content_version
 
     opened: list[tuple[str, int]] = []
     monkeypatch.setattr(ui_main, "_ui_is_running", lambda _url: True)
+    monkeypatch.setattr(ui_main, "_ui_health", lambda _url: {"studio_version": _studio_content_version()})
     monkeypatch.setattr(
         ui_main.webbrowser,
         "open",
@@ -1683,6 +2256,28 @@ def test_cli_starts_or_reopens_ui_and_reports_foreign_port_conflict(
 
     assert scheduled == ["http://127.0.0.1:9876/"]
     assert uvicorn_calls == [{"host": "127.0.0.1", "port": 9876, "reload": False}]
+
+
+def test_cli_reuses_current_studio_instead_of_stale_same_count_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from geomwright.studio import __main__ as ui_main
+    from geomwright.studio.app import _studio_content_version
+
+    current_version = _studio_content_version()
+    monkeypatch.setattr(ui_main, "_port_is_available", lambda port: port not in (8765, 8766))
+    monkeypatch.setattr(ui_main, "_ui_is_running", lambda url: url.endswith(("8765/", "8766/")))
+    monkeypatch.setattr(
+        ui_main,
+        "_ui_health",
+        lambda url: {"module_count": 8, "studio_version": "outdated" if url.endswith("8765/") else current_version},
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(ui_main.webbrowser, "open", lambda url, new: opened.append(url))
+
+    ui_main.main([])
+
+    assert opened == ["http://127.0.0.1:8766/"]
 
 
 def test_cli_default_port_falls_back_for_legacy_studio_or_foreign_occupant(

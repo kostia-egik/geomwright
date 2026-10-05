@@ -1,4 +1,4 @@
-import { formatNumber, splitReadableSubscripts } from "./i18n.js";
+import { formatNumber, splitReadableSubscripts, t } from "./i18n.js";
 
 const canvas = document.querySelector("#profile-canvas");
 const emptyState = document.querySelector("#canvas-empty");
@@ -93,11 +93,11 @@ function drawPath(
     context.fill();
   }
   context.setLineDash(dash || (dashed ? [7, 6] : []));
-  context.strokeStyle = stroke;
+  if (stroke !== false) context.strokeStyle = stroke;
   context.lineWidth = lineWidth;
   context.lineJoin = "round";
   context.lineCap = "round";
-  context.stroke();
+  if (stroke !== false) context.stroke();
   context.restore();
 }
 
@@ -163,6 +163,137 @@ function drawReferencePaths(view) {
       dash: [11, 4, 2, 4],
       lineWidth: 1.15,
     });
+  }
+}
+
+const TONE_COLORS = {
+  intake: "#61c0b1",
+  exhaust: "#e3aa4f",
+  ref: "rgba(190, 200, 210, 0.85)",
+  active: "#f2f5f8",
+  cam: "#9aa7b3",
+  rest: "rgba(150, 165, 180, 0.75)",
+  max: "#ff8c42",
+  mech: "#61c0b1",
+};
+
+function toneColor(tone) {
+  return TONE_COLORS[tone] || "#c8ccd2";
+}
+
+function diagramBox(view) {
+  const bounds = state.data?.bounds;
+  if (!bounds) return null;
+  const [left, top] = view.point([bounds.x_min, bounds.y_max]);
+  const [right, bottom] = view.point([bounds.x_max, bounds.y_min]);
+  return { left, top, right, bottom };
+}
+
+function drawLabels(view) {
+  const labels = state.data?.labels || [];
+  if (!labels.length) return;
+  const box = diagramBox(view);
+  context.save();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  for (const label of labels) {
+    if (label.placement === "caption") {
+      const fontPx = Math.max(11, Math.min(24, 13 * (label.size || 1)));
+      context.font = `600 ${fontPx}px 'Segoe UI', system-ui, sans-serif`;
+      const centerX = box ? (box.left + box.right) / 2 : view.width / 2;
+      const topY = box ? Math.max(fontPx, box.top - fontPx - 10) : fontPx + 8;
+      context.fillStyle = toneColor(label.tone);
+      context.fillText(t(label.text_key, label.fallback || ""), centerX, topY);
+      continue;
+    }
+    if (!label.leader) {
+      const fontPx = Math.max(6, Math.min(48, 12 * state.zoom * (label.size || 1)));
+      context.font = `600 ${fontPx}px 'Segoe UI', system-ui, sans-serif`;
+      context.textAlign = "center";
+      const [x, y] = view.point([label.x, label.y]);
+      context.fillStyle = toneColor(label.tone);
+      context.fillText(t(label.text_key, label.fallback || ""), x, y);
+    }
+  }
+  drawCalloutLabels(view, box, labels);
+  context.restore();
+}
+
+function drawCalloutLabels(view, box, labels) {
+  if (!box) return;
+  const columns = { left: [], right: [] };
+  for (const label of labels) {
+    if (label.placement === "caption" || !label.leader) continue;
+    columns[label.side === "right" ? "right" : "left"].push(label);
+  }
+  for (const side of ["left", "right"]) {
+    const entries = columns[side].map((label) => {
+      const [anchorX, anchorY] = view.point([label.x, label.y]);
+      return { label, anchorX, anchorY, top: anchorY };
+    });
+    if (!entries.length) continue;
+    entries.sort((a, b) => a.anchorY - b.anchorY);
+    context.font = "600 12px 'Segoe UI', system-ui, sans-serif";
+    context.textBaseline = "middle";
+    context.textAlign = side === "left" ? "right" : "left";
+    for (const entry of entries) {
+      entry.text = t(entry.label.text_key, entry.label.fallback || "");
+      entry.width = context.measureText(entry.text).width;
+    }
+    const gap = 10;
+    let cursor = 14;
+    for (const entry of entries) {
+      entry.top = Math.max(entry.top, cursor);
+      cursor = entry.top + gap;
+    }
+    const overflow = cursor - gap - (view.height - 14);
+    if (overflow > 0) {
+      for (const entry of entries) entry.top -= overflow;
+    }
+    for (const entry of entries) {
+      entry.top = Math.max(14, Math.min(view.height - 14, entry.top));
+    }
+    context.strokeStyle = "rgba(150, 165, 180, 0.5)";
+    context.fillStyle = "rgba(150, 165, 180, 0.8)";
+    context.lineWidth = 1;
+    for (const entry of entries) {
+      const edgeX = side === "left" ? box.left - 12 : box.right + 12;
+      const shelfX = side === "left" ? edgeX + 10 : edgeX - 10;
+      context.fillStyle = toneColor(entry.label.tone);
+      context.fillText(entry.text, edgeX, entry.top);
+      context.beginPath();
+      context.moveTo(edgeX, entry.top);
+      context.lineTo(shelfX, entry.top);
+      context.lineTo(entry.anchorX, entry.anchorY);
+      context.stroke();
+      context.beginPath();
+      context.arc(entry.anchorX, entry.anchorY, 2.2, 0, Math.PI * 2);
+      context.fill();
+    }
+  }
+}
+
+function drawArrows(view) {
+  for (const arrow of state.data?.arrows || []) {
+    const points = arrow.points || [];
+    if (points.length < 2) continue;
+    context.save();
+    context.strokeStyle = toneColor(arrow.tone);
+    context.lineWidth = 2.2;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    context.beginPath();
+    const [firstX, firstY] = view.point(points[0]);
+    context.moveTo(firstX, firstY);
+    for (const point of points.slice(1)) {
+      const [x, y] = view.point(point);
+      context.lineTo(x, y);
+    }
+    const [tailX, tailY] = view.point(points[points.length - 2]);
+    const [headX, headY] = view.point(points[points.length - 1]);
+    drawArrowHead(headX, headY, Math.atan2(headY - tailY, headX - tailX), 9);
+    context.stroke();
+    context.restore();
   }
 }
 
@@ -422,10 +553,12 @@ function drawRadialDimension(item, view) {
   context.stroke();
   const labelNormal = Number(item.label_normal || 0);
   const labelTangent = Number(item.label_tangent || 0);
+  const compactSilent = state.data?.family === "silent_chain_sprocket" && view.width < 480;
+  const labelIndex = compactSilent ? state.data.dimensions.indexOf(item) : 0;
   drawDimensionLabel(
     dimensionText(item),
-    middle[0] + nx * labelNormal + ux * labelTangent,
-    middle[1] + ny * labelNormal + uy * labelTangent,
+    compactSilent ? view.width / 2 : middle[0] + nx * labelNormal + ux * labelTangent,
+    compactSilent ? 22 + labelIndex * 21 : middle[1] + ny * labelNormal + uy * labelTangent,
   );
 }
 
@@ -456,15 +589,32 @@ function draw() {
   for (const guide of state.data.guide_paths || []) {
     drawPath(guide, view, { stroke: "rgba(157, 177, 191, 0.72)", lineWidth: 1.2 });
   }
-  const palette = [
-    "#e3aa4f",
-    "#61c0b1",
-  ];
-  (state.data.feature_paths || []).forEach((path, index) => {
-    const stroke = palette[index % palette.length];
-    drawPath(path, view, { stroke, lineWidth: 2.5 });
-  });
+  if (state.data.tone_paths?.length) {
+    for (const item of state.data.tone_paths) {
+      drawPath(item.points, view, {
+        stroke: item.stroke === false ? false : toneColor(item.tone),
+        lineWidth: item.width ?? (item.active ? 2.4 : 1.6),
+        dashed: item.dashed ?? item.active === false,
+        fill: typeof item.fill === "string" ? item.fill : (item.fill ? "#10151c" : null),
+      });
+    }
+  } else {
+    const palette = [
+      "#e3aa4f",
+      "#61c0b1",
+    ];
+    (state.data.feature_paths || []).forEach((path, index) => {
+      const stroke = palette[index % palette.length];
+      drawPath(path, view, { stroke, lineWidth: 2.5 });
+    });
+  }
+  const activePath = state.data.active_path;
+  if (activePath?.points?.length) {
+    drawPath(activePath.points, view, { stroke: toneColor(activePath.tone), lineWidth: 3.8 });
+  }
+  drawArrows(view);
   drawDimensions(view);
+  drawLabels(view);
 }
 
 function resetView() {

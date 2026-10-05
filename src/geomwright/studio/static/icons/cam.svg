@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Camshaft lobe" shape-rendering="geometricPrecision" color="#8d9aa7">
+  <defs>
+    <!-- Circular base R18, nose R5, tangent flank arcs R40; centre spacing 26. -->
+    <path id="cam-profile" d="M -17.970922 -1.022727 A 40 40 0 0 1 -3.137780 -29.892857 A 5 5 0 0 1 3.137780 -29.892857 A 40 40 0 0 1 17.970922 -1.022727 A 18 18 0 1 1 -17.970922 -1.022727 Z" />
+    <mask id="cam-rear-visible" maskUnits="userSpaceOnUse" x="-40" y="-40" width="80" height="80">
+      <rect x="-40" y="-40" width="80" height="80" fill="white" />
+      <use href="#cam-profile" fill="black" stroke="black" stroke-width="0.3" />
+    </mask>
+    <clipPath id="cam-bore"><circle r="6.5" /></clipPath>
+  </defs>
+  <!-- One affine projection for both faces, the circular bore and all arcs. -->
+  <g transform="matrix(0.90 0.12 -0.56 0.98 28 41)" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <g mask="url(#cam-rear-visible)"><use href="#cam-profile" transform="translate(-9 -5.4)" /></g>
+    <path d="M -9.260924 15.434873 L -18.260924 10.034873 M 2.572479 -30.287465 L -6.427521 -35.687465" />
+    <use href="#cam-profile" />
+    <circle r="6.5" />
+    <g clip-path="url(#cam-bore)"><circle cx="-9" cy="-5.4" r="6.5" /></g>
+  </g>
+</svg>

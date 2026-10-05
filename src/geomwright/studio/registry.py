@@ -10,6 +10,11 @@ from pydantic import BaseModel
 from kompas_mcp.transmission_tools import ChainSprocketPreviewRequest, FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, TimingCurvilinearPulleyPreviewRequest, TimingTrapezoidalPulleyPreviewRequest, VGroovePreviewRequest
 from kompas_mcp.transmissions import build_chain_sprocket_plan, chain_profile_selection, preview_chain_sprocket, preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
+from kompas_mcp.gears import SpurGearRequest, build_spur_gear_preview, contour_options
+from .silent_chain import SilentChainSelectionRequest, silent_chain_selection
+from .silent_chain_preview import build_silent_chain_preview
+from kompas_mcp.transmissions.silent_chain import build_silent_chain_plan
+from .camshaft import CamshaftPhasesRequest, adapt_camshaft_phases, build_camshaft_phases_preview, cam_profile_request
 
 
 PreviewBuilder = Callable[[dict[str, Any]], dict[str, Any]]
@@ -24,12 +29,13 @@ class PreviewModule:
     standard: str
     request_model: type[BaseModel]
     defaults: dict[str, Any]
-    builder: PreviewBuilder
-    adapter: PreviewAdapter
+    builder: PreviewBuilder | None
+    adapter: PreviewAdapter | None
     group: str = "mechanical_transmissions"
     subgroup: str = "belt_drives"
     family: str = "belt_pulleys"
     build: bool = True
+    preview_available: bool = True
     icon: str | None = ""
     selection: dict[str, Any] | None = None
 
@@ -44,12 +50,12 @@ class PreviewModule:
             "family": self.family,
             "icon": self.icon,
             "selection": self.selection,
-            "capabilities": {"preview": True, "build": self.build, "inspect": False},
+            "capabilities": {"preview": self.preview_available, "build": self.build, "inspect": False},
             "spec_url": f"/modules/{self.kind}/spec",
-            "preview_url": f"/modules/{self.kind}/preview",
-            "cad_plan_url": f"/modules/{self.kind}/cad/plan",
-            "cad_create_url": f"/modules/{self.kind}/cad/create",
-            "cad_job_url": f"/modules/{self.kind}/cad/jobs",
+            "preview_url": f"/modules/{self.kind}/preview" if self.preview_available else None,
+            "cad_plan_url": f"/modules/{self.kind}/cad/plan" if self.build else None,
+            "cad_create_url": f"/modules/{self.kind}/cad/create" if self.build else None,
+            "cad_job_url": f"/modules/{self.kind}/cad/jobs" if self.build else None,
         }
 
     def spec(self) -> dict[str, Any]:
@@ -60,6 +66,8 @@ class PreviewModule:
         }
 
     def preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.preview_available or self.builder is None or self.adapter is None:
+            raise ValueError(f"{self.kind} has no preview yet")
         request = self.request_model.model_validate(payload)
         normalized_request = request.model_dump(exclude_none=True)
         raw_preview = self.builder(normalized_request)
@@ -91,6 +99,183 @@ def _build_timing_curvilinear_preview(payload: dict[str, Any]) -> dict[str, Any]
 
 def _build_chain_preview(payload: dict[str, Any]) -> dict[str, Any]:
     return preview_chain_sprocket(**payload)
+
+
+def _build_silent_chain_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_silent_chain_preview(payload)
+
+
+def _silent_full_wheel_outline(tooth_gap: list[list[float]], tooth_count: int, outside_radius: float) -> list[list[float]]:
+    """Repeat one analytic tooth space into one continuous closed wheel contour."""
+    if len(tooth_gap) < 3 or tooth_count < 3 or outside_radius <= 0:
+        return []
+    step = 2.0 * math.pi / tooth_count
+    start_angle = math.atan2(tooth_gap[0][0], tooth_gap[0][1])
+    end_angle = math.atan2(tooth_gap[-1][0], tooth_gap[-1][1])
+    while end_angle <= start_angle:
+        end_angle += 2.0 * math.pi
+    outline: list[list[float]] = []
+    for index in range(tooth_count):
+        gap = _rotate_path(tooth_gap, index * step)
+        if not outline:
+            outline.extend(gap)
+        else:
+            outline.extend(gap[1:])
+        current_end = end_angle + index * step
+        next_start = start_angle + (index + 1) * step
+        while next_start <= current_end:
+            next_start += 2.0 * math.pi
+        arc_steps = max(3, math.ceil((next_start - current_end) / math.radians(3.0)))
+        for arc_index in range(1, arc_steps + 1):
+            if index == tooth_count - 1 and arc_index == arc_steps:
+                outline.append(list(outline[0]))
+            else:
+                angle = current_end + (next_start - current_end) * arc_index / arc_steps
+                outline.append(_polar(outside_radius, angle))
+    return outline
+
+
+def _adapt_silent_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    geometry = dict(preview.get("geometry") or {})
+    derived = dict(preview.get("derived") or {})
+    profile = dict(preview.get("profile") or {})
+    tooth_gap = _points(geometry.get("profile_path"))
+    tooth_count = int(request.get("physical_tooth_count") or 1)
+    outside_radius = float(derived["outside_diameter_mm"]) / 2.0
+    pitch_radius = float(derived["pitch_diameter_mm"]) / 2.0
+    root_radius = float(derived["root_diameter_mm"]) / 2.0
+    section = _chain_section_preview(
+        tooth_gap=tooth_gap,
+        pitch_radius=pitch_radius,
+        outside_radius=outside_radius,
+        root_radius=root_radius,
+        tooth_count=tooth_count,
+        tooth_tip=_points(geometry.get("tooth_tip_path")),
+    )
+    profile_path = section["profile_path"]
+    break_path = section["break_path"]
+    closed = section["outline"]
+    pitch_circle = section["pitch_circle"]
+    outside_circle = section["outside_circle"]
+    axial = dict(preview.get("axial") or {})
+    partial = bool(geometry.get("partial"))
+    tool_policy = bool(geometry.get("tool_policy"))
+    user_radial = bool(geometry.get("user_radial_paths"))
+    dimensions = []
+    dimension_start_radius = float(section["break_radius"])
+    for key, symbol, value, radius, angle in (
+        ("outside_diameter", "Dₑ" if request["standard"].startswith("gost") else "Dₐ", derived["outside_diameter_mm"], outside_radius, float(section["left_angle"]) * 0.78),
+        ("pitch_diameter", "dд" if request["standard"].startswith("gost") else "Dₚ", derived["pitch_diameter_mm"], pitch_radius, float(section["right_angle"]) * 0.78),
+        ("root_diameter", "Dᵢ*" if tool_policy or user_radial else "Dᵢ", derived["root_diameter_mm"], root_radius, float(section["left_angle"]) * 0.35),
+    ):
+        if key == "root_diameter" and partial:
+            continue
+        dimensions.append({
+            "key": key, "symbol": symbol, "orientation": "radial",
+            "start": _polar(float(dimension_start_radius), angle),
+            "end": _polar(float(radius), angle), "value": value, "unit": "mm",
+            "label_normal": 24, "label_tangent": 8,
+        })
+    bounds = _bounds([closed], [pitch_circle, outside_circle])
+    standard = str(request.get("standard"))
+    warnings = list(preview.get("warnings") or [])
+    warning_code = {
+        "gost_13552_81_13576_81": "silent_gost_profile_verified",
+        "din_8190_8191_open": "silent_din_open_reconstruction",
+        "asme_b29_2m_open": "silent_asme_open_reconstruction",
+    }.get(standard, "silent_chain_preview_assumption")
+    strokes = []
+    for index in (-1, 0, 1):
+        for path in geometry.get("supported_paths", []):
+            # The third space closes the window; its following cap is outside it.
+            if index == 1 and path == geometry.get("tooth_tip_path"):
+                continue
+            strokes.append({"points": _rotate_path(_points(path), index * 2.0 * math.pi / tooth_count), "tone": "exhaust", "width": 2.4})
+    tone_paths = [{"points": closed, "tone": "exhaust", "fill": "rgba(227,170,79,.05)", "width": 1.0 if partial else 2.4, "dashed": partial}]
+    if partial or tool_policy or user_radial:
+        if tool_policy or user_radial:
+            tone_paths[0]["stroke"] = False
+        tone_paths.extend(strokes)
+        for index in (-1, 0, 1):
+            for path in geometry.get("tool_policy_paths", []):
+                tone_paths.append({"points": _rotate_path(_points(path), index * 2.0 * math.pi / tooth_count), "tone": "intake", "width": 2.4})
+            for path in geometry.get("user_radial_paths", []):
+                if index == 1 and path == geometry.get("tooth_tip_path"):
+                    continue
+                tone_paths.append({"points": _rotate_path(_points(path), index * 2.0 * math.pi / tooth_count), "tone": "intake", "width": 2.4})
+    for index in (-1, 0):
+        for path in geometry.get("provisional_tip_paths", []):
+            tone_paths.append({"points": _rotate_path(_points(path), index * 2.0 * math.pi / tooth_count), "tone": "exhaust", "width": 2.4, "dashed": True})
+    drawing_status = axial.get("drawing", {}).get("status", "")
+    warning_items = [{"code": warning_code, "message": warnings[0]}] if warnings else []
+    if partial:
+        warning_items.append({"code": "silent_din_rack_height_conflict", "message": "Series 06: the tabulated tool height and Figure-3 rack construction differ by about 0.03 mm; the candidate root is dashed."})
+    if tool_policy:
+        warning_items.append({"code": "silent_asme_tool_root", "message": "Teal root and Dᵢ*: selected tool variant below the source-defined working faces, not a unique standard root."})
+    if standard == "asme_b29_2m_open" and derived.get("tip_shape") == "square":
+        if derived.get("tip_status") == "user_defined_square_tip":
+            warning_items.append({"code": "silent_asme_user_tip", "message": "Square-tip diameter is an explicit user construction choice, not an official standard correction."})
+        elif preview["diagnostics"]["square_construction"]["table_text_status"] == "printed_source_conflict_with_vendor_substitute":
+            warning_items.append({"code": "silent_asme_table_transcription", "message": "The inconsistent Table 7 value is confirmed in the printed standard. The diameter uses a provisional Ramsey substitute, not an official correction."})
+        else:
+            warning_items.append({"code": "silent_asme_square_equation_conflict", "message": "The square-tip diameter uses Table 7 maximum values; the printed equation and figure coordinates do not fully agree with the table."})
+    return {
+        "ok": bool(preview.get("success")),
+        "family": "silent_chain_sprocket",
+        "view_mode": "end",
+        "secondary_view": axial,
+        "completion": preview.get("completion"),
+        "construction_spec": preview.get("construction_spec"),
+        "closed_points": [closed] if closed else [],
+        "feature_paths": [profile_path] if profile_path else [],
+        "tone_paths": tone_paths if closed else [],
+        "guide_paths": [break_path] if break_path else [],
+        "reference_paths": [
+            {"key": "pitch_circle", "points": pitch_circle},
+            {"key": "outside_circle", "points": outside_circle},
+        ],
+        "phantom_bodies": [],
+        "bounds": bounds,
+        "coordinate_system": "end_view",
+        "summary": {
+            "construction_status": (preview.get("completion") or {}).get("status", "source_only"),
+            **({"inner_rim_diameter_mm": preview["construction_spec"]["inner_rim_diameter_mm"],
+                "remaining_web_mm": preview["construction_spec"]["validation"]["material_below_cuts_mm"]}
+               if preview.get("construction_spec") else {}),
+            "designation": "not_provided" if standard == "asme_b29_2m_open" else request.get("designation"),
+            "standard": standard,
+            "family": request.get("family"),
+            "physical_tooth_count": tooth_count,
+            "calculation_tooth_count": derived.get("calculation_tooth_count", tooth_count),
+            "chain_pitch_mm": profile.get("pitch_mm"),
+            "pitch_diameter_mm": derived.get("pitch_diameter_mm"),
+            "outside_diameter_mm": derived.get("outside_diameter_mm"),
+            **({"generator_root_diameter_mm" if tool_policy else "root_diameter_mm": derived.get("root_diameter_mm")} if not partial else {}),
+            "profile_mechanics": derived.get("flank_model"),
+            "tooth_width_mm": axial.get("tooth_width_mm"),
+            "overall_width_mm": axial.get("overall_width_mm"),
+            "profile_status": "user_defined_geometry" if user_radial else "source_faces_with_provisional_tip" if geometry.get("provisional_tip_paths") else "partial_reconstruction" if partial else "source_profile_with_tool_choice" if tool_policy else "reconstructed_from_source" if standard.startswith("din") else "dimensioned_nominal",
+            "axial_status": "user_defined_geometry" if drawing_status == "user_defined_geometry" else "dimensioned" if drawing_status == "dimensioned_faces_with_schematic_body" else "interpreted" if standard.startswith("gost") or standard.startswith("din") else "incomplete",
+            **({"accuracy_class": request.get("accuracy_class")} if standard.startswith("gost") else {}),
+            **({"measuring_tooth_thickness_mm": derived["tooth_thickness_at_measuring_height_mm"], "measuring_height_mm": derived["tooth_measuring_height_mm"]} if "tooth_measuring_height_mm" in derived else {}),
+            **({"span_measurement_mm": derived["span_measurement_mm"]} if "span_measurement_mm" in derived else {}),
+            **({"over_pins_mm": derived["over_pins_mm"]} if "over_pins_mm" in derived else {}),
+            **({"generator_root_radius_mm": derived["root_round_radius_mm"]} if tool_policy else {}),
+            "data_source": profile.get("source"),
+            "profile_form": derived.get("profile_form"),
+            "face_width_mm": request.get("face_width_mm") if standard == "asme_b29_2m_open" else None,
+            "tooth_tip_shape": derived.get("tip_shape") if standard == "asme_b29_2m_open" else None,
+        },
+        "profile_diagnostics": preview.get("diagnostics", {}),
+        "dimensions": dimensions,
+        "warnings": warnings,
+        "warning_items": warning_items,
+        "preview_window": {
+            "tooth_gap_count": section["tooth_gap_count"],
+            "visible_tooth_count": section["visible_tooth_count"],
+            "section_style": "broken_out",
+        },
+    }
 
 
 def _points(value: Any) -> list[list[float]]:
@@ -163,6 +348,7 @@ def _chain_section_preview(
     outside_radius: float,
     root_radius: float,
     tooth_count: int,
+    tooth_tip: list[list[float]] | None = None,
 ) -> dict[str, Any]:
     pitch_angle = 2.0 * math.pi / tooth_count
     sector: list[list[float]] = []
@@ -172,7 +358,7 @@ def _chain_section_preview(
             previous_angle = math.atan2(sector[-1][0], sector[-1][1])
             next_angle = math.atan2(gap[0][0], gap[0][1])
             if next_angle - previous_angle > 1e-9:
-                sector.extend(_radial_arc(outside_radius, previous_angle, next_angle, count=10)[1:-1])
+                sector.extend((_rotate_path(tooth_tip, center_angle - pitch_angle) if tooth_tip else _radial_arc(outside_radius, previous_angle, next_angle, count=10))[1:-1])
             if math.dist(sector[-1], gap[0]) <= 1e-9:
                 gap = gap[1:]
         sector.extend(gap)
@@ -1173,6 +1359,112 @@ def _adapt_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, 
     }
 
 
+def _full_circle(radius: float, count: int = 240) -> list[list[float]]:
+    return [
+        _polar(radius, 2.0 * math.pi * index / count)
+        for index in range(count + 1)
+    ]
+
+
+def _build_gear_spur_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_spur_gear_preview(payload)
+
+
+def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    geometry = dict(preview.get("geometry") or {})
+    summary = dict(preview.get("summary") or {})
+    report = dict(preview.get("report") or {})
+    wheel = _points(geometry.get("full_wheel_outline"))
+    gap_surface = _points(geometry.get("gap_surface_path"))
+    reference_paths = [
+        {"key": "pitch_circle", "points": _full_circle(float(geometry["pitch_radius_mm"]))},
+        {"key": "base_circle", "points": _full_circle(float(geometry["base_radius_mm"]))},
+    ]
+    bounds = _bounds([wheel], [item["points"] for item in reference_paths])
+    root_radius = float(geometry["root_radius_mm"])
+    outside_radius = float(geometry["outside_radius_mm"])
+    pitch_radius = float(geometry["pitch_radius_mm"])
+    dimension_start = max(1.0, root_radius * 0.55)
+    dimensions = [
+        {
+            "key": "outside_diameter",
+            "symbol": "dₐ",
+            "orientation": "radial",
+            "start": _polar(dimension_start, 0.62),
+            "end": _polar(outside_radius, 0.62),
+            "value": summary.get("outside_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 30,
+            "label_tangent": 6,
+        },
+        {
+            "key": "pitch_diameter",
+            "symbol": "d",
+            "orientation": "radial",
+            "start": _polar(dimension_start, -0.72),
+            "end": _polar(pitch_radius, -0.72),
+            "value": summary.get("pitch_diameter_mm"),
+            "unit": "mm",
+            "label_normal": -26,
+            "label_tangent": -6,
+        },
+        {
+            "key": "root_diameter",
+            "symbol": "d_f",
+            "orientation": "radial",
+            "start": _polar(dimension_start, 1.85),
+            "end": _polar(root_radius, 1.85),
+            "value": summary.get("root_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 24,
+            "label_tangent": -4,
+        },
+    ]
+    warning_items = list(preview.get("warning_items") or [])
+    warnings = list(preview.get("warnings") or [])
+    for check in list(report.get("checks") or []):
+        if check.get("status") != "warning":
+            continue
+        if check.get("code") == "gear_span_measurement":
+            message = "Span measurement does not contact the flanks between the root and outside circles."
+            code = "gear_span_unusable"
+        elif check.get("code") == "gear_over_pin":
+            message = "The selected or nominal pin does not fit below the tooth tips."
+            code = "gear_over_pin_unusable"
+        else:
+            continue
+        warning_items.append({"code": code, "severity": "warning", "message": message})
+        warnings.append(message)
+    return {
+        "ok": bool(preview.get("success")),
+        "family": "gear_spur",
+        "view_mode": "end",
+        "closed_points": [wheel] if wheel else [],
+        "feature_paths": [gap_surface] if gap_surface else [],
+        "tone_paths": (
+            [
+                {"points": wheel, "tone": "mech", "width": 2.4, "fill": "rgba(97,192,177,0.05)"},
+                {"points": gap_surface, "tone": "exhaust", "width": 2.2},
+            ]
+            if wheel and gap_surface
+            else []
+        ),
+        "guide_paths": [],
+        "reference_paths": reference_paths,
+        "phantom_bodies": [],
+        "bounds": bounds,
+        "coordinate_system": geometry.get("coordinate_system"),
+        "summary": summary,
+        "derived": preview.get("derived"),
+        "measurements": preview.get("measurements"),
+        "report": report,
+        "dimensions": dimensions,
+        "warnings": warnings,
+        "warning_items": warning_items,
+        "request": dict(request),
+    }
+
+
 _MODULES: dict[str, PreviewModule] = {
     "v_belt": PreviewModule(
         kind="v_belt",
@@ -1267,8 +1559,60 @@ _MODULES: dict[str, PreviewModule] = {
         subgroup="chain_drives",
         family="chain_sprockets",
         build=True,
-        icon=None,
+        icon="/static/icons/roller-sprocket.svg",
         selection=chain_profile_selection(),
+    ),
+    "silent_chain_sprocket": PreviewModule(
+        kind="silent_chain_sprocket",
+        name="Звёздочка пластинчатой зубчатой цепи",
+        description="Торцевой профиль и осевой вид для ГОСТ, DIN- и ASME-compatible открытых реконструкций.",
+        standard="ГОСТ 13552-81 / ГОСТ 13576-81; DIN/ASME open reconstructions",
+        request_model=SilentChainSelectionRequest,
+        defaults=SilentChainSelectionRequest(designation="PZ-1-19.05-74-45", physical_tooth_count=23, accuracy_class=1).model_dump(),
+        builder=_build_silent_chain_preview,
+        adapter=_adapt_silent_chain,
+        subgroup="chain_drives",
+        family="chain_sprockets",
+        build=False,
+        preview_available=True,
+        icon="/static/icons/silent-sprocket.svg",
+        selection=silent_chain_selection(),
+    ),
+    "gear_spur": PreviewModule(
+        kind="gear_spur",
+        name="Цилиндрическая прямозубая шестерня",
+        description="Внешнее прямозубое колесо: эвольвента, трохоида впадины, контрольные размеры и номинальное представление.",
+        standard="ГОСТ 13755-2015 / ГОСТ 16532-70 (nominal)",
+        request_model=SpurGearRequest,
+        defaults=SpurGearRequest().model_dump(exclude_none=True),
+        builder=_build_gear_spur_preview,
+        adapter=_adapt_gear_spur,
+        subgroup="gear_drives",
+        family="gear_drives",
+        build=True,
+        preview_available=True,
+        icon="/static/icons/gear-spur.svg",
+    ),
+    "camshaft_lobe": PreviewModule(
+        kind="camshaft_lobe",
+        name="Кулачок ГРМ",
+        description="Профиль кулачка распределительного вала по фазам клапана и кинематике привода.",
+        standard="Инженерная методика; профиль кулачка не стандартизован",
+        request_model=CamshaftPhasesRequest,
+        defaults={
+            "active_lobe": "intake",
+            "intake_open_deg": -10.0,
+            "intake_close_deg": 50.0,
+            "exhaust_open_deg": -45.0,
+            "exhaust_close_deg": 15.0,
+        },
+        builder=build_camshaft_phases_preview,
+        adapter=adapt_camshaft_phases,
+        group="valvetrain",
+        subgroup="valvetrain",
+        family="camshafts",
+        build=True,
+        icon="/static/icons/cam.svg",
     ),
 }
 
@@ -1294,9 +1638,25 @@ def preview_module(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
 def managed_pulley_plan(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     module = get_module(kind)
     if not module.build:
-        raise ValueError(f"{module.kind} is preview-only; CAD planning is not implemented")
+        raise ValueError(f"{module.kind} has no CAD planning or build yet")
     request = module.request_model.model_validate(payload)
     normalized_request = request.model_dump(exclude_none=True)
+    if module.kind == "camshaft_lobe":
+        if request.step != "cam":
+            raise ValueError("Open the Cam step to plan or build the calculated cam profile")
+        from kompas_mcp.cams.cad import build_cam_plan
+        plan = build_cam_plan(cam_profile_request(request), width=request.cam_width,
+                              rotation_deg=request.cam_rotation_deg, tolerance=request.cad_tolerance)
+        return {k:v for k,v in plan.items() if k not in {"curve", "base", "source_request"}}
     if module.kind == "chain_sprocket":
         return build_chain_sprocket_plan(**normalized_request)
+    if module.kind == "gear_spur":
+        from kompas_mcp.gears.cad import build_gear_spur_plan
+        return build_gear_spur_plan(normalized_request)
+    if module.kind == "silent_chain_sprocket":
+        preview = build_silent_chain_preview(normalized_request)
+        missing = preview["completion"]["missing_fields"]
+        if missing:
+            raise ValueError("Complete construction dimensions: " + ", ".join(missing))
+        return build_silent_chain_plan(preview["construction_spec"], normalized_request)
     return build_managed_pulley_plan(module.kind, normalized_request)

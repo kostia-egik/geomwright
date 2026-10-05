@@ -78,6 +78,7 @@
           <p class="eyebrow" data-i18n="workspace.managed_block">Управляемый блок</p>
           <h2 id="workspace-block-name"></h2>
           <dl id="workspace-block-summary" class="summary-grid"></dl>
+          <p id="workspace-block-readonly" data-i18n="camshaft.cad.readonly" hidden></p>
           <button id="workspace-edit-block" class="primary-button" type="button" data-i18n="workspace.edit">Открыть редактор</button>
         </div>
       </aside>
@@ -153,6 +154,18 @@
         </div>
       </header>
       <div class="canvas-wrap">
+        <div id="cam-motion-toolbar" class="cam-motion-toolbar" hidden role="group" aria-label="Вид кулачка" data-i18n-label="camchart.view">
+          <button id="cam-profile-view" type="button" aria-pressed="true" data-i18n="camchart.profile">Профиль</button>
+          <button id="cam-chart-view" type="button" aria-pressed="false" data-i18n="camchart.charts">Графики S/V/A/J</button>
+        </div>
+        <section id="cam-motion-panel" class="cam-motion-panel" hidden aria-label="Графики движения" data-i18n-label="camchart.title">
+          <header><strong data-i18n="camchart.title">Графики движения</strong><span id="cam-motion-state" role="status"></span></header>
+          <p id="cam-motion-coordinate"></p>
+          <div id="cam-motion-grid" class="cam-motion-grid"></div>
+          <label class="cam-motion-slider"><span data-i18n="camchart.angle">Угол распредвала от начала движения, °</span><input id="cam-motion-angle" type="range" min="0" max="1" step="1" value="0"></label>
+          <output id="cam-motion-readout" class="cam-motion-readout"></output>
+          <p class="cam-motion-help" data-i18n="camchart.help">Рампы выделены фоном. Производные — по радианам распредвала, не по времени. Масштаб каждой панели независимый; разрывы не соединяются линией.</p>
+        </section>
         <div class="profile-view">
         <canvas id="profile-canvas" aria-label="Геометрический предпросмотр"></canvas>
         <div class="canvas-help" data-i18n="canvas.help">Колесо — масштаб · перетаскивание — панорама · двойной щелчок — сброс вида</div>
@@ -173,6 +186,7 @@
         <span id="status-dot" class="status-dot"></span>
         <span id="status-text" data-i18n="status.loading">Загрузка модулей…</span>
       </footer>
+      <ul id="status-warnings" class="status-warnings" hidden></ul>
     </section>
 
     {% include "fields.html" %}
@@ -180,6 +194,7 @@
 
   <script type="module" src="{{ url_for('static', path='/canvas.js') }}?v={{ static_version }}"></script>
   <script type="module" src="{{ url_for('static', path='/side-section.js') }}?v={{ static_version }}"></script>
+  <script type="module" src="{{ url_for('static', path='/cam-motion.js') }}?v={{ static_version }}"></script>
   <script type="module" src="{{ url_for('static', path='/app.js') }}?v={{ static_version }}"></script>
 </body>
 </html>

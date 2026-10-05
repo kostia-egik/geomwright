@@ -4,6 +4,10 @@ import json
 import tempfile
 import threading
 import unittest
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +15,62 @@ from kompas_mcp.bridge_runner import BridgeError, BridgeRunner
 
 
 class BridgeRunnerResponseTests(unittest.TestCase):
+    def test_terminal_watchdog_bounds_descendants_and_preserves_exit_status(self) -> None:
+        watchdog = Path(__file__).resolve().parents[1]/"scripts/run_bounded.py"
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)/"descendants.py"
+            record = Path(directory)/"child.pid"
+            fixture.write_text(
+                "import subprocess,sys,time\nfrom pathlib import Path\n"
+                "options={'creationflags':subprocess.CREATE_NO_WINDOW} if sys.platform=='win32' else {}\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],**options)\n"
+                "Path(sys.argv[1]).write_text(str(child.pid))\ntime.sleep(60)\n",encoding="utf-8")
+            start = time.monotonic()
+            result = subprocess.run([sys.executable,str(watchdog),"--timeout","3","--",
+                                     sys.executable,str(fixture),str(record)],
+                                    stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=12)
+            self.assertEqual(result.returncode,124,result.stderr)
+            self.assertLess(time.monotonic()-start,10)
+            self.assertIn("deadline exceeded",result.stderr)
+            self.assertTrue(record.exists(),result.stdout+result.stderr)
+            pid = int(record.read_text())
+            if os.name == "nt":
+                import ctypes
+                from ctypes import wintypes as w
+                kernel = ctypes.WinDLL("kernel32",use_last_error=True)
+                kernel.OpenProcess.argtypes = [w.DWORD,w.BOOL,w.DWORD]
+                kernel.OpenProcess.restype = w.HANDLE
+                kernel.GetExitCodeProcess.argtypes = [w.HANDLE,ctypes.POINTER(w.DWORD)]
+                kernel.CloseHandle.argtypes = [w.HANDLE]
+                handle = kernel.OpenProcess(0x1000,False,pid)
+                if handle:
+                    try:
+                        code = w.DWORD()
+                        self.assertTrue(kernel.GetExitCodeProcess(handle,ctypes.byref(code)))
+                        self.assertNotEqual(code.value,259,"Grandchild survived the deadline")
+                    finally:
+                        kernel.CloseHandle(handle)
+            # Normal leader exit must not retain a sleeping grandchild either.
+            fixture.write_text(fixture.read_text().replace("\ntime.sleep(60)\n","\n"),encoding="utf-8")
+            normal = subprocess.run([sys.executable,str(watchdog),"--timeout","5","--",
+                                     sys.executable,str(fixture),str(record)],
+                                    stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=12)
+            self.assertEqual(normal.returncode,0,normal.stdout+normal.stderr)
+            if os.name == "nt":
+                handle = kernel.OpenProcess(0x1000,False,int(record.read_text()))
+                if handle:
+                    try:
+                        code = w.DWORD()
+                        self.assertTrue(kernel.GetExitCodeProcess(handle,ctypes.byref(code)))
+                        self.assertNotEqual(code.value,259,"Grandchild survived normal leader exit")
+                    finally:
+                        kernel.CloseHandle(handle)
+            finished = subprocess.run([sys.executable,str(watchdog),"--timeout","5","--",
+                                       sys.executable,"-c","print('bounded-ok'); raise SystemExit(7)"],
+                                      stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=12)
+            self.assertEqual(finished.returncode,7,finished.stderr)
+            self.assertIn("bounded-ok",finished.stdout)
+
     def test_rejects_invalid_response_json_as_bridge_error(self) -> None:
         with self._runner_context("{") as runner:
             with self.assertRaisesRegex(BridgeError, "Invalid bridge response JSON"):
