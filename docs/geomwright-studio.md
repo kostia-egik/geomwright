@@ -35,17 +35,19 @@ not a required intermediary between the UI and CAD.
 The current experimental slice supports V-belt, Poly-V, flat-belt, and two
 shape-specific timing-pulley preview modules through one schema-driven form and
 one HTML5 Canvas renderer.
-The separate `silent_chain_sprocket` leaf under Chain drives is preview-only.
+The separate `silent_chain_sprocket` leaf under Chain drives supports preview and
+create-only CAD for a completed functional rim.
 It renders two host-side views: an end-view tooth fragment with radial diameters
 and an axial width/guide view. Each system has separate profile mechanics (GOST
 equations with measuring-section positioning, DIN rolling-rack envelope and
 shifted involute, and ASME-compatible straight working faces with distinct tips);
-the module still has no CAD build path. It offers the GOST 13552-81 type 1/2 catalog and GOST 13576-81 accuracy class,
+It offers the GOST 13552-81 type 1/2 catalog and GOST 13576-81 accuracy class,
 the 60-row secondary DIN 8190 A/B table, and ASME-compatible pitch/guide choices
 from an open reconstruction. DIN and ASME carry a persistent source/conformity
 warning; the ASME choices intentionally have no invented chain designations.
-Its descriptor reports `preview=true` and `build=false`. Host-side radial and
-axial builders supply the two canvas views; there is no CAD plan or KOMPAS write.
+Its descriptor reports `preview=true` and `build=true`. Host-side radial and
+axial builders supply the two canvas views; missing construction dimensions or
+unresolved source conflicts block CAD planning and creation.
 GOST axial sections use C1, h2/h3, guide-throat widths and rib spacing, hatching
 only the cut material. GOST type II uses the Figure 2 18 mm rib spacing and
 integral plate-packet count. The same plate packets repeat at 6s in GOST 13552-81,
@@ -231,20 +233,25 @@ for angle units, clearance, source comparisons, and engineering limits.
 ### Spur gear module
 
 **Mechanical transmissions → Gear drives → External spur gear** opens the
-spur-gear editor. The canvas shows the complete end view with pitch and base
-reference circles, outside/pitch/root dimensions, and the first tooth space
-highlighted. The summary lists control measurements (span length, constant
-chord, over-pin size, base pitch) and the verification status.
+spur-gear editor. The canvas shows a cropped three-tooth sector as a single
+functional contour in the same broken-out style as the chain sprockets, with
+dashed pitch/base reference arcs and outside/pitch/root dimensions. The summary
+lists control measurements (span length, constant chord, over-pin size, base
+pitch) and the verification status.
 
-Enter a basic-rack contour, module, tooth count, pressure angle, profile shift,
-and face width; the preview recalculates automatically. Off-row modules,
+The form separates the basic-rack **standard** from its **contour
+modification** (types A–D or a user-defined contour). Named modifications
+derive the profile angle and the head, clearance, and fillet coefficients from
+the standard and show them as read-only fields; the module is selected from the
+ГОСТ 9563-60 rows. Choosing the user-defined modification turns the module into
+a free numeric value and enables all contour coefficients. Off-row modules,
 small-module contours, undercut, low tip thickness, and unusable span or
 over-pin measurements are reported instead of silently corrected. **Create in
-KOMPAS** builds a new unsaved part with a cylindrical blank, one numeric
-tooth-space cut, and a full circular pattern; the bridge verifies volume,
-bounds, and pattern count against the plan. A recognized gear block is
-create-only: the editor restores its recipe for a new part, and in-place
-parameter editing is not available yet. See
+KOMPAS** builds a new unsaved part with a cylindrical blank, one tooth-space
+cut whose flanks are smooth cubic Bézier-NURBS curves, and a full circular
+pattern; the bridge verifies volume, bounds, and pattern count against the
+plan. A recognized gear block is create-only: the editor restores its recipe
+for a new part, and in-place parameter editing is not available yet. See
 [spur gear](gear-spur.md) for inputs, representation limits, and evidence.
 
 - Parameter edits trigger a new preview automatically after a short debounce.
@@ -346,18 +353,36 @@ and source-marked approximate dimensions selected by the user.
 
 Responses include `completion` and `construction_spec`. Reference/missing-input
 results have no construction spec. Complete validated input values make
-`ready_for_cad_planning` true automatically; `cad_build_available` stays false.
-This is calculation readiness, not permission to create a model. A warning at
-the future model-creation action is deferred until that CAD flow is implemented.
+`ready_for_cad_planning` and `cad_build_available` true automatically.
+The separate creation action still requires explicit write confirmation.
 The specification records source/selection, exact values, accepted rules, axis
 and coordinate mapping, radial period, closed axial material outline, grooves,
-rib phase and geometric checks. It is the input boundary for a future Layer 4
+rib phase and geometric checks. It is the input boundary for the Layer 4
 planner, not a claim of live KOMPAS verification or authorization to write CAD.
 Hub, shaft seat, keyway, strength and full chain-fit verification are separate.
 For GOST II, the axial rim extent is b4, with no hub shoulder or projection.
 Construction outlines coalesce only numerical duplicate vertices;
 no engineering dimensions are silently fitted or rounded. Suggestions alone are
 formatted to six decimal places before the user accepts them.
+
+CAD creation revolves the completed axial material outline, cuts one radial
+profile and repeats it around global X. GOST II ribs share one angular phase.
+Circular runs become native arcs; noncircular runs use source-resolution segments
+with at most 0.0005 mm additional deviation from source points. The source's
+0.002 mm circular sampling bound is separate; neither value is a manufacturing
+tolerance or a claim of analytic DIN/ASME conformity.
+The bridge checks actual sketch endpoints, arc centers/radii/directions, closure,
+pattern axis/count/step, rebuild, body bounds, and positive single-solid volume.
+An independent volume estimate has a 0.5% acceptance bound; material removed by
+all pattern instances must match the source cut times the physical tooth count
+within 0.01% (with a 0.001 mm³ comparison floor).
+
+The result is a new unsaved part. Save it through workspace document actions.
+Persisted `GW_SILENT_VERSION`/`SC_*` ownership and the entered form restore a
+create-only block after reopening. **Create new from parameters** restores the
+form without editing the original part. Native sketch editing and in-place
+parameter updates are not this module's contract. A failed creation reports the
+partial document and completed operation IDs; cancellation is not rollback.
 
 ## HTTP contract
 

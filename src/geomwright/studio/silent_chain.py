@@ -70,7 +70,7 @@ class SilentChainSelectionRequest(BaseModel):
     designation: str
     physical_tooth_count: int = Field(ge=11, le=114)
     accuracy_class: Literal[1, 2] | None = None
-    face_width_mm: float = Field(default=20.0, gt=0)
+    face_width_mm: float = Field(default=20.0, gt=0, allow_inf_nan=False)
     tooth_tip_shape: Literal["square", "round"] = "square"
     axial_source: Literal["ramsey_rp_sc", "gb_10855_2016"] = "ramsey_rp_sc"
     body_depth_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)

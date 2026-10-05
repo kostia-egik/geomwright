@@ -302,6 +302,9 @@ select:focus, input:focus, textarea:focus { border-color: rgba(227, 170, 79, 0.6
 .chain-selection-detail, .chain-selection-hint { overflow-wrap: anywhere; }
 .chain-selection-detail[hidden], .chain-selection-hint[hidden] { display: none; }
 .chain-selection-hint { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.gear-note { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.field.derived input:disabled { color: var(--muted); cursor: not-allowed; }
+.field.derived .field-title::after { content: " ·"; color: var(--muted); }
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field[hidden] { display: none; }
 .field[data-kind="object"], .field[data-kind="array"] { grid-column: 1 / -1; }

@@ -2846,6 +2846,10 @@ class KompasAdapter:
         result = self.runner.call("create_silent_chain_sprocket", {
             "plan": plan, "execute": True, "confirm_write": True, "visible": bool(visible),
         }, progress_callback=progress_callback)
+        if result.get("success") is not True:
+            error = BridgeError(str(result.get("error") or "Silent-chain CAD verification failed"))
+            error.partial_result = result.get("partial_result")
+            raise error
         return result
 
     def create_gear_spur(

@@ -42,13 +42,13 @@ def test_registry_exposes_schema_driven_transmission_modules() -> None:
         assert validated.model_dump(exclude_none=True) == spec["defaults"]
 
 
-def test_silent_chain_catalog_selection_is_distinct_from_roller_chain_and_has_no_cad() -> None:
+def test_silent_chain_catalog_selection_is_distinct_from_roller_chain_and_requires_completion() -> None:
     module = get_module("silent_chain_sprocket")
     descriptor = module.descriptor()
-    assert descriptor["capabilities"] == {"preview": True, "build": False, "inspect": False}
+    assert descriptor["capabilities"] == {"preview": True, "build": True, "inspect": False}
     assert descriptor["subgroup"] == "chain_drives"
     assert descriptor["preview_url"] == "/modules/silent_chain_sprocket/preview"
-    assert descriptor["cad_plan_url"] is None
+    assert descriptor["cad_plan_url"] == "/modules/silent_chain_sprocket/cad/plan"
     assert module.request_model.model_validate(module.defaults).model_dump() == module.defaults
     standards = module.spec()["module"]["selection"]["standards"]
     assert [item["value"] for item in standards] == [
@@ -90,7 +90,7 @@ def test_silent_chain_catalog_selection_is_distinct_from_roller_chain_and_has_no
     ):
         with pytest.raises(ValueError):
             module.request_model.model_validate(invalid)
-    with pytest.raises(ValueError, match="no CAD planning"):
+    with pytest.raises(ValueError, match="Complete construction dimensions"):
         managed_pulley_plan(module.kind, module.defaults)
 
     gost_preview = preview_module(module.kind, module.defaults)
@@ -382,7 +382,7 @@ def test_silent_chain_explicit_completion_gate_and_geometry() -> None:
     ready = preview_module("silent_chain_sprocket", choices)
     assert ready["completion"]["geometry_complete"]
     assert ready["completion"]["ready_for_cad_planning"]
-    assert not ready["completion"]["cad_build_available"]
+    assert ready["completion"]["cad_build_available"]
     spec = ready["construction_spec"]
     assert spec["axial_material_outline"][0] == spec["axial_material_outline"][-1]
     assert spec["relative_rib_phases_deg"] == [0.0]*4
@@ -1745,8 +1745,8 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert silent_preview.json()["family"] == "silent_chain_sprocket"
     for suffix, payload, status in (
         ("cad/plan", silent_spec["defaults"], 422),
-        ("cad/create", {"profile": silent_spec["defaults"], "confirm_write": True}, 409),
-        ("cad/jobs", {"profile": silent_spec["defaults"], "confirm_write": True}, 409),
+        ("cad/create", {"profile": silent_spec["defaults"], "confirm_write": True}, 422),
+        ("cad/jobs", {"profile": silent_spec["defaults"], "confirm_write": True}, 422),
         ("cad/update-jobs", {"profile": silent_spec["defaults"], "confirm_write": True}, 409),
     ):
         assert client.post(f"/modules/silent_chain_sprocket/{suffix}", json=payload).status_code == status

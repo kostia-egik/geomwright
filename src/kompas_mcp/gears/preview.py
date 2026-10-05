@@ -110,7 +110,9 @@ def build_spur_gear_preview(
     summary = {
         "module_mm": module,
         "tooth_count": tooth_count,
-        "contour": geometry.rack.contour,
+        "standard": geometry.rack.standard,
+        "modification": geometry.rack.modification,
+        "contour_name": geometry.rack.name_ru,
         "standard_edition": geometry.rack.standard_edition,
         "pressure_angle_deg": math.degrees(geometry.pressure_angle_rad),
         "profile_shift": geometry.profile_shift,

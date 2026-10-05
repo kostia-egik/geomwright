@@ -99,6 +99,7 @@ let previewTimer = null;
 let statusDescriptor = { key: "status.loading", state: "idle", variables: {} };
 let cadPlanKey = null;
 let cadPlanController = null;
+let lastCadPlanReady = null;
 let cadBuildActive = false;
 let activeCadJobId = null;
 let workspaceSnapshot = null;
@@ -866,6 +867,189 @@ function createCamshaftKinematicsFields() {
 }
 
 
+function gearSelectionMetadata() {
+  return currentModule?.selection || {};
+}
+
+function gearStandardMetadata(value) {
+  return (gearSelectionMetadata().standards || []).find((item) => item.value === value) || null;
+}
+
+function createGearModuleSelect(currentValue) {
+  const select = document.createElement("select");
+  select.name = "module_mm";
+  select.dataset.schemaType = "number";
+  const rows = gearSelectionMetadata().module_rows || {};
+  const numericCurrent = Number(currentValue);
+  let matched = false;
+  for (const [key, labelKey] of [["row_1", "gear.module_row_1"], ["row_2", "gear.module_row_2"]]) {
+    const values = rows[key] || [];
+    if (!values.length) continue;
+    const group = document.createElement("optgroup");
+    group.label = t(labelKey, humanize(key));
+    for (const value of values) {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = formatNumber(value, 6);
+      if (Number.isFinite(numericCurrent) && Math.abs(value - numericCurrent) <= 1e-9) {
+        option.selected = true;
+        matched = true;
+      }
+      group.append(option);
+    }
+    select.append(group);
+  }
+  if (!matched && Number.isFinite(numericCurrent)) {
+    const option = document.createElement("option");
+    option.value = String(numericCurrent);
+    option.textContent = formatNumber(numericCurrent, 6);
+    select.prepend(option);
+    select.value = String(numericCurrent);
+  }
+  return select;
+}
+
+function createGearStandardSelect(currentValue) {
+  const select = document.createElement("select");
+  select.name = "standard";
+  select.dataset.schemaType = "string";
+  for (const item of gearSelectionMetadata().standards || []) {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = (getLocale() === "ru" ? item.label_ru : item.label_en) || item.value;
+    option.selected = item.value === currentValue;
+    select.append(option);
+  }
+  return select;
+}
+
+function createGearModificationSelect(currentValue) {
+  const select = document.createElement("select");
+  select.name = "modification";
+  select.dataset.schemaType = "string";
+  const system = gearStandardMetadata(
+    document.querySelector("#dynamic-fields [name='standard']")?.value || "gost_13755_2015",
+  );
+  for (const item of system?.modifications || []) {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = t(`enum.modification.${item.value}`, (getLocale() === "ru" ? item.label_ru : item.label_en) || item.value);
+    option.selected = item.value === currentValue;
+    select.append(option);
+  }
+  return select;
+}
+
+function createGearFields() {
+  const properties = currentSpec.schema.properties || {};
+  const required = new Set(currentSpec.schema.required || []);
+  const append = (element) => fieldsContainer.append(element);
+  const standardField = createField("standard", properties.standard, required.has("standard"));
+  const modificationField = createField("modification", properties.modification, required.has("modification"));
+  const standardInput = standardField.querySelector("input, select");
+  if (standardInput && standardInput.tagName !== "SELECT") {
+    standardField.replaceChild(createGearStandardSelect(standardInput.value), standardInput);
+  }
+  const modificationInput = modificationField.querySelector("input, select");
+  if (modificationInput && modificationInput.tagName !== "SELECT") {
+    modificationField.replaceChild(createGearModificationSelect(modificationInput.value), modificationInput);
+  }
+  const moduleField = createField("module_mm", properties.module_mm, required.has("module_mm"));
+  const moduleNumber = moduleField.querySelector("input");
+  const coefficientNames = ["pressure_angle_deg", "addendum_coefficient", "clearance_coefficient", "root_fillet_coefficient"];
+  const coefficientFields = {};
+  for (const name of coefficientNames) {
+    coefficientFields[name] = createField(name, properties[name], required.has(name));
+  }
+  const note = document.createElement("p");
+  note.className = "gear-note";
+  note.dataset.gearNote = "";
+  note.dataset.i18n = "gear.standard_note";
+
+  append(standardField);
+  append(modificationField);
+  append(moduleField);
+  append(createField("tooth_count", properties.tooth_count, required.has("tooth_count")));
+  append(createField("profile_shift", properties.profile_shift, required.has("profile_shift")));
+  append(createField("face_width_mm", properties.face_width_mm, required.has("face_width_mm")));
+  append(note);
+  for (const name of coefficientNames) append(coefficientFields[name]);
+  append(createField("pin_diameter_mm", properties.pin_diameter_mm, required.has("pin_diameter_mm")));
+
+  const standardSelect = standardField.querySelector("select");
+  const modificationSelect = modificationField.querySelector("select");
+
+  function modificationMetadata() {
+    const system = gearStandardMetadata(standardSelect.value);
+    return system?.modifications.find((item) => item.value === modificationSelect.value) || null;
+  }
+
+  function applyModuleField(meta) {
+    const custom = modificationSelect.value === "custom";
+    const moduleSelect = moduleField.querySelector("select[name='module_mm']");
+    if (custom) {
+      if (moduleSelect) {
+        moduleNumber.value = moduleSelect.value;
+        moduleField.replaceChild(moduleNumber, moduleSelect);
+      }
+      moduleNumber.disabled = false;
+      return;
+    }
+    if (!moduleSelect) {
+      moduleField.replaceChild(createGearModuleSelect(moduleNumber.value), moduleNumber);
+    } else {
+      moduleField.replaceChild(createGearModuleSelect(moduleSelect.value), moduleSelect);
+    }
+    void meta;
+  }
+
+  function applyCoefficientFields(meta) {
+    const custom = modificationSelect.value === "custom";
+    for (const name of coefficientNames) {
+      const wrapper = coefficientFields[name];
+      const input = wrapper.querySelector("input");
+      input.disabled = !custom;
+      wrapper.classList.toggle("derived", !custom);
+      const derived = meta ? meta[name] : null;
+      if (!custom && derived != null) input.value = String(derived);
+      let hint = wrapper.querySelector("[data-gear-derived-hint]");
+      if (!custom) {
+        if (!hint) {
+          hint = document.createElement("small");
+          hint.dataset.gearDerivedHint = "";
+          hint.dataset.i18n = "gear.derived_from_standard";
+          wrapper.append(hint);
+        }
+        hint.textContent = t("gear.derived_from_standard", "Автоматически из стандарта");
+      } else if (hint) {
+        hint.remove();
+      }
+    }
+  }
+
+  function syncGearFields() {
+    const meta = modificationMetadata();
+    applyModuleField(meta);
+    applyCoefficientFields(meta);
+    note.textContent = t(
+      "gear.standard_note",
+      "Коэффициенты контура берутся из выбранного стандарта и модификации. Для прямого ввода выберите пользовательскую модификацию.",
+    );
+    note.hidden = modificationSelect.value === "custom";
+  }
+
+  standardSelect.addEventListener("change", () => {
+    const system = gearStandardMetadata(standardSelect.value);
+    if (system && !system.modifications.some((item) => item.value === modificationSelect.value)) {
+      modificationSelect.value = system.modifications[0].value;
+    }
+    syncGearFields();
+  });
+  modificationSelect.addEventListener("change", syncGearFields);
+  syncGearFields();
+}
+
+
 function renderFields() {
   fieldsContainer.replaceChildren();
   const properties = currentSpec.schema.properties || {};
@@ -876,6 +1060,11 @@ function renderFields() {
       camshaftModuleKind = currentModule.kind;
     }
     fieldsContainer.append(createCamshaftWizard());
+    return;
+  }
+  if (currentModule?.kind === "gear_spur") {
+    createGearFields();
+    syncConditionalFields();
     return;
   }
   if (["chain_sprocket", "silent_chain_sprocket"].includes(currentModule?.kind)) fieldsContainer.append(createChainProfileSelector());
@@ -972,9 +1161,13 @@ function syncSilentCompletion(result = lastPreviewResult) {
   for (const name of silentCompletionNames) {
     const wrapper = panel.querySelector(`[data-field-name='${name}']`);
     if (!wrapper) continue;
-    const visible = applicable.has(name);
-    wrapper.hidden = !visible;
     const input = wrapper.querySelector("input,select");
+    // Restored form values must reach the first preview. With no report yet,
+    // disabling all completion fields would turn a complete recipe into a
+    // source-only request and leave its CAD action disabled.
+    const visible = report ? applicable.has(name)
+      : input.value !== "" && input.value !== "unresolved";
+    wrapper.hidden = !visible;
     input.disabled = !visible;
   }
   panel.hidden = !!report && applicable.size === 0;
@@ -991,6 +1184,16 @@ function syncSilentCompletion(result = lastPreviewResult) {
 
 function invalidateSilentGeometry(event) {
   if (currentModule?.kind !== "silent_chain_sprocket") return;
+  // A number input can emit change on blur after input was already previewed.
+  // Keep the accepted result when that event carries exactly the same payload.
+  try {
+    if (lastPreviewResult && payloadKey(collectPayload()) === lastSuccessfulPayloadKey) {
+      silentCompletionStale = false;
+      syncSilentCompletion();
+      renderSummary(lastPreviewResult.summary);
+      return;
+    }
+  } catch (_) { /* Incomplete input must follow the normal stale path. */ }
   silentCompletionEpoch += 1;
   silentCompletionStale = true;
   if (lastPreviewResult?.family === "silent_chain_sprocket") {
@@ -1488,11 +1691,12 @@ function managedBlockName(block) {
     timing_trapezoidal: "block.timing_trapezoidal",
     timing_curvilinear: "block.timing_curvilinear",
     gear_spur: "block.gear_spur",
+    silent_chain_sprocket: "block.silent_chain_sprocket",
     camshaft_lobe: "block.camshaft_lobe",
   }[block.module] || "block.generic";
   return t(family, block.name || block.module, {
     designation: profile.designation || "",
-    count: profile.groove_count || profile.tooth_count || "",
+    count: profile.groove_count || profile.tooth_count || profile.physical_tooth_count || "",
     crown: formatNumber(profile.crown_height || 0),
     module: profile.module_mm != null ? formatNumber(profile.module_mm) : "",
   });
@@ -1509,8 +1713,9 @@ function selectWorkspaceBlock(block) {
     ? (block.module === "camshaft_lobe" ? "camshaft.cad.recreate" : "app.recreate_block")
     : "workspace.edit";
   workspaceEditBlockButton.textContent = t(workspaceEditBlockButton.dataset.i18n);
-  workspaceBlockReadonly.hidden = block.module !== "camshaft_lobe" || block.editable;
-  workspaceBlockReadonly.dataset.i18n = block.status === "partial" ? "camshaft.cad.partial"
+  workspaceBlockReadonly.hidden = !["camshaft_lobe", "silent_chain_sprocket"].includes(block.module) || block.editable;
+  workspaceBlockReadonly.dataset.i18n = block.module === "silent_chain_sprocket" ? "silent.cad.readonly"
+    : block.status === "partial" ? "camshaft.cad.partial"
     : block.status === "legacy_unverified" ? "camshaft.cad.legacy"
     : block.recipe_error ? "camshaft.cad.recipe_unavailable" : "camshaft.cad.readonly";
   workspaceBlockReadonly.textContent = t(workspaceBlockReadonly.dataset.i18n);
@@ -1801,7 +2006,8 @@ function showEditor({ locked = false } = {}) {
   updateEditorPresentation();
   cadTitle.textContent = t(locked ? "cad.update_title" : "cad.title");
   cadDescription.dataset.i18n = currentModule.kind === "camshaft_lobe"
-    ? "camshaft.cad.description" : locked ? "cad.update_description" : "cad.description";
+    ? "camshaft.cad.description" : currentModule.kind === "silent_chain_sprocket"
+    ? "silent.cad.description" : locked ? "cad.update_description" : "cad.description";
   cadDescription.textContent = t(cadDescription.dataset.i18n);
   cadCreateButton.textContent = t(locked ? "cad.update" : "cad.create");
   editorDocumentActions.hidden = !locked;
@@ -1872,6 +2078,7 @@ async function selectModule(kind, autoPreview = true) {
     customProfileBaseValues = null;
     displayedWarnings = [];
     cadPlanKey = null;
+    lastCadPlanReady = null;
     cadPlanController?.abort();
     cadPlanController = null;
     cadCreateButton.disabled = true;
@@ -1895,8 +2102,41 @@ async function selectModule(kind, autoPreview = true) {
   }
 }
 
+function renderCadPlanReady(plan, elapsed) {
+  cadResult.dataset.state = "ready";
+  if (currentModule.kind === "camshaft_lobe") {
+    cadResult.textContent = t("camshaft.cad.ready", undefined, {
+      width: formatNumber(plan.width),
+      error: Number(plan.fit.max_sampled_error_mm).toLocaleString(getLocale(), {maximumSignificantDigits: 3}),
+    });
+    if (plan.verification.curvature_shortfall_mm > 0) {
+      cadResult.textContent += " " + t("camshaft.cad.curvature", undefined, {
+        radius: plan.verification.min_sampled_curvature_radius_mm.toLocaleString(getLocale(), {maximumSignificantDigits: 4}),
+        shortfall: plan.verification.curvature_shortfall_mm.toLocaleString(getLocale(), {maximumSignificantDigits: 3}),
+      });
+    }
+    return;
+  }
+  const planDimensions = cadPlanDisplayDimensions(plan);
+  cadResult.textContent = t("cad.plan_ready", "CAD plan ready", {
+    elapsed: formatPlanElapsed(elapsed),
+    diameter: formatNumber(planDimensions.outerDiameter),
+    width: formatNumber(planDimensions.faceWidth),
+  });
+}
+
 async function prepareCadPlan(payload, key = payloadKey(payload)) {
   if (currentModule.kind === "camshaft_lobe" && payload.step !== "cam") return;
+  if (currentModule.kind === "silent_chain_sprocket" && lastPreviewResult?.completion
+      && !lastPreviewResult.completion.geometry_complete) {
+    cadPlanController?.abort();
+    cadPlanController = null;
+    cadPlanKey = null;
+    cadCreateButton.disabled = true;
+    cadResult.dataset.state = "pending";
+    cadResult.textContent = t("silent.cad.incomplete");
+    return;
+  }
   if (!currentModule.capabilities.build) {
     cadPlanKey = null;
     cadCreateButton.disabled = true;
@@ -1920,29 +2160,12 @@ async function prepareCadPlan(payload, key = payloadKey(payload)) {
     if (controller !== cadPlanController) return;
     cadPlanKey = key;
     cadCreateButton.disabled = cadBuildActive || (Boolean(editorContext) && !currentDirtyState());
-    cadResult.dataset.state = "ready";
-    if (currentModule.kind === "camshaft_lobe") {
-      cadResult.textContent = t("camshaft.cad.ready", undefined, {
-        width: formatNumber(plan.width),
-        error: Number(plan.fit.max_sampled_error_mm).toLocaleString(getLocale(), {maximumSignificantDigits: 3}),
-      });
-      if (plan.verification.curvature_shortfall_mm > 0) {
-        cadResult.textContent += " " + t("camshaft.cad.curvature", undefined, {
-          radius: plan.verification.min_sampled_curvature_radius_mm.toLocaleString(getLocale(), {maximumSignificantDigits: 4}),
-          shortfall: plan.verification.curvature_shortfall_mm.toLocaleString(getLocale(), {maximumSignificantDigits: 3}),
-        });
-      }
-    } else {
-      const planDimensions = cadPlanDisplayDimensions(plan);
-      cadResult.textContent = t("cad.plan_ready", "CAD plan ready", {
-      elapsed: formatPlanElapsed(performance.now() - planStartedAt),
-      diameter: formatNumber(planDimensions.outerDiameter),
-      width: formatNumber(planDimensions.faceWidth),
-    });
-    }
+    lastCadPlanReady = { plan, elapsed: performance.now() - planStartedAt };
+    renderCadPlanReady(plan, lastCadPlanReady.elapsed);
   } catch (error) {
     if (error.name === "AbortError" || controller !== cadPlanController) return;
     cadPlanKey = null;
+    lastCadPlanReady = null;
     cadResult.dataset.state = "error";
     cadResult.textContent = currentModule.kind === "camshaft_lobe" && error.message.includes("cam build rejected:")
       ? t("camshaft.cad.rejected")
@@ -2065,8 +2288,9 @@ async function createManagedPulley() {
     );
   }
   const isCam = buildModule.kind === "camshaft_lobe";
-  const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : "Geomwright pulley");
-  if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
+  const isSilent = buildModule.kind === "silent_chain_sprocket";
+  const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : isSilent ? "Geomwright silent sprocket" : "Geomwright pulley");
+  if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : isSilent ? "silent.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
   cadBuildActive = true;
   cadCancelButton.hidden = false;
   cadCreateButton.disabled = true;
@@ -2100,7 +2324,7 @@ async function createManagedPulley() {
     const elapsed = formatElapsed(Date.now() - startedAt);
     cadResult.dataset.state = "ready";
     cadResult.textContent = t(
-      isCam ? "camshaft.cad.created" : updating ? "cad.updated" : "cad.created",
+      isCam ? "camshaft.cad.created" : isSilent ? "silent.cad.created" : updating ? "cad.updated" : "cad.created",
       updating ? "Model rebuilt and verified" : "Pulley created and verified",
       { elapsed },
     );
@@ -2129,7 +2353,7 @@ async function createManagedPulley() {
       const createdBlock = created.block;
       selectedWorkspaceDocumentId = createdEntry.document.runtime_id;
       selectedWorkspaceBlock = createdBlock;
-      if (isCam) {
+      if (isCam || isSilent) {
         editorContext = null;
         if (currentModule.kind === buildModule.kind) {
           baselinePayload = { ...profile };
@@ -2213,6 +2437,9 @@ function refreshLanguage() {
     updateEditorPresentation();
   }
   refreshStatusLanguage();
+  if (lastCadPlanReady && cadResult.dataset.state === "ready") {
+    renderCadPlanReady(lastCadPlanReady.plan, lastCadPlanReady.elapsed);
+  }
   if (workspaceActionActive) updateWorkspaceBusy();
 }
 

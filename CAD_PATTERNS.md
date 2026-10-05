@@ -58,6 +58,7 @@ Evidence levels used by this file:
 | Sketch cannot be assigned to extrude/revolve/evolution | `OP-001` |
 | Operation uses wrong sketch contour or rejects a valid-looking sketch | `OP-002`, `OP-001` |
 | Numeric cam NURBS fails creation or silently changes its order | `CURVE-001`, `VERIFY-001` |
+| KOMPAS spline accepts parameters but readback is empty, renormalized, or reads as closed | `CURVE-002` |
 | Bent coil / hook spiral phase is wrong | `SPIRAL-001`, `VAR-001` |
 | Native curve fillet needs a source cut point but raw spiral endpoints cannot be read | `FILLET-003` |
 | Cut sketch rounds the cutter when the retained body edge must be rounded | `FILLET-004`, `OP-002`, `VERIFY-001` |
@@ -65,11 +66,40 @@ Evidence levels used by this file:
 | UI opens files in a hidden or different KOMPAS instance | `SESSION-001` |
 | CAD job remains queued after a completed-looking operation | `SESSION-002` |
 | CAD model is created but Studio reports that the managed block is missing | `SESSION-003` |
+| Circular pattern reports the right count but leaves one uncut tooth space | `PATTERN-001` |
 | Host tests create duplicate CAD models during unrelated work | `SESSION-004` |
 | Bridge fails with `SyntaxError` although the project venv accepts the file | `BRIDGE-001` |
 | Numeric sketch creation times out with hundreds of entities | `OP-004`, `BRIDGE-001` |
 
 ## Rules
+
+### PATTERN-001: Verify Material Removal, Not Only The Circular Pattern Counter
+
+Evidence: live-verified on the silent-chain GOST II rim; corrected creation and
+save/reopen retain the expected volume and radial profile.
+
+Symptom: `ICircularPattern` is valid and reports `Count2=23` and the correct
+angular step, but the final rim contains the material of only 22 cuts.
+
+Cause: a full-period cutter included the zero-stock outside-circle tooth-tip
+arc. Adjacent cutters had coincident boundaries; the native pattern silently
+omitted a material-removing instance without failing `Update()`.
+
+Rule: for a rotationally symmetric blank and repeated identical cuts, compare
+total removed volume with source-cut volume times physical instance count.
+The silent-chain builder uses 0.01% of expected removed volume, with a
+0.001 mm³ numerical floor. This is a mass-property comparison bound, not a
+manufacturing tolerance. A valid counter cannot override a failed comparison.
+
+Implementation: circular-tip GOST/DIN profiles cut only the tooth space; the
+tip circle already belongs to the rim. ASME rounded tips partition their
+full-period cutter at a source-defined outside-radius tip maximum, so adjacent
+cutter boundaries meet outside material. Preserve the functional contour.
+
+Verification: check the source cut and final mass properties, count/step/axis,
+actual profile entities and arc directions, bounds, rebuild and save/reopen.
+Known example: `transmissions/silent_chain.py` and
+`handle_create_silent_chain_sprocket`.
 
 ### BRIDGE-001: The Bridge Must Parse Under KOMPAS Python 3.2
 
@@ -1980,28 +2010,31 @@ Cause:
 
 Rule:
 - Keep separate sampling densities: high resolution for host-side preview and
-  analysis, a documented chord tolerance for the CAD contour.
-- Simplify the closed CAD contour with Ramer-Douglas-Peucker (or an equivalent
-  bounded deviation method) before creating entities; compact exact circular
-  runs into single arcs.
-- Measure the one-sided deviation of the simplified contour, not only the
-  entity count. A sensible starting tolerance is `max(0.01 mm, 0.002 m)`.
-- Verify the expected volume from the simplified contour clipped to the blank,
+  analysis, a documented tolerance for the CAD contour.
+- Prefer one smooth KOMPAS spline per analytic curve (`CURVE-002`) over a dense
+  segment chain; fit the spline through Ramer-Douglas-Peucker-decimated samples
+  and record the measured deviation.
+- If the contour must remain polyline entities, simplify it first and compact
+  exact circular runs into single arcs.
+- Verify the expected volume from the analytic contour clipped to the blank,
   not from a coarsely decimated preview polygon.
 
 Verification:
-- Record entity count, maximum chord deviation, create time, and the live body
+- Record entity count, maximum curve deviation, create time, and the live body
   volume error.
-- The spur-gear default contour was reduced from 264 to ~44 entities with
-  0.01 mm maximum deviation; create time fell below 10 s and the live volume
-  error was 0.0012 %.
+- The spur-gear default contour first used 264 segment entities and timed out;
+  the final version uses seven entities (two smooth curves per flank plus exact
+  cap and closure arcs), creates in about six seconds, and the live volume
+  error is below 0.01 %.
 
 Known example:
-- `gear_spur` G2 slice: one tooth-space contour repeated 20 times; the first
-  dense attempt timed out, the bounded contour passed create and reopen.
+- `gear_spur` G2 slice: one tooth-space contour repeated 20 times; the dense
+  segment attempt timed out, the bounded smooth-spline contour passed create
+  and reopen.
 
 Related:
 - `OP-002`
+- `CURVE-002`
 - `SESSION-002`
 - `BRIDGE-001`
 
@@ -2060,6 +2093,57 @@ Known examples:
 Related:
 - `DIR-001`
 - `VAR-001`
+
+---
+
+### CURVE-002: Build KOMPAS Splines As A Cubic Bezier Chain
+
+Applies when:
+- an analytic curve must become one smooth KOMPAS spline entity;
+- a numeric profile is fitted through sampled points;
+- the sketch closure audit or the cut ignores a spline that was just created.
+
+Symptom:
+- `SetNurbsParams` returns true and the spline appears in the tree, but
+  `GetNurbsParams` returns `degree = null` or no points;
+- the closure audit counts a gap where the spline should be (planned five
+  entities, settled three);
+- a general interpolating B-spline knot vector comes back renormalized to
+  integer knots with `closed = true`, and the cut extrusion update fails.
+
+Cause:
+- The sketch readback requires casting the entity to `INurbs` before
+  `GetNurbsParams`; the raw dispatch object exposes neither `Degree` nor the
+  method, so the geometry reads empty and the entity is skipped.
+- KOMPAS preserves the piecewise-Bezier knot convention used by the accepted
+  cam path, not an arbitrary simple-knot B-spline. Interior knots must be
+  repeated three times with clamped ends.
+
+Rule:
+- Represent one smooth curve as a C1 cubic Bezier chain: Catmull-Rom control
+  points through the data, weights 1, knots `[t0]*4`, `[t_i]*3` at interior
+  parameters, `[t_n]*4`; degree 3, `closed = false`.
+- Cast to `INurbs` in `_inspect_sketch_full_entity` and read `values[1]` points,
+  `values[2]` weights, `values[3]` knots, degree from `Degree`.
+- Split a profile at a real tangent discontinuity (for example the gear form
+  point) into separate smooth curves instead of rounding the corner.
+
+Verification:
+- The closure preflight must report the full curve count and zero gaps.
+- The cut extrusion update succeeds and the live body volume matches the
+  analytic expected volume.
+- Evaluate the fitted chain host-side and record its maximum deviation from the
+  analytic samples.
+
+Known example:
+- Cam: `cams/cad.py` piecewise-Bezier knots; gear `gear_spur`: root and
+  involute curves per flank, seven tooth-space entities, live cut accepted with
+  0.007 % volume error.
+
+Related:
+- `CURVE-001`
+- `OP-002`
+- `BRIDGE-001`
 
 ---
 

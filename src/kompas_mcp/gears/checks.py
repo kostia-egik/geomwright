@@ -101,11 +101,15 @@ def evaluate_gear_checks(geometry, measurements: dict) -> dict:
             "gear_contour",
             "ok" if geometry.rack.conformity_claim else "warning",
             (
-                f"Basic rack {geometry.rack.contour}: {geometry.rack.standard_edition}."
+                f"Basic rack {geometry.rack.name_ru} ({geometry.rack.standard} · {geometry.rack.modification}): "
+                f"{geometry.rack.standard_edition}."
                 if geometry.rack.conformity_claim
-                else "Explicit coefficients define a modified contour without a standard-conformity claim."
+                else "Explicit coefficients define a user-defined rack without a standard-conformity claim."
             ),
-            value=geometry.rack.contour,
+            value={
+                "standard": geometry.rack.standard,
+                "modification": geometry.rack.modification,
+            },
         )
     )
     checks.append(

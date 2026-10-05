@@ -179,6 +179,7 @@ class SpurGearGeometry:
     period_outline: list[list[float]] = field(default_factory=list)
     gap_outline: list[list[float]] = field(default_factory=list)
     gap_surface_path: list[list[float]] = field(default_factory=list)
+    surface_split_index: int = 0
     involute_path: list[list[float]] = field(default_factory=list)
     fillet_path: list[list[float]] = field(default_factory=list)
     root_arc_path: list[list[float]] = field(default_factory=list)
@@ -211,10 +212,12 @@ def build_spur_gear_geometry(
 ) -> SpurGearGeometry:
     """Build the complete nominal geometry for one external spur gear."""
     rack = resolve_rack(
-        str(request.get("contour") or "gost_a"),
+        str(request.get("standard") or "gost_13755_2015"),
+        str(request.get("modification") or "a"),
         pressure_angle_deg=request.get("pressure_angle_deg"),
         addendum_coefficient=request.get("addendum_coefficient"),
         clearance_coefficient=request.get("clearance_coefficient"),
+        root_fillet_coefficient=request.get("root_fillet_coefficient"),
     )
     module = float(request["module_mm"])
     tooth_count = int(request["tooth_count"])
@@ -256,7 +259,7 @@ def build_spur_gear_geometry(
         warnings.append(
             warning_item(
                 "gear_contour_modified",
-                "Explicit coefficients make this a modified, non-standard contour.",
+                "Explicit coefficients make this a user-defined rack without a standard-conformity claim.",
             )
         )
     if outside_radius <= base_radius + 1e-9:
@@ -395,9 +398,11 @@ def build_spur_gear_geometry(
             involute_trim.insert(0, [float(form_point[0]), float(form_point[1])])
         boundary = _dedupe([*trochoid_trim, *involute_trim], tolerance=max(1e-9, module * 1e-6))
         root_angle = _angle(trochoid_curve[0])
+        split_point = form_point
     else:
-        # The trochoid stays below the involute (no undercut trim). The visible
-        # flank starts where the involute leaves the root circle.
+        # The trochoid stays below the involute (no undercut trim). Keep the
+        # trochoid from the root up to the base circle, then the involute; a
+        # short connector at the base circle is a nominal junction.
         start_radius = max(base_radius, root_radius)
         involute_trim = [point for point in full_involute if _radius(point) >= start_radius - 1e-9]
         if not involute_trim:
@@ -409,13 +414,28 @@ def build_spur_gear_geometry(
             )
             geometry.errors = errors
             return geometry
-        boundary = _dedupe(involute_trim, tolerance=max(1e-9, module * 1e-6))
-        form_radius = _radius(boundary[0])
+        trochoid_prefix: list[list[float]] = []
+        if _radius(trochoid_curve[0]) < start_radius - 1e-9:
+            for point in trochoid_curve:
+                trochoid_prefix.append(point)
+                if _radius(point) >= start_radius - 1e-9:
+                    break
+        if not trochoid_prefix:
+            boundary = _dedupe(involute_trim, tolerance=max(1e-9, module * 1e-6))
+        else:
+            if len(trochoid_prefix) < 2:
+                trochoid_prefix = [trochoid_curve[0], involute_trim[0]]
+            boundary = _dedupe([*trochoid_prefix, *involute_trim], tolerance=max(1e-9, module * 1e-6))
+        form_radius = _radius(involute_trim[0])
         root_angle = _angle(boundary[0])
+        split_point = involute_trim[0]
 
     root_arc_steps = max(3, int(8 * max(root_angle, 1e-3) / 0.1))
     root_arc = _arc_points(root_radius, 0.0, root_angle, root_arc_steps)
     surface = _dedupe([*root_arc, *boundary])
+    surface_split_index = min(
+        range(len(surface)), key=lambda index: math.dist(surface[index], split_point)
+    )
 
     # Closed tooth-space cut contour with an overshoot cap outside the blank.
     overshoot = outside_radius + max(1.0, 0.02 * outside_radius)
@@ -446,14 +466,15 @@ def build_spur_gear_geometry(
     period = _dedupe([*surface, *tip_arc[1:-1], *mirrored_tooth[1:]])
     if math.dist(period[0], period[-1]) > 1e-9:
         period.append(period[0])
-    period = _decimate(period, max(20, int(wheel_points_per_tooth)))
+    geometry.period_outline = period
+    wheel_period = _decimate(period, max(20, int(wheel_points_per_tooth)))
 
     wheel_points: list[list[float]] = []
     for index in range(tooth_count):
         angle_step = 2.0 * math.pi / tooth_count
         rotated = [
             _polar(_radius(point), _angle(point) + index * angle_step)
-            for point in period
+            for point in wheel_period
         ]
         if wheel_points:
             rotated = rotated[1:]
@@ -467,10 +488,10 @@ def build_spur_gear_geometry(
     geometry.root_envelope = "sharp_rack_trochoid" if trochoid_used else "involute_root_circle"
     geometry.gap_outline = gap
     geometry.gap_surface_path = _dedupe([*surface, *mirrored_surface])
+    geometry.surface_split_index = int(surface_split_index)
     geometry.involute_path = involute_trim
     geometry.fillet_path = trochoid_curve if trochoid_used else []
     geometry.root_arc_path = root_arc
-    geometry.period_outline = period
     geometry.full_wheel_outline = wheel_points
     geometry.section_area_mm2 = abs(_signed_area(wheel_points))
     return geometry

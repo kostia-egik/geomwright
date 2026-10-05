@@ -305,7 +305,7 @@ def complete_silent_chain_geometry(request: dict[str, Any], preview: dict[str, A
                                     "depth_mm": depth, "bottom_radius_mm": 0.0,
                                     "source": "source_dimensions_with_selected_square_floor"} for g in ax["guide_grooves_mm"]]
     selected = {name: request[name] for name in fields}
-    report.update(geometry_complete=True, ready_for_cad_planning=True, cad_build_available=False, status="defined")
+    report.update(geometry_complete=True, ready_for_cad_planning=True, cad_build_available=True, status="defined")
     rules = ["exact_source_dimensions_retained_except_explicit_conflict_resolution", "explicit_lower_closure"]
     rules.append("Ramsey_15deg_entrance" if radius is None else "tangent_circular_axial_entrances")
     if standard.startswith("gost"):
@@ -333,7 +333,15 @@ def complete_silent_chain_geometry(request: dict[str, Any], preview: dict[str, A
             "outside_diameter_mm": 2*outside_r, "inner_rim_diameter_mm": 2*(outside_r-body_depth),
             "functional_width_mm": width, "axial_extent_mm": extent,
             "radial_parameters": copy.deepcopy(preview["derived"]),
-            "physical_tooth_count": request["physical_tooth_count"], "radial_period": preview["geometry"]["period_path"],
+             "physical_tooth_count": request["physical_tooth_count"], "radial_period": preview["geometry"]["period_path"],
+             "radial_space": preview["geometry"]["profile_path"],
+             "radial_tip_circle": ({
+                 "center": [preview["derived"]["tip_arc_center_diameter_mm"]/2*math.sin(math.pi/request["physical_tooth_count"]),
+                            preview["derived"]["tip_arc_center_diameter_mm"]/2*math.cos(math.pi/request["physical_tooth_count"])],
+                 "radius": preview["derived"]["tip_round_radius_mm"],
+                 "start": preview["geometry"]["tooth_tip_path"][0],
+                 "end": preview["geometry"]["tooth_tip_path"][-1], "direction": True,
+             } if standard.startswith("asme") and preview["derived"].get("tip_shape") == "round" else None),
             "axial_material_outline": outline, "guide_grooves": ax["guide_grooves_mm"],
             "relative_rib_phases_deg": ax.get("relative_rib_phases_deg", [0.0]),
             "rib_centers_mm": ax.get("rib_centers_mm", [width/2]),

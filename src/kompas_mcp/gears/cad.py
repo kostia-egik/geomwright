@@ -1,9 +1,11 @@
 """Layer 3 create-only CAD plan for one external spur gear.
 
-The plan owns a new part: a cylindrical blank, one numeric tooth-space cut with
-the involute/trochoid contour, and a circular pattern. It is create-only and
-numeric: the sketch is not parameterized, matching the accepted silent-chain
-numeric-profile path in the bridge. High-level code builds this plan; only
+The plan owns a new part: a cylindrical blank, one numeric tooth-space cut, and
+a circular pattern. The tooth-space flanks are single interpolating cubic
+B-splines (KOMPAS spline entities) instead of dense segment chains, so the cut
+contour is smooth; only the cap and the root-adjacent closure use exact arcs and
+segments. The plan is create-only and numeric, matching the accepted KOMPAS
+numeric-profile path. High-level code builds this plan; only
 `bridge/kompas_bridge.py` executes COM calls.
 """
 from __future__ import annotations
@@ -12,22 +14,26 @@ import math
 from typing import Any
 
 from .involute import build_spur_gear_geometry
+from .nurbs import bezier_chain, spline_max_deviation
 from .preview import build_spur_gear_preview
 from .spec import SpurGearRequest
 
 FAMILY_CODE = 8
 OWNERSHIP_SCHEMA = "geomwright.managed_gear_spur"
 PLAN_STAGE = "gear_spur_cad_plan"
-CONTOUR_CODES = {"gost_a": 1, "gost_b": 2, "gost_c": 3, "gost_d": 4, "custom": 0}
+STANDARD_CODES = {"gost_13755_2015": 1}
+MODIFICATION_CODES = {"a": 1, "b": 2, "c": 3, "d": 4, "custom": 0}
 
 
-def _simplify_closed(path: list[list[float]], tolerance: float) -> list[list[float]]:
-    """Ramer-Douglas-Peucker decimation that preserves the closed contour."""
-    points = [list(map(float, point)) for point in path]
-    if len(points) >= 2 and math.dist(points[0], points[-1]) <= 1e-9:
-        points = points[:-1]
-    if len(points) < 8:
-        return [*points, points[0]]
+def _simplify_open(points: list[list[float]], tolerance: float) -> list[list[float]]:
+    """Ramer-Douglas-Peucker decimation that keeps the first and last point."""
+    unique: list[list[float]] = []
+    for point in points:
+        candidate = [float(point[0]), float(point[1])]
+        if not unique or math.dist(unique[-1], candidate) > 1e-9:
+            unique.append(candidate)
+    if len(unique) <= 2:
+        return unique
 
     def simplify(sequence: list[list[float]]) -> list[list[float]]:
         if len(sequence) < 3:
@@ -52,10 +58,7 @@ def _simplify_closed(path: list[list[float]], tolerance: float) -> list[list[flo
         right = simplify(sequence[worst_index:])
         return [*left[:-1], *right]
 
-    simplified = simplify([*points, points[0]])
-    if len(simplified) < 4:
-        simplified = [*points[:4], points[0]]
-    return simplified
+    return simplify(unique)
 
 
 def _polygon_area(points: list[list[float]]) -> float:
@@ -106,130 +109,78 @@ def _clip_to_circle(polygon: list[list[float]], radius: float, segments: int = 7
     return output
 
 
-def _circle(a: list[float], b: list[float], c: list[float]):
-    bx, by = b[0] - a[0], b[1] - a[1]
-    cx, cy = c[0] - a[0], c[1] - a[1]
-    det = 2.0 * (bx * cy - by * cx)
-    if abs(det) < 1e-12:
-        return None
-    u, v = bx * bx + by * by, cx * cx + cy * cy
-    center = [a[0] + (cy * u - by * v) / det, a[1] + (bx * v - cx * u) / det]
-    return center, math.dist(a, center), det < 0
+def _polar(radius: float, angle: float) -> list[float]:
+    return [radius * math.sin(angle), radius * math.cos(angle)]
 
 
-def contour_entities(path: list[list[float]], prefix: str) -> list[dict[str, Any]]:
-    """Compact one closed numeric contour into segments and exact arcs."""
-    points: list[list[float]] = []
-    for point in path:
-        if len(point) != 2 or not all(math.isfinite(float(value)) for value in point):
-            raise ValueError("Gear contour contains invalid coordinates")
-        candidate = [float(point[0]), float(point[1])]
-        if not points or math.dist(points[-1], candidate) > 1e-9:
-            points.append(candidate)
-    if len(points) >= 2 and math.dist(points[0], points[-1]) <= 1e-9:
-        points = points[:-1]
-    if len(points) < 8:
-        raise ValueError("Gear tooth-space contour is too short")
-    entities: list[dict[str, Any]] = []
-    count = len(points)
-    index = 0
-    while index < count - 1:
-        current = points[index]
-        third = min(index + 2, count - 1)
-        circle = _circle(points[index], points[index + 1], points[third])
-        if circle:
-            center, radius, clockwise = circle
-            end = index + 2
-            while end + 1 < count:
-                candidate = points[end + 1]
-                previous = points[end]
-                turn = ((previous[0] - center[0]) * (candidate[1] - center[1])
-                        - (previous[1] - center[1]) * (candidate[0] - center[0]))
-                if abs(math.dist(candidate, center) - radius) > 1e-7 or (turn < 0) != clockwise:
-                    break
-                end += 1
-            if end - index >= 3:
-                entities.append({
-                    "id": f"{prefix}_{len(entities)}",
-                    "kind": "arc",
-                    "center": center,
-                    "radius": radius,
-                    "start": current,
-                    "end": points[end],
-                    "direction": clockwise,
-                    "style": 1,
-                })
-                index = end
-                continue
-        dx = points[index + 1][0] - current[0]
-        dy = points[index + 1][1] - current[1]
-        segment_length = math.hypot(dx, dy)
-        run = index + 1
-        while run + 1 < count and segment_length > 1e-12:
-            candidate = points[run + 1]
-            cross = abs(dx * (candidate[1] - current[1]) - dy * (candidate[0] - current[0])) / segment_length
-            if cross > 1e-7:
-                break
-            projection = (candidate[0] - current[0]) * dx + (candidate[1] - current[1]) * dy
-            if projection <= 0:
-                break
-            run += 1
-        entities.append({
-            "id": f"{prefix}_{len(entities)}",
-            "kind": "segment",
-            "start": current,
-            "end": points[run],
-            "style": 1,
-        })
-        index = run
-    # Close the contour back to its first point.
-    if math.dist(entities[-1]["end"], points[0]) > 1e-9:
-        entities.append({
-            "id": f"{prefix}_{len(entities)}",
-            "kind": "segment",
-            "start": entities[-1]["end"],
-            "end": points[0],
-            "style": 1,
-        })
-    if len(entities) > 1024:
-        raise ValueError("Gear tooth-space contour exceeds the bounded CAD entity budget")
-    return entities
+def _clockwise(start: list[float], middle: list[float], end: list[float]) -> bool:
+    cross = (middle[0] - start[0]) * (end[1] - middle[1]) - (middle[1] - start[1]) * (end[0] - middle[0])
+    return cross < 0.0
 
 
-def _closed_polygon_area(points: list[list[float]]) -> float:
-    area = 0.0
-    for index in range(len(points) - 1):
-        x1, y1 = points[index]
-        x2, y2 = points[index + 1]
-        area += x1 * y2 - x2 * y1
-    return area / 2.0
+def _entity_endpoints(entity: dict) -> tuple[list[float], list[float]] | None:
+    kind = str(entity.get("kind") or "")
+    if kind in ("segment", "arc"):
+        return list(entity["start"]), list(entity["end"])
+    if kind == "nurbs":
+        points = list(entity.get("points") or [])
+        if len(points) >= 2:
+            return list(points[0]), list(points[-1])
+    return None
 
 
-def _validate_closed_contour(points: list[list[float]], module_mm: float) -> None:
-    if len(points) < 4:
-        raise ValueError("Gear tooth-space contour must be a closed polyline")
-    if math.dist(points[0], points[-1]) > 1e-7:
-        raise ValueError("Gear tooth-space contour is not closed")
-    if abs(_closed_polygon_area(points)) < 1e-6:
-        raise ValueError("Gear tooth-space contour has no area")
-    # Reject self-intersections before any COM call.
-    def orientation(a, b, c):
-        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+def _validate_entity_contour(entities: list[dict], module_mm: float) -> None:
+    if len(entities) < 3:
+        raise ValueError("Gear tooth-space contour needs at least three entities")
+    tolerance = max(1e-6, module_mm * 1e-6)
+    for index, entity in enumerate(entities):
+        endpoints = _entity_endpoints(entity)
+        if endpoints is None:
+            raise ValueError("Gear contour entity has no usable endpoints")
+        following = entities[(index + 1) % len(entities)]
+        following_endpoints = _entity_endpoints(following)
+        if following_endpoints is None:
+            raise ValueError("Gear contour entity has no usable endpoints")
+        if math.dist(endpoints[1], following_endpoints[0]) > tolerance:
+            raise ValueError("Gear contour entities are not connected in order")
+    for entity in entities:
+        if entity.get("kind") == "nurbs" and len(entity.get("points") or []) < 4:
+            raise ValueError("Gear flank spline needs at least four control points")
 
-    count = len(points) - 1
-    tolerance = max(1e-12, module_mm * 1e-9)
-    for first in range(count):
-        a, b = points[first], points[first + 1]
-        for second in range(first + 1, count):
-            if second in (first, (first + 1) % count):
-                continue
-            if first == 0 and second == count - 1:
-                continue
-            c, d = points[second], points[second + 1]
-            o1, o2 = orientation(a, b, c), orientation(a, b, d)
-            o3, o4 = orientation(c, d, a), orientation(c, d, b)
-            if o1 * o2 < -tolerance and o3 * o4 < -tolerance:
-                raise ValueError("Gear tooth-space contour self-intersects")
+
+def _nurbs_entity(spline: dict, entity_id: str) -> dict:
+    return {
+        "id": entity_id,
+        "kind": "nurbs",
+        "points": spline["points"],
+        "weights": spline["weights"],
+        "knots": spline["knots"],
+        "degree": spline["degree"],
+        "closed": False,
+        "style": 1,
+    }
+
+
+def _fit_smooth_curve(
+    points: list[list[float]],
+    module_mm: float,
+) -> tuple[list[list[float]], dict, float]:
+    """Fit one smooth Bezier chain within a bounded deviation."""
+    deviation_cap = max(0.03, module_mm * 0.01)
+    best = None
+    for tolerance in (0.01, 0.005, 0.002, 0.001, 0.0005):
+        candidate_points = _simplify_open(points, tolerance)
+        if len(candidate_points) < 4:
+            continue
+        candidate_spline = bezier_chain(candidate_points)
+        candidate_deviation = spline_max_deviation(candidate_spline, points)
+        if best is None or candidate_deviation < best[2]:
+            best = (candidate_points, candidate_spline, candidate_deviation)
+        if candidate_deviation <= deviation_cap:
+            break
+    if best is None or best[2] > deviation_cap:
+        raise ValueError("Gear flank spline deviation exceeds the CAD tolerance")
+    return best
 
 
 def build_gear_spur_plan(
@@ -246,11 +197,72 @@ def build_gear_spur_plan(
     if not preview.get("success"):
         errors = ", ".join(str(item.get("code")) for item in preview.get("errors") or [])
         raise ValueError("Gear preview rejected the request: " + (errors or "invalid geometry"))
-    geometry = build_spur_gear_geometry(request, curve_samples=220, wheel_points_per_tooth=16)
-    gap_outline = _simplify_closed(geometry.gap_outline, max(0.01, geometry.module_mm * 0.002))
-    _validate_closed_contour(gap_outline, geometry.module_mm)
-    entities = contour_entities(gap_outline, "gear_gap")
+    geometry = build_spur_gear_geometry(request, curve_samples=260, wheel_points_per_tooth=160)
+    path = geometry.gap_surface_path
+    if len(path) < 8:
+        raise ValueError("Gear tooth-space surface is missing")
+    tip_index = max(range(len(path)), key=lambda index: math.hypot(path[index][0], path[index][1]))
+    surface = path[:tip_index + 1]
+    split_index = int(getattr(geometry, "surface_split_index", 0) or 0)
+    if not 0 < split_index < len(surface) - 2:
+        split_index = max(1, len(surface) // 2)
+    root_surface = surface[:split_index + 1]
+    involute_surface = surface[split_index:]
+    root_points, root_spline, root_deviation = _fit_smooth_curve(root_surface, geometry.module_mm)
+    involute_points, involute_spline, involute_deviation = _fit_smooth_curve(
+        involute_surface, geometry.module_mm
+    )
+    deviation = max(root_deviation, involute_deviation)
+    left_involute_points = [[-point[0], point[1]] for point in reversed(involute_points)]
+    left_root_points = [[-point[0], point[1]] for point in reversed(root_points)]
+    left_involute_spline = bezier_chain(left_involute_points)
+    left_root_spline = bezier_chain(left_root_points)
+
+    tip = surface[-1]
+    tip_angle = math.atan2(tip[0], tip[1])
+    overshoot = geometry.outside_radius + max(1.0, 0.02 * geometry.outside_radius)
+    cap_out = _polar(overshoot, tip_angle)
+    cap_in = _polar(geometry.outside_radius, -tip_angle)
+    cap_arc_start = cap_out
+    cap_arc_mid = _polar(overshoot, 0.0)
+    cap_arc_end = _polar(overshoot, -tip_angle)
+    entities = [
+        _nurbs_entity(root_spline, "gear_space_root_right"),
+        _nurbs_entity(involute_spline, "gear_space_involute_right"),
+        {"id": "gear_space_cap_out", "kind": "segment", "start": tip, "end": cap_arc_start, "style": 1},
+        {
+            "id": "gear_space_cap_arc",
+            "kind": "arc",
+            "center": [0.0, 0.0],
+            "radius": overshoot,
+            "start": cap_arc_start,
+            "end": cap_arc_end,
+            "direction": _clockwise(cap_arc_start, cap_arc_mid, cap_arc_end),
+            "style": 1,
+        },
+        {"id": "gear_space_cap_in", "kind": "segment", "start": cap_arc_end, "end": cap_in, "style": 1},
+        _nurbs_entity(left_involute_spline, "gear_space_involute_left"),
+        _nurbs_entity(left_root_spline, "gear_space_root_left"),
+    ]
+    _validate_entity_contour(entities, geometry.module_mm)
+
+    clipped_gap = _clip_to_circle(geometry.gap_outline, geometry.outside_radius)
+    gap_area = _polygon_area(clipped_gap) if len(clipped_gap) >= 3 else 0.0
     pattern_count = int(geometry.tooth_count)
+    expected_section = math.pi * geometry.outside_radius ** 2 - pattern_count * gap_area
+    expected_volume = expected_section * geometry.face_width_mm
+    if expected_volume <= 0.0 or not math.isfinite(expected_volume):
+        raise ValueError("Gear expected volume is not positive")
+
+    x_values = [point[0] for point in geometry.full_wheel_outline]
+    y_values = [point[1] for point in geometry.full_wheel_outline]
+    x_min, x_max = min(x_values), max(x_values)
+    y_min, y_max = min(y_values), max(y_values)
+    width = geometry.face_width_mm
+    expected_bounds_candidates = [
+        [-width, y_min, x_min, 0.0, y_max, x_max],
+        [-width, x_min, y_min, 0.0, x_max, y_max],
+    ]
     operations = [
         {
             "id": "blank",
@@ -275,7 +287,7 @@ def build_gear_spur_plan(
                 "entities": entities,
                 "parameterize": False,
                 "require_fully_defined": False,
-                "profile_status": "nominal_sharp_rack_numeric_profile",
+                "profile_status": "nominal_smooth_flank_numeric_profile",
             },
         },
         {
@@ -301,25 +313,6 @@ def build_gear_spur_plan(
                 "parameterize": False,
             },
         },
-    ]
-    clipped_gap = _clip_to_circle(gap_outline, geometry.outside_radius)
-    gap_area = _polygon_area(clipped_gap) if len(clipped_gap) >= 3 else 0.0
-    expected_section = math.pi * geometry.outside_radius ** 2 - pattern_count * gap_area
-    expected_volume = expected_section * geometry.face_width_mm
-    if expected_volume <= 0.0 or not math.isfinite(expected_volume):
-        raise ValueError("Gear expected volume is not positive")
-    bounds_outline = build_spur_gear_geometry(
-        request, curve_samples=220, wheel_points_per_tooth=160
-    ).full_wheel_outline
-    x_values = [point[0] for point in bounds_outline]
-    y_values = [point[1] for point in bounds_outline]
-    x_min, x_max = min(x_values), max(x_values)
-    y_min, y_max = min(y_values), max(y_values)
-    width = geometry.face_width_mm
-    # The YOZ sketch may map its two axes to global Y/Z in either order.
-    expected_bounds_candidates = [
-        [-width, y_min, x_min, 0.0, y_max, x_max],
-        [-width, x_min, y_min, 0.0, x_max, y_max],
     ]
     return {
         "ok": True,
@@ -352,12 +345,15 @@ def build_gear_spur_plan(
             "expected_section_area_mm2": expected_section,
             "clipped_gap_area_mm2": gap_area,
             "entity_count": len(entities),
-            "contour_points": len(gap_outline),
+            "spline_control_points": len(root_spline["points"]) + len(involute_spline["points"]),
+            "spline_deviation_mm": deviation,
         },
         "ownership": {
             "schema": OWNERSHIP_SCHEMA,
             "version": 1,
             "family_code": FAMILY_CODE,
+            "standard_code": STANDARD_CODES.get(str(request.get("standard")), 0),
+            "modification_code": MODIFICATION_CODES.get(str(request.get("modification")), 0),
             "source_profile": dict(request),
         },
         "verification": {
@@ -372,7 +368,8 @@ def build_gear_spur_plan(
         },
         "accuracy": {
             "profile": "analytic_involute_with_sharp_rack_trochoid",
-            "profile_encoding": "numeric_segments_and_exact_arcs",
+            "profile_encoding": "root_and_involute_cubic_bezier_nurbs_per_flank_with_exact_cap_arc",
+            "flank_spline_deviation_mm": deviation,
             "parameterization": "numeric_create_only",
             "representation_mode": "nominal",
             "conformity_claim": False,

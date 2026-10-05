@@ -1627,6 +1627,31 @@ def _sketch_entity_geometry(entity_kind, entity):
             "end": [_json_safe_scalar(safe_get(entity, "X2")), _json_safe_scalar(safe_get(entity, "Y2"))],
             "direction": _json_safe_scalar(safe_get(entity, "Direction")),
         }
+    if entity_kind == "nurbs":
+        geometry = {
+            "degree": _json_safe_scalar(safe_get(entity, "Degree")),
+        }
+        try:
+            values = entity.GetNurbsParams()
+        except Exception:
+            values = None
+        if values:
+            try:
+                geometry["closed"] = bool(values[0])
+                coordinates = [float(value) for value in list(values[1])]
+                points = [
+                    [coordinates[index], coordinates[index + 1]]
+                    for index in range(0, len(coordinates) - 1, 2)
+                ]
+                geometry["points"] = points
+                geometry["weights"] = [float(value) for value in list(values[2])]
+                geometry["knots"] = [float(value) for value in list(values[3])]
+                if points:
+                    geometry["start"] = list(points[0])
+                    geometry["end"] = list(points[-1])
+            except Exception as exc:
+                geometry["readback_error"] = str(exc)
+        return geometry
     if entity_kind == "ellipse":
         return {
             "center": [_json_safe_scalar(safe_get(entity, "Xc")), _json_safe_scalar(safe_get(entity, "Yc"))],
@@ -2484,6 +2509,7 @@ def _inspect_sketch_full_entity(entity, *, entity_kind, collection_name, index):
         "circle": "ICircle",
         "point": "IPoint",
         "ellipse": "IEllipse",
+        "nurbs": "INurbs",
     }.get(entity_kind)
     if interface_name:
         try:
@@ -2868,6 +2894,7 @@ def _inspect_sketch_full(model_container, payload):
             ("circles", ("Circles", "GetCircles"), "circle"),
             ("points", ("Points", "GetPoints"), "point"),
             ("ellipses", ("Ellipses", "GetEllipses"), "ellipse"),
+            ("nurbs", ("Nurbses", "GetNurbses"), "nurbs"),
         ):
             collection_result = _inspect_sketch_full_collection(drawing_container, collection_name, accessors, entity_kind, max_items=max_items)
             result["collections"].append(collection_result)
@@ -5625,6 +5652,39 @@ def _add_sketch_arc(drawing_container, center, radius, start, end, direction, li
     return arc
 
 
+def _add_sketch_nurbs(drawing_container, entity):
+    """Create one KOMPAS spline (NURBS) entity from explicit parameters."""
+    import pythoncom
+    import win32com.client
+
+    collection = _get_add_collection(drawing_container, "Nurbses", "GetNurbses", "Nurbses")
+    nurbs = collection.Add()
+    if nurbs is None:
+        raise RuntimeError("Nurbses.Add returned None")
+    points = []
+    for point in list(entity.get("points") or []):
+        points.extend([float(point[0]), float(point[1])])
+    if len(points) < 8:
+        raise RuntimeError("A spline needs at least four control points")
+    weights = [float(value) for value in list(entity.get("weights") or [])]
+    knots = [float(value) for value in list(entity.get("knots") or [])]
+    degree = int(entity.get("degree") or 3)
+    if len(weights) != len(points) // 2:
+        weights = [1.0] * (len(points) // 2)
+    if not knots:
+        raise RuntimeError("Spline knots are missing")
+
+    def array(values):
+        return win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, values)
+
+    if not nurbs.SetNurbsParams(array(points), array(weights), array(knots), degree, bool(entity.get("closed", False))):
+        raise RuntimeError("Spline SetNurbsParams failed")
+    _apply_line_style(nurbs, int(entity.get("line_style", 1)))
+    if not nurbs.Update():
+        raise RuntimeError("Spline Update returned False")
+    return nurbs
+
+
 def _add_sketch_ellipse(drawing_container, center, radius_x, radius_y, angle, line_style):
     ellipses = _get_add_collection(drawing_container, "Ellipses", "GetEllipses", "Ellipses")
     ellipse = ellipses.Add()
@@ -5741,6 +5801,19 @@ def _create_sketch_entities(model_container, part, payload):
                     direction=bool(entity.get("direction", True)), role=role, target=entity_id,
                 )
                 results.append({"index": index, "id": entity_id, "kind": kind, "ok": True, "reference": safe_get(created, "Reference"), "collection_index": collection_index})
+            elif kind == "nurbs":
+                collection_index = _sketch_entity_collection_count(drawing_container, "nurbs")
+                created = _add_sketch_nurbs(drawing_container, entity)
+                results.append({
+                    "index": index,
+                    "id": entity_id,
+                    "kind": kind,
+                    "ok": True,
+                    "reference": safe_get(created, "Reference"),
+                    "collection_index": collection_index,
+                    "control_point_count": len(list(entity.get("points") or [])),
+                })
+                sketch_entities[entity_id] = {"object": created, "role": role, "target": entity_id}
             elif kind == "ellipse":
                 collection_index = _sketch_entity_collection_count(drawing_container, "ellipse")
                 created = _add_sketch_ellipse(drawing_container, entity.get("center"), float(entity.get("radius_x")), float(entity.get("radius_y")), float(entity.get("angle", 0.0)), int(entity.get("line_style", 1)))
@@ -25904,7 +25977,7 @@ def _entity_style_id(entity):
 def _entity_curve_endpoints(entity):
     kind = entity.get("kind")
     geometry = entity.get("geometry") or {}
-    if kind not in ("segment", "arc"):
+    if kind not in ("segment", "arc", "nurbs"):
         return None
     start = geometry.get("start")
     end = geometry.get("end")
@@ -25925,6 +25998,16 @@ def _sample_curve_points(geometry, samples=16):
     end = geometry.get("end")
     if not isinstance(start, list) or not isinstance(end, list) or len(start) != 2 or len(end) != 2:
         return []
+    control_points = geometry.get("points")
+    if (
+        "center" not in geometry
+        and isinstance(control_points, list)
+        and len(control_points) > 2
+    ):
+        try:
+            return [[float(point[0]), float(point[1])] for point in control_points]
+        except Exception:
+            return [[float(start[0]), float(start[1])], [float(end[0]), float(end[1])]]
     if "center" not in geometry or "radius" not in geometry:
         return [[float(start[0]), float(start[1])], [float(end[0]), float(end[1])]]
     center = geometry.get("center")
@@ -27366,11 +27449,19 @@ def _inspect_silent_chain_block(doc3):
     if safe_get(variables.get("GW_SILENT_VERSION"), "Value") != 1:
         return None
     model = cast_model_container(part)
+    import win32com.client
+    patterns = [p for p in iter_collection(safe_get(model, "FeaturePatterns")) if safe_get(p, "Name") == "Silent tooth pattern"]
+    if len(patterns) != 1:
+        return None
+    initial_refs = {int(safe_get(item, "Reference") or 0) for item in
+                    _ensure_dispatch_sequence(safe_get(win32com.client.CastTo(patterns[0], "ICircularPattern"), "InitialObjects"))}
     roots = []
     for collection, name in (("Sketchs", "Silent rim profile"), ("Rotateds", "Silent functional rim"),
                              ("Sketchs", "Silent radial period"), ("Extrusions", "Silent radial cut"),
                              ("FeaturePatterns", "Silent tooth pattern")):
         matches = [item for item in iter_collection(safe_get(model, collection)) if safe_get(item, "Name") == name]
+        if collection == "Extrusions":
+            matches = [item for item in matches if int(safe_get(item, "Reference") or 0) in initial_refs]
         if len(matches) != 1 or safe_get(matches[0], "Valid") is False:
             return None
         roots.append(matches[0])
@@ -27401,6 +27492,83 @@ def _inspect_silent_chain_block(doc3):
             "verification_scope": "ownership_and_recipe_recognition_not_fresh_geometry_audit"}
 
 
+def _silent_chain_readback(doc3, plan):
+    import win32com.client
+    part = safe_get(doc3, "TopPart")
+    model = cast_model_container(part)
+    profiles = {}
+    for name, expected in (("Silent rim profile", plan["rim_entities"]),
+                           ("Silent radial period", plan["operations"][0]["params"]["entities"])):
+        sketches = [s for s in iter_collection(safe_get(model, "Sketchs")) if safe_get(s, "Name") == name]
+        if len(sketches) != 1:
+            raise RuntimeError("Silent-chain root sketch is missing or ambiguous: " + name)
+        snapshot = _inspect_sketch_full(model, {"sketch_ref": safe_get(sketches[0], "Reference"),
+            "include_dimensions": False, "include_constraints": False, "include_diagnostics": False,
+            "max_items": 500})
+        actual = [e for e in snapshot["entities"] if _entity_style_id(e) == 1]
+        if len(actual) != len(expected) or not snapshot["summary"].get("closure_primary_closed"):
+            raise RuntimeError("Silent-chain profile entity count/closure mismatch: " + name)
+        for entity in expected:
+            def matches(candidate):
+                geometry = candidate.get("geometry") or {}
+                if candidate.get("kind") != entity["kind"]:
+                    return False
+                for key in ("start", "end", "center"):
+                    if key in entity and (key not in geometry or math.hypot(
+                        entity[key][0]-geometry[key][0], entity[key][1]-geometry[key][1]) > 1e-6):
+                        return False
+                return entity["kind"] != "arc" or (abs(float(geometry.get("radius") or 0)-entity["radius"]) <= 1e-6
+                    and bool(geometry.get("direction")) == entity["direction"])
+            matching = [e for e in actual if matches(e)]
+            if len(matching) != 1:
+                raise RuntimeError("Silent-chain actual profile differs from plan: " + name + "/" + entity["id"])
+            actual.remove(matching[0])
+        profiles[name] = {"ok": True, "entity_count": len(expected), "closed": True,
+                          "constraints_state": snapshot.get("constraints_state")}
+    patterns = [p for p in iter_collection(safe_get(model, "FeaturePatterns")) if safe_get(p, "Name") == "Silent tooth pattern"]
+    if len(patterns) != 1:
+        raise RuntimeError("Silent-chain root pattern is missing or ambiguous")
+    pattern = win32com.client.CastTo(patterns[0], "ICircularPattern")
+    if len(_ensure_dispatch_sequence(safe_get(pattern, "InitialObjects"))) != 1:
+        raise RuntimeError("Silent-chain pattern must retain exactly one source cut")
+    count = int(round(float(pattern.Count2)))
+    if count != plan["verification"]["pattern_count"] or abs(float(pattern.Step2)-360./count) > 1e-7:
+        raise RuntimeError("Silent-chain pattern count/angular pitch mismatch")
+    if int(safe_get(pattern.Axis, "Reference") or 0) != int(safe_get(part.DefaultObject(71), "Reference") or 0):
+        raise RuntimeError("Silent-chain pattern axis does not match global X")
+    bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+    body = _active_api5_primary_body_metrics()
+    if len(bodies) != 1 or body["body_count"] != 1 or not body["solid"] or body["volume"] <= 0:
+        raise RuntimeError("Silent-chain body must be one positive-volume solid")
+    box = win32com.client.CastTo(bodies[0], "IBody7").GetGabarit()
+    if not box or not box[0] or len(box) != 7:
+        raise RuntimeError("Silent-chain body bounds unavailable")
+    body["bounds_mm"] = [float(v) for v in box[1:]]
+    verify = plan["verification"]
+    error = abs(body["volume"]*1000/float(verify["expected_volume_mm3"])-1)
+    if error > float(verify["volume_relative_tolerance"]) or any(
+        abs(a-b) > float(verify["bounds_tolerance_mm"]) for a, b in zip(body["bounds_mm"], verify["expected_bounds_mm"])):
+        raise RuntimeError("Silent-chain body volume/bounds differ from completed geometry")
+    return {"ok": True, "profiles": profiles, "pattern_count": count,
+            "pattern_angle_step_deg": float(pattern.Step2), "body": body, "relative_volume_error": error}
+
+
+def handle_verify_silent_chain_sprocket(payload):
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "silent_chain_cad_plan" or plan.get("plan_version") != 1:
+        raise ValueError("A silent_chain_cad_plan version 1 is required")
+    app = make_app()
+    document = resolve_document(app, payload.get("document_id"))
+    if document is None:
+        raise RuntimeError("Exact silent-chain document not found")
+    document.Active = True
+    doc3 = cast_document_3d(document)
+    block = _inspect_silent_chain_block(doc3)
+    if not block or block.get("profile") != plan["profile_request"]:
+        raise RuntimeError("Silent-chain ownership/recipe does not match the verification plan")
+    return {"ok": True, "block": block, "readback": _silent_chain_readback(doc3, plan)}
+
+
 def handle_create_silent_chain_sprocket(payload):
     if payload.get("execute") is not True or payload.get("confirm_write") is not True:
         raise ValueError("Silent-chain creation requires execute=true and confirm_write=true")
@@ -27419,10 +27587,11 @@ def handle_create_silent_chain_sprocket(payload):
         part = safe_get(cast_document_3d(doc3), "TopPart")
         model = cast_model_container(part)
         names = plan["entity_names"]
+        document_id = describe_runtime_document(doc3, app)["runtime_id"]
         stage = "axial_rim_sketch"
-        report_progress(10, stage, name=names["rim_sketch"])
+        report_progress(10, stage, name=names["rim_sketch"], document_id=document_id)
         axis = {"id": "rim_axis", "kind": "segment", "start": [-5., 0.],
-                "end": [float(plan["target"]["axial_max"])+5., 0.], "style": 3}
+                "end": [float(plan["target"]["axial_max"])+5., 0.], "line_style": 3}
         sketch, target, entities, parameterization = _create_sketch_entities(model, part, {
             "name": names["rim_sketch"], "plane": "XOY", "create_new_sketch": True,
             "entities": list(plan["rim_entities"])+[axis],
@@ -27435,7 +27604,9 @@ def handle_create_silent_chain_sprocket(payload):
         rotated = model.Rotateds.Add(28)
         rotated.Name = names["rim"]
         rotated.Profile = sketch
-        rotated.SetProfile(sketch)
+        set_profile = safe_get(rotated, "SetProfile")
+        if callable(set_profile):
+            set_profile(sketch)
         rotated.Axis = part.DefaultObject(71)
         rotated.Direction = 0
         rotated.ToroidShapeType = False
@@ -27444,14 +27615,20 @@ def handle_create_silent_chain_sprocket(payload):
         if not rotated.Update():
             raise RuntimeError("Silent axial rim revolution failed")
         before = _active_api5_primary_body_metrics()
-        runtime = {"rim": {"scenario": "stepped_shaft", "feature": rotated,
-                            "axis": part.DefaultObject(71), "sketch": sketch}}
+        runtime = {"rim": {"scenario": "stepped_shaft", "feature": {
+            "rotated": rotated, "axis": part.DefaultObject(71), "sketch": sketch}}}
         steps.append({"id": "rim", "sketch": _v_belt_object_reference(sketch, "rim_sketch"),
                       "feature": _v_belt_object_reference(rotated, "rim"), "profile_preflight": preflight})
         for i, operation in enumerate(operations):
             stage = operation["id"]
-            report_progress(30+20*i, stage, name=operation["params"]["name"])
+            report_progress(30+20*i, stage, name=operation["params"]["name"], document_id=document_id)
             _execute_workflow_operation(part, model, operation, runtime, steps)
+        visibility = [_set_model_object_hidden(item, True, role="silent_construction")
+                      for item in iter_collection(safe_get(model, "Sketchs")) if safe_get(item, "Valid") is not False]
+        visibility.extend(_set_model_object_hidden(part.DefaultObject(plane), True, role="silent_default_plane")
+                          for plane in (1, 2, 3, 71, 72, 73))
+        if not all(item.get("ok") for item in visibility):
+            raise RuntimeError("Silent-chain construction visibility readback failed")
         stage = "rebuild_and_body_verification"
         if not cast_document_3d(doc3).RebuildDocument():
             raise RuntimeError("Silent-chain final rebuild failed")
@@ -27473,6 +27650,12 @@ def handle_create_silent_chain_sprocket(payload):
         pattern = next(s for s in steps if s.get("id") == "tooth_pattern")
         if int(pattern.get("count") or 0) != int(verify["pattern_count"]):
             raise RuntimeError("Silent-chain physical tooth count readback failed")
+        cut_step = next(s for s in steps if s.get("id") == "radial_cut")
+        removed = float(cut_step["volume_removed"])
+        if abs((before["volume"]-body["volume"])-removed*int(verify["pattern_count"])) > max(1e-6, removed*int(verify["pattern_count"])*1e-4):
+            raise RuntimeError("Silent-chain native pattern omitted or overlapped a material-removing instance: expected=%s actual=%s cm3" %
+                               (removed*int(verify["pattern_count"]), before["volume"]-body["volume"]))
+        readback = _silent_chain_readback(cast_document_3d(doc3), plan)
         stage = "persist_ownership"
         spec = plan["construction_spec"]
         metadata = _apply_part_variables(part, [
@@ -27486,20 +27669,33 @@ def handle_create_silent_chain_sprocket(payload):
         block = _inspect_silent_chain_block(cast_document_3d(doc3))
         if not metadata.get("ok") or not block or block["profile"] != plan["profile_request"]:
             raise RuntimeError("Silent-chain ownership/recipe readback failed")
+        exports = {"functional_rim": _v_belt_object_reference(rotated, "functional_rim"),
+                   "rim_sketch": _v_belt_object_reference(sketch, "rim_sketch"),
+                   "radial_profile_sketch": _v_belt_object_reference(runtime["period_sketch"]["sketch"], "radial_profile_sketch"),
+                   "radial_cut": _v_belt_object_reference(runtime["radial_cut"]["feature"], "radial_cut"),
+                   "tooth_pattern": _v_belt_object_reference(runtime["tooth_pattern"]["pattern"], "tooth_pattern")}
         report_progress(100, "completed", name=plan["name"])
         return {"ok": True, "success": True, "executed": True, "stage": "verified",
                 "saved": False, "closed": False, "document": describe_runtime_document(doc3, app),
-                "block": block, "body": body, "steps": steps,
-                "exports": {s["id"]: s.get("feature") or s.get("sketch") for s in steps if s.get("id")},
+                "block": block, "body": body, "steps": steps, "visibility": visibility, "readback": readback,
+                "exports": exports, "semantic_outputs": exports,
                 "verification": {"ok": True, "final_rebuild_ok": True, "pattern_count": pattern["count"],
-                                 "relative_volume_error": error, "bounds_verified": True},
+                                 "relative_volume_error": error, "bounds_verified": True,
+                                 "all_pattern_instances_remove_expected_material": True},
                 "accuracy": plan["accuracy"]}
     except Exception as exc:
-        raise RuntimeError("create_silent_chain_sprocket failed at %s: %s | partial_document=%s" %
-                           (stage, exc, json.dumps(describe_runtime_document(doc3, app) if doc3 else None)))
+        return {"ok": False, "success": False, "stage": stage, "executed": doc3 is not None,
+                "error": "Silent-chain creation failed at %s: %s" % (stage, exc),
+                "partial_result": {"document": describe_runtime_document(doc3, app) if doc3 else None,
+                                   "saved": False, "rollback_performed": False,
+                                   "completed_operation_ids": [s.get("id") for s in steps if s.get("id")]}}
 
 
-GEAR_CONTOUR_CODES = {"gost_a": 1, "gost_b": 2, "gost_c": 3, "gost_d": 4, "custom": 0}
+GEAR_STANDARD_CODES = {"gost_13755_2015": 1}
+GEAR_STANDARD_NAMES = {value: key for key, value in GEAR_STANDARD_CODES.items()}
+GEAR_MODIFICATION_CODES = {"a": 1, "b": 2, "c": 3, "d": 4, "custom": 0}
+GEAR_MODIFICATION_NAMES = {value: key for key, value in GEAR_MODIFICATION_CODES.items()}
+LEGACY_GEAR_CONTOUR_CODES = {"gost_a": 1, "gost_b": 2, "gost_c": 3, "gost_d": 4, "custom": 0}
 GEAR_RECIPE_CHUNK = 800
 
 
@@ -27556,10 +27752,13 @@ def _inspect_gear_spur_block(doc3):
     if variables.get("GW_GEAR_VERSION") != 1:
         return None
     required = {
-        "GEAR_M", "GEAR_Z", "GEAR_X", "GEAR_ALPHA_DEG", "GEAR_CONTOUR",
+        "GEAR_M", "GEAR_Z", "GEAR_X", "GEAR_ALPHA_DEG",
         "GEAR_DA", "GEAR_DF", "GEAR_B", "GEAR_VERIFIED",
     }
     if not required.issubset(variables):
+        return None
+    has_standard = "GEAR_STANDARD" in variables and "GEAR_MODIFICATION" in variables
+    if not has_standard and "GEAR_CONTOUR" not in variables:
         return None
     model = cast_model_container(part)
     if model is None:
@@ -27590,9 +27789,17 @@ def _inspect_gear_spur_block(doc3):
     if len(blank_sketch) != 1 or len(gap_sketch) != 1 or len(blanks) != 1 or not cuts or len(patterns) != 1:
         return None
     recipe, recipe_error = _read_gear_recipe(items)
-    contour_codes = {value: key for key, value in GEAR_CONTOUR_CODES.items()}
+    if has_standard:
+        standard = GEAR_STANDARD_NAMES.get(int(round(float(variables.get("GEAR_STANDARD") or 0))), "gost_13755_2015")
+        modification = GEAR_MODIFICATION_NAMES.get(int(round(float(variables.get("GEAR_MODIFICATION") or 0))), "custom")
+    else:
+        legacy_names = {value: key for key, value in LEGACY_GEAR_CONTOUR_CODES.items()}
+        legacy = legacy_names.get(int(round(float(variables.get("GEAR_CONTOUR") or 0))), "custom")
+        standard = "gost_13755_2015"
+        modification = legacy.replace("gost_", "") if legacy.startswith("gost_") else "custom"
     profile = {
-        "contour": contour_codes.get(int(round(float(variables.get("GEAR_CONTOUR") or 0))), "custom"),
+        "standard": standard,
+        "modification": modification,
         "module_mm": variables.get("GEAR_M"),
         "tooth_count": int(round(float(variables.get("GEAR_Z") or 0))),
         "pressure_angle_deg": variables.get("GEAR_ALPHA_DEG"),
@@ -27718,7 +27925,8 @@ def handle_create_gear_spur(payload):
             {"name": "GEAR_Z", "value": int(profile_request.get("tooth_count") or 0), "expression": None},
             {"name": "GEAR_X", "value": float(profile_request.get("profile_shift") or 0.0), "expression": None},
             {"name": "GEAR_ALPHA_DEG", "value": float(profile_request.get("pressure_angle_deg") or 20.0), "expression": None},
-            {"name": "GEAR_CONTOUR", "value": GEAR_CONTOUR_CODES.get(str(profile_request.get("contour")), 0), "expression": None},
+            {"name": "GEAR_STANDARD", "value": GEAR_STANDARD_CODES.get(str(profile_request.get("standard")), 1), "expression": None},
+            {"name": "GEAR_MODIFICATION", "value": GEAR_MODIFICATION_CODES.get(str(profile_request.get("modification")), 0), "expression": None},
             {"name": "GEAR_DA", "value": 2.0 * float(geometry.get("outside_radius") or 0.0), "expression": None},
             {"name": "GEAR_DF", "value": 2.0 * float(geometry.get("root_radius") or 0.0), "expression": None},
             {"name": "GEAR_B", "value": float(geometry.get("face_width") or 0.0), "expression": None},
@@ -29280,6 +29488,8 @@ def _dispatch_action(request):
         return handle_create_chain_sprocket(payload)
     if action == "create_silent_chain_sprocket":
         return handle_create_silent_chain_sprocket(payload)
+    if action == "verify_silent_chain_sprocket":
+        return handle_verify_silent_chain_sprocket(payload)
     if action == "create_gear_spur":
         return handle_create_gear_spur(payload)
     if action == "update_managed_pulley":

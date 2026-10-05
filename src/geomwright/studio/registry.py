@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from kompas_mcp.transmission_tools import ChainSprocketPreviewRequest, FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, TimingCurvilinearPulleyPreviewRequest, TimingTrapezoidalPulleyPreviewRequest, VGroovePreviewRequest
 from kompas_mcp.transmissions import build_chain_sprocket_plan, chain_profile_selection, preview_chain_sprocket, preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
-from kompas_mcp.gears import SpurGearRequest, build_spur_gear_preview, contour_options
+from kompas_mcp.gears import SpurGearRequest, build_spur_gear_preview, gear_selection
 from .silent_chain import SilentChainSelectionRequest, silent_chain_selection
 from .silent_chain_preview import build_silent_chain_preview
 from kompas_mcp.transmissions.silent_chain import build_silent_chain_plan
@@ -276,6 +276,14 @@ def _adapt_silent_chain(preview: dict[str, Any], request: dict[str, Any]) -> dic
             "section_style": "broken_out",
         },
     }
+
+
+def _dedupe_points(points: list[list[float]], tolerance: float = 1e-9) -> list[list[float]]:
+    result: list[list[float]] = []
+    for point in points:
+        if not result or math.dist(result[-1], point) > tolerance:
+            result.append([float(point[0]), float(point[1])])
+    return result
 
 
 def _points(value: Any) -> list[list[float]]:
@@ -1359,65 +1367,97 @@ def _adapt_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, 
     }
 
 
-def _full_circle(radius: float, count: int = 240) -> list[list[float]]:
-    return [
-        _polar(radius, 2.0 * math.pi * index / count)
-        for index in range(count + 1)
-    ]
-
-
 def _build_gear_spur_preview(payload: dict[str, Any]) -> dict[str, Any]:
     return build_spur_gear_preview(payload)
+
+
+def _gear_sector_outline(period: list[list[float]], tooth_count: int, visible_pitches: int = 3) -> list[list[float]]:
+    """Repeat one high-resolution tooth period into a cropped sector outline."""
+    if len(period) < 8 or tooth_count < 4:
+        return []
+    core = period[:-1] if math.dist(period[0], period[-1]) <= 1e-9 else list(period)
+    step = 2.0 * math.pi / tooth_count
+    offset = -(visible_pitches - 1) / 2.0
+    points: list[list[float]] = []
+    for index in range(visible_pitches):
+        rotated = _rotate_path(core, (offset + index) * step)
+        if points:
+            rotated = rotated[1:]
+        points.extend(rotated)
+    points.append(_rotate_path([core[0]], (offset + visible_pitches) * step)[0])
+    return _dedupe_points(points)
 
 
 def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     geometry = dict(preview.get("geometry") or {})
     summary = dict(preview.get("summary") or {})
     report = dict(preview.get("report") or {})
-    wheel = _points(geometry.get("full_wheel_outline"))
-    gap_surface = _points(geometry.get("gap_surface_path"))
-    reference_paths = [
-        {"key": "pitch_circle", "points": _full_circle(float(geometry["pitch_radius_mm"]))},
-        {"key": "base_circle", "points": _full_circle(float(geometry["base_radius_mm"]))},
-    ]
-    bounds = _bounds([wheel], [item["points"] for item in reference_paths])
+    period = _points(geometry.get("period_outline"))
+    tooth_count = int(request.get("tooth_count") or summary.get("tooth_count") or 0)
+    sector = _gear_sector_outline(period, tooth_count, 3)
     root_radius = float(geometry["root_radius_mm"])
     outside_radius = float(geometry["outside_radius_mm"])
     pitch_radius = float(geometry["pitch_radius_mm"])
-    dimension_start = max(1.0, root_radius * 0.55)
+    base_radius = float(geometry["base_radius_mm"])
+    step = 2.0 * math.pi / max(1, tooth_count)
+    if sector:
+        left_angle = math.atan2(sector[0][0], sector[0][1])
+        right_angle = math.atan2(sector[-1][0], sector[-1][1])
+        tooth_depth = max(0.1, outside_radius - root_radius)
+        break_radius = max(root_radius * 0.58, root_radius - tooth_depth * 1.6)
+        break_path = _section_break_contour(
+            outside_radius=root_radius,
+            break_radius=break_radius,
+            left_angle=left_angle,
+            right_angle=right_angle,
+            wave_depth=max(tooth_depth * 0.08, outside_radius * 0.0015),
+        )
+        break_path[0] = list(sector[-1])
+        break_path[-1] = list(sector[0])
+        outline = [*sector, *break_path[1:]]
+    else:
+        outline = []
+        left_angle, right_angle, break_radius = -step, step, root_radius * 0.7
+    closed = _dedupe_points(outline) if outline else []
+    reference_paths = [
+        {"key": "pitch_circle", "points": _radial_arc(pitch_radius, left_angle, right_angle, count=96)},
+        {"key": "base_circle", "points": _radial_arc(base_radius, left_angle, right_angle, count=96)},
+    ]
+    bounds = _bounds([closed] if closed else [], [item["points"] for item in reference_paths])
+    dimension_start = max(1.0, break_radius * 1.12)
     dimensions = [
         {
             "key": "outside_diameter",
             "symbol": "dₐ",
             "orientation": "radial",
-            "start": _polar(dimension_start, 0.62),
-            "end": _polar(outside_radius, 0.62),
+            "start": _polar(dimension_start, right_angle * 0.62),
+            "end": _polar(outside_radius, right_angle * 0.62),
             "value": summary.get("outside_diameter_mm"),
             "unit": "mm",
-            "label_normal": 30,
-            "label_tangent": 6,
+            "label_normal": 26,
+            "label_tangent": 5,
         },
         {
             "key": "pitch_diameter",
             "symbol": "d",
             "orientation": "radial",
-            "start": _polar(dimension_start, -0.72),
-            "end": _polar(pitch_radius, -0.72),
+            "start": _polar(dimension_start, left_angle * 0.62),
+            "end": _polar(pitch_radius, left_angle * 0.62),
             "value": summary.get("pitch_diameter_mm"),
             "unit": "mm",
-            "label_normal": -26,
-            "label_tangent": -6,
+            "label_normal": -24,
+            "label_tangent": -5,
         },
         {
             "key": "root_diameter",
             "symbol": "d_f",
             "orientation": "radial",
-            "start": _polar(dimension_start, 1.85),
-            "end": _polar(root_radius, 1.85),
+            "start": _polar(dimension_start, step * -0.35),
+            "end": _polar(root_radius, step * -0.35),
             "value": summary.get("root_diameter_mm"),
             "unit": "mm",
-            "label_normal": 24,
-            "label_tangent": -4,
+            "label_normal": -22,
+            "label_tangent": 6,
         },
     ]
     warning_items = list(preview.get("warning_items") or [])
@@ -1439,14 +1479,11 @@ def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[s
         "ok": bool(preview.get("success")),
         "family": "gear_spur",
         "view_mode": "end",
-        "closed_points": [wheel] if wheel else [],
-        "feature_paths": [gap_surface] if gap_surface else [],
+        "closed_points": [closed] if closed else [],
+        "feature_paths": [],
         "tone_paths": (
-            [
-                {"points": wheel, "tone": "mech", "width": 2.4, "fill": "rgba(97,192,177,0.05)"},
-                {"points": gap_surface, "tone": "exhaust", "width": 2.2},
-            ]
-            if wheel and gap_surface
+            [{"points": closed, "tone": "exhaust", "width": 2.4, "fill": "rgba(227,170,79,.05)"}]
+            if closed
             else []
         ),
         "guide_paths": [],
@@ -1461,6 +1498,11 @@ def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[s
         "dimensions": dimensions,
         "warnings": warnings,
         "warning_items": warning_items,
+        "preview_window": {
+            "tooth_gap_count": 3,
+            "visible_tooth_count": 3,
+            "section_style": "broken_out",
+        },
         "request": dict(request),
     }
 
@@ -1573,7 +1615,7 @@ _MODULES: dict[str, PreviewModule] = {
         adapter=_adapt_silent_chain,
         subgroup="chain_drives",
         family="chain_sprockets",
-        build=False,
+        build=True,
         preview_available=True,
         icon="/static/icons/silent-sprocket.svg",
         selection=silent_chain_selection(),
@@ -1592,6 +1634,7 @@ _MODULES: dict[str, PreviewModule] = {
         build=True,
         preview_available=True,
         icon="/static/icons/gear-spur.svg",
+        selection=gear_selection(),
     ),
     "camshaft_lobe": PreviewModule(
         kind="camshaft_lobe",
