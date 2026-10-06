@@ -1278,6 +1278,14 @@ function createGearFields() {
   // A stored explicit pin is unusual enough that the block opens to show it.
   groups.measurement.root.open = initialPin != null;
 
+  if (properties.ring_chamfer_mm) {
+    append(groups.chamfer, createField(
+      "ring_chamfer_mm", properties.ring_chamfer_mm, required.has("ring_chamfer_mm"),
+    ));
+    append(groups.chamfer, createField(
+      "ring_chamfer_angle_deg", properties.ring_chamfer_angle_deg, required.has("ring_chamfer_angle_deg"),
+    ));
+  }
   if (properties.tip_chamfer_mm) {
     const chamferField = createField("tip_chamfer_mm", properties.tip_chamfer_mm, required.has("tip_chamfer_mm"));
     const chamferAngleField = createField("tip_chamfer_angle_deg", properties.tip_chamfer_angle_deg, required.has("tip_chamfer_angle_deg"));

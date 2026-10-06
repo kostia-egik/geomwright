@@ -95,6 +95,26 @@ class InternalGearRequest(BaseModel):
             "standard pin that fits the internal tooth space."
         ),
     )
+    ring_chamfer_mm: float = Field(
+        default=0.5, ge=0.0, le=50.0,
+        title="Ring end chamfer width, mm",
+        description="Axial width of the chamfer on both outside edges of the ring blank; 0 keeps sharp edges.",
+    )
+    ring_chamfer_angle_deg: float = Field(
+        default=45.0, ge=15.0, le=75.0,
+        title="Ring chamfer angle, deg",
+        description="Angle between the ring chamfer surface and the end face; 45 degrees is the c x 45 form.",
+    )
+    tip_chamfer_mm: float = Field(
+        default=0.0, ge=0.0, le=20.0,
+        title="Tooth tip chamfer width, mm",
+        description="Axial width of the chamfer on the internal tooth tips at both bore edges; 0 keeps sharp tips.",
+    )
+    tip_chamfer_angle_deg: float = Field(
+        default=45.0, ge=15.0, le=75.0,
+        title="Tooth tip chamfer angle, deg",
+        description="Angle between the tooth-tip chamfer surface and the end face; 45 degrees is the c x 45 form.",
+    )
 
     @model_validator(mode="after")
     def _validate_rack_selection(self) -> "InternalGearRequest":

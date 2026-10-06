@@ -28666,20 +28666,41 @@ def handle_create_gear_internal(payload):
         raise ValueError("Managed internal-gear ownership schema is missing")
     workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
     operations = list(workflow_params.get("operations") or [])
-    scenario_list = [str(item.get("scenario") or "") for item in operations]
-    spur_scenarios = [
-        "cylindrical_blank", "rotational_cut", "numeric_profile_sketch",
-        "cut_extrusion", "circular_pattern",
+    operation_ids = [str(item.get("id") or "") for item in operations]
+    ring_chamfer_ids = (
+        ["ring_chamfer_face_a", "ring_chamfer_face_b"]
+        if "ring_chamfer_face_a" in operation_ids
+        else []
+    )
+    tip_chamfer_ids = (
+        ["tip_chamfer_face_a", "tip_chamfer_face_b"]
+        if "tip_chamfer_face_a" in operation_ids
+        else []
+    )
+    expected_ids = [
+        "blank",
+        *ring_chamfer_ids,
+        "bore_cut",
+        *tip_chamfer_ids,
+        "tooth_space_sketch",
+        "tooth_space_cut",
+        "tooth_space_pattern",
     ]
-    helical_scenarios = [
-        "cylindrical_blank", "rotational_cut", "numeric_profile_sketch",
-        "helical_cut_evolution", "circular_pattern",
-    ]
-    if scenario_list not in (spur_scenarios, helical_scenarios):
+    if operation_ids != expected_ids:
         raise ValueError(
-            "Managed internal gear requires ring blank, bore cut, tooth-space "
-            "sketch and cut, and circular pattern"
+            "Managed internal gear requires ring blank, optional ring chamfers, "
+            "bore cut, optional tooth-tip chamfers, tooth-space sketch and cut, "
+            "and circular pattern"
         )
+    operation_scenarios = {
+        str(item.get("id") or ""): str(item.get("scenario") or "")
+        for item in operations
+    }
+    for chamfer_id in ring_chamfer_ids + tip_chamfer_ids:
+        if operation_scenarios.get(chamfer_id) != "rotational_cut":
+            raise ValueError("Internal gear chamfer cuts must use rotational_cut")
+    if operation_scenarios.get("tooth_space_cut") not in ("cut_extrusion", "helical_cut_evolution"):
+        raise ValueError("Internal gear tooth-space cut must be an extrusion or a helical evolution")
     name = str(plan.get("name") or "").strip()
     if not name:
         raise ValueError("Internal gear plan name must not be empty")

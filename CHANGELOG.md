@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Rounded the internal-gear roots with a nominal circular fillet from the
+  selected contour radius, reduced automatically when it does not fit the
+  space, and fixed the preview period sampling that had broken the root
+  junctions between neighbouring teeth.
+- Added ring end chamfers (0.5 x 45° by default) and optional tooth-tip
+  chamfers to the internal gear, with integrated removal volumes and a hatched
+  longitudinal section view.
+- Removed the radial closure line from the internal-gear end view by drawing
+  the ring outside and the toothed inner boundary as separate contours.
 - Added the `gear_internal` Studio module: an internal spur/helical ring gear
   with an explicit ring blank outside diameter, ГОСТ 19274-73 nominal geometry,
   span/constant-chord/over-pin controls, and a live-verified create-only

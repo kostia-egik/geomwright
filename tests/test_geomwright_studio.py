@@ -1878,8 +1878,19 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert internal_plan.status_code == 200
     internal_plan_body = internal_plan.json()
     assert internal_plan_body["stage"] == "internal_gear_cad_plan"
+    assert [op["id"] for op in internal_plan_body["workflow"]["params"]["operations"]] == [
+        "blank",
+        "ring_chamfer_face_a",
+        "ring_chamfer_face_b",
+        "bore_cut",
+        "tooth_space_sketch",
+        "tooth_space_cut",
+        "tooth_space_pattern",
+    ]
     assert [op["scenario"] for op in internal_plan_body["workflow"]["params"]["operations"]] == [
         "cylindrical_blank",
+        "rotational_cut",
+        "rotational_cut",
         "rotational_cut",
         "numeric_profile_sketch",
         "cut_extrusion",

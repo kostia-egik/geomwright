@@ -76,21 +76,29 @@ function drawBackground(view) {
 function drawPath(
   points,
   view,
-  { fill = null, stroke = "#e3aa4f", dashed = false, dash = null, lineWidth = 1.8 } = {},
+  { fill = null, stroke = "#e3aa4f", dashed = false, dash = null, lineWidth = 1.8, holes = null, fillRule = "evenodd" } = {},
 ) {
   if (!points?.length) return;
   context.save();
   context.beginPath();
-  const [firstX, firstY] = view.point(points[0]);
-  context.moveTo(firstX, firstY);
-  for (const point of points.slice(1)) {
-    const [x, y] = view.point(point);
-    context.lineTo(x, y);
+  const tracePath = (path) => {
+    const [firstX, firstY] = view.point(path[0]);
+    context.moveTo(firstX, firstY);
+    for (const point of path.slice(1)) {
+      const [x, y] = view.point(point);
+      context.lineTo(x, y);
+    }
+    context.closePath();
+  };
+  tracePath(points);
+  for (const hole of holes || []) {
+    if (hole?.length) tracePath(hole);
   }
   if (fill) {
-    context.closePath();
     context.fillStyle = fill;
-    context.fill();
+    context.fill(holes?.length ? fillRule : "nonzero");
+    context.beginPath();
+    tracePath(points);
   }
   context.setLineDash(dash || (dashed ? [7, 6] : []));
   if (stroke !== false) context.strokeStyle = stroke;

@@ -2133,10 +2133,13 @@ Related:
 
 ---
 
-### OP-006: Cut A Central Bore With A Revolved Rectangle, Not A Lone Circle Sketch
+### OP-006: Use The Existing Revolved Cut For A Central Bore, Not A Lone Circle Sketch
 
 Evidence: live-verified on the internal gear `gear_internal` `m2 z40 D100 × 20`
-(spur and `β20` left); the earlier lone-circle plan failed before any cut.
+(spur and `β20` left). The `rotational_cut` scenario already existed and is
+already used for relief and chamfer rings; the internal-gear slice reuses it
+for the central bore. The earlier plan that routed a lone circle through
+`numeric_profile_sketch` failed before any cut.
 
 Symptom:
 - A `numeric_profile_sketch` containing one circle (`kind: "circle"`) is rejected
@@ -2151,8 +2154,7 @@ Cause:
   curves.
 
 Rule:
-- For a through bore, do not route a lone circle through
-  `numeric_profile_sketch`. Cut the bore with one `rotational_cut` whose profile
+- Reuse the existing `rotational_cut` scenario for a through bore. Its profile
   is a rectangle spanning the full blank width on one side of the gear axis,
   for example
   `[[-b-1, 0], [1, 0], [1, r_bore], [-b-1, r_bore]]` on plane `XOY`, revolved
@@ -2162,11 +2164,13 @@ Rule:
   expensive pattern stays the last feature.
 
 Verification:
-- Internal gear spur `m2 z40 D100 × 20`: one solid, relative volume error
-  0.013 %, bounds `[-20, -50, -50, 0, 50, 50]`, 40 pattern instances,
+- Internal gear spur `m2 z40 D100 × 20`, rounded roots, ring chamfer
+  0.5 × 45°: one solid, relative volume error 0.003 %, bounds
+  `[-20, -50, -50, 0, 50, 50]`, 40 pattern instances, save/reopen `verified`.
+- Internal gear helical `m2 z40 β20 left`: relative volume error 0.004 %,
   save/reopen `verified`.
-- Internal gear helical `m2 z40 β20 left`: relative volume error 0.006 %,
-  save/reopen `verified`.
+- The same spur gear with ring and tooth-tip chamfers: relative volume error
+  0.0005 %, save/reopen `verified`.
 
 Related:
 - `OP-002`

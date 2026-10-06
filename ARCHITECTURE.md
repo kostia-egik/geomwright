@@ -463,13 +463,16 @@ and reuses the same basic-rack catalog, but follows ГОСТ 19274-73 for the wh
 `d_a2 = d2 - 2 (h_a* - x2 - 0.2) m`, `d_f2 = d2 + 2 (h_a* + c* + x2) m`, and
 the controls are measured across the internal tooth spaces. Layer 2
 `gears/internal.py` owns the nominal involute space, the radial tip extension
-when the tip circle lies inside the base circle, the ring-wall and tip checks,
-and the span/constant-chord/over-pin measurement set. Layer 3 `gears/cad.py`
-builds a create-only numeric plan: a ring blank with an explicit outside
-diameter, a full-rotation rectangular bore at the tip diameter, one internal
-tooth-space cut closed by exact root and bore arcs, and a circular pattern; the
-space cut is a through-all extrusion for a spur gear and a cut evolution along
-the cylindrical spiral for `β > 0`. The bridge persists `GW_GEAR_VERSION=2`,
+when the tip circle lies inside the base circle, the nominal circular root
+fillet from the selected contour radius (reduced when it does not fit the
+space), the ring-wall and tip checks, and the span/constant-chord/over-pin
+measurement set. Layer 3 `gears/cad.py` builds a create-only numeric plan: a
+ring blank with an explicit outside diameter, two optional full-rotation
+conical cuts on the ring outside edges, a full-rotation rectangular bore at the
+tip diameter, two optional tooth-tip chamfer cuts at the bore edges, one
+internal tooth-space cut closed by exact root-fillet and bore arcs, and a
+circular pattern; the space cut is a through-all extrusion for a spur gear and
+a cut evolution along the cylindrical spiral for `β > 0`. The bridge persists `GW_GEAR_VERSION=2`,
 `GW_FAMILY_CODE=9`, `GEAR_RING_DA`, the `GEAR_*` fingerprint, and a checksummed
 internal recipe; reopened blocks are read-only and recreatable. Live acceptance
 covers an internal spur `m2 z40 D100 × 20` and an internal helical `m2 z40`,

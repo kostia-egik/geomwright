@@ -206,11 +206,11 @@ function drawGearSideView(rect) {
 
   const internalTipDiameter = Number(data.tip_diameter_mm) || 0;
   const internalRootDiameter = Number(data.root_diameter_mm) || 0;
-  const internalBore = Boolean(data.internal) && internalTipDiameter > 0;
-  const boreTop = internalBore ? centerY - (internalTipDiameter * scale) / 2 : 0;
-  const boreBottom = internalBore ? centerY + (internalTipDiameter * scale) / 2 : 0;
-  const boreEraseTop = boreTop + 1.5;
-  const boreEraseHeight = Math.max(0, boreBottom - boreTop - 3);
+  const internalSection = Boolean(data.internal) && internalTipDiameter > 0;
+  const boreTopY = internalSection ? centerY - (internalTipDiameter * scale) / 2 : 0;
+  const boreBottomY = internalSection ? centerY + (internalTipDiameter * scale) / 2 : 0;
+  const rootTopY = internalSection ? centerY - (internalRootDiameter * scale) / 2 : 0;
+  const rootBottomY = internalSection ? centerY + (internalRootDiameter * scale) / 2 : 0;
 
   // Every sampled point of the real transverse profile sweeps a helix across
   // the face width; its orthographic side-view trace is v = r cos(theta + twist*x).
@@ -239,38 +239,62 @@ function drawGearSideView(rect) {
     if (drawing) ctx.stroke();
   };
   ctx.save();
-  if (internalBore) {
-    // Teeth traces belong to the rim bands only; the through-bore stays empty.
-    const traceClip = new Path2D();
-    traceClip.addPath(silhouette);
-    traceClip.rect(left + 2, boreEraseTop, Math.max(0, width - 4), boreEraseHeight);
-    ctx.clip(traceClip, "evenodd");
-  } else {
-    ctx.clip(silhouette);
-  }
+  ctx.clip(silhouette);
   for (let index = 0; index + 1 < tipEdges.length; index += 2) {
     drawTrace(tipEdges[index], "rgba(227,170,79,.95)", 1.4);
     drawTrace(tipEdges[index + 1], "rgba(227,170,79,.95)", 1.4);
   }
   ctx.restore();
 
-  if (internalBore) {
-    // The through-bore of the ring: erase the window so the bore reads as a
-    // real opening, keep the outer silhouette edges, then mark the root band.
+  if (internalSection) {
+    // Long-section view: the top and bottom rim bands are hatched material,
+    // the tooth traces above stay as the cut tooth profiles.
     ctx.save();
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.fillRect(left + 2, boreEraseTop, Math.max(0, width - 4), boreEraseHeight);
+    ctx.beginPath();
+    ctx.rect(left, top, width, Math.max(0, rootTopY - top));
+    ctx.rect(left, rootBottomY, width, Math.max(0, bottom - rootBottomY));
+    ctx.clip();
+    ctx.strokeStyle = "rgba(142, 174, 196, 0.42)";
+    ctx.lineWidth = 1;
+    for (let offset = -height; offset < width + height; offset += 9) {
+      ctx.beginPath();
+      ctx.moveTo(left + offset, bottom);
+      ctx.lineTo(left + offset + height, top);
+      ctx.stroke();
+    }
     ctx.restore();
     ctx.setLineDash([]);
-    ctx.strokeStyle = "rgba(142, 174, 196, 0.55)";
+    ctx.strokeStyle = "rgba(142, 174, 196, 0.65)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(left, boreTop); ctx.lineTo(right, boreTop);
-    ctx.moveTo(left, boreBottom); ctx.lineTo(right, boreBottom);
-    const rootTop = centerY - (internalRootDiameter * scale) / 2;
-    const rootBottom = centerY + (internalRootDiameter * scale) / 2;
-    ctx.moveTo(left, rootTop); ctx.lineTo(right, rootTop);
-    ctx.moveTo(left, rootBottom); ctx.lineTo(right, rootBottom);
+    ctx.moveTo(left, rootTopY); ctx.lineTo(right, rootTopY);
+    ctx.moveTo(left, rootBottomY); ctx.lineTo(right, rootBottomY);
+    ctx.moveTo(left, boreTopY); ctx.lineTo(right, boreTopY);
+    ctx.moveTo(left, boreBottomY); ctx.lineTo(right, boreBottomY);
+    ctx.stroke();
+    const ringChamfer = Math.max(0, Number(data.ring_chamfer_mm) || 0);
+    const ringDepth = Math.max(0, Number(data.ring_chamfer_depth_mm) || 0);
+    const tipChamfer = Math.max(0, Number(data.tip_chamfer_mm) || 0);
+    const tipDepth = Math.max(0, Number(data.tip_chamfer_depth_mm) || 0);
+    ctx.strokeStyle = "#e3aa4f";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    if (ringChamfer > 0 && ringDepth > 0) {
+      const cx = Math.min(ringChamfer * scale, width / 2);
+      const cy = Math.min(ringDepth * scale, height / 2);
+      ctx.moveTo(left, top + cy); ctx.lineTo(left + cx, top);
+      ctx.moveTo(right - cx, top); ctx.lineTo(right, top + cy);
+      ctx.moveTo(left, bottom - cy); ctx.lineTo(left + cx, bottom);
+      ctx.moveTo(right - cx, bottom); ctx.lineTo(right, bottom - cy);
+    }
+    if (tipChamfer > 0 && tipDepth > 0) {
+      const cx = Math.min(tipChamfer * scale, width / 2);
+      const cy = Math.min(tipDepth * scale, Math.max(0, rootTopY - boreTopY));
+      ctx.moveTo(left, boreTopY); ctx.lineTo(left + cx, boreTopY - cy);
+      ctx.moveTo(right - cx, boreTopY - cy); ctx.lineTo(right, boreTopY);
+      ctx.moveTo(left, boreBottomY); ctx.lineTo(left + cx, boreBottomY + cy);
+      ctx.moveTo(right - cx, boreBottomY + cy); ctx.lineTo(right, boreBottomY);
+    }
     ctx.stroke();
   }
 

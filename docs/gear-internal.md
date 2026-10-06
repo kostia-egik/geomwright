@@ -32,11 +32,14 @@ chamfers yet.
 | `helix_angle_deg` | Helix angle `β` on the reference cylinder | 0–45°; the end view is the transverse section |
 | `hand` | Tooth direction | Right or left; ignored for `β = 0` |
 | `pin_diameter_mm` | Over-pin measurement pin | Measurement only; nominal 1.5 m for the wheel |
+| `ring_chamfer_mm` / `ring_chamfer_angle_deg` | End chamfer on both ring outside edges | Default 0.5 mm × 45°; `0` keeps sharp ring edges |
+| `tip_chamfer_mm` / `tip_chamfer_angle_deg` | End chamfer on the internal tooth tips at both bore edges | Default `0` keeps sharp tooth tips |
 | Derived coefficients | `α`, `h_a*`, `c*`, `ρ_f*` | Editable only for the user-defined modification |
 
 The ring wall above the roots is checked: a wall thinner than
 `max(1.5 mm, m)` is reported, and an outside diameter at or below the root
-diameter is rejected before any CAD work.
+diameter is rejected before any CAD work. Chamfer depths are checked against
+the face width and against the rim/tooth height before any CAD work.
 
 ## Geometry
 
@@ -49,16 +52,24 @@ The nominal diameters follow ГОСТ 19274-73, table 2, item 13:
 The `0.2 m` term is the standard's additional tip offset for the wheel. The
 tooth thickness at the reference circle is `s2 = (π/2 - 2 x2 tan α) m`, and the
 mating space width carries the opposite sign. One space is bounded by two
-involute flanks that narrow toward the root circle and is closed by the root
-arc; toward the bore the space opens into the central hole, which is cut at the
-tip diameter.
+involute flanks that narrow toward the root circle and is closed by a circular
+root fillet; toward the bore the space opens into the central hole, which is
+cut at the tip diameter.
 
-The representation is `nominal`. When the tip circle lies inside the base
-circle (small tooth counts), the involute is extended radially to the tip and
-the report carries `gear_internal_tip_below_base`. A pinion-cutter (долбяк)
-envelope, its protuberance, and the real generated root remain a separate
-`generated_exact` block; the module does not claim them. Root-fillet metadata
-from the contour is reported, not generated.
+The root fillet is a nominal circular fillet of the selected contour radius
+`ρ_f = ρ_f* m`: it is tangent to the involute flank and internally tangent to
+the root circle, and it is reduced (with `circular_root_fillet_reduced`) when
+the requested radius does not fit the space. This rounds the root the way the
+basic contour describes it; it is not the exact pinion-cutter (долбяк)
+envelope, and the radial tip extension below the base circle carries
+`gear_internal_tip_below_base`. Both remain separate from the future
+`generated_exact` block.
+
+The end chamfers are modelled as full-rotation conical cuts: two cuts on the
+ring blank outside edges (`ring_chamfer_*`) and, when requested, two cuts on the
+internal tooth tips at the bore edges (`tip_chamfer_*`). The removed volume is
+integrated over the actual rim/tooth fraction, so the expected CAD volume stays
+accurate for the patterned body.
 
 ## Measurements
 
@@ -82,29 +93,38 @@ excludes it, and the report says so instead of showing a number.
 `build_internal_gear_plan` produces a create-only numeric plan:
 
 1. a ring blank cylinder with the explicit outside diameter and face width;
-2. a central bore at the internal tip diameter, cut with a full-rotation
-   rectangular profile around the gear axis;
-3. one internal tooth-space sketch: an involute flank spline per side, bore
-   closure segments and arc, and the root arc;
-4. a through-all cut (or a helical cut evolution for `β > 0`);
-5. a circular pattern of the space cut, `z` instances over 360°.
+2. two optional full-rotation conical cuts on the ring outside edges
+   (`ring_chamfer_*`);
+3. a central bore at the internal tip diameter, cut with a full-rotation
+   rectangular profile around the gear axis (the existing `rotational_cut`
+   scenario, not a lone-circle sketch);
+4. two optional full-rotation conical cuts on the internal tooth tips at the
+   bore edges (`tip_chamfer_*`);
+5. one internal tooth-space sketch: an involute flank spline per side, bore
+   closure segments and arc, and exact root-fillet arcs;
+6. a through-all cut (or a helical cut evolution for `β > 0`);
+7. a circular pattern of the space cut, `z` instances over 360°.
 
 The expected volume is the analytic ring section: outer disc minus the tip
-bore minus `z` tooth spaces, multiplied by the face width. The bridge verifies
-one positive-volume solid, the expected bounds `[-b, -D/2, -D/2, 0, D/2, D/2]`,
-the pattern count, and the relative volume error against the plan before the
-part variables and the checksummed recipe are written.
+bore minus `z` tooth spaces, minus the integrated ring and tooth-tip chamfer
+volumes, multiplied by the face width. The bridge verifies one positive-volume
+solid, the expected bounds `[-b, -D/2, -D/2, 0, D/2, D/2]`, the pattern count,
+and the relative volume error against the plan before the part variables and
+the checksummed recipe are written.
 
 ## Verification
 
 The live acceptance cases are stored under `experiments/spikes/`
 (local, ignored):
 
-- internal spur gear `m2 z40`, ring `D100 × 20`: one solid, relative volume
-  error 0.013 %, save/reopen returns the verified recreatable block;
-- internal helical gear `m2 z40`, `β = 20°` left, ring `D100 × 20`: one solid,
-  relative volume error 0.006 %, save/reopen returns the verified recreatable
-  block.
+- internal spur gear `m2 z40`, ring `D100 × 20`, rounded roots, ring chamfer
+  0.5 × 45°: one solid, relative volume error 0.003 %, save/reopen returns the
+  verified recreatable block;
+- internal helical gear `m2 z40`, `β = 20°` left, ring `D100 × 20`, rounded
+  roots, ring chamfer 0.5 × 45°: one solid, relative volume error 0.004 %,
+  save/reopen returns the verified recreatable block;
+- the same spur gear with both ring and tooth-tip chamfers `0.5 × 45°`: one
+  solid, relative volume error 0.0005 %, save/reopen verified.
 
 These checks cover the solid, its bounds, the physical tooth count and the
 managed-block recipe. They do not certify the pinion-cutter root shape,

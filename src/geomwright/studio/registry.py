@@ -1653,6 +1653,7 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
     root_radius = float(geometry.get("root_radius_mm") or 0.0)
     ring_outline = _points(geometry.get("full_ring_outline"))
     inner_path = _points(geometry.get("inner_profile_path"))
+    outer_path = _radial_arc(ring_radius, 0.0, 2.0 * math.pi, count=240)
     reference_paths = [
         {"key": "ring_circle", "points": _radial_arc(ring_radius, 0.0, 2.0 * math.pi, count=180)},
         {"key": "pitch_circle", "points": _radial_arc(pitch_radius, 0.0, 2.0 * math.pi, count=180)},
@@ -1660,14 +1661,19 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
         {"key": "tip_circle", "points": _radial_arc(tip_radius, 0.0, 2.0 * math.pi, count=180)},
         {"key": "root_circle", "points": _radial_arc(root_radius, 0.0, 2.0 * math.pi, count=180)},
     ]
+    # The ring material is the area between the outside circle and the toothed
+    # inner boundary. The two contours stay separate so no radial closure line
+    # crosses the view.
     tone_paths: list[dict[str, Any]] = []
-    if ring_outline:
+    if outer_path:
         tone_paths.append(
             {
-                "points": ring_outline,
+                "points": outer_path,
+                "holes": [inner_path] if inner_path else [],
                 "tone": "exhaust",
-                "width": 2.4,
-                "fill": "rgba(227,170,79,.06)",
+                "width": 2.2,
+                "fill": "rgba(227,170,79,.09)",
+                "stroke": "#e3aa4f",
             }
         )
     if inner_path:
@@ -1680,7 +1686,7 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
             }
         )
     bounds = _bounds(
-        [ring_outline] if ring_outline else [],
+        [path for path in (ring_outline, inner_path) if path],
         [item["points"] for item in reference_paths],
     )
     dimension_start = max(1.0, 0.28 * ring_radius)
@@ -1793,6 +1799,13 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
             "tip_diameter_mm": summary.get("tip_diameter_mm"),
             "tooth_count": tooth_count,
             "tip_thickness_mm": summary.get("tip_thickness_mm"),
+            "root_fillet_radius_mm": summary.get("root_fillet_radius_effective_mm"),
+            "ring_chamfer_mm": summary.get("ring_chamfer_mm", 0.0),
+            "ring_chamfer_angle_deg": summary.get("ring_chamfer_angle_deg", 45.0),
+            "ring_chamfer_depth_mm": summary.get("ring_chamfer_depth_mm", 0.0),
+            "tip_chamfer_mm": summary.get("tip_chamfer_mm", 0.0),
+            "tip_chamfer_angle_deg": summary.get("tip_chamfer_angle_deg", 45.0),
+            "tip_chamfer_depth_mm": summary.get("tip_chamfer_depth_mm", 0.0),
             "helix_angle_deg": summary.get("helix_angle_deg", 0.0),
             "hand": summary.get("hand", "right"),
             "lead_mm": summary.get("lead_mm", 0.0),

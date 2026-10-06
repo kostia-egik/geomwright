@@ -15,7 +15,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .internal import build_internal_gear_geometry, build_internal_gear_preview
+from .internal import (
+    build_internal_gear_geometry,
+    build_internal_gear_preview,
+    internal_ring_chamfer_volume,
+    internal_tip_chamfer_volume,
+)
 from .internal_spec import InternalGearRequest
 from .involute import build_spur_gear_geometry
 from .nurbs import bezier_chain, spline_max_deviation
@@ -626,26 +631,92 @@ def build_internal_gear_plan(
             }
         )
     entities.append(_nurbs_entity(left_spline, "internal_space_involute_left"))
-    root_point_right = list(geometry.root_point_right)
-    root_point_left = list(geometry.root_point_left)
-    root_mid = _polar(geometry.root_radius, 0.0)
-    entities.append(
-        {
-            "id": "internal_space_root_arc",
-            "kind": "arc",
-            "center": [0.0, 0.0],
-            "radius": geometry.root_radius,
-            "start": root_point_left,
-            "end": root_point_right,
-            "direction": _clockwise(root_point_left, root_mid, root_point_right),
-            "style": 1,
-        }
-    )
+    fillet_radius = geometry.root_fillet_radius_effective_mm
+    if geometry.root_fillet_mode.startswith("circular") and fillet_radius > 0.0:
+        left_arc = list(geometry.left_fillet_arc)
+        if len(left_arc) >= 2:
+            left_mid = left_arc[len(left_arc) // 2]
+            entities.append(
+                {
+                    "id": "internal_space_root_fillet_left",
+                    "kind": "arc",
+                    "center": list(geometry.left_fillet_center),
+                    "radius": fillet_radius,
+                    "start": list(geometry.left_fillet_start),
+                    "end": list(geometry.left_fillet_end),
+                    "direction": _clockwise(
+                        list(geometry.left_fillet_start), left_mid, list(geometry.left_fillet_end)
+                    ),
+                    "style": 1,
+                }
+            )
+        root_middle = list(geometry.root_middle_arc)
+        if len(root_middle) >= 2 and math.dist(root_middle[0], root_middle[-1]) > 1e-6:
+            root_mid = root_middle[len(root_middle) // 2]
+            entities.append(
+                {
+                    "id": "internal_space_root_arc",
+                    "kind": "arc",
+                    "center": [0.0, 0.0],
+                    "radius": geometry.root_radius,
+                    "start": list(geometry.left_fillet_end),
+                    "end": list(geometry.right_fillet_end),
+                    "direction": _clockwise(
+                        list(geometry.left_fillet_end), root_mid, list(geometry.right_fillet_end)
+                    ),
+                    "style": 1,
+                }
+            )
+        right_arc = list(geometry.right_fillet_arc)
+        if len(right_arc) >= 2:
+            right_mid = right_arc[len(right_arc) // 2]
+            entities.append(
+                {
+                    "id": "internal_space_root_fillet_right",
+                    "kind": "arc",
+                    "center": list(geometry.right_fillet_center),
+                    "radius": fillet_radius,
+                    "start": list(geometry.right_fillet_end),
+                    "end": list(geometry.right_fillet_start),
+                    "direction": _clockwise(
+                        list(geometry.right_fillet_end), right_mid, list(geometry.right_fillet_start)
+                    ),
+                    "style": 1,
+                }
+            )
+    else:
+        root_point_right = list(geometry.root_point_right)
+        root_point_left = list(geometry.root_point_left)
+        root_mid = _polar(geometry.root_radius, 0.0)
+        entities.append(
+            {
+                "id": "internal_space_root_arc",
+                "kind": "arc",
+                "center": [0.0, 0.0],
+                "radius": geometry.root_radius,
+                "start": root_point_left,
+                "end": root_point_right,
+                "direction": _clockwise(root_point_left, root_mid, root_point_right),
+                "style": 1,
+            }
+        )
     _validate_entity_contour(entities, geometry.module_mm)
 
     pattern_count = int(geometry.tooth_count)
+    ring_chamfer_volume = internal_ring_chamfer_volume(
+        geometry,
+        width_mm=geometry.ring_chamfer_mm,
+        angle_deg=geometry.ring_chamfer_angle_deg,
+    )
+    tip_chamfer_volume = internal_tip_chamfer_volume(
+        geometry,
+        width_mm=geometry.tip_chamfer_mm,
+        angle_deg=geometry.tip_chamfer_angle_deg,
+    )
     expected_section = geometry.section_area_mm2
-    expected_volume = expected_section * geometry.face_width_mm
+    expected_volume = (
+        expected_section * geometry.face_width_mm - ring_chamfer_volume - tip_chamfer_volume
+    )
     if expected_volume <= 0.0 or not math.isfinite(expected_volume):
         raise ValueError("Internal gear expected volume is not positive")
 
@@ -684,7 +755,7 @@ def build_internal_gear_plan(
                 "require_fully_defined": False,
             },
         }
-    operations = [
+    operations: list[dict] = [
         {
             "id": "blank",
             "scenario": "cylindrical_blank",
@@ -699,6 +770,47 @@ def build_internal_gear_plan(
                 "require_fully_defined": False,
             },
         },
+    ]
+    if geometry.ring_chamfer_mm > 0.0:
+        ring_depth = geometry.ring_chamfer_depth_mm
+        ring_width = geometry.ring_chamfer_mm
+        operations.extend(
+            [
+                {
+                    "id": "ring_chamfer_face_a",
+                    "scenario": "rotational_cut",
+                    "params": {
+                        "name": f"{requested_name} ring chamfer A",
+                        "plane": "XOY",
+                        "axis": "blank.axis",
+                        "profile_points": [
+                            [-width, ring_radius - ring_depth],
+                            [-width + ring_width, ring_radius],
+                            [-width, ring_radius],
+                        ],
+                        "angle_degrees": 360.0,
+                        "require_fully_defined": False,
+                    },
+                },
+                {
+                    "id": "ring_chamfer_face_b",
+                    "scenario": "rotational_cut",
+                    "params": {
+                        "name": f"{requested_name} ring chamfer B",
+                        "plane": "XOY",
+                        "axis": "blank.axis",
+                        "profile_points": [
+                            [0.0, ring_radius - ring_depth],
+                            [-ring_width, ring_radius],
+                            [0.0, ring_radius],
+                        ],
+                        "angle_degrees": 360.0,
+                        "require_fully_defined": False,
+                    },
+                },
+            ]
+        )
+    operations.append(
         {
             "id": "bore_cut",
             "scenario": "rotational_cut",
@@ -715,39 +827,97 @@ def build_internal_gear_plan(
                 "angle_degrees": 360.0,
                 "require_fully_defined": False,
             },
-        },
-        {
-            "id": "tooth_space_sketch",
-            "scenario": "numeric_profile_sketch",
-            "params": {
-                "name": f"{requested_name} one internal tooth space",
-                "plane": "YOZ",
-                "entities": entities,
-                "parameterize": False,
-                "require_fully_defined": False,
-                "profile_status": "nominal_internal_space_numeric_profile",
+        }
+    )
+    if geometry.tip_chamfer_mm > 0.0:
+        tip_depth = geometry.tip_chamfer_depth_mm
+        tip_width = geometry.tip_chamfer_mm
+        tip_radius = geometry.outside_radius
+        operations.extend(
+            [
+                {
+                    "id": "tip_chamfer_face_a",
+                    "scenario": "rotational_cut",
+                    "params": {
+                        "name": f"{requested_name} tip chamfer A",
+                        "plane": "XOY",
+                        "axis": "blank.axis",
+                        "profile_points": [
+                            [-width, tip_radius],
+                            [-width, tip_radius + tip_depth],
+                            [-width + tip_width, tip_radius + tip_depth],
+                        ],
+                        "angle_degrees": 360.0,
+                        "require_fully_defined": False,
+                    },
+                },
+                {
+                    "id": "tip_chamfer_face_b",
+                    "scenario": "rotational_cut",
+                    "params": {
+                        "name": f"{requested_name} tip chamfer B",
+                        "plane": "XOY",
+                        "axis": "blank.axis",
+                        "profile_points": [
+                            [0.0, tip_radius],
+                            [0.0, tip_radius + tip_depth],
+                            [-tip_width, tip_radius + tip_depth],
+                        ],
+                        "angle_degrees": 360.0,
+                        "require_fully_defined": False,
+                    },
+                },
+            ]
+        )
+    operations.extend(
+        [
+            {
+                "id": "tooth_space_sketch",
+                "scenario": "numeric_profile_sketch",
+                "params": {
+                    "name": f"{requested_name} one internal tooth space",
+                    "plane": "YOZ",
+                    "entities": entities,
+                    "parameterize": False,
+                    "require_fully_defined": False,
+                    "profile_status": "nominal_internal_space_numeric_profile",
+                },
             },
-        },
-        tooth_space_cut,
-        {
-            "id": "tooth_space_pattern",
-            "scenario": "circular_pattern",
-            "params": {
-                "name": f"{requested_name} internal tooth space pattern",
-                "source": "tooth_space_cut.feature",
-                "axis": "blank.axis",
-                "count": pattern_count,
-                "span_angle": 360.0,
-                "parameterize": False,
+            tooth_space_cut,
+            {
+                "id": "tooth_space_pattern",
+                "scenario": "circular_pattern",
+                "params": {
+                    "name": f"{requested_name} internal tooth space pattern",
+                    "source": "tooth_space_cut.feature",
+                    "axis": "blank.axis",
+                    "count": pattern_count,
+                    "span_angle": 360.0,
+                    "parameterize": False,
+                },
             },
-        },
-    ]
+        ]
+    )
     exports = [
         {"name": "ring_body", "ref": "blank.body"},
         {"name": "bore_cut", "ref": "bore_cut.feature"},
         {"name": "tooth_space_cut", "ref": "tooth_space_cut.feature"},
         {"name": "tooth_space_pattern", "ref": "tooth_space_pattern.feature"},
     ]
+    if geometry.ring_chamfer_mm > 0.0:
+        exports.extend(
+            [
+                {"name": "ring_chamfer_a", "ref": "ring_chamfer_face_a.feature"},
+                {"name": "ring_chamfer_b", "ref": "ring_chamfer_face_b.feature"},
+            ]
+        )
+    if geometry.tip_chamfer_mm > 0.0:
+        exports.extend(
+            [
+                {"name": "tip_chamfer_a", "ref": "tip_chamfer_face_a.feature"},
+                {"name": "tip_chamfer_b", "ref": "tip_chamfer_face_b.feature"},
+            ]
+        )
     return {
         "ok": True,
         "stage": INTERNAL_PLAN_STAGE,
@@ -787,6 +957,16 @@ def build_internal_gear_plan(
             "spline_control_points": len(right_spline["points"]) + len(left_spline["points"]),
             "spline_deviation_mm": deviation,
             "tip_below_base": geometry.tip_below_base,
+            "root_fillet_mode": geometry.root_fillet_mode,
+            "root_fillet_radius_effective_mm": geometry.root_fillet_radius_effective_mm,
+            "ring_chamfer_mm": geometry.ring_chamfer_mm,
+            "ring_chamfer_angle_deg": geometry.ring_chamfer_angle_deg,
+            "ring_chamfer_depth_mm": geometry.ring_chamfer_depth_mm,
+            "tip_chamfer_mm": geometry.tip_chamfer_mm,
+            "tip_chamfer_angle_deg": geometry.tip_chamfer_angle_deg,
+            "tip_chamfer_depth_mm": geometry.tip_chamfer_depth_mm,
+            "ring_chamfer_volume_mm3": ring_chamfer_volume,
+            "tip_chamfer_volume_mm3": tip_chamfer_volume,
         },
         "ownership": {
             "schema": INTERNAL_OWNERSHIP_SCHEMA,
@@ -808,11 +988,28 @@ def build_internal_gear_plan(
         },
         "accuracy": {
             "profile": (
-                "analytic_transverse_involute_with_nominal_tip_extension"
+                "analytic_transverse_involute_with_nominal_tip_extension_and_circular_root_fillet"
                 if geometry.tip_below_base
-                else "analytic_transverse_involute_with_root_arc"
+                else "analytic_transverse_involute_with_circular_root_fillet"
             ),
-            "profile_encoding": "involute_cubic_bezier_nurbs_per_flank_with_exact_root_and_bore_arcs",
+            "profile_encoding": "involute_cubic_bezier_nurbs_per_flank_with_root_fillet_and_bore_arcs",
+            "root_fillet": (
+                "circular_radius_%s_mm" % round(geometry.root_fillet_radius_effective_mm, 6)
+                if geometry.root_fillet_mode.startswith("circular")
+                else "sharp_nominal_root"
+            ),
+            "ring_chamfer": (
+                "two_cut_rotations_width_%s_angle_%s"
+                % (round(geometry.ring_chamfer_mm, 6), round(geometry.ring_chamfer_angle_deg, 3))
+                if geometry.ring_chamfer_mm > 0.0
+                else "none"
+            ),
+            "tip_chamfer": (
+                "two_cut_rotations_width_%s_angle_%s"
+                % (round(geometry.tip_chamfer_mm, 6), round(geometry.tip_chamfer_angle_deg, 3))
+                if geometry.tip_chamfer_mm > 0.0
+                else "none"
+            ),
             "sweep": (
                 "cut_evolution_along_cylindric_spiral_lead_%s_mm" % round(geometry.lead_mm, 6)
                 if helical
