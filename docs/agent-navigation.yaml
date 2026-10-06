@@ -27,7 +27,7 @@ transmissions:
   chain:
     owner: src/kompas_mcp/transmissions/chain.py
     symbols: [preview_chain_sprocket, build_chain_sprocket_plan]
-    bridge_symbols: [handle_create_chain_sprocket, _build_chain_row_layout]
+    bridge_symbols: [handle_create_chain_sprocket, _build_chain_row_layout, _chain_recipe_variables, _read_chain_recipe]
     studio_symbol: _adapt_chain
     focused_test: tests/test_geomwright_studio.py -k chain
   v_belt:
@@ -45,9 +45,19 @@ transmissions:
   spur_gear:
     owner: src/kompas_mcp/gears/
     symbols: [build_spur_gear_preview, build_gear_spur_plan, SpurGearRequest]
-    bridge_symbols: [handle_create_gear_spur, _inspect_gear_spur_block]
+    bridge_symbols: [handle_create_gear_spur, handle_inspect_gear_spur, _inspect_gear_spur_block]
     studio_symbol: _adapt_gear_spur
+    mcp_symbols: [register_gear_tools]
     focused_test: tests/test_geomwright_studio.py -k gear
+    mcp_test: tests/test_tool_catalog.py -k gear
+  internal_gear:
+    owner: src/kompas_mcp/gears/internal.py
+    symbols: [build_internal_gear_preview, build_internal_gear_plan, InternalGearRequest]
+    bridge_symbols: [handle_create_gear_internal, handle_inspect_gear_internal, _inspect_gear_internal_block]
+    studio_symbol: _adapt_gear_internal
+    mcp_symbols: [register_gear_tools]
+    focused_test: tests/test_geomwright_studio.py -k gear
+    mcp_test: tests/test_tool_catalog.py -k gear
 
 studio:
   module_registry:

@@ -167,10 +167,20 @@ class SpurGearGeometry:
     space_width_mm: float
     tip_arc_thickness_mm: float
     form_radius_mm: float
-    root_fillet_radius_mm: float
+    root_fillet_radius_mm: float | None
     gap_half_angle_rad: float
     tip_half_angle_rad: float
     root_arc_half_angle_rad: float
+    helix_angle_rad: float = 0.0
+    hand: str = "right"
+    transverse_module_mm: float = 0.0
+    base_helix_angle_rad: float = 0.0
+    axial_pitch_mm: float = 0.0
+    lead_mm: float = 0.0
+    tip_thickness_normal_mm: float = 0.0
+    tip_chamfer_mm: float = 0.0
+    tip_chamfer_angle_deg: float = 45.0
+    tip_chamfer_depth_mm: float = 0.0
     minimum_shift: float = 0.0
     undercut: bool = False
     root_envelope: str = "sharp_rack_trochoid"
@@ -210,7 +220,13 @@ def build_spur_gear_geometry(
     wheel_points_per_tooth: int = 48,
     max_involute_samples: int | None = None,
 ) -> SpurGearGeometry:
-    """Build the complete nominal geometry for one external spur gear."""
+    """Build the complete nominal geometry for one external cylindrical gear.
+
+    `helix_angle_deg = 0` is a spur gear; a positive angle builds the transverse
+    section of a helical gear. The normal module and normal pressure angle stay
+    the standard inputs; the transverse module and pressure angle drive the
+    end-view involute.
+    """
     rack = resolve_rack(
         str(request.get("standard") or "gost_13755_2015"),
         str(request.get("modification") or "a"),
@@ -221,38 +237,65 @@ def build_spur_gear_geometry(
     )
     module = float(request["module_mm"])
     tooth_count = int(request["tooth_count"])
-    pressure_angle = math.radians(float(rack.pressure_angle_deg))
+    alpha_n = math.radians(float(rack.pressure_angle_deg))
     shift = float(request.get("profile_shift", 0.0))
     face_width = float(request.get("face_width_mm", 20.0))
+    helix_angle = math.radians(float(request.get("helix_angle_deg") or 0.0))
+    hand = str(request.get("hand") or "right").strip().lower()
+    if hand not in ("right", "left"):
+        raise ValueError("hand must be 'right' or 'left'")
 
     ha = rack.addendum_coefficient
     clearance = rack.clearance_coefficient
 
-    pitch_radius = module * tooth_count / 2.0
+    cos_beta = math.cos(helix_angle)
+    module_t = module / cos_beta
+    pressure_angle = math.atan(math.tan(alpha_n) / cos_beta)
+    base_helix_angle = math.atan(math.tan(helix_angle) * math.cos(pressure_angle))
+    pitch_radius = module_t * tooth_count / 2.0
     base_radius = pitch_radius * math.cos(pressure_angle)
     outside_radius = pitch_radius + module * (ha + shift)
     root_radius = pitch_radius - module * (ha + clearance - shift)
     inv_alpha = involute(pressure_angle)
     dedendum = module * (ha + clearance - shift)
+    tip_chamfer = float(request.get("tip_chamfer_mm") or 0.0)
+    tip_chamfer_angle = float(request.get("tip_chamfer_angle_deg") or 45.0)
+    tip_chamfer_depth = (
+        tip_chamfer * math.tan(math.radians(tip_chamfer_angle)) if tip_chamfer > 0.0 else 0.0
+    )
 
     warnings: list[dict] = []
     errors: list[dict] = []
 
-    module_info = describe_module(module)
+    module_info = describe_module(module, rack.module_system)
     if not module_info["standard_value"]:
         warnings.append(
             warning_item(
                 "gear_module_off_row",
-                f"Module {module:g} mm is outside ГОСТ 9563-60 rows 1-2 and their recorded exceptions.",
+                f"Module {module:g} mm is outside the {module_info['standard_edition']} rows.",
                 module_mm=module,
+                standard_edition=module_info["standard_edition"],
             )
         )
-    if module < 1.0:
+    below_range = rack.module_min is not None and module < rack.module_min - 1e-9
+    above_range = rack.module_max is not None and (
+        module >= rack.module_max - 1e-9
+        if rack.module_max_exclusive
+        else module > rack.module_max + 1e-9
+    )
+    if below_range or above_range:
         warnings.append(
             warning_item(
-                "gear_small_module_contour",
-                "ГОСТ 9587-81 small-module contours are not implemented; ГОСТ 13755-2015 coefficients are used.",
+                "gear_standard_module_range",
+                (
+                    f"Module {module:g} mm is outside the applicable range of "
+                    f"{rack.standard_edition}."
+                ),
                 module_mm=module,
+                standard=rack.standard_edition,
+                module_min=rack.module_min,
+                module_max=rack.module_max,
+                module_max_exclusive=rack.module_max_exclusive,
             )
         )
     if not rack.conformity_claim:
@@ -275,39 +318,64 @@ def build_spur_gear_geometry(
         errors.append(error_item("gear_root_not_positive", "The root diameter is not positive."))
     if outside_radius <= root_radius:
         errors.append(error_item("gear_invalid_radii", "The outside diameter must exceed the root diameter."))
+    if tip_chamfer > 0.0:
+        if 2.0 * tip_chamfer >= face_width - 1e-9:
+            errors.append(
+                error_item(
+                    "gear_chamfer_exceeds_face_width",
+                    "The end chamfers from both faces meet; reduce the chamfer width.",
+                    tip_chamfer_mm=tip_chamfer,
+                    face_width_mm=face_width,
+                )
+            )
+        if tip_chamfer_depth >= (outside_radius - root_radius) - 1e-9:
+            errors.append(
+                error_item(
+                    "gear_chamfer_reaches_root",
+                    "The chamfer radial depth reaches the root cylinder; reduce the width or angle.",
+                    tip_chamfer_mm=tip_chamfer,
+                    tip_chamfer_angle_deg=tip_chamfer_angle,
+                    tip_chamfer_depth_mm=tip_chamfer_depth,
+                    radial_land_mm=outside_radius - root_radius,
+                )
+            )
 
-    eta = math.pi / (2.0 * tooth_count) + 2.0 * shift * math.tan(pressure_angle) / tooth_count
+    eta = math.pi / (2.0 * tooth_count) + 2.0 * shift * math.tan(alpha_n) / tooth_count
     base_half_angle = math.pi / tooth_count - eta
     tooth_tip_half_angle = eta + inv_alpha - _involute_polar(outside_radius, base_radius)
     tooth_thickness = 2.0 * pitch_radius * eta
-    space_width = math.pi * module - tooth_thickness
+    space_width = math.pi * module_t - tooth_thickness
     tip_arc_thickness = 2.0 * outside_radius * tooth_tip_half_angle
+    tip_thickness_normal = tip_arc_thickness * math.cos(base_helix_angle)
     if tip_arc_thickness <= 0.0:
         errors.append(
             error_item(
                 "gear_tip_thickness_negative",
                 "The involute flanks cross before the outside circle: the tooth tip is not constructible.",
                 tip_thickness_mm=tip_arc_thickness,
+                tip_thickness_normal_mm=tip_thickness_normal,
             )
         )
-    elif tip_arc_thickness < 0.25 * module:
+    elif tip_thickness_normal < 0.25 * module:
         warnings.append(
             warning_item(
                 "gear_tip_thickness_low",
                 "Tooth tip thickness is below 0.25 m; the flank may be pointed and sensitive to tolerances.",
                 tip_thickness_mm=tip_arc_thickness,
+                tip_thickness_normal_mm=tip_thickness_normal,
             )
         )
-    elif tip_arc_thickness < 0.3 * module:
+    elif tip_thickness_normal < 0.3 * module:
         warnings.append(
             warning_item(
                 "gear_tip_thickness_below_recommendation",
                 "Tooth tip thickness is below the 0.30 m recommendation of ГОСТ 16532-70.",
                 tip_thickness_mm=tip_arc_thickness,
+                tip_thickness_normal_mm=tip_thickness_normal,
             )
         )
 
-    min_shift = ha - tooth_count * math.sin(pressure_angle) ** 2 / 2.0
+    min_shift = ha - tooth_count * math.sin(pressure_angle) ** 2 / (2.0 * cos_beta)
     undercut = shift < min_shift - 1e-9
     if undercut:
         warnings.append(
@@ -319,6 +387,10 @@ def build_spur_gear_geometry(
             )
         )
 
+    helical = helix_angle > 1e-9
+    axial_pitch = math.pi * module / math.sin(helix_angle) if helical else 0.0
+    lead = axial_pitch * tooth_count
+
     geometry = SpurGearGeometry(
         request=dict(request),
         rack=rack,
@@ -327,6 +399,16 @@ def build_spur_gear_geometry(
         pressure_angle_rad=pressure_angle,
         profile_shift=shift,
         face_width_mm=face_width,
+        helix_angle_rad=helix_angle,
+        hand=hand,
+        transverse_module_mm=module_t,
+        base_helix_angle_rad=base_helix_angle,
+        axial_pitch_mm=axial_pitch,
+        lead_mm=lead,
+        tip_thickness_normal_mm=tip_thickness_normal,
+        tip_chamfer_mm=tip_chamfer,
+        tip_chamfer_angle_deg=tip_chamfer_angle,
+        tip_chamfer_depth_mm=tip_chamfer_depth,
         pitch_radius=pitch_radius,
         base_radius=base_radius,
         outside_radius=outside_radius,
@@ -336,8 +418,10 @@ def build_spur_gear_geometry(
         space_width_mm=space_width,
         tip_arc_thickness_mm=tip_arc_thickness,
         form_radius_mm=base_radius,
-        root_fillet_radius_mm=rack.fillet_coefficient * module,
-        gap_half_angle_rad=math.pi / (2.0 * tooth_count) - 2.0 * shift * math.tan(pressure_angle) / tooth_count,
+        root_fillet_radius_mm=(
+            None if rack.fillet_coefficient is None else rack.fillet_coefficient * module
+        ),
+        gap_half_angle_rad=math.pi / (2.0 * tooth_count) - 2.0 * shift * math.tan(alpha_n) / tooth_count,
         tip_half_angle_rad=tooth_tip_half_angle,
         root_arc_half_angle_rad=0.0,
         minimum_shift=min_shift,
@@ -353,9 +437,11 @@ def build_spur_gear_geometry(
     # dedendum below the rack pitch line. The profile shift is carried by the
     # tooth thickness and by the reduced corner depth, matching the open
     # py_gearworks reference construction (rolling on the reference radius).
+    # For a helical gear the rack is sliced in the transverse plane: the flank
+    # angle and pitch widen to alpha_t / m_t while the depths stay normal.
     rack_depth = (ha + clearance) * module
     corner_depth = (ha + clearance - shift) * module
-    lateral = math.pi * module / 4.0 - rack_depth * math.tan(pressure_angle)
+    lateral = math.pi * module_t / 4.0 - rack_depth * math.tan(pressure_angle)
     t_root = -lateral / pitch_radius
     trochoid_curve = [
         _trochoid_point(pitch_radius, corner_depth, lateral, t_root + 1.2 * index / curve_samples)

@@ -7,6 +7,8 @@ import json
 import hashlib
 from typing import Any
 
+from kompas_mcp.sketch_runtime.cubic import interpolate_cubic
+
 from .preview import preview_cam_profile, _selection_issues
 from .analyze import self_intersection
 
@@ -27,8 +29,6 @@ def _point(segment: list[list[float]], t: float) -> list[float]:
 def _spline(parameters: list[float], points: list[list[float]]) -> list[list[list[float]]]:
     """C2 cubic interpolation, with exact base-circle tangent directions."""
     n = len(parameters)
-    h = [parameters[i+1]-parameters[i] for i in range(n-1)]
-    slopes = [[(points[i+1][k]-points[i][k])/h[i] for k in (0, 1)] for i in range(n-1)]
     tangents = []
     for index in (0, n-1):
         p = points[index]
@@ -37,30 +37,7 @@ def _spline(parameters: list[float], points: list[list[float]]) -> list[list[lis
         # Arc-length parameter removes tangential acceleration jumps at the
         # piecewise motion knots. The endpoints have unit circle tangents.
         tangents.append(direction)
-    second = []
-    for k in (0, 1):
-        lower = [0.0]+h[:-1]+[h[-1]]
-        upper = [h[0]]+h[1:]+[0.0]
-        diag = [2*h[0]]+[2*(h[i-1]+h[i]) for i in range(1,n-1)]+[2*h[-1]]
-        rhs = [6*(slopes[0][k]-tangents[0][k])]
-        rhs += [6*(slopes[i][k]-slopes[i-1][k]) for i in range(1,n-1)]
-        rhs += [6*(tangents[1][k]-slopes[-1][k])]
-        for i in range(1,n):
-            factor = lower[i]/diag[i-1]
-            diag[i] -= factor*upper[i-1]
-            rhs[i] -= factor*rhs[i-1]
-        values = [0.0]*n
-        values[-1] = rhs[-1]/diag[-1]
-        for i in range(n-2,-1,-1):
-            values[i] = (rhs[i]-upper[i]*values[i+1])/diag[i]
-        second.append(values)
-    segments = []
-    for i, step in enumerate(h):
-        d0 = [slopes[i][k]-step*(2*second[k][i]+second[k][i+1])/6 for k in (0,1)]
-        d1 = [slopes[i][k]+step*(second[k][i]+2*second[k][i+1])/6 for k in (0,1)]
-        segments.append([points[i], [points[i][k]+step*d0[k]/3 for k in (0,1)],
-                         [points[i+1][k]-step*d1[k]/3 for k in (0,1)], points[i+1]])
-    return segments
+    return interpolate_cubic(parameters, points, tangents)
 
 
 def _evaluate(parameters: list[float], segments: list, value: float) -> list[float]:

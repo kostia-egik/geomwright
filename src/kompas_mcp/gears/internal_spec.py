@@ -1,24 +1,20 @@
-"""Public request contract for the external cylindrical gear module."""
+"""Public request contract for the internal cylindrical gear module."""
 from __future__ import annotations
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .basic_racks import STANDARDS, resolve_rack, standard_options
-from .modules import module_rows_catalog
-from .pins import pin_source_catalog
+from .basic_racks import resolve_rack
 
 
-class SpurGearRequest(BaseModel):
-    """External cylindrical gear with a rack-generated nominal profile.
+class InternalGearRequest(BaseModel):
+    """Internal cylindrical gear (ring gear) with a nominal involute profile.
 
-    `standard` selects the basic-rack system; `modification` selects one of its
-    named variants. The standard supplies the pressure angle and the head,
-    clearance, and fillet coefficients. Only `modification="custom"` exposes
-    those coefficients as explicit inputs. `helix_angle_deg = 0` is a spur
-    gear; a positive angle turns the same module into a helical gear whose
-    end view is the transverse section.
+    The gear is cut from a ring blank whose outside diameter is an explicit
+    input; the internal tooth spaces are cut from the bore. `standard` and
+    `modification` select the basic-rack system exactly as for the external
+    gear; only `modification="custom"` exposes the rack coefficients.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -42,24 +38,29 @@ class SpurGearRequest(BaseModel):
         description="Normal module m selected from the standard module rows.",
     )
     tooth_count: int = Field(
-        default=20, ge=6, le=400,
+        default=40, ge=8, le=400,
         title="Tooth count",
-        description="Number of teeth z.",
+        description="Number of internal teeth z.",
     )
     profile_shift: float = Field(
         default=0.0, ge=-1.5, le=1.5,
         title="Profile shift coefficient",
-        description="Rack shift coefficient x applied to the nominal profile.",
+        description="Rack shift coefficient x2 of the internal gear; positive values thin the tooth.",
     )
     face_width_mm: float = Field(
         default=20.0, gt=0.0, le=1000.0,
         title="Face width, mm",
-        description="Functional tooth width b of the gear rim; hub and bore are separate.",
+        description="Functional tooth width b of the ring.",
+    )
+    ring_outside_diameter_mm: float = Field(
+        default=100.0, gt=0.0, le=5000.0,
+        title="Ring blank outside diameter, mm",
+        description="Outside diameter of the ring blank on whose inner surface the teeth are cut.",
     )
     helix_angle_deg: float = Field(
         default=0.0, ge=0.0, le=45.0,
         title="Helix angle, deg",
-        description="Tooth helix angle beta on the reference cylinder; 0 keeps a spur gear.",
+        description="Tooth helix angle beta on the reference cylinder; 0 keeps a spur internal gear.",
     )
     hand: Literal["right", "left"] = Field(
         default="right",
@@ -91,22 +92,12 @@ class SpurGearRequest(BaseModel):
         title="Over-pin diameter, mm",
         description=(
             "Measurement pin/ball diameter. Empty selects the nearest cached "
-            "standard pin that fits below the tips."
+            "standard pin that fits the internal tooth space."
         ),
-    )
-    tip_chamfer_mm: float = Field(
-        default=0.0, ge=0.0, le=20.0,
-        title="Tip chamfer width, mm",
-        description="Axial width of the end chamfer on the tooth tips; 0 keeps sharp tooth ends.",
-    )
-    tip_chamfer_angle_deg: float = Field(
-        default=45.0, ge=15.0, le=75.0,
-        title="Tip chamfer angle, deg",
-        description="Angle between the chamfer surface and the end face; 45 degrees is the c x 45 form.",
     )
 
     @model_validator(mode="after")
-    def _validate_rack_selection(self) -> "SpurGearRequest":
+    def _validate_rack_selection(self) -> "InternalGearRequest":
         if self.mode != "custom":
             if any(
                 value is not None
@@ -147,33 +138,16 @@ class SpurGearRequest(BaseModel):
         )
 
 
-class SpurGearCreateRequest(SpurGearRequest):
+class InternalGearCreateRequest(InternalGearRequest):
     """Create-only MCP request: plan with execute=false, write with both flags."""
 
-    name: str = Field(default="Geomwright cylindrical gear", min_length=1, max_length=120)
+    name: str = Field(default="Geomwright internal gear", min_length=1, max_length=120)
     execute: bool = False
     confirm_write: bool = False
     visible: bool = True
 
     @model_validator(mode="after")
-    def _validate_write_confirmation(self) -> "SpurGearCreateRequest":
+    def _validate_write_confirmation(self) -> "InternalGearCreateRequest":
         if self.execute and self.confirm_write is not True:
             raise ValueError("confirm_write=true is required when execute=true")
         return self
-
-
-def gear_selection() -> dict:
-    """Studio selection metadata: standards, module rows, and pin rows."""
-    return {
-        "standards": standard_options(),
-        "module_rows": module_rows_catalog(),
-        "pin_sources": pin_source_catalog(),
-    }
-
-
-def standard_for(value: str):
-    key = str(value or "").strip().lower()
-    system = STANDARDS.get(key)
-    if system is None:
-        raise ValueError(f"Unknown basic rack standard: {value}")
-    return system

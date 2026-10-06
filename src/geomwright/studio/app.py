@@ -57,6 +57,13 @@ def _studio_content_version() -> str:
     from kompas_mcp.transmissions import silent_chain
     digest.update(b"transmissions/silent_chain.py")
     digest.update(Path(silent_chain.__file__).read_bytes())
+    from kompas_mcp.transmissions import silent_geometry
+    for path in sorted(Path(silent_geometry.__file__).parent.glob("*.py")):
+        digest.update(f"transmissions/silent_geometry/{path.name}".encode("utf-8"))
+        digest.update(path.read_bytes())
+    from kompas_mcp.sketch_runtime import cubic
+    digest.update(b"sketch_runtime/cubic.py")
+    digest.update(Path(cubic.__file__).read_bytes())
     return digest.hexdigest()[:12]
 
 
@@ -222,6 +229,13 @@ def create_app(
             plan = managed_pulley_plan(module_kind, profile)
             plan["name"] = name
             return adapter.create_gear_spur(
+                plan, execute=True, confirm_write=True, visible=True,
+                progress_callback=progress_callback,
+            )
+        if module_kind == "gear_internal":
+            plan = managed_pulley_plan(module_kind, profile)
+            plan["name"] = name
+            return adapter.create_gear_internal(
                 plan, execute=True, confirm_write=True, visible=True,
                 progress_callback=progress_callback,
             )
@@ -632,7 +646,7 @@ def create_app(
     def start_module_update_job(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             module = get_module(kind)
-            if module.kind in {"camshaft_lobe", "silent_chain_sprocket"}:
+            if module.kind in {"camshaft_lobe", "silent_chain_sprocket", "chain_sprocket"}:
                 raise HTTPException(status_code=409, detail="This module is create-only; build a new part instead")
             if not module.build:
                 raise HTTPException(status_code=409, detail=f"{module.kind} has no CAD build yet")

@@ -57,6 +57,7 @@ Evidence levels used by this file:
 | Composite path mixes sketch edges and 3D edges | `EDGE-002` |
 | Sketch cannot be assigned to extrude/revolve/evolution | `OP-001` |
 | Operation uses wrong sketch contour or rejects a valid-looking sketch | `OP-002`, `OP-001` |
+| A lone circle sketch is rejected as a non-closed bore profile | `OP-006`, `OP-002` |
 | Numeric cam NURBS fails creation or silently changes its order | `CURVE-001`, `VERIFY-001` |
 | KOMPAS spline accepts parameters but readback is empty, renormalized, or reads as closed | `CURVE-002` |
 | Bent coil / hook spiral phase is wrong | `SPIRAL-001`, `VAR-001` |
@@ -87,9 +88,14 @@ omitted a material-removing instance without failing `Update()`.
 
 Rule: for a rotationally symmetric blank and repeated identical cuts, compare
 total removed volume with source-cut volume times physical instance count.
-The silent-chain builder uses 0.01% of expected removed volume, with a
+The silent-chain builder uses 0.05% of expected removed volume, with a
 0.001 mm³ numerical floor. This is a mass-property comparison bound, not a
 manufacturing tolerance. A valid counter cannot override a failed comparison.
+The solid ASME rounded-tip/side-guide case showed 0.0214% native mass-property
+non-additivity despite passing independent volume and geometry checks. Keep the
+reported relative error; the 0.05% bound is still below a single missing cut at
+the supported maximum 114 teeth (about 0.88%). Do not increase it to accept a
+missing instance. The independent full-body volume check remains mandatory.
 
 Implementation: circular-tip GOST/DIN profiles cut only the tooth space; the
 tip circle already belongs to the rim. ASME rounded tips partition their
@@ -148,7 +154,8 @@ Related:
 ### CURVE-001: Native NURBS Uses Order And Typed Numeric Arrays
 
 Evidence: live-verified on direct C2 and roller-rocker cam profiles, including
-rebuild and save/reopen curve readback.
+rebuild and save/reopen curve readback; DIN silent sprocket curves also verified
+with 15, 23 and 114 teeth.
 
 Symptom:
 - `INurbs.SetNurbsParams` returns false with ordinary Python arrays or the
@@ -167,6 +174,9 @@ Rule and implementation:
 - Cast indexed items to `INurbs`/`IArc` before calling their readback methods.
 - Read all poles, weights and knots after rebuild. Do not count `Update()` as
   proof of curve accuracy or correct base-arc direction.
+- Sample the evaluated rational curve for topology checks, not its control
+  polygon. `GetNurbsParams`' first return value is success, not curve closure;
+  read the native `Closed` property separately.
 - For sampled motion envelopes, arc-length interpolation avoids tangential
   acceleration jumps corrupting curvature at piecewise motion knots. Keep a true
   circular base arc separate and verify global contact and final solid volume.
@@ -178,7 +188,8 @@ Verification:
 - A valid extrusion with the wrong base-arc branch can still be the wrong cam;
   volume/bounds verification must reject it.
 
-Known example: `kompas_mcp/cams/cad.py` and bridge `handle_create_cam`.
+Known examples: `kompas_mcp/sketch_runtime/cubic.py`, `kompas_mcp/cams/cad.py`,
+`transmissions/silent_geometry/silent_chain_din.py`, and bridge `_sample_curve_points`.
 
 ### VAR-002: Read AddVariable Text From Note, Not ParameterNote
 
@@ -360,8 +371,9 @@ Verification:
 Known example:
 - single-row chain sprockets use `GW_FAMILY_CODE=6`, `CH_*` variables, two root
   sketches, blank/cut extrusions, and one tooth-space pattern. Recognition uses
-  five root references and keeps reopened blocks read-only until designation and
-  profile-variant metadata become reconstructable.
+  five root references and a checksummed `geomwright.chain.recipe`; a valid recipe
+  restores the Studio profile and exposes the block as recreatable, while in-place
+  branch replacement remains unsupported.
 
 ---
 
@@ -2037,6 +2049,129 @@ Related:
 - `CURVE-002`
 - `SESSION-002`
 - `BRIDGE-001`
+
+---
+
+### EVO-001: Anchor A Guide Spiral On The Axis, Not On The Reference Cylinder
+
+Applies when:
+- sweeping a section along an `ICylindricSpiral3D` with `IEvolution` (types 46/47);
+- building helical gears, worm grooves, or any cut/boss whose section is large
+  relative to the helix radius;
+- choosing the spiral position association point.
+
+Symptom:
+- The sweep builds and is `Valid`, but the removed/added volume is wrong; in the
+  helical-gear probe it was 25 % of the analytic tooth-space volume at β=20°
+  and scaled roughly as `1/lead`.
+- A straight path (huge lead) produced the exact volume, so the section contour
+  and the Evolution binding were fine.
+
+Cause:
+- When the spiral position point is associated with a point on the reference
+  cylinder (radius ≈ profile radius), KOMPAS builds a deformed spiral/sweep.
+  The `Diameter` property already defines the winding radius; the position point
+  should be the axis anchor, mirroring the working helical-thread pattern
+  (`start_center_point` on the axis plus `DiameterBaseObject`).
+- `BySurfaceNormal` and `SketchShiftType` do not repair the deformation.
+
+Rule:
+- Anchor `spiral.Position` on the gear/part axis (`SetAssociationObject(center)`)
+  and set `spiral.Diameter` to the reference cylinder; keep `Step = lead`,
+  `Height = swept length`, and `TurnDirection` from the hand.
+- Verify the sweep by volume against the analytic section (`≤ 0.01 %` live
+  tolerance) before exposing the operation in a module.
+
+Verification:
+- Helical-gear live cases: `m2 z20 b20 β20 right` → volume error 0.005 %;
+  `m2 z21 b16 β30 left` → 0.0046 %; both save/reopen as `verified`.
+- Probe matrix (straight vs helical, section radius 0/10/21.3 mm, XOZ/XOY/YOZ,
+  `SketchShiftType` 0/1/2, `BySurfaceNormal` on/off) is in the ignored
+  `experiments/spikes/20261005-gear-spur/` quarantine.
+
+Related:
+- `SPIRAL-001`
+- `OP-004`
+- `CURVE-002`
+
+---
+
+### OP-005: Chamfer Symmetric Ends Before The Expensive Pattern
+
+Applies when:
+- cutting symmetric end chamfers (gear tooth tips, thread ends, rim edges);
+- the same body also carries an expensive pattern or sweep feature;
+- the chamfer is defined by a small closed profile revolved 360°.
+
+Symptom:
+- Chamfering the finished patterned body forces KOMPAS to rebuild the whole
+  pattern tree and can multiply the create time severalfold (helical gear with
+  chamfers: ~99 s versus ~23 s without).
+
+Cause:
+- Feature order in the tree. A rotation cut after the pattern must re-evaluate
+  the patterned body; the same cut on the plain blank is trivial.
+
+Rule:
+- Subtract a symmetric end chamfer from the blank **before** the tooth-space
+  cut or pattern. Subtracting a set is order-independent, so the final Boolean
+  body is identical.
+- Verify the volume from the material actually removed, not the full ring:
+  sample the per-pitch analytic outline at the cut radii, because only the
+  teeth (not the gaps) lie in the chamfer band. The full-ring formula
+  overestimates the removal about fourfold for `m2 z20` at `c = 0.5 mm`.
+
+Verification:
+- `m2 z20 x0 b20 + chamfer 0.5 x 45`: volume error 0.008 %, each blank cut
+  removes 17.15 mm³, save/reopen `verified`.
+- `m2 z20 x0 b20 β20 right + chamfer 0.5 x 45`: volume error 0.007 %,
+  save/reopen `verified`.
+
+Related:
+- `EVO-001`
+- `OP-004`
+
+---
+
+### OP-006: Cut A Central Bore With A Revolved Rectangle, Not A Lone Circle Sketch
+
+Evidence: live-verified on the internal gear `gear_internal` `m2 z40 D100 × 20`
+(spur and `β20` left); the earlier lone-circle plan failed before any cut.
+
+Symptom:
+- A `numeric_profile_sketch` containing one circle (`kind: "circle"`) is rejected
+  by the sketch preflight: `primary contour is not closed`, `0 component(s);
+  expected 1`, although the circle itself is a valid closed entity.
+- The later `cut_extrusion` executor has a single-primary-circle fallback, but
+  the sketch operation's own closure audit runs first and aborts the workflow.
+
+Cause:
+- The numeric-profile closure audit reads style-1 curves; a `circle` entity is
+  not returned through the curve collection and therefore counts as zero
+  curves.
+
+Rule:
+- For a through bore, do not route a lone circle through
+  `numeric_profile_sketch`. Cut the bore with one `rotational_cut` whose profile
+  is a rectangle spanning the full blank width on one side of the gear axis,
+  for example
+  `[[-b-1, 0], [1, 0], [1, r_bore], [-b-1, r_bore]]` on plane `XOY`, revolved
+  360° about the part axis. The segment on the axis is a normal revolved-bore
+  profile.
+- Keep the bore cut before the tooth-space cut and the pattern, so the
+  expensive pattern stays the last feature.
+
+Verification:
+- Internal gear spur `m2 z40 D100 × 20`: one solid, relative volume error
+  0.013 %, bounds `[-20, -50, -50, 0, 50, 50]`, 40 pattern instances,
+  save/reopen `verified`.
+- Internal gear helical `m2 z40 β20 left`: relative volume error 0.006 %,
+  save/reopen `verified`.
+
+Related:
+- `OP-002`
+- `OP-005`
+- `PATTERN-001`
 
 ---
 

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Internal cylindrical gear ring" shape-rendering="geometricPrecision" color="#8d9aa7">
+  <!-- Ring blank with the internal toothed boundary: teeth point toward the centre. -->
+  <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="32" cy="32" r="23" />
+    <path d="M 51.38 34.14 L 51.38 29.86 L 45.79 29.59 L 45.15 27.19 L 49.86 24.16 L 47.72 20.46 L 42.74 23.02 L 40.98 21.26 L 43.54 16.28 L 39.84 14.14 L 36.81 18.85 L 34.41 18.21 L 34.14 12.62 L 29.86 12.62 L 29.59 18.21 L 27.19 18.85 L 24.16 14.14 L 20.46 16.28 L 23.02 21.26 L 21.26 23.02 L 16.28 20.46 L 14.14 24.16 L 18.85 27.19 L 18.21 29.59 L 12.62 29.86 L 12.62 34.14 L 18.21 34.41 L 18.85 36.81 L 14.14 39.84 L 16.28 43.54 L 21.26 40.98 L 23.02 42.74 L 20.46 47.72 L 24.16 49.86 L 27.19 45.15 L 29.59 45.79 L 29.86 51.38 L 34.14 51.38 L 34.41 45.79 L 36.81 45.15 L 39.84 49.86 L 43.54 47.72 L 40.98 42.74 L 42.74 40.98 L 47.72 43.54 L 49.86 39.84 L 45.15 36.81 L 45.79 34.41 Z" />
+  </g>
+</svg>

@@ -54,7 +54,8 @@ def evaluate_gear_checks(geometry, measurements: dict) -> dict:
             unit="x",
         )
     )
-    tip_value = geometry.tip_arc_thickness_mm
+    helical = geometry.helix_angle_rad > 1e-9
+    tip_value = geometry.tip_thickness_normal_mm if helical else geometry.tip_arc_thickness_mm
     tip_limit = 0.3 * geometry.module_mm
     if tip_value <= 0.0:
         tip_status = "error"
@@ -68,31 +69,65 @@ def evaluate_gear_checks(geometry, measurements: dict) -> dict:
         _check(
             "gear_tip_thickness",
             tip_status,
-            "Arc tooth thickness on the outside circle against the 0.30 m recommendation.",
+            (
+                "Normal tooth thickness on the outside circle against the 0.30 m recommendation."
+                if helical
+                else "Arc tooth thickness on the outside circle against the 0.30 m recommendation."
+            ),
             value=tip_value,
             limit=tip_limit,
             unit="mm",
         )
     )
+    if helical:
+        axial_pitch = geometry.axial_pitch_mm
+        overlap = geometry.face_width_mm / axial_pitch if axial_pitch > 0.0 else 0.0
+        checks.append(
+            _check(
+                "gear_axial_overlap",
+                "ok" if overlap >= 1.0 - 1e-9 else "warning",
+                (
+                    "Axial overlap ratio b / p_x; below 1.0 the tooth engagement is not continuous "
+                    "across the face width."
+                ),
+                value=overlap,
+                limit=1.0,
+                unit="x",
+            )
+        )
     module_status = "ok" if geometry.module_info.get("standard_value") else "warning"
     checks.append(
         _check(
             "gear_module_row",
             module_status,
-            "Module value against ГОСТ 9563-60 rows 1-2 and their recorded exceptions.",
+            (
+                f"Module value against {geometry.module_info.get('standard_edition')} "
+                "rows and their recorded exceptions."
+            ),
             value=geometry.module_mm,
             limit=None,
             unit="mm",
         )
     )
-    if geometry.module_mm < 1.0:
+    rack = geometry.rack
+    below_range = rack.module_min is not None and geometry.module_mm < rack.module_min - 1e-9
+    above_range = rack.module_max is not None and (
+        geometry.module_mm >= rack.module_max - 1e-9
+        if rack.module_max_exclusive
+        else geometry.module_mm > rack.module_max + 1e-9
+    )
+    if below_range or above_range:
+        range_text = (
+            f"{rack.module_min:g}..{rack.module_max:g}"
+            + (" (upper bound excluded)" if rack.module_max_exclusive else "")
+        )
         checks.append(
             _check(
-                "gear_small_module_contour",
+                "gear_standard_module_range",
                 "warning",
-                "Small-module contour of ГОСТ 9587-81 is not implemented; ГОСТ 13755-2015 coefficients are used.",
+                f"{rack.standard_edition} applies to modules {range_text} mm.",
                 value=geometry.module_mm,
-                limit=1.0,
+                limit=[rack.module_min, rack.module_max],
                 unit="mm",
             )
         )
@@ -112,15 +147,19 @@ def evaluate_gear_checks(geometry, measurements: dict) -> dict:
             },
         )
     )
+    fillet_note = (
+        "The contour fillet radius is not tabulated for this modification."
+        if geometry.root_fillet_radius_mm is None
+        else (
+            f"The contour fillet radius {geometry.root_fillet_radius_mm:.4f} mm is reported, "
+            "not applied as a rounded cutter tip."
+        )
+    )
     checks.append(
         _check(
             "gear_root_envelope",
             "ok",
-            (
-                "Nominal envelope: theoretical sharp generating rack. "
-                f"The contour fillet radius {geometry.root_fillet_radius_mm:.4f} mm is reported, "
-                "not applied as a rounded cutter tip."
-            ),
+            f"Nominal envelope: theoretical sharp generating rack. {fillet_note}",
             value=geometry.root_envelope,
         )
     )
@@ -149,6 +188,17 @@ def evaluate_gear_checks(geometry, measurements: dict) -> dict:
             unit="mm",
         )
     )
+    if geometry.tip_chamfer_mm > 0.0:
+        checks.append(
+            _check(
+                "gear_tip_chamfer",
+                "ok",
+                "End chamfer on both tooth-tip faces; the two conical cuts remove the calculated ring volume.",
+                value=geometry.tip_chamfer_mm,
+                limit=geometry.tip_chamfer_angle_deg,
+                unit="mm/deg",
+            )
+        )
     errors = [item for item in geometry.errors]
     if errors:
         status = "error"

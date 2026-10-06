@@ -15,8 +15,9 @@ turning KOMPAS into an uncontrolled scripting target.
 - create and edit selected sketch and feature entities with explicit targets;
 - preview and build supported parametric parts and spring families;
 - preview and build managed V-belt, Poly-V, flat-belt, timing-belt, selected
-  roller/bush-chain transmission geometry, and an external spur gear with a
-  nominal involute/trochoid profile;
+  roller/bush-chain transmission geometry, an external cylindrical gear
+  (spur or helical) with a nominal rack-generated profile, and an internal
+  ring gear with an explicit blank outside diameter;
 - create specifications, relink assembly paths, run quality checks, and export
   safe working copies;
 - use Geomwright Studio to preview transmission geometry and edit recognized
@@ -42,8 +43,10 @@ within the scope stated by their contracts and live verification evidence.
 | Sketch and feature runtime | Experimental | Low-level tools; inspect before writing |
 | Parametric parts and springs | Experimental | Family-specific parameters and verification |
 | Geomwright Studio | Experimental | Local UI; no arbitrary-body write path |
-| Spur gear | Experimental, live-verified | External cylindrical spur gear; nominal preview and create-only managed part |
+| Cylindrical gear | Experimental, live-verified | External spur/helical gear; ГОСТ 13755-2015, ГОСТ 9587-81, ГОСТ Р 50531-93 and ISO 53:1998 contours; nominal preview, create-only managed part, MCP tools |
+| Internal gear | Experimental, live-verified | Internal spur/helical ring gear; explicit blank outside diameter, ГОСТ 19274-73 nominal geometry, create-only managed part, MCP tools |
 | Cam profiles | Experimental | Shared Studio/MCP create-only build, native curve/contact and solid readback |
+| Silent-chain sprockets | Experimental, live-verified | Shared Studio/MCP calculation and new-part creation; solid blank, DIN NURBS, saved recipe inspection |
 | Native KOMPAS module inspection | Research-only | Disabled by default; explicit opt-in for local investigation |
 
 An experimental status is a contract boundary, not a promise that every catalog
@@ -225,8 +228,10 @@ not part of the public repository.
 - [Spring workflows](docs/spring-workflows.md) — spring-family navigation;
 - [Transmission contracts](docs/transmission-platform-concept.md) — pulley,
   sprocket, and gear boundaries;
-- [External spur gear](docs/gear-spur.md) — inputs, nominal representation,
-  create-only CAD, and live evidence;
+- [Cylindrical gear](docs/gear-spur.md) — inputs, rack standards, pin rows,
+  nominal representation, create-only CAD, and live evidence;
+- [Internal gear](docs/gear-internal.md) — ring blank input, ГОСТ 19274-73
+  geometry, controls, create-only CAD, and live evidence;
 - [Architecture](ARCHITECTURE.md) — layer ownership for maintainers;
 - [CAD patterns](CAD_PATTERNS.md) — verified KOMPAS-specific invariants.
 

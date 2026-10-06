@@ -10,7 +10,13 @@ from pydantic import BaseModel
 from kompas_mcp.transmission_tools import ChainSprocketPreviewRequest, FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, TimingCurvilinearPulleyPreviewRequest, TimingTrapezoidalPulleyPreviewRequest, VGroovePreviewRequest
 from kompas_mcp.transmissions import build_chain_sprocket_plan, chain_profile_selection, preview_chain_sprocket, preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
-from kompas_mcp.gears import SpurGearRequest, build_spur_gear_preview, gear_selection
+from kompas_mcp.gears import (
+    InternalGearRequest,
+    SpurGearRequest,
+    build_internal_gear_preview,
+    build_spur_gear_preview,
+    gear_selection,
+)
 from .silent_chain import SilentChainSelectionRequest, silent_chain_selection
 from .silent_chain_preview import build_silent_chain_preview
 from kompas_mcp.transmissions.silent_chain import build_silent_chain_plan
@@ -239,8 +245,7 @@ def _adapt_silent_chain(preview: dict[str, Any], request: dict[str, Any]) -> dic
         "coordinate_system": "end_view",
         "summary": {
             "construction_status": (preview.get("completion") or {}).get("status", "source_only"),
-            **({"inner_rim_diameter_mm": preview["construction_spec"]["inner_rim_diameter_mm"],
-                "remaining_web_mm": preview["construction_spec"]["validation"]["material_below_cuts_mm"]}
+            **({"remaining_web_mm": preview["construction_spec"]["validation"]["material_below_cuts_mm"]}
                if preview.get("construction_spec") else {}),
             "designation": "not_provided" if standard == "asme_b29_2m_open" else request.get("designation"),
             "standard": standard,
@@ -1359,7 +1364,6 @@ def _adapt_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, 
             preview,
             [
                 "chain_profile_standard_scope",
-                "chain_downstream_operations_external",
                 "chain_multirow_axial_preview_pending",
                 "chain_pri_extended_profile",
             ],
@@ -1369,6 +1373,10 @@ def _adapt_chain(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, 
 
 def _build_gear_spur_preview(payload: dict[str, Any]) -> dict[str, Any]:
     return build_spur_gear_preview(payload)
+
+
+def _build_gear_internal_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_internal_gear_preview(payload)
 
 
 def _gear_sector_outline(period: list[list[float]], tooth_count: int, visible_pitches: int = 3) -> list[list[float]]:
@@ -1391,6 +1399,28 @@ def _gear_sector_outline(period: list[list[float]], tooth_count: int, visible_pi
 
 
 def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    if not preview.get("success"):
+        return {
+            "ok": False,
+            "family": "gear_spur",
+            "view_mode": "end",
+            "closed_points": [],
+            "feature_paths": [],
+            "tone_paths": [],
+            "guide_paths": [],
+            "reference_paths": [],
+            "phantom_bodies": [],
+            "bounds": None,
+            "summary": {},
+            "derived": {},
+            "measurements": {},
+            "report": dict(preview.get("report") or {}),
+            "dimensions": [],
+            "warnings": list(preview.get("warnings") or []),
+            "warning_items": list(preview.get("warning_items") or []),
+            "errors": list(preview.get("errors") or []),
+            "request": dict(request),
+        }
     geometry = dict(preview.get("geometry") or {})
     summary = dict(preview.get("summary") or {})
     report = dict(preview.get("report") or {})
@@ -1433,8 +1463,8 @@ def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[s
             "key": "outside_diameter",
             "symbol": "dₐ",
             "orientation": "radial",
-            "start": _polar(dimension_start, 0.0),
-            "end": _polar(outside_radius, 0.0),
+            "start": _polar(dimension_start, step),
+            "end": _polar(outside_radius, step),
             "value": summary.get("outside_diameter_mm"),
             "unit": "mm",
             "label_normal": 26,
@@ -1465,6 +1495,64 @@ def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[s
     ]
     warning_items = list(preview.get("warning_items") or [])
     warnings = list(preview.get("warnings") or [])
+    period_items = [
+        {
+            "radius": math.hypot(float(point[0]), float(point[1])),
+            "angle": math.atan2(float(point[0]), float(point[1])),
+        }
+        for point in _points(geometry.get("period_outline"))
+    ]
+    radial_tolerance = max(1e-6, 1e-9 * outside_radius)
+    step_angle = 2.0 * math.pi / max(1, tooth_count)
+
+    def _radial_runs(predicate) -> list[tuple[int, int]]:
+        runs: list[tuple[int, int]] = []
+        index = 0
+        while index < len(period_items):
+            if not predicate(period_items[index]):
+                index += 1
+                continue
+            start = index
+            while index + 1 < len(period_items) and predicate(period_items[index + 1]):
+                index += 1
+            runs.append((start, index))
+            index += 1
+        return runs
+
+    def _first_long_run(runs):
+        return next(((start, end) for start, end in runs if end > start), None)
+
+    def _last_long_run(runs):
+        for start, end in reversed(runs):
+            if end > start:
+                return (start, end)
+        return None
+
+    local_pairs: list[tuple[str, dict[str, float], dict[str, float]]] = []
+    tip_run = _first_long_run(
+        _radial_runs(lambda item: item["radius"] >= outside_radius - radial_tolerance)
+    )
+    if tip_run is not None:
+        local_pairs.append(
+            ("tip", period_items[tip_run[0]], period_items[tip_run[1]])
+        )
+    root_runs = _radial_runs(lambda item: item["radius"] <= root_radius + radial_tolerance)
+    root_start = _first_long_run(root_runs)
+    root_end = _last_long_run(root_runs)
+    if root_start is not None and root_end is not None:
+        root_first = period_items[root_start[1]]
+        root_second = dict(period_items[root_end[0]])
+        root_second["angle"] -= step_angle
+        local_pairs.append(("root", root_first, root_second))
+
+    tip_edges: list[dict[str, float]] = []
+    root_edges: list[dict[str, float]] = []
+    for index in range(max(1, tooth_count)):
+        offset = -index * step_angle
+        for kind, first, second in local_pairs:
+            target = tip_edges if kind == "tip" else root_edges
+            target.append({"radius": first["radius"], "angle": first["angle"] + offset})
+            target.append({"radius": second["radius"], "angle": second["angle"] + offset})
     for check in list(report.get("checks") or []):
         if check.get("status") != "warning":
             continue
@@ -1505,6 +1593,211 @@ def _adapt_gear_spur(preview: dict[str, Any], request: dict[str, Any]) -> dict[s
             "tooth_gap_count": 3,
             "visible_tooth_count": 3,
             "section_style": "broken_out",
+        },
+        "secondary_view": {
+            "family": "gear_spur",
+            "tip_edges": tip_edges,
+            "root_edges": root_edges,
+            "face_width_mm": summary.get("face_width_mm"),
+            "outside_diameter_mm": summary.get("outside_diameter_mm"),
+            "pitch_diameter_mm": summary.get("pitch_diameter_mm"),
+            "root_diameter_mm": summary.get("root_diameter_mm"),
+            "tooth_count": tooth_count,
+            "tip_thickness_mm": summary.get("tip_thickness_mm"),
+            "tip_chamfer_mm": summary.get("tip_chamfer_mm", 0.0),
+            "tip_chamfer_angle_deg": summary.get("tip_chamfer_angle_deg", 45.0),
+            "tip_chamfer_depth_mm": summary.get("tip_chamfer_depth_mm", 0.0),
+            "helix_angle_deg": summary.get("helix_angle_deg", 0.0),
+            "hand": summary.get("hand", "right"),
+            "lead_mm": summary.get("lead_mm", 0.0),
+            "axial_pitch_mm": summary.get("axial_pitch_mm", 0.0),
+            "axial_overlap": summary.get("axial_overlap", 0.0),
+        },
+        "request": dict(request),
+    }
+
+
+def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    warning_items = list(preview.get("warning_items") or [])
+    warnings = list(preview.get("warnings") or [])
+    if not preview.get("success"):
+        return {
+            "ok": False,
+            "family": "gear_internal",
+            "view_mode": "end",
+            "closed_points": [],
+            "feature_paths": [],
+            "tone_paths": [],
+            "guide_paths": [],
+            "reference_paths": [],
+            "phantom_bodies": [],
+            "bounds": None,
+            "summary": {},
+            "derived": {},
+            "measurements": {},
+            "report": dict(preview.get("report") or {}),
+            "dimensions": [],
+            "warnings": warnings,
+            "warning_items": warning_items,
+            "errors": list(preview.get("errors") or []),
+            "request": dict(request),
+        }
+    geometry = dict(preview.get("geometry") or {})
+    summary = dict(preview.get("summary") or {})
+    report = dict(preview.get("report") or {})
+    tooth_count = int(summary.get("tooth_count") or request.get("tooth_count") or 0)
+    ring_radius = float(geometry.get("ring_outside_radius_mm") or 0.0)
+    pitch_radius = float(geometry.get("pitch_radius_mm") or 0.0)
+    base_radius = float(geometry.get("base_radius_mm") or 0.0)
+    tip_radius = float(geometry.get("outside_radius_mm") or 0.0)
+    root_radius = float(geometry.get("root_radius_mm") or 0.0)
+    ring_outline = _points(geometry.get("full_ring_outline"))
+    inner_path = _points(geometry.get("inner_profile_path"))
+    reference_paths = [
+        {"key": "ring_circle", "points": _radial_arc(ring_radius, 0.0, 2.0 * math.pi, count=180)},
+        {"key": "pitch_circle", "points": _radial_arc(pitch_radius, 0.0, 2.0 * math.pi, count=180)},
+        {"key": "base_circle", "points": _radial_arc(base_radius, 0.0, 2.0 * math.pi, count=180)},
+        {"key": "tip_circle", "points": _radial_arc(tip_radius, 0.0, 2.0 * math.pi, count=180)},
+        {"key": "root_circle", "points": _radial_arc(root_radius, 0.0, 2.0 * math.pi, count=180)},
+    ]
+    tone_paths: list[dict[str, Any]] = []
+    if ring_outline:
+        tone_paths.append(
+            {
+                "points": ring_outline,
+                "tone": "exhaust",
+                "width": 2.4,
+                "fill": "rgba(227,170,79,.06)",
+            }
+        )
+    if inner_path:
+        tone_paths.append(
+            {
+                "points": inner_path,
+                "stroke": "#61c0b1",
+                "width": 1.3,
+                "fill": False,
+            }
+        )
+    bounds = _bounds(
+        [ring_outline] if ring_outline else [],
+        [item["points"] for item in reference_paths],
+    )
+    dimension_start = max(1.0, 0.28 * ring_radius)
+    dimensions = [
+        {
+            "key": "ring_outside_diameter",
+            "symbol": "D",
+            "orientation": "radial",
+            "start": _polar(dimension_start, 0.7),
+            "end": _polar(ring_radius, 0.7),
+            "value": summary.get("ring_outside_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 0.0,
+            "label_tangent": 26,
+        },
+        {
+            "key": "pitch_diameter",
+            "symbol": "d",
+            "orientation": "radial",
+            "start": _polar(dimension_start, -0.7),
+            "end": _polar(pitch_radius, -0.7),
+            "value": summary.get("pitch_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 0.0,
+            "label_tangent": -26,
+        },
+        {
+            "key": "root_diameter",
+            "symbol": "d_f",
+            "orientation": "radial",
+            "start": _polar(dimension_start, 2.6),
+            "end": _polar(root_radius, 2.6),
+            "value": summary.get("root_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 0.0,
+            "label_tangent": 26,
+        },
+        {
+            "key": "tip_diameter",
+            "symbol": "d_a",
+            "orientation": "radial",
+            "start": _polar(dimension_start, -2.6),
+            "end": _polar(tip_radius, -2.6),
+            "value": summary.get("tip_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 0.0,
+            "label_tangent": -26,
+        },
+    ]
+    step = 2.0 * math.pi / max(1, tooth_count)
+    tip_half = math.pi / max(1, tooth_count) - float(geometry.get("tip_space_half_angle_rad") or 0.0)
+    root_half = float(geometry.get("root_space_half_angle_rad") or 0.0)
+    tip_edges: list[dict[str, float]] = []
+    root_edges: list[dict[str, float]] = []
+    for index in range(max(1, tooth_count)):
+        center = index * step
+        tip_edges.append({"radius": tip_radius, "angle": center + tip_half})
+        tip_edges.append({"radius": tip_radius, "angle": center - tip_half})
+        root_edges.append({"radius": root_radius, "angle": center + root_half})
+        root_edges.append({"radius": root_radius, "angle": center - root_half})
+    span = dict((preview.get("measurements") or {}).get("span") or {})
+    if not span.get("usable"):
+        message = "Span measurement does not contact the internal flanks between the tip and root circles."
+        warning_items.append({"code": "gear_span_unusable", "severity": "warning", "message": message})
+        warnings.append(message)
+    over_pin = dict((preview.get("measurements") or {}).get("over_pin") or {})
+    if over_pin.get("available") is False:
+        message = "Over-pin control is not performed for helical internal gears."
+        warning_items.append(
+            {"code": "gear_internal_over_pin_not_performed", "severity": "warning", "message": message}
+        )
+        warnings.append(message)
+    elif not over_pin.get("fits_below_tips"):
+        message = "The selected or nominal pin does not fit the internal tooth space."
+        warning_items.append({"code": "gear_over_pin_unusable", "severity": "warning", "message": message})
+        warnings.append(message)
+    return {
+        "ok": bool(preview.get("success")),
+        "family": "gear_internal",
+        "view_mode": "end",
+        "closed_points": [ring_outline] if ring_outline else [],
+        "feature_paths": [],
+        "tone_paths": tone_paths,
+        "guide_paths": [],
+        "reference_paths": reference_paths,
+        "phantom_bodies": [],
+        "bounds": bounds,
+        "coordinate_system": geometry.get("coordinate_system"),
+        "summary": summary,
+        "derived": preview.get("derived"),
+        "measurements": preview.get("measurements"),
+        "report": report,
+        "dimensions": dimensions,
+        "warnings": warnings,
+        "warning_items": warning_items,
+        "preview_window": {
+            "tooth_gap_count": tooth_count,
+            "visible_tooth_count": tooth_count,
+            "section_style": "full_ring",
+        },
+        "secondary_view": {
+            "family": "gear_internal",
+            "internal": True,
+            "tip_edges": tip_edges,
+            "root_edges": root_edges,
+            "face_width_mm": summary.get("face_width_mm"),
+            "outside_diameter_mm": summary.get("ring_outside_diameter_mm"),
+            "pitch_diameter_mm": summary.get("pitch_diameter_mm"),
+            "root_diameter_mm": summary.get("root_diameter_mm"),
+            "tip_diameter_mm": summary.get("tip_diameter_mm"),
+            "tooth_count": tooth_count,
+            "tip_thickness_mm": summary.get("tip_thickness_mm"),
+            "helix_angle_deg": summary.get("helix_angle_deg", 0.0),
+            "hand": summary.get("hand", "right"),
+            "lead_mm": summary.get("lead_mm", 0.0),
+            "axial_pitch_mm": summary.get("axial_pitch_mm", 0.0),
+            "axial_overlap": summary.get("axial_overlap", 0.0),
         },
         "request": dict(request),
     }
@@ -1625,9 +1918,9 @@ _MODULES: dict[str, PreviewModule] = {
     ),
     "gear_spur": PreviewModule(
         kind="gear_spur",
-        name="Цилиндрическая прямозубая шестерня",
-        description="Внешнее прямозубое колесо: эвольвента, трохоида впадины, контрольные размеры и номинальное представление.",
-        standard="ГОСТ 13755-2015 / ГОСТ 16532-70 (nominal)",
+        name="Цилиндрическая шестерня (прямозубая / косозубая)",
+        description="Внешнее цилиндрическое колесо: четыре системы исходного контура, эвольвента торцового сечения, трохоида впадины, косой зуб и контрольные размеры.",
+        standard="ГОСТ 13755-2015 / ГОСТ 9587-81 / ГОСТ Р 50531-93 / ISO 53:1998 (nominal)",
         request_model=SpurGearRequest,
         defaults=SpurGearRequest().model_dump(exclude_none=True),
         builder=_build_gear_spur_preview,
@@ -1637,6 +1930,22 @@ _MODULES: dict[str, PreviewModule] = {
         build=True,
         preview_available=True,
         icon="/static/icons/gear-spur.svg",
+        selection=gear_selection(),
+    ),
+    "gear_internal": PreviewModule(
+        kind="gear_internal",
+        name="Цилиндрическое колесо внутреннего зацепления",
+        description="Зубчатый венец: явный внешний диаметр кольцевой заготовки, впадины с внутренней поверхности, эвольвента торцового сечения и контрольные размеры.",
+        standard="ГОСТ 19274-73 / ГОСТ 13755-2015 / ГОСТ 9587-81 / ГОСТ Р 50531-93 / ISO 53:1998 (nominal)",
+        request_model=InternalGearRequest,
+        defaults=InternalGearRequest().model_dump(exclude_none=True),
+        builder=_build_gear_internal_preview,
+        adapter=_adapt_gear_internal,
+        subgroup="gear_drives",
+        family="gear_drives",
+        build=True,
+        preview_available=True,
+        icon="/static/icons/gear-internal.svg",
         selection=gear_selection(),
     ),
     "camshaft_lobe": PreviewModule(
@@ -1699,6 +2008,9 @@ def managed_pulley_plan(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     if module.kind == "gear_spur":
         from kompas_mcp.gears.cad import build_gear_spur_plan
         return build_gear_spur_plan(normalized_request)
+    if module.kind == "gear_internal":
+        from kompas_mcp.gears.cad import build_internal_gear_plan
+        return build_internal_gear_plan(normalized_request)
     if module.kind == "silent_chain_sprocket":
         preview = build_silent_chain_preview(normalized_request)
         missing = preview["completion"]["missing_fields"]

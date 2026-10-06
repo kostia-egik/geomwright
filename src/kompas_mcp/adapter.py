@@ -2831,6 +2831,12 @@ class KompasAdapter:
     def inspect_cam(self, document_id: str) -> dict[str, Any]:
         return self.runner.call("inspect_cam",{"document_id":document_id,"_require_visible_kompas":True})
 
+    def inspect_silent_chain_sprocket(self, document_id: str) -> dict[str, Any]:
+        """Read a numeric silent-chain block and its saved recipe without writes."""
+        if not str(document_id or "").strip():
+            raise ValueError("Exact document_id is required for silent-chain inspection")
+        return self.runner.call("inspect_silent_chain_sprocket", {"document_id": document_id})
+
     def create_silent_chain_sprocket(
         self, plan: dict[str, Any], *, execute: bool = False,
         confirm_write: bool = False, visible: bool = True,
@@ -2867,6 +2873,34 @@ class KompasAdapter:
         return self.runner.call("create_gear_spur", {
             "plan": plan, "execute": True, "confirm_write": True, "visible": bool(visible),
         }, progress_callback=progress_callback)
+
+    def inspect_gear_spur(self, *, document_id: str) -> dict[str, Any]:
+        """Read one recognized managed gear block with its stored recipe."""
+        if not str(document_id or "").strip():
+            raise ValueError("document_id is required")
+        return self.runner.call("inspect_gear_spur", {"document_id": str(document_id)})
+
+    def create_gear_internal(
+        self, plan: dict[str, Any], *, execute: bool = False,
+        confirm_write: bool = False, visible: bool = True,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Execute a create-only managed internal-gear plan in a new part."""
+        if plan.get("stage") != "internal_gear_cad_plan" or plan.get("plan_version") != 1:
+            raise ValueError("An internal_gear_cad_plan version 1 is required")
+        if not execute:
+            return {"ok": True, "success": True, "executed": False, "stage": "planned", "plan": plan}
+        if confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+        return self.runner.call("create_gear_internal", {
+            "plan": plan, "execute": True, "confirm_write": True, "visible": bool(visible),
+        }, progress_callback=progress_callback)
+
+    def inspect_gear_internal(self, *, document_id: str) -> dict[str, Any]:
+        """Read one recognized managed internal-gear block with its stored recipe."""
+        if not str(document_id or "").strip():
+            raise ValueError("document_id is required")
+        return self.runner.call("inspect_gear_internal", {"document_id": str(document_id)})
 
     def create_managed_pulley(
         self,

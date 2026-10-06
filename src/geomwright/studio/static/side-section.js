@@ -16,7 +16,10 @@ function updateLayout() {
   wrap.classList.toggle("has-side-section", Boolean(data));
   wrap.classList.toggle("side-section-collapsed", Boolean(data) && manuallyHidden);
   toggle.setAttribute("aria-expanded", String(!panel.hidden));
-  toggle.title = t(manuallyHidden ? "chain.axial_show" : "chain.axial_hide");
+  const gear = ["gear_spur", "gear_internal"].includes(data?.family);
+  toggle.title = gear
+    ? t(manuallyHidden ? "gear.axial_show" : "gear.axial_hide")
+    : t(manuallyHidden ? "chain.axial_show" : "chain.axial_hide");
   toggle.setAttribute("aria-label", toggle.title);
   toggle.firstElementChild.textContent = stacked.matches
     ? (manuallyHidden ? "▴" : "▾") : (manuallyHidden ? "‹" : "›");
@@ -149,6 +152,193 @@ function drawSilentSection(rect) {
    legend.textContent = t(legend.dataset.i18n);
 }
 
+function drawGearSideView(rect) {
+  const toothWidth = Math.max(1e-6, Number(data.face_width_mm) || 1);
+  const outside = Math.max(1e-6, Number(data.outside_diameter_mm) || 1);
+  const betaDeg = Number(data.helix_angle_deg) || 0;
+  const rightHand = data.hand !== "left";
+  const lead = Number(data.lead_mm) > 0 ? Number(data.lead_mm) : 0;
+  const handSign = rightHand ? 1 : -1;
+  const twistPerUnit = lead > 0 ? 2 * Math.PI / lead : 0;
+  const outsideRadius = outside / 2;
+  const chamferWidth = Math.max(0, Number(data.tip_chamfer_mm) || 0);
+  const chamferAngle = ((Number(data.tip_chamfer_angle_deg) || 45) * Math.PI) / 180;
+  const chamferDepth = Number(data.tip_chamfer_depth_mm) > 0
+    ? Number(data.tip_chamfer_depth_mm)
+    : chamferWidth * Math.tan(chamferAngle);
+  const tipEdges = (Array.isArray(data.tip_edges) ? data.tip_edges : [])
+    .map((edge) => ({ radius: Number(edge.radius) || 0, angle: Number(edge.angle) || 0 }))
+    .filter((edge) => edge.radius > 0);
+  const leftMargin = 96;
+  const rightMargin = 48;
+  const topMargin = 72;
+  const bottomMargin = 112;
+  const scale = Math.max(0.01, Math.min(
+    (rect.width - leftMargin - rightMargin) / toothWidth,
+    (rect.height - topMargin - bottomMargin) / outside,
+  ));
+  const width = toothWidth * scale;
+  const height = outside * scale;
+  const left = leftMargin + Math.max(0, (rect.width - leftMargin - rightMargin - width) / 2);
+  const top = topMargin + Math.max(0, (rect.height - topMargin - bottomMargin - height) / 2);
+  const right = left + width;
+  const bottom = top + height;
+  const centerY = top + height / 2;
+
+  const chamferX = Math.min(chamferWidth * scale, width / 2);
+  const chamferY = Math.min(chamferDepth * scale, height / 2);
+  const silhouette = new Path2D();
+  silhouette.moveTo(left, top + chamferY);
+  silhouette.lineTo(left + chamferX, top);
+  silhouette.lineTo(right - chamferX, top);
+  silhouette.lineTo(right, top + chamferY);
+  silhouette.lineTo(right, bottom - chamferY);
+  silhouette.lineTo(right - chamferX, bottom);
+  silhouette.lineTo(left + chamferX, bottom);
+  silhouette.lineTo(left, bottom - chamferY);
+  silhouette.closePath();
+  ctx.fillStyle = "rgba(227,170,79,.04)";
+  ctx.fill(silhouette);
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "#e3aa4f";
+  ctx.lineWidth = 2;
+  ctx.stroke(silhouette);
+
+  const internalTipDiameter = Number(data.tip_diameter_mm) || 0;
+  const internalRootDiameter = Number(data.root_diameter_mm) || 0;
+  const internalBore = Boolean(data.internal) && internalTipDiameter > 0;
+  const boreTop = internalBore ? centerY - (internalTipDiameter * scale) / 2 : 0;
+  const boreBottom = internalBore ? centerY + (internalTipDiameter * scale) / 2 : 0;
+  const boreEraseTop = boreTop + 1.5;
+  const boreEraseHeight = Math.max(0, boreBottom - boreTop - 3);
+
+  // Every sampled point of the real transverse profile sweeps a helix across
+  // the face width; its orthographic side-view trace is v = r cos(theta + twist*x).
+  const samples = 20;
+  const drawTrace = (item, color, lineWidth, xStart = 0, xEnd = -toothWidth) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    let drawing = false;
+    for (let index = 0; index <= samples; index++) {
+      const x = xStart + (xEnd - xStart) * (index / samples);
+      const angle = item.angle + handSign * twistPerUnit * x;
+      const visible = Math.sin(angle) > 0.03;
+      const u = left + ((x + toothWidth) / toothWidth) * width;
+      const v = centerY - item.radius * Math.cos(angle) * scale;
+      if (visible && !drawing) {
+        ctx.beginPath();
+        ctx.moveTo(u, v);
+        drawing = true;
+      } else if (visible) {
+        ctx.lineTo(u, v);
+      } else if (drawing) {
+        ctx.stroke();
+        drawing = false;
+      }
+    }
+    if (drawing) ctx.stroke();
+  };
+  ctx.save();
+  if (internalBore) {
+    // Teeth traces belong to the rim bands only; the through-bore stays empty.
+    const traceClip = new Path2D();
+    traceClip.addPath(silhouette);
+    traceClip.rect(left + 2, boreEraseTop, Math.max(0, width - 4), boreEraseHeight);
+    ctx.clip(traceClip, "evenodd");
+  } else {
+    ctx.clip(silhouette);
+  }
+  for (let index = 0; index + 1 < tipEdges.length; index += 2) {
+    drawTrace(tipEdges[index], "rgba(227,170,79,.95)", 1.4);
+    drawTrace(tipEdges[index + 1], "rgba(227,170,79,.95)", 1.4);
+  }
+  ctx.restore();
+
+  if (internalBore) {
+    // The through-bore of the ring: erase the window so the bore reads as a
+    // real opening, keep the outer silhouette edges, then mark the root band.
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fillRect(left + 2, boreEraseTop, Math.max(0, width - 4), boreEraseHeight);
+    ctx.restore();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = "rgba(142, 174, 196, 0.55)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(left, boreTop); ctx.lineTo(right, boreTop);
+    ctx.moveTo(left, boreBottom); ctx.lineTo(right, boreBottom);
+    const rootTop = centerY - (internalRootDiameter * scale) / 2;
+    const rootBottom = centerY + (internalRootDiameter * scale) / 2;
+    ctx.moveTo(left, rootTop); ctx.lineTo(right, rootTop);
+    ctx.moveTo(left, rootBottom); ctx.lineTo(right, rootBottom);
+    ctx.stroke();
+  }
+
+  if (betaDeg > 1e-9) {
+    let labelEdge = null;
+    for (let index = 0; index + 1 < tipEdges.length; index += 2) {
+      if (Math.sin(tipEdges[index].angle) > 0.1) {
+        labelEdge = tipEdges[index];
+        break;
+      }
+    }
+    if (labelEdge) {
+      const start = [
+        right,
+        centerY - labelEdge.radius * Math.cos(labelEdge.angle) * scale,
+      ];
+      label(
+        t("gear.axial_angle", "β = {angle}°", { angle: formatNumber(betaDeg, 1) }),
+        start[0] - 34,
+        start[1] + 16,
+      );
+    }
+  }
+
+  dimension(left, right, bottom, bottom + 36,
+    t("gear.axial_width", "b = {value}", { value: formatNumber(toothWidth, 2) }));
+  const dimensionX = left - 34;
+  ctx.strokeStyle = "#8eacc0";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(left, top);
+  ctx.lineTo(dimensionX - 5, top);
+  ctx.moveTo(left, bottom);
+  ctx.lineTo(dimensionX - 5, bottom);
+  ctx.moveTo(dimensionX, top);
+  ctx.lineTo(dimensionX, bottom);
+  for (const [y, direction] of [[top, 1], [bottom, -1]]) {
+    ctx.moveTo(dimensionX - 3, y + direction * 5);
+    ctx.lineTo(dimensionX, y);
+    ctx.lineTo(dimensionX + 3, y + direction * 5);
+  }
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(dimensionX - 12, centerY);
+  ctx.rotate(-Math.PI / 2);
+  label(t(
+    data.internal ? "gear.axial_outside_internal" : "gear.axial_outside",
+    data.internal ? "D = {value} mm" : "dₐ = {value} mm",
+    { value: formatNumber(outside, 2) },
+  ), 0, 0);
+  ctx.restore();
+
+  document.querySelector("#axial-row-count").textContent = t(
+    "gear.axial_teeth", "z = {count}", { count: data.tooth_count });
+  document.querySelector("#axial-preview-note").textContent = betaDeg > 1e-9
+    ? t(
+      data.internal ? "gear.axial_note_helical_internal" : "gear.axial_note_helical",
+      "β = {angle}°, {hand}, L = {lead} мм, ε_β = {overlap}.",
+      {
+        angle: formatNumber(betaDeg, 2),
+        hand: t(`enum.hand.${rightHand ? "right" : "left"}`),
+        lead: formatNumber(Number(data.lead_mm) || 0, 2),
+        overlap: formatNumber(Number(data.axial_overlap) || 0, 3),
+      },
+    )
+    : t(data.internal ? "gear.axial_note_spur_internal" : "gear.axial_note_spur", "Прямозубое колесо.");
+}
+
 function draw() {
   if (panel.hidden || !data) return;
   const rect = canvas.getBoundingClientRect();
@@ -158,6 +348,7 @@ function draw() {
   canvas.height = Math.round(rect.height * ratio);
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
+  if (["gear_spur", "gear_internal"].includes(data.family)) { drawGearSideView(rect); return; }
   const silent = data.family === "silent_chain_sprocket";
   document.querySelector("#axial-row-count").textContent = t(silent ? "silent.axial_ribs" : "chain.axial_rows", "", { count: data.row_count });
   if (silent && data.drawing) { drawSilentSection(rect); return; }
@@ -278,6 +469,20 @@ function draw() {
 
 window.addEventListener("geomwright-preview", (event) => {
   const result = event.detail;
+  if (["gear_spur", "gear_internal"].includes(result?.family)) {
+    data = result?.secondary_view ? { ...result.secondary_view, family: result.family } : null;
+    for (const node of [panel.querySelector("h3"), rail.querySelector(".axial-rail-caption")]) {
+      node.dataset.i18n = "gear.axial_title";
+      node.textContent = t("gear.axial_title");
+    }
+    panel.querySelector(".axial-legend").dataset.i18n = "gear.axial_legend";
+    panel.querySelector(".axial-legend").textContent = t("gear.axial_legend");
+    canvas.setAttribute("aria-label", t("gear.axial_label"));
+    updateLayout();
+    panel.dataset.state = "ready";
+    requestAnimationFrame(draw);
+    return;
+  }
   data = result?.family === "silent_chain_sprocket"
     ? { ...(result.secondary_view || {}), family: result.family }
     : result?.family === "chain_sprocket" && result.secondary_view ? result.secondary_view : null;

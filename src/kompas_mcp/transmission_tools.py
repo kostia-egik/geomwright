@@ -4,8 +4,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .transmissions import list_chain_profiles as _list_chain_profiles
 from .transmissions import list_v_belt_profiles as _list_v_belt_profiles
 from .transmissions import list_poly_v_profiles as _list_poly_v_profiles
+from .transmissions import preview_chain_sprocket as _preview_chain_sprocket
 from .transmissions import preview_flat_belt_pulley as _preview_flat_belt_pulley
 from .transmissions import preview_timing_belt_pulley as _preview_timing_belt_pulley
 from .transmissions import preview_poly_v_groove as _preview_poly_v_groove
@@ -204,6 +206,19 @@ class ChainSprocketPreviewRequest(BaseModel):
     )
 
 
+class ChainSprocketCreateRequest(ChainSprocketPreviewRequest):
+    name: str = Field(default="Geomwright chain sprocket", min_length=1, max_length=120)
+    execute: bool = False
+    confirm_write: bool = False
+    visible: bool = True
+
+    @model_validator(mode="after")
+    def validate_write_confirmation(self) -> "ChainSprocketCreateRequest":
+        if self.execute and self.confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+        return self
+
+
 class RotationalBlankParameterBaseContract(BaseModel):
     """Operation variables that define a composed rotational blank."""
 
@@ -291,6 +306,42 @@ def register_transmission_tools(mcp: Any, adapter: Any) -> None:
     def preview_flat_belt_pulley(request: FlatBeltPulleyPreviewRequest) -> dict:
         """Preview a cylindrical or explicitly crowned flat-belt pulley rim."""
         return _preview_flat_belt_pulley(**request.model_dump())
+
+    @mcp.tool()
+    def list_chain_profiles() -> dict:
+        """List the ISO 606 / GOST roller and bush chain catalog with tooth-construction strategies."""
+        return _list_chain_profiles()
+
+    @mcp.tool()
+    def preview_chain_sprocket(request: ChainSprocketPreviewRequest) -> dict:
+        """Preview one functional roller/bush chain sprocket tooth gap; no CAD write."""
+        return _preview_chain_sprocket(**request.model_dump())
+
+    @mcp.tool()
+    def create_chain_sprocket(request: ChainSprocketCreateRequest) -> dict:
+        """Plan (execute=false) or create one verified create-only functional sprocket part.
+
+        Creation stores a checksummed recipe so a reopened block restores its
+        designation, tooth count and profile variant for a new build.
+        """
+        return adapter.create_managed_pulley(
+            family="chain_sprocket",
+            profile_request=request.model_dump(
+                exclude={"name", "execute", "confirm_write", "visible"}
+            ),
+            name=request.name,
+            execute=request.execute,
+            confirm_write=request.confirm_write,
+            visible=request.visible,
+        )
+
+    @mcp.tool()
+    def inspect_chain_sprocket(document_id: str) -> dict:
+        """Read one saved managed chain-sprocket block with its recipe and recreate status."""
+        result = adapter.inspect_managed_pulley(document_id=document_id)
+        if not result.get("recognized") or result.get("family") != "chain_sprocket":
+            raise ValueError("The exact document does not contain a recognized chain-sprocket block")
+        return result
 
     @mcp.tool()
     def list_poly_v_profiles() -> dict:

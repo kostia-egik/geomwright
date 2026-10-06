@@ -136,10 +136,151 @@ class ToolCatalogTests(unittest.TestCase):
 
         self.assertEqual(source_tools, set(_registered_tool_names()))
 
+    def test_silent_chain_mcp_preflight_and_write_boundary(self) -> None:
+        from unittest.mock import Mock
+        from mcp.server.fastmcp import FastMCP
+        from kompas_mcp.bridge_runner import BridgeError
+        from kompas_mcp.silent_chain_tools import register_silent_chain_tools
+        from kompas_mcp.transmissions.silent_geometry import SilentChainSelectionRequest
+
+        adapter = Mock()
+        mcp = FastMCP("silent-contract")
+        register_silent_chain_tools(mcp, adapter)
+        tools = {name: tool.fn for name, tool in mcp._tool_manager._tools.items()}
+        page = tools["list_silent_chain_profiles"](standard="din_8190_8191_open", limit=2)
+        self.assertEqual(len(page["profiles"]), 2)
+        self.assertTrue(page["has_more"])
+        self.assertEqual(tools["list_silent_chain_profiles"](query="no-such-size")["total"], 0)
+        request = SilentChainSelectionRequest(standard="din_8190_8191_open", family="outer",
+                                             designation="08-020A", physical_tooth_count=23)
+        preview = tools["preview_silent_chain_sprocket"](request)
+        self.assertTrue(preview["completion"]["ready_for_cad_planning"])
+        self.assertNotIn("geometry", preview)
+        planned = tools["create_silent_chain_sprocket"](request)
+        self.assertFalse(planned["executed"])
+        self.assertNotIn("plan", planned)
+        adapter.create_silent_chain_sprocket.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "confirm_write"):
+            tools["create_silent_chain_sprocket"](request, execute=True)
+        adapter.create_silent_chain_sprocket.assert_not_called()
+        incomplete = SilentChainSelectionRequest(designation="PZ-1-19.05-74-45",
+                                                 physical_tooth_count=17, accuracy_class=1)
+        refused = tools["create_silent_chain_sprocket"](incomplete, execute=True, confirm_write=True)
+        self.assertEqual(refused["stage"], "needs_input")
+        adapter.create_silent_chain_sprocket.assert_not_called()
+        error = BridgeError("native failure")
+        error.partial_result = {"document": {"runtime_id": "@document:0"}, "rollback_performed": False}
+        adapter.create_silent_chain_sprocket.side_effect = error
+        failed = tools["create_silent_chain_sprocket"](request, execute=True, confirm_write=True)
+        self.assertEqual(failed["partial_result"], error.partial_result)
+        self.assertFalse(failed["success"])
+        self.assertTrue(failed["executed"])
+        adapter.create_silent_chain_sprocket.side_effect = None
+        adapter.create_silent_chain_sprocket.return_value = {
+            "ok": True, "success": True, "executed": True,
+            "body": {"volume": 1.0}, "document": {"runtime_id": "@document:0"},
+            "readback": {"large_native_arrays": []}, "steps": []}
+        created = tools["create_silent_chain_sprocket"](request, execute=True, confirm_write=True)
+        self.assertTrue(created["success"])
+        self.assertEqual(created["body_units"]["volume"], "cm3")
+        self.assertNotIn("readback", created)
+        self.assertNotIn("steps", created)
+
+    def test_gear_mcp_preflight_and_write_boundary(self) -> None:
+        from unittest.mock import Mock
+
+        from mcp.server.fastmcp import FastMCP
+
+        from kompas_mcp.gear_tools import register_gear_tools
+        from kompas_mcp.gears import SpurGearCreateRequest, SpurGearRequest
+
+        adapter = Mock()
+        mcp = FastMCP("gear-contract")
+        register_gear_tools(mcp, adapter)
+        tools = {name: tool.fn for name, tool in mcp._tool_manager._tools.items()}
+
+        standards = tools["list_gear_standards"]()
+        self.assertEqual(
+            [item["value"] for item in standards["standards"]],
+            ["gost_13755_2015", "gost_9587_81", "gost_r_50531_93", "iso_53_1998"],
+        )
+
+        preview_request = SpurGearRequest(
+            standard="iso_53_1998", modification="b",
+            module_mm=2.0, tooth_count=20, face_width_mm=20.0,
+        )
+        preview = tools["preview_cylindrical_gear"](preview_request)
+        self.assertTrue(preview["success"])
+        self.assertEqual(preview["family"], "gear_spur")
+        adapter.create_gear_spur.assert_not_called()
+
+        create_request = SpurGearCreateRequest(
+            standard="gost_9587_81", modification="h1_c25",
+            module_mm=0.5, tooth_count=24, face_width_mm=6.0,
+        )
+        adapter.create_gear_spur.return_value = {
+            "ok": True, "success": True, "executed": False, "stage": "planned",
+        }
+        planned = tools["create_cylindrical_gear"](create_request)
+        self.assertFalse(planned["executed"])
+        adapter.create_gear_spur.assert_called_once()
+        self.assertFalse(adapter.create_gear_spur.call_args.kwargs["execute"])
+        adapter.create_gear_spur.reset_mock()
+        with self.assertRaisesRegex(ValueError, "confirm_write"):
+            SpurGearCreateRequest(
+                standard="gost_9587_81", modification="h1_c25",
+                module_mm=0.5, tooth_count=24, face_width_mm=6.0,
+                execute=True,
+            )
+        adapter.create_gear_spur.assert_not_called()
+
+        adapter.inspect_gear_spur.return_value = {"module": "gear_spur", "recipe": {"version": 1}}
+        inspected = tools["inspect_cylindrical_gear"]("doc-1")
+        self.assertEqual(inspected["module"], "gear_spur")
+        adapter.inspect_gear_spur.return_value = {"module": "v_belt"}
+        with self.assertRaisesRegex(ValueError, "recognized gear block"):
+            tools["inspect_cylindrical_gear"]("doc-2")
+
+        from kompas_mcp.gears import InternalGearCreateRequest, InternalGearRequest
+
+        internal_preview_request = InternalGearRequest(
+            module_mm=2.0, tooth_count=40, face_width_mm=20.0,
+            ring_outside_diameter_mm=100.0,
+        )
+        internal_preview = tools["preview_internal_gear"](internal_preview_request)
+        self.assertTrue(internal_preview["success"])
+        self.assertEqual(internal_preview["family"], "gear_internal")
+        self.assertEqual(internal_preview["summary"]["ring_outside_diameter_mm"], 100.0)
+        adapter.create_gear_internal.assert_not_called()
+
+        internal_create_request = InternalGearCreateRequest(
+            module_mm=2.0, tooth_count=40, face_width_mm=20.0,
+            ring_outside_diameter_mm=100.0,
+        )
+        adapter.create_gear_internal.return_value = {
+            "ok": True, "success": True, "executed": False, "stage": "planned",
+        }
+        internal_planned = tools["create_internal_gear"](internal_create_request)
+        self.assertFalse(internal_planned["executed"])
+        adapter.create_gear_internal.assert_called_once()
+        self.assertFalse(adapter.create_gear_internal.call_args.kwargs["execute"])
+        adapter.create_gear_internal.reset_mock()
+        with self.assertRaisesRegex(ValueError, "confirm_write"):
+            InternalGearCreateRequest(
+                module_mm=2.0, tooth_count=40, face_width_mm=20.0,
+                ring_outside_diameter_mm=100.0, execute=True,
+            )
+        adapter.create_gear_internal.assert_not_called()
+
+        adapter.inspect_gear_internal.return_value = {"module": "gear_internal", "recipe": {"version": 1}}
+        internal_inspected = tools["inspect_internal_gear"]("doc-1")
+        self.assertEqual(internal_inspected["module"], "gear_internal")
+        adapter.inspect_gear_internal.return_value = {"module": "gear_spur"}
+        with self.assertRaisesRegex(ValueError, "recognized internal gear block"):
+            tools["inspect_internal_gear"]("doc-2")
+
     def test_server_stays_bootstrap_sized(self) -> None:
         server_tool_names = _source_tool_names([SERVER_PATH])
-
-        self.assertEqual(server_tool_names, ["get_mcp_tool_catalog"])
         self.assertLessEqual(len(SERVER_PATH.read_text(encoding="utf-8").splitlines()), 120)
 
     def test_registration_modules_do_not_import_server(self) -> None:

@@ -7,6 +7,7 @@ manufacturing-conformity certificate. No COM or Studio dependency lives here.
 from __future__ import annotations
 
 import math
+import copy
 from typing import Any
 
 _SEGMENT_TOLERANCE_MM = .0005
@@ -167,6 +168,8 @@ def build_silent_chain_plan(spec: dict[str, Any], profile_request: dict[str, Any
         raise ValueError("name must not be empty")
     radius = spec["outside_diameter_mm"]/2
     inner = spec["inner_rim_diameter_mm"]/2
+    if inner != 0 or spec.get("blank_policy") != "solid_to_axis":
+        raise ValueError("Silent sprocket CAD requires a solid blank to the axis; bores belong to other modules")
     count = spec["physical_tooth_count"]
     period = [list(p) for p in spec["radial_period"]]
     circle = spec.get("radial_tip_circle")
@@ -211,7 +214,15 @@ def build_silent_chain_plan(spec: dict[str, Any], profile_request: dict[str, Any
             cut_path = [[p[0]*math.cos(angle)+p[1]*math.sin(angle),
                          p[1]*math.cos(angle)-p[0]*math.sin(angle)] for p in period[peak:]] + period[1:peak+1]
     cut_angles = [math.atan2(p[0], p[1]) for p in (cut_path[0], cut_path[-1])]
-    cut_entities = path_entities(cut_path, "period")
+    if spec["source_system"].startswith("din"):
+        cut_entities = copy.deepcopy(spec.get("radial_curve_entities") or [])
+        if len(cut_entities) not in (3, 5) or any(e.get("kind") != "nurbs" for e in cut_entities):
+            raise ValueError("DIN CAD requires its analytic-piece cubic NURBS plan; no segment fallback")
+        for entity in cut_entities:
+            entity.update(start=list(entity["points"][0]), end=list(entity["points"][-1]),
+                          degree=entity["order"], line_style=1)
+    else:
+        cut_entities = path_entities(cut_path, "period")
     overshoot = radius+max(1.0, .01*radius)
     left = [overshoot*math.sin(cut_angles[0]), overshoot*math.cos(cut_angles[0])]
     right = [overshoot*math.sin(cut_angles[-1]), overshoot*math.cos(cut_angles[-1])]
@@ -224,6 +235,8 @@ def build_silent_chain_plan(spec: dict[str, Any], profile_request: dict[str, Any
     # Native YOZ sketch maps (u,v) to global (X=0,Y=-v,Z=u).
     # The source spec uses (global Z, global Y), with its space at +Y.
     for entity in cut_entities:
+        if entity["kind"] == "nurbs":
+            entity["points"] = [[p[0], -p[1]] for p in entity["points"]]
         for key in ("start", "end", "center"):
             if key in entity:
                 entity[key] = [entity[key][0], -entity[key][1]]
@@ -274,7 +287,8 @@ def build_silent_chain_plan(spec: dict[str, Any], profile_request: dict[str, Any
                 "expected_bounds_mm": [0., min(p[1] for p in rotations), min(p[0] for p in rotations),
                                        width, max(p[1] for p in rotations), max(p[0] for p in rotations)],
                 "bounds_tolerance_mm": .01, "pattern_count": count},
-            "accuracy": {"circular_runs": "native_arcs", "other_runs": "source_resolution_segments",
+            "accuracy": {"circular_runs": "native_arcs", "other_runs": "analytic_piece_cubic_nurbs" if spec["source_system"].startswith("din") else "source_resolution_segments",
                          "source_circular_chord_error_mm": .002,
                          "max_segment_source_deviation_mm": _SEGMENT_TOLERANCE_MM,
+                         "nurbs_fit": [{"id": e["id"], **e["fit"]} for e in cut_entities if e["kind"] == "nurbs"],
                          "parameterization": "numeric_create_only", "conformity_claim": False}}

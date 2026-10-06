@@ -1637,7 +1637,7 @@ def _sketch_entity_geometry(entity_kind, entity):
             values = None
         if values:
             try:
-                geometry["closed"] = bool(values[0])
+                geometry["closed"] = bool(safe_get(entity, "Closed", False))
                 coordinates = [float(value) for value in list(values[1])]
                 points = [
                     [coordinates[index], coordinates[index + 1]]
@@ -5668,7 +5668,7 @@ def _add_sketch_nurbs(drawing_container, entity):
         raise RuntimeError("A spline needs at least four control points")
     weights = [float(value) for value in list(entity.get("weights") or [])]
     knots = [float(value) for value in list(entity.get("knots") or [])]
-    degree = int(entity.get("degree") or 3)
+    degree = int(entity.get("order") or entity.get("degree") or 3)
     if len(weights) != len(points) // 2:
         weights = [1.0] * (len(points) // 2)
     if not knots:
@@ -22592,7 +22592,7 @@ def _resolve_runtime_workflow_output(runtime_objects, operation_id, output_key):
             )
         return {"type": expected[0], "object": target[expected[1]], "name": safe_get(target[expected[1]], "Name")}
 
-    if scenario == "cut_extrusion":
+    if scenario in ("cut_extrusion", "helical_cut_evolution", "rotational_cut"):
         feature = target.get("feature")
         if feature is None:
             feature = target.get("cut")
@@ -24585,6 +24585,371 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         )
         return
 
+    if scenario == "helical_cut_evolution":
+        import win32com.client
+        sketch_output = _resolve_runtime_output_reference(
+            runtime_objects,
+            params.get("sketch") or params.get("profile"),
+            default_output=params.get("sketch_output") or "sketch",
+            context_label="Workflow helical_cut_evolution sketch reference on operation %s" % operation_id,
+        )
+        if sketch_output is None and bindings.get("sketch_operation"):
+            sketch_operation = bindings["sketch_operation"]
+            sketch_key = bindings.get("sketch_output") or "sketch"
+            sketch_output = _resolve_runtime_workflow_output(runtime_objects, sketch_operation, sketch_key)
+            sketch_output = dict(sketch_output, operation_id=sketch_operation, output_key=sketch_key)
+        if sketch_output is None or sketch_output.get("type") != "sketch":
+            raise RuntimeError("Workflow helical_cut_evolution requires a sketch reference")
+        sketch = sketch_output["object"]
+        sketch_operation_id = sketch_output.get("operation_id")
+        sketch_runtime = runtime_objects.get(sketch_operation_id) or {}
+        if str(sketch_runtime.get("scenario") or "") != "numeric_profile_sketch":
+            raise RuntimeError("Workflow helical_cut_evolution requires a numeric_profile_sketch source")
+
+        axis_output = _resolve_runtime_output_reference(
+            runtime_objects,
+            params.get("axis") or "blank.axis",
+            default_output=params.get("axis_output") or "axis",
+            context_label="Workflow helical_cut_evolution axis reference on operation %s" % operation_id,
+        )
+        if axis_output is None and bindings.get("axis_operation"):
+            axis_operation = bindings["axis_operation"]
+            axis_key = bindings.get("axis_output") or "axis"
+            axis_output = _resolve_runtime_workflow_output(runtime_objects, axis_operation, axis_key)
+            axis_output = dict(axis_output, operation_id=axis_operation, output_key=axis_key)
+        if axis_output is None or axis_output.get("type") not in ("axis", "edge"):
+            raise RuntimeError("Workflow helical_cut_evolution requires an axis or straight edge reference")
+        axis = axis_output["object"]
+
+        reference_diameter = float(params.get("reference_diameter") or 0.0)
+        lead = float(params.get("lead") or 0.0)
+        height = float(params.get("height") or params.get("face_width") or 0.0)
+        hand = str(params.get("hand") or "right").strip().lower()
+        if reference_diameter <= 0.0 or lead <= 0.0 or height <= 0.0:
+            raise RuntimeError("helical_cut_evolution requires positive reference_diameter, lead, and height")
+        if hand not in ("right", "left"):
+            raise RuntimeError("helical_cut_evolution hand must be right or left")
+        start_x = float(params.get("start_x") or 0.0)
+        start_angle = math.radians(float(params.get("start_angle_deg") or 0.0))
+        start_radius = reference_diameter / 2.0
+        anchor_radius = params.get("anchor_radius_mm")
+        anchor_radius = start_radius if anchor_radius is None else float(anchor_radius)
+        start_point = _create_point3d(
+            model_container,
+            "%s spiral start" % (params.get("name") or "Helical cut"),
+            [
+                start_x,
+                anchor_radius * math.sin(start_angle),
+                anchor_radius * math.cos(start_angle),
+            ],
+        )
+        if start_point is None:
+            raise RuntimeError("helical_cut_evolution failed to create the spiral start point")
+
+        auxiliary_container = win32com.client.CastTo(part, "IAuxiliaryGeomContainer")
+        spiral = win32com.client.CastTo(auxiliary_container.Spirals3D.Add(56), "ICylindricSpiral3D")
+        if spiral is None:
+            raise RuntimeError("helical_cut_evolution Spirals3D.Add(56) returned None")
+        spiral_position = safe_get(spiral, "Position")
+        if spiral_position is None:
+            raise RuntimeError("helical_cut_evolution spiral does not expose Position")
+        spiral_position.ParameterType = 1
+        spiral_position.OrientationType = 0
+        if not bool(spiral_position.SetAssociationObject(start_point)):
+            raise RuntimeError("helical_cut_evolution spiral SetAssociationObject(point) returned False")
+        position_parameters = win32com.client.CastTo(
+            spiral_position.LocalCSParameters,
+            "ILocalCSAxesDirectionParam",
+        )
+        if position_parameters is None:
+            raise RuntimeError("helical_cut_evolution spiral does not expose ILocalCSAxesDirectionParam")
+        position_parameters.LeadAxis = 73
+        if not bool(position_parameters.SetDirectingObject(73, axis)):
+            raise RuntimeError("helical_cut_evolution spiral SetDirectingObject(OZ, axis) returned False")
+        if not bool(spiral_position.Update()):
+            raise RuntimeError("helical_cut_evolution spiral position Update() returned False")
+        spiral.CoordinateSystem = _resolve_default_part_object(part, "origin")
+        spiral.DiameterType = 0
+        spiral.Diameter = reference_diameter
+        spiral.BuildingType = 1
+        spiral.Step = lead
+        spiral.Height = height
+        spiral.BuildingDirection = bool(params.get("building_direction", False))
+        spiral.TurnDirection = hand != "left"
+        try:
+            spiral.Name = str(params.get("spiral_name") or ("%s spiral path" % (params.get("name") or "Helical cut")))
+        except Exception:
+            pass
+        if not bool(spiral.Update()):
+            raise RuntimeError("helical_cut_evolution failed to create the spiral path")
+        spiral_gabarit = None
+        for accessor_name in ("GetGabarit", "Gabarit", "GetBox"):
+            accessor = safe_get(spiral, accessor_name)
+            if not callable(accessor):
+                continue
+            try:
+                raw_gabarit = accessor()
+                if raw_gabarit and len(raw_gabarit) == 7:
+                    spiral_gabarit = [float(value) for value in raw_gabarit[1:]]
+                elif raw_gabarit:
+                    spiral_gabarit = [float(value) for value in raw_gabarit]
+            except Exception:
+                spiral_gabarit = None
+            break
+        spiral_turn_readback = {}
+        for attribute_name in ("BuildingType", "Step", "Height", "TurnCount", "Turns", "NumberOfTurns"):
+            value = safe_get(spiral, attribute_name)
+            if value is not None:
+                spiral_turn_readback[attribute_name] = value
+        steps_report.append(
+            {
+                "step": "create_helical_spiral_path",
+                "ok": True,
+                "scenario": scenario,
+                "id": operation_id,
+                "reference": safe_get(spiral, "Reference"),
+                "name": safe_get(spiral, "Name"),
+                "reference_diameter": reference_diameter,
+                "lead": lead,
+                "height": height,
+                "hand": hand,
+                "building_direction": bool(safe_get(spiral, "BuildingDirection", False)),
+                "turn_direction": bool(safe_get(spiral, "TurnDirection", False)),
+                "gabarit_mm": spiral_gabarit,
+                "properties": spiral_turn_readback,
+                "anchor_radius_mm": anchor_radius,
+                "start_point": [start_x, anchor_radius * math.sin(start_angle), anchor_radius * math.cos(start_angle)],
+            }
+        )
+
+        body_before = _active_api5_primary_body_metrics()
+        evolutions = safe_get(model_container, "Evolutions")
+        if evolutions is None:
+            get_evolutions = safe_get(model_container, "GetEvolutions")
+            if callable(get_evolutions):
+                evolutions = get_evolutions()
+        if evolutions is None or not callable(safe_get(evolutions, "Add")):
+            raise RuntimeError("Part does not expose Evolutions.Add")
+        evolution = evolutions.Add(47)
+        if evolution is None:
+            raise RuntimeError("Evolutions.Add(o3d_cutEvolution) returned None")
+        evolution.Sketch = sketch
+        evolution.Edges = [spiral]
+        sketch_shift_type_applied = None
+        if params.get("sketch_shift_type") is not None:
+            try:
+                evolution.SketchShiftType = int(params.get("sketch_shift_type"))
+                sketch_shift_type_applied = int(params.get("sketch_shift_type"))
+            except Exception:
+                sketch_shift_type_applied = None
+        by_surface_normal_applied = None
+        if params.get("by_surface_normal") is not None:
+            try:
+                evolution.BySurfaceNormal = bool(params.get("by_surface_normal"))
+                by_surface_normal_applied = bool(params.get("by_surface_normal"))
+            except Exception:
+                by_surface_normal_applied = None
+        try:
+            evolution.OperationResult = 2
+        except Exception:
+            pass
+        try:
+            evolution.Name = str(params.get("name") or "Helical tooth-space cut")
+        except Exception:
+            pass
+        if not bool(evolution.Update()):
+            raise RuntimeError("helical_cut_evolution cut update failed")
+        update_part = safe_get(part, "Update")
+        part_update_result = bool(update_part()) if callable(update_part) else None
+        body_after = _active_api5_primary_body_metrics()
+        volume_removed = float(body_before["volume"]) - float(body_after["volume"])
+        volume_tolerance = max(1e-9, abs(float(body_before["volume"])) * 1e-9)
+        operation_valid = bool(safe_get(evolution, "Valid", False))
+        if not operation_valid:
+            raise RuntimeError("helical_cut_evolution cut is invalid after update")
+        if body_after["body_count"] != body_before["body_count"]:
+            raise RuntimeError(
+                "helical_cut_evolution changed body count: before=%s after=%s"
+                % (body_before["body_count"], body_after["body_count"])
+            )
+        if volume_removed <= volume_tolerance:
+            raise RuntimeError(
+                "helical_cut_evolution removed no measurable material: before_volume=%s after_volume=%s"
+                % (body_before["volume"], body_after["volume"])
+            )
+        runtime_objects[operation_id] = {
+            "scenario": scenario,
+            "feature": evolution,
+            "cut": evolution,
+            "spiral": spiral,
+            "spiral_start_point": start_point,
+            "interface": operation.get("interface") or {},
+            "params": params,
+        }
+        steps_report.append(
+            {
+                "operation": "workflow_feature",
+                "id": operation_id,
+                "scenario": scenario,
+                "name": safe_get(evolution, "Name"),
+                "type": safe_get(evolution, "Type"),
+                "reference": safe_get(evolution, "Reference"),
+                "valid": operation_valid,
+                "part_update_result": part_update_result,
+                "sketch": _describe_sketch_entity_for_report(sketch),
+                "spiral_reference": safe_get(spiral, "Reference"),
+                "reference_diameter": reference_diameter,
+                "lead": lead,
+                "height": height,
+                "hand": hand,
+                "sketch_shift_type": sketch_shift_type_applied,
+                "by_surface_normal": by_surface_normal_applied,
+                "body_before": body_before,
+                "body_after": body_after,
+                "volume_removed": volume_removed,
+                "model_object_type": safe_get(evolution, "ModelObjectType"),
+                "operation_result": safe_get(evolution, "OperationResult"),
+            }
+        )
+        return
+
+    if scenario == "rotational_cut":
+        import win32com.client
+        profile_points = [
+            [float(point[0]), float(point[1])]
+            for point in (params.get("profile_points") or [])
+        ]
+        if len(profile_points) < 3:
+            raise RuntimeError("Workflow rotational_cut requires at least three profile points")
+        if profile_points[0] != profile_points[-1]:
+            profile_points = profile_points + [list(profile_points[0])]
+        profile_entities = []
+        for index in range(len(profile_points) - 1):
+            start_point = profile_points[index]
+            end_point = profile_points[index + 1]
+            profile_entities.append(
+                {
+                    "id": "profile_seg_%d" % index,
+                    "kind": "segment",
+                    "start": [start_point[0], start_point[1]],
+                    "end": [end_point[0], end_point[1]],
+                    "style": 1,
+                }
+            )
+        profile_sketch, profile_target, profile_entities_report, profile_parameterization = _create_sketch_entities(
+            model_container,
+            part,
+            {
+                "name": params.get("name") or "Rotational cut profile",
+                "plane": params.get("plane") or "XOY",
+                "create_new_sketch": True,
+                "entities": profile_entities,
+            },
+        )
+        axis_output = _resolve_runtime_output_reference(
+            runtime_objects,
+            params.get("axis") or "blank.axis",
+            default_output=params.get("axis_output") or "axis",
+            context_label="Workflow rotational_cut axis reference on operation %s" % operation_id,
+        )
+        if axis_output is None and bindings.get("axis_operation"):
+            axis_operation = bindings["axis_operation"]
+            axis_key = bindings.get("axis_output") or "axis"
+            axis_output = _resolve_runtime_workflow_output(runtime_objects, axis_operation, axis_key)
+            axis_output = dict(axis_output, operation_id=axis_operation, output_key=axis_key)
+        rotation_axis = None
+        if axis_output is not None and axis_output.get("type") in ("axis", "edge"):
+            rotation_axis = axis_output["object"]
+        if rotation_axis is None:
+            rotation_axis = _safe_call(part, "DefaultObject", 71)
+        if rotation_axis is None:
+            raise RuntimeError("Workflow rotational_cut could not resolve a rotation axis")
+
+        rotateds = safe_get(model_container, "Rotateds")
+        if rotateds is None:
+            get_rotateds = safe_get(model_container, "GetRotateds")
+            if callable(get_rotateds):
+                rotateds = get_rotateds()
+        if rotateds is None or not callable(safe_get(rotateds, "Add")):
+            raise RuntimeError("Part does not expose Rotateds.Add")
+        rotated = rotateds.Add(29)
+        if rotated is None:
+            raise RuntimeError("Rotateds.Add(o3d_cutRotated) returned None")
+        try:
+            rotated.Name = str(params.get("name") or "Rotational cut")
+        except Exception:
+            pass
+        try:
+            rotated.Profile = profile_sketch
+        except Exception as exc:
+            raise RuntimeError("Failed to assign rotational_cut profile: " + str(exc))
+        set_profile = safe_get(rotated, "SetProfile")
+        if callable(set_profile):
+            set_profile(profile_sketch)
+        try:
+            rotated.Axis = rotation_axis
+        except Exception as exc:
+            raise RuntimeError("Failed to assign rotational_cut axis: " + str(exc))
+        try:
+            rotated.Direction = 0
+        except Exception:
+            pass
+        try:
+            rotated.ToroidShapeType = False
+        except Exception:
+            pass
+        set_angle = safe_get(rotated, "SetAngle")
+        if callable(set_angle):
+            set_angle(True, float(params.get("angle_degrees") or 360.0))
+        set_rotated_type = safe_get(rotated, "SetRotatedType")
+        if callable(set_rotated_type):
+            set_rotated_type(True, 0)
+        body_before = _active_api5_primary_body_metrics()
+        if not bool(rotated.Update()):
+            raise RuntimeError("rotational_cut rotation update failed")
+        update_part = safe_get(part, "Update")
+        part_update_result = bool(update_part()) if callable(update_part) else None
+        body_after = _active_api5_primary_body_metrics()
+        volume_removed = float(body_before["volume"]) - float(body_after["volume"])
+        volume_tolerance = max(1e-9, abs(float(body_before["volume"])) * 1e-9)
+        if body_after["body_count"] != body_before["body_count"]:
+            raise RuntimeError(
+                "rotational_cut changed body count: before=%s after=%s"
+                % (body_before["body_count"], body_after["body_count"])
+            )
+        if volume_removed <= volume_tolerance:
+            raise RuntimeError(
+                "rotational_cut removed no measurable material: before_volume=%s after_volume=%s"
+                % (body_before["volume"], body_after["volume"])
+            )
+        runtime_objects[operation_id] = {
+            "scenario": scenario,
+            "feature": rotated,
+            "cut": rotated,
+            "rotated": rotated,
+            "sketch": profile_sketch,
+            "interface": operation.get("interface") or {},
+            "params": params,
+        }
+        steps_report.append(
+            {
+                "operation": "workflow_feature",
+                "id": operation_id,
+                "scenario": scenario,
+                "name": safe_get(rotated, "Name"),
+                "reference": safe_get(rotated, "Reference"),
+                "valid": bool(safe_get(rotated, "Valid", False)),
+                "part_update_result": part_update_result,
+                "sketch": _describe_sketch_entity_for_report(profile_sketch),
+                "profile_points": profile_points,
+                "angle_degrees": float(params.get("angle_degrees") or 360.0),
+                "body_before": body_before,
+                "body_after": body_after,
+                "volume_removed": volume_removed,
+            }
+        )
+        return
+
     if scenario == "cut_extrusion":
         sketch_output = _resolve_runtime_output_reference(
             runtime_objects,
@@ -25999,6 +26364,32 @@ def _sample_curve_points(geometry, samples=16):
     if not isinstance(start, list) or not isinstance(end, list) or len(start) != 2 or len(end) != 2:
         return []
     control_points = geometry.get("points")
+    if control_points and geometry.get("knots"):
+        knots, weights = geometry["knots"], geometry.get("weights") or []
+        order = int(geometry.get("degree") or 0)
+        degree, n = order-1, len(control_points)-1
+        if order < 2 or len(knots) != len(control_points)+order or len(weights) != len(control_points):
+            raise RuntimeError("Native NURBS readback has invalid order/array lengths")
+        def evaluate(t, span):
+            values = [[control_points[i][0]*weights[i], control_points[i][1]*weights[i], weights[i]]
+                      for i in range(span-degree, span+1)]
+            for level in range(1, degree+1):
+                for j in range(degree, level-1, -1):
+                    i = span-degree+j
+                    denominator = knots[i+degree-level+1]-knots[i]
+                    alpha = (t-knots[i])/denominator if denominator else 0.0
+                    values[j] = [(1-alpha)*values[j-1][k]+alpha*values[j][k] for k in range(3)]
+            if abs(values[degree][2]) < 1e-12:
+                raise RuntimeError("Native NURBS has a zero evaluated weight")
+            return [values[degree][k]/values[degree][2] for k in (0, 1)]
+        points = []
+        count = max(8, int(samples)//2)
+        for span in range(degree, n+1):
+            lo, hi = knots[span], knots[span+1]
+            if hi > lo:
+                points.extend(evaluate(lo+(hi-lo)*i/count, span) for i in range(count))
+        points.append(evaluate(knots[n+1], n))
+        return points
     if (
         "center" not in geometry
         and isinstance(control_points, list)
@@ -27232,6 +27623,76 @@ def _build_chain_row_layout(doc3, part, model_container, plan):
     }
 
 
+CHAIN_RECIPE_CHUNK = 800
+CHAIN_RECIPE_SCHEMA = "geomwright.chain.recipe"
+
+
+def _chain_recipe_profile(plan):
+    source = dict((plan.get("ownership") or {}).get("source_profile") or {})
+    profile = {
+        "designation": source.get("designation"),
+        "chain_type": source.get("chain_type"),
+        "tooth_count": source.get("tooth_count"),
+        "row_count": source.get("row_count"),
+        "gost_profile_variant": source.get("gost_profile_variant", source.get("tooth_profile_variant")),
+    }
+    if (not profile["designation"] or not profile["chain_type"]
+            or profile["gost_profile_variant"] not in ("offset", "non_offset")):
+        raise RuntimeError("Chain recipe requires a complete source profile")
+    return profile
+
+
+def _chain_recipe_variables(plan):
+    import hashlib
+    recipe = {
+        "schema": CHAIN_RECIPE_SCHEMA,
+        "version": 1,
+        "studio_profile": _chain_recipe_profile(plan),
+        "name": str(plan.get("name") or ""),
+    }
+    encoded = json.dumps(recipe, ensure_ascii=True, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    chunks = [encoded[index:index + CHAIN_RECIPE_CHUNK] for index in range(0, len(encoded), CHAIN_RECIPE_CHUNK)] or [""]
+    if len(chunks) > 12:
+        raise RuntimeError("Chain recipe exceeds the metadata budget")
+    variables = [{"name": "CHAIN_RECIPE_COUNT", "value": len(chunks), "note": None}]
+    for index, chunk in enumerate(chunks):
+        variables.append({"name": "CHAIN_RECIPE_%03d" % index, "value": 0, "note": chunk})
+    variables.append({
+        "name": "CHAIN_RECIPE_HASH",
+        "value": 0,
+        "note": hashlib.sha256(encoded.encode("ascii")).hexdigest(),
+    })
+    return variables
+
+
+def _read_chain_recipe(variables):
+    import hashlib
+    try:
+        items = {}
+        for item in variables:
+            if not isinstance(item, dict):
+                continue
+            items[str(item.get("name") or "")] = item
+        count = int(float((items.get("CHAIN_RECIPE_COUNT") or {}).get("value") or 0))
+        if not 1 <= count <= 12:
+            raise ValueError("invalid chain recipe chunk count")
+        encoded = "".join(
+            str((items.get("CHAIN_RECIPE_%03d" % index) or {}).get("note") or "")
+            for index in range(count)
+        )
+        digest = str((items.get("CHAIN_RECIPE_HASH") or {}).get("note") or "")
+        if hashlib.sha256(encoded.encode("ascii")).hexdigest() != digest:
+            raise ValueError("chain recipe checksum differs")
+        recipe = json.loads(encoded)
+        if recipe.get("schema") != CHAIN_RECIPE_SCHEMA or recipe.get("version") != 1:
+            raise ValueError("unsupported chain recipe version")
+        if not isinstance(recipe.get("studio_profile"), dict):
+            raise ValueError("chain recipe has no studio profile")
+        return recipe, None
+    except Exception as exc:
+        return None, str(exc)
+
+
 def handle_create_chain_sprocket(payload):
     if not bool(payload.get("execute", False)):
         raise ValueError("create_chain_sprocket requires execute=true")
@@ -27321,9 +27782,17 @@ def handle_create_chain_sprocket(payload):
             {"name": "CH_DA", "value": float(derived.get("outside_diameter") or 0.0), "expression": None, "note": "Sprocket outside diameter"},
             {"name": "CH_DF", "value": float(derived.get("root_diameter") or 0.0), "expression": None, "note": "Sprocket root diameter"},
             {"name": "CH_B", "value": float(geometry.get("face_width") or 0.0), "expression": None, "note": "Functional tooth width"},
-        ])
+        ] + _chain_recipe_variables(plan))
         if not metadata_report.get("ok"):
             raise RuntimeError("Managed chain-sprocket metadata variables could not be created")
+        recipe_readback = handle_inspect_managed_pulley({"_document": doc3})
+        if (not recipe_readback.get("recognized")
+                or recipe_readback.get("family") != "chain_sprocket"
+                or dict(recipe_readback.get("profile_request") or {}) != _chain_recipe_profile(plan)
+                or not recipe_readback.get("recreatable")):
+            raise RuntimeError(
+                "Chain ownership/recipe readback failed: %s" % recipe_readback.get("recipe_error")
+            )
 
         current_stage = "axial_rounding"
         body_before_rounding = _active_api5_primary_body_metrics()
@@ -27517,6 +27986,19 @@ def _silent_chain_readback(doc3, plan):
                     if key in entity and (key not in geometry or math.hypot(
                         entity[key][0]-geometry[key][0], entity[key][1]-geometry[key][1]) > 1e-6):
                         return False
+                if entity["kind"] == "nurbs":
+                    if int(geometry.get("degree") or 0) != entity["order"]:
+                        return False
+                    for key in ("points", "weights", "knots"):
+                        planned, observed = entity[key], geometry.get(key) or []
+                        if len(planned) != len(observed):
+                            return False
+                        if key == "points":
+                            if any(math.hypot(a[0]-b[0], a[1]-b[1]) > 1e-7 for a, b in zip(planned, observed)):
+                                return False
+                        elif any(abs(a-b) > 1e-9 for a, b in zip(planned, observed)):
+                            return False
+                    return True
                 return entity["kind"] != "arc" or (abs(float(geometry.get("radius") or 0)-entity["radius"]) <= 1e-6
                     and bool(geometry.get("direction")) == entity["direction"])
             matching = [e for e in actual if matches(e)]
@@ -27652,7 +28134,12 @@ def handle_create_silent_chain_sprocket(payload):
             raise RuntimeError("Silent-chain physical tooth count readback failed")
         cut_step = next(s for s in steps if s.get("id") == "radial_cut")
         removed = float(cut_step["volume_removed"])
-        if abs((before["volume"]-body["volume"])-removed*int(verify["pattern_count"])) > max(1e-6, removed*int(verify["pattern_count"])*1e-4):
+        expected_removed = removed*int(verify["pattern_count"])
+        actual_removed = before["volume"]-body["volume"]
+        # Rounded ASME tips exhibit small non-additivity in native mass properties.
+        # 0.05% remains below a missing instance at the supported maximum count 114.
+        pattern_volume_error = abs(actual_removed-expected_removed)/expected_removed
+        if abs(actual_removed-expected_removed) > max(1e-6, expected_removed*5e-4):
             raise RuntimeError("Silent-chain native pattern omitted or overlapped a material-removing instance: expected=%s actual=%s cm3" %
                                (removed*int(verify["pattern_count"]), before["volume"]-body["volume"]))
         readback = _silent_chain_readback(cast_document_3d(doc3), plan)
@@ -27680,7 +28167,9 @@ def handle_create_silent_chain_sprocket(payload):
                 "block": block, "body": body, "steps": steps, "visibility": visibility, "readback": readback,
                 "exports": exports, "semantic_outputs": exports,
                 "verification": {"ok": True, "final_rebuild_ok": True, "pattern_count": pattern["count"],
-                                 "relative_volume_error": error, "bounds_verified": True,
+                                  "relative_volume_error": error, "bounds_verified": True,
+                                  "pattern_volume_relative_error": pattern_volume_error,
+                                  "pattern_volume_relative_tolerance": 5e-4,
                                  "all_pattern_instances_remove_expected_material": True},
                 "accuracy": plan["accuracy"]}
     except Exception as exc:
@@ -27699,7 +28188,7 @@ LEGACY_GEAR_CONTOUR_CODES = {"gost_a": 1, "gost_b": 2, "gost_c": 3, "gost_d": 4,
 GEAR_RECIPE_CHUNK = 800
 
 
-def _gear_recipe_variables(plan):
+def _gear_recipe_variables(plan, kind=None):
     import hashlib
     recipe = {
         "schema": "geomwright.gear.recipe",
@@ -27707,6 +28196,8 @@ def _gear_recipe_variables(plan):
         "studio_profile": dict(plan.get("profile_request") or {}),
         "name": str(plan.get("name") or ""),
     }
+    if kind is not None:
+        recipe["kind"] = str(kind)
     encoded = json.dumps(recipe, ensure_ascii=True, sort_keys=True, allow_nan=False, separators=(",", ":"))
     chunks = [encoded[index:index + GEAR_RECIPE_CHUNK] for index in range(0, len(encoded), GEAR_RECIPE_CHUNK)] or [""]
     if len(chunks) > 120:
@@ -27782,6 +28273,11 @@ def _inspect_gear_spur_block(doc3):
         item for item in extrusions
         if str(safe_get(item, "Name") or "").lower().endswith(" one tooth space cut")
     ]
+    evolutions = list(iter_collection(safe_get(model, "Evolutions")))
+    cuts.extend(
+        item for item in evolutions
+        if str(safe_get(item, "Name") or "").lower().endswith(" one tooth space cut")
+    )
     patterns = [
         item for item in iter_collection(safe_get(model, "FeaturePatterns"))
         if str(safe_get(item, "Name") or "").lower().endswith(" tooth space pattern")
@@ -27831,6 +28327,23 @@ def _inspect_gear_spur_block(doc3):
     }
 
 
+def handle_inspect_gear_spur(payload):
+    document_id = payload.get("document_id")
+    if not document_id:
+        raise ValueError("document_id is required")
+    app = make_app()
+    document = resolve_document(app, document_id)
+    if document is None:
+        raise RuntimeError("Gear document was not found")
+    doc3 = cast_document_3d(document)
+    if doc3 is None:
+        raise RuntimeError("Gear inspection requires a 3D document")
+    block = _inspect_gear_spur_block(doc3)
+    if block is None:
+        raise RuntimeError("The document does not contain a recognized managed gear block")
+    return block
+
+
 def handle_create_gear_spur(payload):
     if payload.get("execute") is not True or payload.get("confirm_write") is not True:
         raise ValueError("Spur-gear creation requires execute=true and confirm_write=true")
@@ -27843,9 +28356,21 @@ def handle_create_gear_spur(payload):
         raise ValueError("Managed spur-gear ownership schema is missing")
     workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
     operations = list(workflow_params.get("operations") or [])
-    expected_scenarios = ["cylindrical_blank", "numeric_profile_sketch", "cut_extrusion", "circular_pattern"]
-    if [str(item.get("scenario") or "") for item in operations] != expected_scenarios:
-        raise ValueError("Managed spur gear requires blank, profile, cut, and circular-pattern operations")
+    scenario_list = [str(item.get("scenario") or "") for item in operations]
+    spur_scenarios = ["numeric_profile_sketch", "cut_extrusion", "circular_pattern"]
+    helical_scenarios = ["numeric_profile_sketch", "helical_cut_evolution", "circular_pattern"]
+    index = 1
+    chamfer_count = 0
+    while index < len(scenario_list) and scenario_list[index] == "rotational_cut":
+        chamfer_count += 1
+        index += 1
+    core_scenarios = scenario_list[index:]
+    if (
+        scenario_list[:1] != ["cylindrical_blank"]
+        or chamfer_count > 2
+        or core_scenarios not in (spur_scenarios, helical_scenarios)
+    ):
+        raise ValueError("Managed gear requires blank, optional chamfer cuts, profile, tooth-space cut, and circular pattern")
     name = str(plan.get("name") or "").strip()
     if not name:
         raise ValueError("Gear plan name must not be empty")
@@ -27915,11 +28440,52 @@ def handle_create_gear_spur(payload):
         pattern_step = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
         if pattern_step is None or int(pattern_step.get("count") or 0) != int(verify.get("pattern_count") or 0):
             raise RuntimeError("Gear physical tooth count readback failed")
+        stage = "hide_auxiliary_geometry"
+        auxiliary_objects = []
+        blank_runtime = runtime_objects.get("blank") or {}
+        for role in ("axis_start", "axis_end", "axis"):
+            if blank_runtime.get(role) is not None:
+                auxiliary_objects.append((role, blank_runtime[role]))
+        cut_runtime = runtime_objects.get("tooth_space_cut") or {}
+        for role in ("spiral", "spiral_start_point"):
+            if cut_runtime.get(role) is not None:
+                auxiliary_objects.append((role, cut_runtime[role]))
+        for operation_id, runtime in runtime_objects.items():
+            if str(operation_id).startswith("tip_chamfer") and runtime.get("sketch") is not None:
+                auxiliary_objects.append((operation_id + "_sketch", runtime["sketch"]))
+        auxiliary_objects.extend(
+            ("sketch", sketch)
+            for sketch in iter_collection(safe_get(model, "Sketchs"))
+        )
+        default_object = safe_get(part, "DefaultObject")
+        if callable(default_object):
+            for plane_id in (1, 2, 3, 71, 72, 73):
+                try:
+                    plane_object = default_object(plane_id)
+                except Exception:
+                    plane_object = None
+                if plane_object is not None:
+                    auxiliary_objects.append(("default_%d" % plane_id, plane_object))
+        visibility_report = _hide_auxiliary_model_objects(auxiliary_objects, hidden=True)
+        visibility_failures = [
+            item for item in (visibility_report.get("objects") or [])
+            if not item.get("ok") and not str(item.get("role") or "").startswith("default_")
+        ]
+        steps_report.append(
+            {
+                "step": "hide_auxiliary_geometry",
+                "ok": bool(visibility_report.get("ok")),
+                "hidden_count": len(auxiliary_objects),
+                "failures": visibility_failures,
+            }
+        )
+        if visibility_failures:
+            raise RuntimeError("Gear auxiliary geometry could not be hidden: %s" % visibility_failures)
         stage = "persist_ownership"
         profile_request = dict(plan.get("profile_request") or {})
         geometry = plan.get("geometry") or {}
         metadata = _apply_part_variables(part, [
-            {"name": "GW_GEAR_VERSION", "value": 1, "expression": None, "note": "Create-only spur gear"},
+            {"name": "GW_GEAR_VERSION", "value": 1, "expression": None, "note": "Create-only cylindrical gear"},
             {"name": "GW_FAMILY_CODE", "value": 8, "expression": None, "note": "Geomwright gear family code"},
             {"name": "GEAR_M", "value": float(profile_request.get("module_mm") or 0.0), "expression": None},
             {"name": "GEAR_Z", "value": int(profile_request.get("tooth_count") or 0), "expression": None},
@@ -27930,6 +28496,8 @@ def handle_create_gear_spur(payload):
             {"name": "GEAR_DA", "value": 2.0 * float(geometry.get("outside_radius") or 0.0), "expression": None},
             {"name": "GEAR_DF", "value": 2.0 * float(geometry.get("root_radius") or 0.0), "expression": None},
             {"name": "GEAR_B", "value": float(geometry.get("face_width") or 0.0), "expression": None},
+            {"name": "GEAR_BETA_DEG", "value": float(profile_request.get("helix_angle_deg") or 0.0), "expression": None},
+            {"name": "GEAR_HAND", "value": 1 if str(profile_request.get("hand") or "right").lower() == "right" else 0, "expression": None},
             {"name": "GEAR_VERIFIED", "value": 1, "expression": None, "note": "Host and native checks passed"},
         ] + _gear_recipe_variables(plan))
         if not metadata.get("ok"):
@@ -27965,6 +28533,314 @@ def handle_create_gear_spur(payload):
         }
     except Exception as exc:
         raise RuntimeError("create_gear_spur failed at %s: %s | partial_document=%s" %
+                           (stage, exc, json.dumps(describe_runtime_document(doc3, app) if doc3 else None)))
+
+
+def _inspect_gear_internal_block(doc3):
+    part = safe_get(doc3, "TopPart")
+    if part is None:
+        return None
+    items = {str(safe_get(variable, "Name") or ""): variable for variable in _iter_operation_variables(part)}
+    variables = {name: safe_get(variable, "Value") for name, variable in items.items()}
+    if variables.get("GW_GEAR_VERSION") != 2:
+        return None
+    required = {
+        "GEAR_M", "GEAR_Z", "GEAR_X", "GEAR_ALPHA_DEG",
+        "GEAR_DA", "GEAR_DF", "GEAR_B", "GEAR_RING_DA", "GEAR_VERIFIED",
+    }
+    if not required.issubset(variables):
+        return None
+    has_standard = "GEAR_STANDARD" in variables and "GEAR_MODIFICATION" in variables
+    if not has_standard and "GEAR_CONTOUR" not in variables:
+        return None
+    model = cast_model_container(part)
+    if model is None:
+        return None
+
+    def object_name(item):
+        return str(safe_get(item, "Name") or "").lower()
+
+    sketches = list(iter_collection(safe_get(model, "Sketchs")))
+    blank_sketch = [item for item in sketches if object_name(item).endswith(" ring blank sketch")]
+    gap_sketch = [item for item in sketches if object_name(item).endswith(" one internal tooth space")]
+    extrusions = list(iter_collection(safe_get(model, "Extrusions")))
+    blanks = [item for item in extrusions if object_name(item).endswith(" ring blank")]
+    rotateds = safe_get(model, "Rotateds")
+    if rotateds is None:
+        get_rotateds = safe_get(model, "GetRotateds")
+        rotateds = get_rotateds() if callable(get_rotateds) else None
+    bore_cuts = [
+        item for item in iter_collection(rotateds)
+        if object_name(item).endswith(" bore cut")
+    ]
+    cuts = [
+        item for item in extrusions
+        if object_name(item).endswith(" one internal tooth space cut")
+    ]
+    cuts.extend(
+        item for item in iter_collection(safe_get(model, "Evolutions"))
+        if object_name(item).endswith(" one internal tooth space cut")
+    )
+    patterns = [
+        item for item in iter_collection(safe_get(model, "FeaturePatterns"))
+        if object_name(item).endswith(" internal tooth space pattern")
+    ]
+    if (
+        len(blank_sketch) != 1 or len(gap_sketch) != 1
+        or len(blanks) != 1 or len(bore_cuts) != 1 or not cuts or len(patterns) != 1
+    ):
+        return None
+    recipe, recipe_error = _read_gear_recipe(items)
+    if recipe is not None and recipe.get("kind") != "internal":
+        recipe, recipe_error = None, "gear recipe kind differs"
+    if has_standard:
+        standard = GEAR_STANDARD_NAMES.get(int(round(float(variables.get("GEAR_STANDARD") or 0))), "gost_13755_2015")
+        modification = GEAR_MODIFICATION_NAMES.get(int(round(float(variables.get("GEAR_MODIFICATION") or 0))), "custom")
+    else:
+        legacy_names = {value: key for key, value in LEGACY_GEAR_CONTOUR_CODES.items()}
+        legacy = legacy_names.get(int(round(float(variables.get("GEAR_CONTOUR") or 0))), "custom")
+        standard = "gost_13755_2015"
+        modification = legacy.replace("gost_", "") if legacy.startswith("gost_") else "custom"
+    profile = {
+        "standard": standard,
+        "modification": modification,
+        "module_mm": variables.get("GEAR_M"),
+        "tooth_count": int(round(float(variables.get("GEAR_Z") or 0))),
+        "pressure_angle_deg": variables.get("GEAR_ALPHA_DEG"),
+        "profile_shift": variables.get("GEAR_X"),
+        "face_width_mm": variables.get("GEAR_B"),
+        "ring_outside_diameter_mm": variables.get("GEAR_RING_DA"),
+    }
+    if recipe and recipe.get("studio_profile"):
+        profile = dict(recipe["studio_profile"])
+    owned = [
+        safe_get(item, "Reference")
+        for item in [blank_sketch[0], gap_sketch[0], blanks[0], bore_cuts[0]]
+        + list(cuts) + [patterns[0]]
+        if safe_get(item, "Reference")
+    ]
+    verified = bool(variables.get("GEAR_VERIFIED") == 1)
+    return {
+        "id": "gear-internal:" + str(owned[0]) if owned else "gear-internal:unknown",
+        "schema": "geomwright.managed_gear_internal",
+        "version": 1,
+        "module": "gear_internal",
+        "name": str(safe_get(part, "Name") or "Geomwright internal gear"),
+        "profile": profile,
+        "editable": False,
+        "verified": verified,
+        "status": "verified" if verified else "partial",
+        "recipe": recipe,
+        "recipe_error": recipe_error,
+        "recreatable": bool(recipe and recipe.get("studio_profile")),
+        "owned_references": owned,
+    }
+
+
+def handle_inspect_gear_internal(payload):
+    document_id = payload.get("document_id")
+    if not document_id:
+        raise ValueError("document_id is required")
+    app = make_app()
+    document = resolve_document(app, document_id)
+    if document is None:
+        raise RuntimeError("Internal gear document was not found")
+    doc3 = cast_document_3d(document)
+    if doc3 is None:
+        raise RuntimeError("Internal gear inspection requires a 3D document")
+    block = _inspect_gear_internal_block(doc3)
+    if block is None:
+        raise RuntimeError("The document does not contain a recognized managed internal gear block")
+    return block
+
+
+def handle_create_gear_internal(payload):
+    if payload.get("execute") is not True or payload.get("confirm_write") is not True:
+        raise ValueError("Internal-gear creation requires execute=true and confirm_write=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "internal_gear_cad_plan" or int(plan.get("plan_version") or 0) != 1:
+        raise ValueError("An internal_gear_cad_plan version 1 is required")
+    if plan.get("family") != "gear_internal":
+        raise ValueError("Managed internal-gear plan family must be gear_internal")
+    if (plan.get("ownership") or {}).get("schema") != "geomwright.managed_gear_internal":
+        raise ValueError("Managed internal-gear ownership schema is missing")
+    workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
+    operations = list(workflow_params.get("operations") or [])
+    scenario_list = [str(item.get("scenario") or "") for item in operations]
+    spur_scenarios = [
+        "cylindrical_blank", "rotational_cut", "numeric_profile_sketch",
+        "cut_extrusion", "circular_pattern",
+    ]
+    helical_scenarios = [
+        "cylindrical_blank", "rotational_cut", "numeric_profile_sketch",
+        "helical_cut_evolution", "circular_pattern",
+    ]
+    if scenario_list not in (spur_scenarios, helical_scenarios):
+        raise ValueError(
+            "Managed internal gear requires ring blank, bore cut, tooth-space "
+            "sketch and cut, and circular pattern"
+        )
+    name = str(plan.get("name") or "").strip()
+    if not name:
+        raise ValueError("Internal gear plan name must not be empty")
+    app = make_app()
+    doc3 = None
+    steps_report = []
+    stage = "create_document"
+    try:
+        doc3, part, model = _create_part_document(app, bool(payload.get("visible", True)))
+        part = safe_get(cast_document_3d(doc3), "TopPart")
+        model = cast_model_container(part)
+        if part is None or model is None:
+            raise RuntimeError("Managed internal-gear document has no top part or model container")
+        part.Name = name
+        if not part.Update():
+            raise RuntimeError("Internal gear part name update failed")
+        runtime_objects = {}
+        for index, operation in enumerate(operations):
+            stage = str(operation.get("id") or "operation_%d" % index)
+            report_progress(
+                10 + int(70.0 * index / max(1, len(operations))),
+                str(operation.get("scenario") or "workflow_operation"),
+                name=str((operation.get("params") or {}).get("name") or ""),
+            )
+            _execute_workflow_operation(part, model, operation, runtime_objects, steps_report)
+        stage = "rebuild_and_body_verification"
+        if not cast_document_3d(doc3).RebuildDocument():
+            raise RuntimeError("Internal gear final rebuild failed")
+        import win32com.client
+        bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+        body = _active_api5_primary_body_metrics()
+        if len(bodies) != 1 or not body["solid"] or not 0.0 < float(body["volume"]):
+            raise RuntimeError("Internal gear result must be one positive-volume solid")
+        box = win32com.client.CastTo(bodies[0], "IBody7").GetGabarit()
+        if not box or not box[0] or len(box) != 7:
+            raise RuntimeError("Internal gear body bounds unavailable")
+        body["bounds_mm"] = [float(value) for value in box[1:]]
+        verify = plan.get("verification") or {}
+        expected_volume = float(verify.get("expected_volume_mm3") or 0.0)
+        if expected_volume <= 0.0:
+            raise RuntimeError("Internal gear plan expected volume is missing")
+        error = abs(float(body["volume"]) * 1000.0 / expected_volume - 1.0)
+        if error > float(verify.get("volume_relative_tolerance") or 0.01):
+            raise RuntimeError("Internal gear body volume disagrees with the plan: " + str(error))
+        expected_bounds = [float(value) for value in (verify.get("expected_bounds_mm") or [])]
+        bound_candidates = [
+            [float(value) for value in candidate]
+            for candidate in (verify.get("expected_bounds_candidates_mm") or [expected_bounds])
+            if len(candidate) == 6
+        ]
+        bounds_tolerance = float(verify.get("bounds_tolerance_mm") or 0.05)
+        width = float(verify.get("face_width_mm") or 0.0)
+        max_radius = float(verify.get("max_radius_mm") or 0.0)
+        actual = [float(value) for value in body["bounds_mm"]]
+        extent_ok = (
+            max_radius > 0.0
+            and abs(actual[0] + width) <= bounds_tolerance
+            and abs(actual[3]) <= bounds_tolerance
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) <= max_radius + bounds_tolerance
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) >= 0.5 * max_radius
+        )
+        if not extent_ok and not any(
+            all(abs(actual_value - expected) <= bounds_tolerance for actual_value, expected in zip(actual, candidate))
+            for candidate in bound_candidates
+        ):
+            raise RuntimeError("Internal gear body bounds disagree with the plan: " + str(body["bounds_mm"]))
+        pattern_step = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
+        if pattern_step is None or int(pattern_step.get("count") or 0) != int(verify.get("pattern_count") or 0):
+            raise RuntimeError("Internal gear physical tooth count readback failed")
+        stage = "hide_auxiliary_geometry"
+        auxiliary_objects = []
+        blank_runtime = runtime_objects.get("blank") or {}
+        for role in ("axis_start", "axis_end", "axis"):
+            if blank_runtime.get(role) is not None:
+                auxiliary_objects.append((role, blank_runtime[role]))
+        cut_runtime = runtime_objects.get("tooth_space_cut") or {}
+        for role in ("spiral", "spiral_start_point"):
+            if cut_runtime.get(role) is not None:
+                auxiliary_objects.append((role, cut_runtime[role]))
+        auxiliary_objects.extend(
+            ("sketch", sketch)
+            for sketch in iter_collection(safe_get(model, "Sketchs"))
+        )
+        default_object = safe_get(part, "DefaultObject")
+        if callable(default_object):
+            for plane_id in (1, 2, 3, 71, 72, 73):
+                try:
+                    plane_object = default_object(plane_id)
+                except Exception:
+                    plane_object = None
+                if plane_object is not None:
+                    auxiliary_objects.append(("default_%d" % plane_id, plane_object))
+        visibility_report = _hide_auxiliary_model_objects(auxiliary_objects, hidden=True)
+        visibility_failures = [
+            item for item in (visibility_report.get("objects") or [])
+            if not item.get("ok") and not str(item.get("role") or "").startswith("default_")
+        ]
+        steps_report.append(
+            {
+                "step": "hide_auxiliary_geometry",
+                "ok": bool(visibility_report.get("ok")),
+                "hidden_count": len(auxiliary_objects),
+                "failures": visibility_failures,
+            }
+        )
+        if visibility_failures:
+            raise RuntimeError("Internal gear auxiliary geometry could not be hidden: %s" % visibility_failures)
+        stage = "persist_ownership"
+        profile_request = dict(plan.get("profile_request") or {})
+        geometry = plan.get("geometry") or {}
+        metadata = _apply_part_variables(part, [
+            {"name": "GW_GEAR_VERSION", "value": 2, "expression": None, "note": "Create-only internal cylindrical gear"},
+            {"name": "GW_FAMILY_CODE", "value": 9, "expression": None, "note": "Geomwright internal gear family code"},
+            {"name": "GEAR_KIND", "value": 2, "expression": None, "note": "Internal gear kind"},
+            {"name": "GEAR_M", "value": float(profile_request.get("module_mm") or 0.0), "expression": None},
+            {"name": "GEAR_Z", "value": int(profile_request.get("tooth_count") or 0), "expression": None},
+            {"name": "GEAR_X", "value": float(profile_request.get("profile_shift") or 0.0), "expression": None},
+            {"name": "GEAR_ALPHA_DEG", "value": float(profile_request.get("pressure_angle_deg") or 20.0), "expression": None},
+            {"name": "GEAR_STANDARD", "value": GEAR_STANDARD_CODES.get(str(profile_request.get("standard")), 1), "expression": None},
+            {"name": "GEAR_MODIFICATION", "value": GEAR_MODIFICATION_CODES.get(str(profile_request.get("modification")), 0), "expression": None},
+            {"name": "GEAR_DA", "value": 2.0 * float(geometry.get("tip_radius") or 0.0), "expression": None},
+            {"name": "GEAR_DF", "value": 2.0 * float(geometry.get("root_radius") or 0.0), "expression": None},
+            {"name": "GEAR_B", "value": float(geometry.get("face_width") or 0.0), "expression": None},
+            {"name": "GEAR_BETA_DEG", "value": float(profile_request.get("helix_angle_deg") or 0.0), "expression": None},
+            {"name": "GEAR_HAND", "value": 1 if str(profile_request.get("hand") or "right").lower() == "right" else 0, "expression": None},
+            {"name": "GEAR_RING_DA", "value": 2.0 * float(geometry.get("ring_outside_radius") or 0.0), "expression": None},
+            {"name": "GEAR_VERIFIED", "value": 1, "expression": None, "note": "Host and native checks passed"},
+        ] + _gear_recipe_variables(plan, kind="internal"))
+        if not metadata.get("ok"):
+            raise RuntimeError("Internal gear metadata variables could not be created")
+        block = _inspect_gear_internal_block(cast_document_3d(doc3))
+        if not block or block.get("module") != "gear_internal" or block.get("profile") != profile_request:
+            raise RuntimeError("Internal gear ownership/recipe readback failed")
+        report_progress(100, "completed", name=name)
+        return {
+            "ok": True,
+            "success": True,
+            "executed": True,
+            "stage": "verified",
+            "saved": False,
+            "closed": False,
+            "document": describe_runtime_document(doc3, app),
+            "block": block,
+            "body": body,
+            "steps": steps_report,
+            "exports": {
+                step["id"]: step.get("feature") or step.get("sketch")
+                for step in steps_report
+                if step.get("id")
+            },
+            "verification": {
+                "ok": True,
+                "final_rebuild_ok": True,
+                "pattern_count": pattern_step["count"],
+                "relative_volume_error": error,
+                "bounds_verified": True,
+            },
+            "accuracy": plan.get("accuracy"),
+        }
+    except Exception as exc:
+        raise RuntimeError("create_gear_internal failed at %s: %s | partial_document=%s" %
                            (stage, exc, json.dumps(describe_runtime_document(doc3, app) if doc3 else None)))
 
 
@@ -28214,6 +29090,16 @@ def handle_finalize_cam(payload):
         raise RuntimeError("Cam verification marker readback failed")
     report_progress(100,"cam_host_verified",document_id=payload["document_id"])
     return {"ok":True,"document":describe_runtime_document(doc,app)}
+
+
+def handle_inspect_silent_chain_sprocket(payload):
+    app = make_app()
+    if not str(payload.get("document_id") or "").strip():
+        raise ValueError("Exact document_id is required for silent-chain inspection")
+    doc = resolve_document_strict(app, payload["document_id"])
+    block = _inspect_silent_chain_block(cast_document_3d(doc))
+    return {"ok": True, "document": describe_runtime_document(doc, app),
+            "recognized": block is not None, "block": block}
 
 
 def handle_inspect_cam(payload):
@@ -29021,12 +29907,15 @@ def handle_inspect_managed_pulley(payload):
         name = str(safe_get(variable, "Name") or "")
         if not name:
             continue
+        note = safe_get(variable, "ParameterNote")
+        if note is None:
+            note = safe_get(variable, "Note")
         variables.append(
             {
                 "name": name,
                 "expression": safe_get(variable, "Expression"),
                 "value": safe_get(variable, "Value"),
-                "note": safe_get(variable, "ParameterNote"),
+                "note": note,
                 "reference": safe_get(variable, "Reference"),
             }
         )
@@ -29212,6 +30101,12 @@ def handle_inspect_managed_pulley(payload):
             "gost_profile_variant": None,
         }
         display_name = blank_name[:-6] if blank_name.lower().endswith(" blank") else "Chain sprocket"
+    chain_recipe = None
+    chain_recipe_error = None
+    if family == "chain_sprocket":
+        chain_recipe, chain_recipe_error = _read_chain_recipe(variables)
+        if chain_recipe and isinstance(chain_recipe.get("studio_profile"), dict):
+            profile_request = dict(chain_recipe["studio_profile"])
     owned_references = sorted(
         int(item.get("reference"))
         for item in sketches + rotateds + fillets + extrusions + feature_patterns
@@ -29274,6 +30169,9 @@ def handle_inspect_managed_pulley(payload):
         "profile_request": profile_request,
         "owned_references": owned_references,
         "identity_references": identity_references,
+        "recipe": chain_recipe,
+        "recipe_error": chain_recipe_error,
+        "recreatable": bool(family == "chain_sprocket" and chain_recipe and chain_recipe.get("studio_profile")),
         "document": describe_document(document, app),
         "evidence": evidence,
         "variables": variables,
@@ -29320,7 +30218,11 @@ def handle_studio_workspace_snapshot(payload):
                         "editable": bool(
                             inspection.get("profile_request")
                             and all(value is not None for value in inspection.get("profile_request").values())
+                            and not inspection.get("recreatable")
                         ),
+                        "recipe": inspection.get("recipe"),
+                        "recipe_error": inspection.get("recipe_error"),
+                        "recreatable": bool(inspection.get("recreatable")),
                     }
                 )
             owned = set(inspection.get("owned_references") or [])
@@ -29336,6 +30238,10 @@ def handle_studio_workspace_snapshot(payload):
             if gear_block is not None:
                 entry["blocks"].append(gear_block)
                 owned.update(gear_block["owned_references"])
+            internal_gear_block = _inspect_gear_internal_block(doc3)
+            if internal_gear_block is not None:
+                entry["blocks"].append(internal_gear_block)
+                owned.update(internal_gear_block["owned_references"])
             model_container = cast_model_container(safe_get(doc3, "TopPart"))
             for collection_name, accessors in MODEL_OBJECT_COLLECTION_SPECS:
                 collection, _accessor, _errors = _resolve_model_object_collection(model_container, accessors)
@@ -29386,6 +30292,8 @@ def _dispatch_action(request):
         return handle_finalize_cam(payload)
     if action == "inspect_cam":
         return handle_inspect_cam(payload)
+    if action == "inspect_silent_chain_sprocket":
+        return handle_inspect_silent_chain_sprocket(payload)
     if action == "list_documents":
         return handle_list_documents()
     if action == "activate_document":
@@ -29492,6 +30400,13 @@ def _dispatch_action(request):
         return handle_verify_silent_chain_sprocket(payload)
     if action == "create_gear_spur":
         return handle_create_gear_spur(payload)
+
+    if action == "inspect_gear_spur":
+        return handle_inspect_gear_spur(payload)
+    if action == "create_gear_internal":
+        return handle_create_gear_internal(payload)
+    if action == "inspect_gear_internal":
+        return handle_inspect_gear_internal(payload)
     if action == "update_managed_pulley":
         return handle_update_managed_pulley(payload)
     if action == "inspect_managed_pulley":

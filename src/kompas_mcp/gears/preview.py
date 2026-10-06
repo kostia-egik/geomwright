@@ -6,6 +6,7 @@ import math
 from .checks import evaluate_gear_checks
 from .involute import build_spur_gear_geometry
 from .measure import base_pitch, chordal_tooth, constant_chord, over_pin_measurement, span_measurement
+from .pins import select_standard_pin
 
 
 def build_spur_gear_preview(
@@ -43,29 +44,45 @@ def build_spur_gear_preview(
         }
 
     pin_diameter = request.get("pin_diameter_mm")
+    alpha_n = math.radians(geometry.rack.pressure_angle_deg)
+    pin_kwargs = {
+        "normal_pressure_angle_rad": alpha_n,
+        "transverse_pressure_angle_rad": geometry.pressure_angle_rad,
+    }
+
+    def pin_probe(diameter: float) -> dict:
+        return over_pin_measurement(
+            module_mm=module,
+            tooth_count=tooth_count,
+            profile_shift=geometry.profile_shift,
+            pressure_angle_rad=geometry.pressure_angle_rad,
+            pitch_radius=geometry.pitch_radius,
+            outside_radius=geometry.outside_radius,
+            pin_diameter_mm=diameter,
+            **pin_kwargs,
+        )
+
     if pin_diameter is None:
         preferred = (1.44 if tooth_count % 2 == 0 else 1.68) * module
-        alternate = (1.68 if tooth_count % 2 == 0 else 1.44) * module
-        chosen = None
-        for candidate, source in (
-            (preferred, "nominal_even_1.44_m" if tooth_count % 2 == 0 else "nominal_odd_1.68_m"),
-            (alternate, "fallback_even_1.68_m" if tooth_count % 2 == 0 else "fallback_odd_1.44_m"),
-        ):
-            probe = over_pin_measurement(
-                module_mm=module,
-                tooth_count=tooth_count,
-                profile_shift=geometry.profile_shift,
-                pressure_angle_rad=geometry.pressure_angle_rad,
-                pitch_radius=geometry.pitch_radius,
-                outside_radius=geometry.outside_radius,
-                pin_diameter_mm=candidate,
-            )
-            if probe.get("fits_below_tips"):
-                chosen = (candidate, source)
-                break
-        if chosen is None:
-            chosen = (preferred, "nominal_unplaced")
-        pin_diameter, pin_source = chosen
+        standard = select_standard_pin(
+            preferred, lambda diameter: pin_probe(diameter).get("fits_below_tips")
+        )
+        if standard is not None:
+            pin_diameter = standard["diameter_mm"]
+            pin_source = standard["source"]
+        else:
+            alternate = (1.68 if tooth_count % 2 == 0 else 1.44) * module
+            chosen = None
+            for candidate, source in (
+                (preferred, "nominal_even_1.44_m" if tooth_count % 2 == 0 else "nominal_odd_1.68_m"),
+                (alternate, "fallback_even_1.68_m" if tooth_count % 2 == 0 else "fallback_odd_1.44_m"),
+            ):
+                if pin_probe(candidate).get("fits_below_tips"):
+                    chosen = (candidate, source)
+                    break
+            if chosen is None:
+                chosen = (preferred, "nominal_unplaced")
+            pin_diameter, pin_source = chosen
     else:
         pin_diameter = float(pin_diameter)
         pin_source = "explicit"
@@ -78,11 +95,12 @@ def build_spur_gear_preview(
             base_radius=geometry.base_radius,
             outside_radius=geometry.outside_radius,
             root_radius=geometry.root_radius,
+            **pin_kwargs,
         ),
         "constant_chord": constant_chord(
             module_mm=module,
             profile_shift=geometry.profile_shift,
-            pressure_angle_rad=geometry.pressure_angle_rad,
+            pressure_angle_rad=alpha_n,
             pitch_radius=geometry.pitch_radius,
             outside_radius=geometry.outside_radius,
         ),
@@ -95,10 +113,11 @@ def build_spur_gear_preview(
                 pitch_radius=geometry.pitch_radius,
                 outside_radius=geometry.outside_radius,
                 pin_diameter_mm=pin_diameter,
+                **pin_kwargs,
             ),
             "pin_source": pin_source,
         },
-        "base_pitch_mm": base_pitch(module, geometry.pressure_angle_rad),
+        "base_pitch_mm": base_pitch(module, alpha_n),
         **chordal_tooth(
             pitch_radius=geometry.pitch_radius,
             tooth_thickness_mm=geometry.tooth_thickness_mm,
@@ -107,6 +126,9 @@ def build_spur_gear_preview(
     report = evaluate_gear_checks(geometry, measurements)
     span = measurements["span"]
     over_pin = measurements["over_pin"]
+    axial_overlap = (
+        geometry.face_width_mm / geometry.axial_pitch_mm if geometry.axial_pitch_mm > 0.0 else 0.0
+    )
     summary = {
         "module_mm": module,
         "tooth_count": tooth_count,
@@ -114,7 +136,7 @@ def build_spur_gear_preview(
         "modification": geometry.rack.modification,
         "contour_name": geometry.rack.name_ru,
         "standard_edition": geometry.rack.standard_edition,
-        "pressure_angle_deg": math.degrees(geometry.pressure_angle_rad),
+        "pressure_angle_deg": math.degrees(alpha_n),
         "profile_shift": geometry.profile_shift,
         "face_width_mm": geometry.face_width_mm,
         "pitch_diameter_mm": 2.0 * geometry.pitch_radius,
@@ -140,6 +162,28 @@ def build_spur_gear_preview(
         "representation_mode": report["representation_mode"],
         "verification_status": report["status"],
     }
+    if geometry.helix_angle_rad > 1e-9:
+        summary.update(
+            {
+                "helix_angle_deg": math.degrees(geometry.helix_angle_rad),
+                "hand": geometry.hand,
+                "transverse_module_mm": geometry.transverse_module_mm,
+                "transverse_pressure_angle_deg": math.degrees(geometry.pressure_angle_rad),
+                "base_helix_angle_deg": math.degrees(geometry.base_helix_angle_rad),
+                "axial_pitch_mm": geometry.axial_pitch_mm,
+                "lead_mm": geometry.lead_mm,
+                "axial_overlap": axial_overlap,
+                "tip_thickness_normal_mm": geometry.tip_thickness_normal_mm,
+            }
+        )
+    if geometry.tip_chamfer_mm > 0.0:
+        summary.update(
+            {
+                "tip_chamfer_mm": geometry.tip_chamfer_mm,
+                "tip_chamfer_angle_deg": geometry.tip_chamfer_angle_deg,
+                "tip_chamfer_depth_mm": geometry.tip_chamfer_depth_mm,
+            }
+        )
     derived = {
         **summary,
         "module_row": geometry.module_info.get("row"),

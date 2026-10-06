@@ -44,9 +44,24 @@ specific task, not a changelog or a dump of live CAD experiments.
 | [Flat-belt pulley](flat-belt-pulley.md) | Implemented, live-verified | Cylindrical/crowned managed rim |
 | [Timing-belt pulley](timing-belt-pulley.md) | Experimental | T/AT and HTD preview and managed Studio path |
 | [Chain transmission](chain-transmission-concept.md) | Experimental, create-verified | ISO/GOST roller and bush sprocket profiles; create-only family slice |
-| [Spur gear](gear-spur.md) | Implemented, live-verified | External cylindrical spur gear: nominal involute/trochoid preview and create-only managed part |
+| [Cylindrical gear](gear-spur.md) | Implemented, live-verified | External spur and helical cylindrical gear with four basic-rack systems (ГОСТ 13755-2015, ГОСТ 9587-81, ГОСТ Р 50531-93, ISO 53:1998), cached pin rows, optional tip chamfers; nominal preview, create-only managed part, MCP tools |
+| [Internal gear](gear-internal.md) | Implemented, live-verified | Internal spur and helical ring gear with explicit blank outside diameter (ГОСТ 19274-73 nominal geometry); nominal preview, create-only managed part, MCP tools |
 | [Gear transmission plan](gear-transmission-concept.md) | Planned, research-backed | Cylindrical, bevel, hypoid, and worm families; native baseline, CAD/Studio split, phases |
 | [Gear standards register](gear-standards.md) | Reference | GOST/ISO/DIN/AGMA designations, applicability, and acquisition status |
+
+## Shaft connections
+
+| Document | Status | Scope |
+| --- | --- | --- |
+| [Connection systems plan](connection-systems-concept.md) | Planned, research-backed | Splines incl. radiused runout, keyways, face joints, and motorcycle dog clutches; native baseline, CAD/Studio split, phases |
+| [Connection standards register](connection-standards.md) | Reference | GOST/ISO/DIN/ANSI designations, applicability, acquisition status, and non-standard face joints |
+
+## Shaft features
+
+| Document | Status | Scope |
+| --- | --- | --- |
+| [Grooves and undercuts plan](groove-systems-concept.md) | Planned, research-backed | Retaining-ring grooves, seal and O-ring seats, grinding exits, thread runouts, and related seats |
+| [Groove standards register](groove-standards.md) | Reference | GOST/DIN/ISO designations, applicability, status conflicts, and acquisition list |
 
 ## Camshafts
 

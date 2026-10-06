@@ -795,6 +795,8 @@ def preview_chain_sprocket(
     if gost_profile_variant not in ("offset", "non_offset"):
         raise ValueError("gost_profile_variant must be 'offset' or 'non_offset'")
     profile = _profile(designation)
+    if row_count > 1 and profile.get("native_simplex_only"):
+        raise ValueError("this chain designation is simplex-only")
     pitch = profile["pitch"]
     dimensions_standard = {
         "iso_606": "ISO 606",
@@ -832,7 +834,6 @@ def preview_chain_sprocket(
     ]
     warnings = [
         "Catalog dimensions come from the selected ISO or GOST chain family; the tooth gap uses the KOMPAS-compatible GOST 591 construction, and selecting its variant does not make the dimensional catalogs interchangeable.",
-        "Hub, bore, keyway, shaft interface, and downstream manufacturing operations are outside this module.",
         "End-view preview shows the radial tooth profile only; multi-row axial rim geometry is not shown yet.",
     ]
     if profile["profile_family"] == "pri" and tooth_geometry["standard_parameters"].get("extended_lambda_policy"):

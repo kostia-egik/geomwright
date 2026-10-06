@@ -875,35 +875,66 @@ function gearStandardMetadata(value) {
   return (gearSelectionMetadata().standards || []).find((item) => item.value === value) || null;
 }
 
-function createGearModuleSelect(currentValue) {
+function createGearModuleSelect(currentValue, moduleSystem, rangeMeta = {}) {
   const select = document.createElement("select");
   select.name = "module_mm";
   select.dataset.schemaType = "number";
-  const rows = gearSelectionMetadata().module_rows || {};
-  const numericCurrent = Number(currentValue);
-  let matched = false;
-  for (const [key, labelKey] of [["row_1", "gear.module_row_1"], ["row_2", "gear.module_row_2"]]) {
-    const values = rows[key] || [];
+  const catalog = gearSelectionMetadata().module_rows || {};
+  const rows = catalog[moduleSystem] || catalog[Object.keys(catalog)[0]] || {};
+  const min = rangeMeta.min ?? null;
+  const max = rangeMeta.max ?? null;
+  const exclusive = Boolean(rangeMeta.exclusive);
+  const inRange = (value) => {
+    if (min != null && value < min - 1e-9) return false;
+    if (max != null) {
+      if (exclusive ? value >= max - 1e-9 : value > max + 1e-9) return false;
+    }
+    return true;
+  };
+  const avoidValues = new Set((rows.avoid || []).map(Number));
+  const groups = [
+    { key: "row_1", labelKey: "gear.module_row_1" },
+    { key: "row_2", labelKey: "gear.module_row_2" },
+    { key: "exceptions", labelKey: "gear.module_exceptions" },
+  ];
+  const available = [];
+  for (const group of groups) {
+    const values = (rows[group.key] || []).map(Number).filter(inRange);
     if (!values.length) continue;
-    const group = document.createElement("optgroup");
-    group.label = t(labelKey, humanize(key));
+    available.push(...values);
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = t(group.labelKey, humanize(group.key));
     for (const value of values) {
       const option = document.createElement("option");
       option.value = String(value);
-      option.textContent = formatNumber(value, 6);
-      if (Number.isFinite(numericCurrent) && Math.abs(value - numericCurrent) <= 1e-9) {
-        option.selected = true;
-        matched = true;
-      }
-      group.append(option);
+      option.dataset.rawValue = String(value);
+      if (avoidValues.has(value)) option.dataset.avoid = "true";
+      option.textContent = formatNumber(value, 6)
+        + (avoidValues.has(value) ? ` · ${t("gear.module_avoid", "не рекомендуется")}` : "");
+      optgroup.append(option);
     }
-    select.append(group);
+    select.append(optgroup);
   }
-  if (!matched && Number.isFinite(numericCurrent)) {
+  const numericCurrent = Number(currentValue);
+  if (available.length) {
+    const match = Number.isFinite(numericCurrent)
+      ? available.find((value) => Math.abs(value - numericCurrent) <= 1e-9)
+      : undefined;
+    const chosen = match != null
+      ? match
+      : available.reduce(
+        (best, value) => (
+          Math.abs(value - numericCurrent) < Math.abs(best - numericCurrent) ? value : best
+        ),
+        available[0],
+      );
+    select.value = String(chosen);
+  } else if (Number.isFinite(numericCurrent)) {
     const option = document.createElement("option");
     option.value = String(numericCurrent);
+    option.dataset.rawValue = String(numericCurrent);
     option.textContent = formatNumber(numericCurrent, 6);
-    select.prepend(option);
+    select.append(option);
     select.value = String(numericCurrent);
   }
   return select;
@@ -917,19 +948,18 @@ function createGearStandardSelect(currentValue) {
     const option = document.createElement("option");
     option.value = item.value;
     option.textContent = (getLocale() === "ru" ? item.label_ru : item.label_en) || item.value;
+    option.title = (getLocale() === "ru" ? item.scope_ru : item.scope_en) || item.edition || "";
     option.selected = item.value === currentValue;
     select.append(option);
   }
   return select;
 }
 
-function createGearModificationSelect(currentValue) {
+function createGearModificationSelect(currentValue, standardValue) {
   const select = document.createElement("select");
   select.name = "modification";
   select.dataset.schemaType = "string";
-  const system = gearStandardMetadata(
-    document.querySelector("#dynamic-fields [name='standard']")?.value || "gost_13755_2015",
-  );
+  const system = gearStandardMetadata(standardValue || "gost_13755_2015");
   for (const item of system?.modifications || []) {
     const option = document.createElement("option");
     option.value = item.value;
@@ -940,10 +970,168 @@ function createGearModificationSelect(currentValue) {
   return select;
 }
 
+function createGearPinList() {
+  const list = document.createElement("datalist");
+  list.id = "gear-pin-diameters";
+  const seen = new Set();
+  for (const source of gearSelectionMetadata().pin_sources || []) {
+    for (const value of source.diameters || []) {
+      const key = String(value);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const option = document.createElement("option");
+      option.value = key;
+      option.label = getLocale() === "ru" ? source.label_ru : source.label_en;
+      list.append(option);
+    }
+  }
+  return list;
+}
+
+function gearEffectiveRange(standardMeta, modificationMeta) {
+  const override = Boolean(
+    modificationMeta
+    && (modificationMeta.module_min != null || modificationMeta.module_max != null)
+  );
+  return {
+    min: override ? modificationMeta.module_min : (standardMeta?.module_min ?? null),
+    max: override ? modificationMeta.module_max : (standardMeta?.module_max ?? null),
+    exclusive: override
+      ? Boolean(modificationMeta.module_max_exclusive)
+      : Boolean(standardMeta?.module_max_exclusive),
+  };
+}
+
+function formatGearRange(range) {
+  if (!range || (range.min == null && range.max == null)) return "";
+  const minText = range.min == null ? "" : formatNumber(range.min, 6);
+  const maxText = range.max == null ? "" : formatNumber(range.max, 6);
+  let text;
+  if (range.min == null) text = `≤ ${maxText}`;
+  else if (range.max == null) text = `≥ ${minText}`;
+  else text = `${minText}…${maxText}`;
+  if (range.exclusive && range.max != null) {
+    text += ` (${t("gear.range_excluding", "не включая {value}", { value: maxText })})`;
+  }
+  return text;
+}
+
+function gearCoefficientSummary(modificationMeta) {
+  if (!modificationMeta) return "";
+  if (modificationMeta.value === "custom") {
+    return t("gear.custom_coefficients", "Пользовательские коэффициенты контура");
+  }
+  const parts = [];
+  if (modificationMeta.pressure_angle_deg != null) {
+    parts.push(`α=${formatNumber(modificationMeta.pressure_angle_deg, 3)}°`);
+  }
+  if (modificationMeta.addendum_coefficient != null) {
+    parts.push(`h*ₐ=${formatNumber(modificationMeta.addendum_coefficient, 3)}`);
+  }
+  if (modificationMeta.clearance_coefficient != null) {
+    parts.push(`c*=${formatNumber(modificationMeta.clearance_coefficient, 5)}`);
+  }
+  parts.push(
+    modificationMeta.root_fillet_coefficient != null
+      ? `ρ_f*=${formatNumber(modificationMeta.root_fillet_coefficient, 5)}`
+      : t("gear.fillet_not_tabulated", "ρ_f* не нормирован"),
+  );
+  return parts.join(" · ");
+}
+
+function refreshGearDynamicText() {
+  if (!["gear_spur", "gear_internal"].includes(currentModule?.kind) || !currentSpec) return;
+  const standardSelect = fieldsContainer.querySelector("select[name='standard']");
+  const modificationSelect = fieldsContainer.querySelector("select[name='modification']");
+  const moduleSelect = fieldsContainer.querySelector("[data-field-name='module_mm'] select");
+  const standardMeta = gearStandardMetadata(standardSelect?.value);
+  const locale = getLocale();
+  for (const option of standardSelect?.options || []) {
+    const item = gearStandardMetadata(option.value);
+    if (!item) continue;
+    option.textContent = (locale === "ru" ? item.label_ru : item.label_en) || item.value;
+    option.title = (locale === "ru" ? item.scope_ru : item.scope_en) || item.edition || "";
+  }
+  for (const option of modificationSelect?.options || []) {
+    const item = standardMeta?.modifications.find((modification) => modification.value === option.value);
+    option.textContent = t(
+      `enum.modification.${option.value}`,
+      (locale === "ru" ? item?.label_ru : item?.label_en) || option.value,
+    );
+  }
+  for (const option of moduleSelect?.options || []) {
+    const raw = option.dataset.rawValue;
+    if (raw == null) continue;
+    option.textContent = formatNumber(Number(raw), 6)
+      + (option.dataset.avoid === "true" ? ` · ${t("gear.module_avoid", "не рекомендуется")}` : "");
+  }
+  const standardHelp = fieldsContainer.querySelector("[data-gear-standard-help]");
+  if (standardHelp) {
+    const scope = (locale === "ru" ? standardMeta?.scope_ru : standardMeta?.scope_en) || "";
+    const edition = standardMeta?.edition
+      ? t("gear.help_edition", "Редакция: {value}", { value: standardMeta.edition })
+      : "";
+    const range = formatGearRange(gearEffectiveRange(standardMeta, null));
+    standardHelp.textContent = [
+      scope,
+      edition,
+      range ? t("gear.help_module", "Модуль: {value}", { value: range }) : "",
+    ].filter(Boolean).join(" · ");
+  }
+  const moduleHelp = fieldsContainer.querySelector("[data-gear-module-help]");
+  if (moduleHelp) {
+    const rowsEdition = gearSelectionMetadata().module_rows?.[standardMeta?.module_system]?.edition || "";
+    moduleHelp.textContent = rowsEdition
+      ? t("gear.help_module_rows", "Ряды: {value}", { value: rowsEdition })
+      : "";
+  }
+  const modificationHelp = fieldsContainer.querySelector("[data-gear-modification-help]");
+  if (modificationHelp) {
+    const modificationMeta = standardMeta?.modifications.find(
+      (item) => item.value === modificationSelect?.value,
+    ) || null;
+    const range = formatGearRange(gearEffectiveRange(standardMeta, modificationMeta));
+    const standardRange = formatGearRange(gearEffectiveRange(standardMeta, null));
+    const coefficients = gearCoefficientSummary(modificationMeta);
+    modificationHelp.textContent = [
+      coefficients,
+      range && range !== standardRange
+        ? t("gear.help_module", "Модуль: {value}", { value: range })
+        : "",
+    ].filter(Boolean).join(" · ");
+  }
+}
+
+function createGearFieldGroup(key, legendKey, fallback, { collapsible = false, open = false } = {}) {
+  const root = document.createElement(collapsible ? "details" : "fieldset");
+  root.className = collapsible ? "gear-group gear-collapsible" : "gear-group";
+  root.dataset.gearGroup = key;
+  const title = document.createElement(collapsible ? "summary" : "legend");
+  title.dataset.i18n = legendKey;
+  title.textContent = t(legendKey, fallback);
+  const body = document.createElement("div");
+  body.className = "gear-fields";
+  root.append(title, body);
+  if (collapsible) root.open = open;
+  return { root, body };
+}
+
 function createGearFields() {
   const properties = currentSpec.schema.properties || {};
   const required = new Set(currentSpec.schema.required || []);
-  const append = (element) => fieldsContainer.append(element);
+  // Blocks follow the operator's importance order: what defines the gear,
+  // how the tooth runs, the main dimensions, then the secondary groups.
+  // Derived coefficients and the over-pin pin are collapsed while they are
+  // not in play. Each block uses the thin gray frame of the chain selector.
+  const groups = {
+    standard: createGearFieldGroup("standard", "gear.group.standard_modification", "Стандарт и модификация"),
+    tooth: createGearFieldGroup("tooth", "gear.group.tooth", "Направление и угол зуба"),
+    main: createGearFieldGroup("main", "gear.group.main", "Основные параметры"),
+    coefficients: createGearFieldGroup("coefficients", "gear.group.coefficients", "Производные коэффициенты", { collapsible: true }),
+    chamfer: createGearFieldGroup("chamfer", "gear.group.chamfer", "Фаска"),
+    measurement: createGearFieldGroup("measurement", "gear.group.measurement", "Измерение по роликам", { collapsible: true }),
+  };
+  const append = (group, element) => group.body.append(element);
   const standardField = createField("standard", properties.standard, required.has("standard"));
   const modificationField = createField("modification", properties.modification, required.has("modification"));
   const standardInput = standardField.querySelector("input, select");
@@ -952,9 +1140,21 @@ function createGearFields() {
   }
   const modificationInput = modificationField.querySelector("input, select");
   if (modificationInput && modificationInput.tagName !== "SELECT") {
-    modificationField.replaceChild(createGearModificationSelect(modificationInput.value), modificationInput);
+    modificationField.replaceChild(createGearModificationSelect(modificationInput.value, standardInput?.value), modificationInput);
   }
+  standardField.querySelector("[data-field-help]")?.remove();
+  const standardHelp = document.createElement("small");
+  standardHelp.dataset.gearStandardHelp = "";
+  standardField.append(standardHelp);
+  modificationField.querySelector("[data-field-help]")?.remove();
+  const modificationHelp = document.createElement("small");
+  modificationHelp.dataset.gearModificationHelp = "";
+  modificationField.append(modificationHelp);
   const moduleField = createField("module_mm", properties.module_mm, required.has("module_mm"));
+  moduleField.querySelector("[data-field-help]")?.remove();
+  const moduleHelpElement = document.createElement("small");
+  moduleHelpElement.dataset.gearModuleHelp = "";
+  moduleField.append(moduleHelpElement);
   const moduleNumber = moduleField.querySelector("input");
   const coefficientNames = ["pressure_angle_deg", "addendum_coefficient", "clearance_coefficient", "root_fillet_coefficient"];
   const coefficientFields = {};
@@ -966,20 +1166,85 @@ function createGearFields() {
   note.dataset.gearNote = "";
   note.dataset.i18n = "gear.standard_note";
 
-  append(standardField);
-  append(modificationField);
-  append(moduleField);
-  append(createField("tooth_count", properties.tooth_count, required.has("tooth_count")));
-  append(createField("profile_shift", properties.profile_shift, required.has("profile_shift")));
-  append(createField("face_width_mm", properties.face_width_mm, required.has("face_width_mm")));
-  append(note);
-  for (const name of coefficientNames) append(coefficientFields[name]);
+  append(groups.standard, standardField);
+  append(groups.standard, modificationField);
+  append(groups.main, moduleField);
+  append(groups.main, createField("tooth_count", properties.tooth_count, required.has("tooth_count")));
+  append(groups.main, createField("profile_shift", properties.profile_shift, required.has("profile_shift")));
+  const faceWidthField = createField("face_width_mm", properties.face_width_mm, required.has("face_width_mm"));
+  if (currentModule?.kind === "gear_internal") {
+    const faceWidthHelp = faceWidthField.querySelector("[data-field-help]");
+    if (faceWidthHelp) {
+      faceWidthHelp.dataset.i18n = "field.face_width_mm.help_internal";
+      faceWidthHelp.textContent = t(
+        "field.face_width_mm.help_internal",
+        "Функциональная ширина зубчатого венца; расточка на диаметр вершин входит в модуль.",
+      );
+    }
+  }
+  append(groups.main, faceWidthField);
+  if (properties.ring_outside_diameter_mm) {
+    append(groups.main, createField(
+      "ring_outside_diameter_mm",
+      properties.ring_outside_diameter_mm,
+      required.has("ring_outside_diameter_mm"),
+    ));
+  }
+  const typeField = createField("hand", properties.hand, required.has("hand"));
+  const typeSelect = typeField.querySelector("select");
+  typeSelect.removeAttribute("name");
+  typeSelect.dataset.gearToothType = "";
+  const typeCode = typeField.querySelector("code");
+  if (typeCode) typeCode.textContent = "tooth_type";
+  typeSelect.replaceChildren();
+  for (const [value, key, fallback] of [
+    ["spur", "gear.tooth_spur", "Прямозубая"],
+    ["right", "gear.tooth_right", "Правое направление"],
+    ["left", "gear.tooth_left", "Левое направление"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.dataset.i18n = key;
+    option.textContent = t(key, fallback);
+    typeSelect.append(option);
+  }
+  const initialHand = baselinePayload.hand === "left" ? "left" : "right";
+  const initialHelix = Number(baselinePayload.helix_angle_deg || 0);
+  typeSelect.value = initialHelix > 1e-9 ? initialHand : "spur";
+  const helixField = createField("helix_angle_deg", properties.helix_angle_deg, required.has("helix_angle_deg"));
+  const helixNumber = helixField.querySelector("input");
+  const applyToothType = () => {
+    const spur = typeSelect.value === "spur";
+    helixNumber.disabled = spur;
+    helixField.classList.toggle("derived", spur);
+    let hint = helixField.querySelector("[data-gear-angle-hint]");
+    if (spur) {
+      if (!hint) {
+        hint = document.createElement("small");
+        hint.dataset.gearAngleHint = "";
+        hint.dataset.i18n = "gear.angle_spur_hint";
+        helixField.append(hint);
+      }
+      hint.textContent = t("gear.angle_spur_hint", "Для прямозубого колеса угол не задаётся");
+      return;
+    }
+    if (hint) hint.remove();
+    if (!(Number(helixNumber.value) > 0)) {
+      helixNumber.value = String(initialHelix > 0 ? initialHelix : 20);
+    }
+  };
+  typeSelect.addEventListener("change", applyToothType);
+  append(groups.tooth, typeField);
+  append(groups.tooth, helixField);
+  append(groups.coefficients, note);
+  for (const name of coefficientNames) append(groups.coefficients, coefficientFields[name]);
   const pinField = createField("pin_diameter_mm", properties.pin_diameter_mm, required.has("pin_diameter_mm"));
   const pinNumber = pinField.querySelector("input");
+  pinNumber.setAttribute("list", "gear-pin-diameters");
   const pinMode = document.createElement("select");
   pinMode.dataset.customProfileField = "pin_mode";
   for (const [value, key, fallback] of [
-    ["auto", "gear.pin_auto", "Автоматически (1,44m / 1,68m)"],
+    ["auto", "gear.pin_auto", "Автоматически (стандартный ролик)"],
     ["custom", "gear.pin_custom", "Пользовательский размер…"],
   ]) {
     const option = document.createElement("option");
@@ -995,9 +1260,9 @@ function createGearFields() {
   pinNote.dataset.i18n = "gear.pin_note";
   pinNote.textContent = t(
     "gear.pin_note",
-    "Диаметр влияет только на измерение по роликам. Стандартные ряды ГОСТ 2475-88, 25255-82 и 22696-77 будут добавлены после проверки таблиц.",
+    "Пусто — ближайший стандартный ролик из кэшированных рядов, который помещается под вершинами. Диаметр влияет только на измерение по роликам.",
   );
-  pinField.append(pinNote);
+  pinField.append(pinNote, createGearPinList());
   const applyPinMode = () => {
     const custom = pinMode.value === "custom";
     pinNumber.disabled = !custom;
@@ -1008,11 +1273,37 @@ function createGearFields() {
     }
   };
   pinMode.addEventListener("change", applyPinMode);
-  append(pinField);
+  append(groups.measurement, pinField);
   applyPinMode();
+  // A stored explicit pin is unusual enough that the block opens to show it.
+  groups.measurement.root.open = initialPin != null;
+
+  if (properties.tip_chamfer_mm) {
+    const chamferField = createField("tip_chamfer_mm", properties.tip_chamfer_mm, required.has("tip_chamfer_mm"));
+    const chamferAngleField = createField("tip_chamfer_angle_deg", properties.tip_chamfer_angle_deg, required.has("tip_chamfer_angle_deg"));
+    const chamferNumber = chamferField.querySelector("input");
+    const chamferAngleNumber = chamferAngleField.querySelector("input");
+    const chamferNote = document.createElement("small");
+    chamferNote.dataset.i18n = "gear.chamfer_off";
+    chamferField.append(chamferNote);
+    const applyChamferFields = () => {
+      const enabled = Number(chamferNumber.value) > 0;
+      chamferAngleNumber.disabled = !enabled;
+      chamferAngleField.classList.toggle("derived", !enabled);
+      chamferNote.textContent = enabled
+        ? t("gear.chamfer_note", "Фаска по обоим торцам зубьев; угол — к торцовой плоскости")
+        : t("gear.chamfer_off", "0 — без фаски");
+    };
+    chamferNumber.addEventListener("input", applyChamferFields);
+    append(groups.chamfer, chamferField);
+    append(groups.chamfer, chamferAngleField);
+    applyChamferFields();
+  } else {
+    delete groups.chamfer;
+  }
 
   const standardSelect = standardField.querySelector("select");
-  const modificationSelect = modificationField.querySelector("select");
+  let modificationSelect = modificationField.querySelector("select");
 
   function modificationMetadata() {
     const system = gearStandardMetadata(standardSelect.value);
@@ -1021,6 +1312,9 @@ function createGearFields() {
 
   function applyModuleField(meta) {
     const custom = modificationSelect.value === "custom";
+    const standardMeta = gearStandardMetadata(standardSelect.value);
+    const moduleSystem = standardMeta?.module_system;
+    const range = gearEffectiveRange(standardMeta, meta);
     const moduleSelect = moduleField.querySelector("select[name='module_mm']");
     if (custom) {
       if (moduleSelect) {
@@ -1031,11 +1325,12 @@ function createGearFields() {
       return;
     }
     if (!moduleSelect) {
-      moduleField.replaceChild(createGearModuleSelect(moduleNumber.value), moduleNumber);
+      moduleField.replaceChild(
+        createGearModuleSelect(moduleNumber.value, moduleSystem, range), moduleNumber);
     } else {
-      moduleField.replaceChild(createGearModuleSelect(moduleSelect.value), moduleSelect);
+      moduleField.replaceChild(
+        createGearModuleSelect(moduleSelect.value, moduleSystem, range), moduleSelect);
     }
-    void meta;
   }
 
   function applyCoefficientFields(meta) {
@@ -1046,16 +1341,20 @@ function createGearFields() {
       input.disabled = !custom;
       wrapper.classList.toggle("derived", !custom);
       const derived = meta ? meta[name] : null;
-      if (!custom && derived != null) input.value = String(derived);
+      if (!custom) {
+        input.value = derived != null ? String(derived) : "";
+      }
       let hint = wrapper.querySelector("[data-gear-derived-hint]");
       if (!custom) {
         if (!hint) {
           hint = document.createElement("small");
           hint.dataset.gearDerivedHint = "";
-          hint.dataset.i18n = "gear.derived_from_standard";
           wrapper.append(hint);
         }
-        hint.textContent = t("gear.derived_from_standard", "Автоматически из стандарта");
+        hint.dataset.i18n = derived != null ? "gear.derived_from_standard" : "gear.derived_not_tabulated";
+        hint.textContent = derived != null
+          ? t("gear.derived_from_standard", "Автоматически из стандарта")
+          : t("gear.derived_not_tabulated", "Не нормирован для этой модификации");
       } else if (hint) {
         hint.remove();
       }
@@ -1066,21 +1365,34 @@ function createGearFields() {
     const meta = modificationMetadata();
     applyModuleField(meta);
     applyCoefficientFields(meta);
+    applyToothType();
+    groups.coefficients.root.open = modificationSelect.value === "custom";
     note.textContent = t(
       "gear.standard_note",
       "Коэффициенты контура берутся из выбранного стандарта и модификации. Для прямого ввода выберите пользовательскую модификацию.",
     );
     note.hidden = modificationSelect.value === "custom";
+    refreshGearDynamicText();
   }
 
   standardSelect.addEventListener("change", () => {
     const system = gearStandardMetadata(standardSelect.value);
-    if (system && !system.modifications.some((item) => item.value === modificationSelect.value)) {
-      modificationSelect.value = system.modifications[0].value;
-    }
+    const keeps = system?.modifications.some((item) => item.value === modificationSelect.value);
+    const nextValue = keeps
+      ? modificationSelect.value
+      : (system?.modifications?.[0]?.value || "a");
+    const nextSelect = createGearModificationSelect(nextValue, standardSelect.value);
+    nextSelect.addEventListener("change", syncGearFields);
+    modificationField.replaceChild(nextSelect, modificationSelect);
+    modificationSelect = nextSelect;
     syncGearFields();
   });
   modificationSelect.addEventListener("change", syncGearFields);
+
+  const layout = document.createElement("div");
+  layout.className = "gear-groups";
+  for (const { root } of Object.values(groups)) layout.append(root);
+  fieldsContainer.append(layout);
   syncGearFields();
 }
 
@@ -1097,7 +1409,7 @@ function renderFields() {
     fieldsContainer.append(createCamshaftWizard());
     return;
   }
-  if (currentModule?.kind === "gear_spur") {
+  if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) {
     createGearFields();
     syncConditionalFields();
     return;
@@ -1283,6 +1595,7 @@ function localizeFields() {
     }
   }
   if (currentModule?.kind === "silent_chain_sprocket") { syncConditionalFields(); syncSilentCompletion(); }
+  if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) refreshGearDynamicText();
   updateChainSelectionDetails();
 }
 
@@ -1292,6 +1605,7 @@ function collectPayload({ withoutCompletion = false } = {}) {
     if (withoutCompletion && silentCompletionNames.has(input.name)) continue;
     if (input.dataset.customProfileField) continue;
     if (input.dataset.chainSelection) continue;
+    if (!input.name) continue;
     const type = input.dataset.schemaType;
     if (type === "boolean") {
       payload[input.name] = input.checked;
@@ -1334,6 +1648,27 @@ function collectPayload({ withoutCompletion = false } = {}) {
   }
   if (baselinePayload.profile_overrides && typeof baselinePayload.profile_overrides === "object") {
     payload.profile_overrides = { ...baselinePayload.profile_overrides };
+  }
+  if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) {
+    const toothType = fieldsContainer.querySelector("[data-gear-tooth-type]")?.value || "spur";
+    if (toothType === "spur") {
+      payload.helix_angle_deg = 0;
+      payload.hand = "right";
+    } else {
+      const angleInput = fieldsContainer.querySelector("[name='helix_angle_deg']");
+      const angle = angleInput ? angleInput.valueAsNumber : Number.NaN;
+      payload.helix_angle_deg = Number.isFinite(angle) && angle > 0 ? angle : 20;
+      payload.hand = toothType;
+    }
+    const properties = currentSpec?.schema?.properties || {};
+    const ordered = {};
+    for (const key of Object.keys(properties)) {
+      if (key in payload) ordered[key] = payload[key];
+    }
+    for (const key of Object.keys(payload)) {
+      if (!(key in ordered)) ordered[key] = payload[key];
+    }
+    return ordered;
   }
   return payload;
 }
@@ -1382,6 +1717,18 @@ function renderReadableSubscripts(element, value) {
   }));
 }
 
+function summaryLabelKey(key) {
+  if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) {
+    const gearKeys = {
+      pitch_diameter_mm: "gear_pitch_diameter_mm",
+      outside_diameter_mm: "gear_outside_diameter_mm",
+      root_diameter_mm: "gear_root_diameter_mm",
+    };
+    if (gearKeys[key]) return `summary.${gearKeys[key]}`;
+  }
+  return `summary.${key}`;
+}
+
 function renderSummary(values) {
   if (currentModule?.kind === "silent_chain_sprocket" && silentCompletionStale) values = { ...values, construction_status: "pending_changes" };
   summary.replaceChildren();
@@ -1390,12 +1737,12 @@ function renderSummary(values) {
     if (key === "tooth_tip_shape" && currentModule?.kind === "silent_chain_sprocket"
       && fieldsContainer.querySelector("[data-field-name='tooth_tip_shape']")?.hidden) continue;
     const dt = document.createElement("dt");
-    renderReadableSubscripts(dt, t(`summary.${key}`, humanize(key)));
+    renderReadableSubscripts(dt, t(summaryLabelKey(key), humanize(key)));
     const dd = document.createElement("dd");
     if (typeof value === "number") dd.textContent = formatNumber(value, key === "chain_pitch_mm" ? 4 : 2);
     else if (typeof value === "boolean") dd.textContent = t(value ? "value.yes" : "value.no");
     else if (key === "selected_law") dd.textContent = localizedEnumValue("law", value);
-    else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "family", "gost_profile_variant", "profile_construction", "profile_mechanics", "tooth_tip_shape", "profile_status", "axial_status", "construction_status"].includes(key)) dd.textContent = localizedEnumValue(key, value);
+    else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "family", "gost_profile_variant", "profile_construction", "profile_mechanics", "tooth_tip_shape", "profile_status", "axial_status", "construction_status", "hand", "over_pin_source"].includes(key)) dd.textContent = localizedEnumValue(key, value);
     else dd.textContent = String(value);
     summary.append(dt, dd);
   }
@@ -1726,6 +2073,7 @@ function managedBlockName(block) {
     timing_trapezoidal: "block.timing_trapezoidal",
     timing_curvilinear: "block.timing_curvilinear",
     gear_spur: "block.gear_spur",
+    gear_internal: "block.gear_internal",
     silent_chain_sprocket: "block.silent_chain_sprocket",
     camshaft_lobe: "block.camshaft_lobe",
   }[block.module] || "block.generic";
@@ -1748,8 +2096,9 @@ function selectWorkspaceBlock(block) {
     ? (block.module === "camshaft_lobe" ? "camshaft.cad.recreate" : "app.recreate_block")
     : "workspace.edit";
   workspaceEditBlockButton.textContent = t(workspaceEditBlockButton.dataset.i18n);
-  workspaceBlockReadonly.hidden = !["camshaft_lobe", "silent_chain_sprocket"].includes(block.module) || block.editable;
+  workspaceBlockReadonly.hidden = !["camshaft_lobe", "silent_chain_sprocket", "chain_sprocket"].includes(block.module) || block.editable;
   workspaceBlockReadonly.dataset.i18n = block.module === "silent_chain_sprocket" ? "silent.cad.readonly"
+    : block.module === "chain_sprocket" ? "chain.cad.readonly"
     : block.status === "partial" ? "camshaft.cad.partial"
     : block.status === "legacy_unverified" ? "camshaft.cad.legacy"
     : block.recipe_error ? "camshaft.cad.recipe_unavailable" : "camshaft.cad.readonly";
@@ -2227,6 +2576,12 @@ function cadPlanDisplayDimensions(plan) {
     };
   }
   const geometry = plan?.geometry || {};
+  if (Number.isFinite(geometry.ring_outside_radius) && Number.isFinite(geometry.face_width)) {
+    return {
+      outerDiameter: 2 * geometry.ring_outside_radius,
+      faceWidth: geometry.face_width,
+    };
+  }
   if (Number.isFinite(geometry.outside_radius) && Number.isFinite(geometry.face_width)) {
     return {
       outerDiameter: 2 * geometry.outside_radius,
@@ -2324,8 +2679,9 @@ async function createManagedPulley() {
   }
   const isCam = buildModule.kind === "camshaft_lobe";
   const isSilent = buildModule.kind === "silent_chain_sprocket";
-  const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : isSilent ? "Geomwright silent sprocket" : "Geomwright pulley");
-  if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : isSilent ? "silent.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
+  const isGear = ["gear_spur", "gear_internal"].includes(buildModule.kind);
+  const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : isSilent ? "Geomwright silent sprocket" : isGear ? "Geomwright gear" : "Geomwright pulley");
+  if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : isSilent ? "silent.cad.confirm" : isGear ? "gear.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
   cadBuildActive = true;
   cadCancelButton.hidden = false;
   cadCreateButton.disabled = true;
@@ -2359,7 +2715,7 @@ async function createManagedPulley() {
     const elapsed = formatElapsed(Date.now() - startedAt);
     cadResult.dataset.state = "ready";
     cadResult.textContent = t(
-      isCam ? "camshaft.cad.created" : isSilent ? "silent.cad.created" : updating ? "cad.updated" : "cad.created",
+      isCam ? "camshaft.cad.created" : isSilent ? "silent.cad.created" : isGear ? "gear.cad.created" : updating ? "cad.updated" : "cad.created",
       updating ? "Model rebuilt and verified" : "Pulley created and verified",
       { elapsed },
     );
@@ -2388,7 +2744,10 @@ async function createManagedPulley() {
       const createdBlock = created.block;
       selectedWorkspaceDocumentId = createdEntry.document.runtime_id;
       selectedWorkspaceBlock = createdBlock;
-      if (isCam || isSilent) {
+      // Cam and silent-chain blocks are create-only, and gear blocks are
+      // read-only/recreatable: in-place update is not part of their contract.
+      // Present the workspace with the new block instead of an update panel.
+      if (isCam || isSilent || !createdBlock.editable) {
         editorContext = null;
         if (currentModule.kind === buildModule.kind) {
           baselinePayload = { ...profile };

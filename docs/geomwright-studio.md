@@ -35,6 +35,11 @@ not a required intermediary between the UI and CAD.
 The current experimental slice supports V-belt, Poly-V, flat-belt, and two
 shape-specific timing-pulley preview modules through one schema-driven form and
 one HTML5 Canvas renderer.
+The `chain_sprocket` leaf under Chain drives covers ISO 606 and GOST roller/bush
+sprockets with a hierarchical catalog, host-side functional-rim preview and a
+create-only managed CAD part. Saved sprockets persist a checksummed recipe; the
+workspace restores its inputs so an edited sprocket can be built as a new part.
+
 The separate `silent_chain_sprocket` leaf under Chain drives supports preview and
 create-only CAD for a completed functional rim.
 It renders two host-side views: an end-view tooth fragment with radial diameters
@@ -230,29 +235,42 @@ marker is published only after native and host checks.
 Read the [English contract](en/camshaft.md) or [Russian guide](ru/camshaft.md)
 for angle units, clearance, source comparisons, and engineering limits.
 
-### Spur gear module
+### Cylindrical gear module
 
-**Mechanical transmissions → Gear drives → External spur gear** opens the
-spur-gear editor. The canvas shows a cropped three-tooth sector as a single
-functional contour in the same broken-out style as the chain sprockets, with
-dashed pitch/base reference arcs and outside/pitch/root dimensions. The summary
-lists control measurements (span length, constant chord, over-pin size, base
-pitch) and the verification status.
+**Mechanical transmissions → Gear drives → Cylindrical gear (spur / helical)**
+opens the cylindrical-gear editor. The canvas shows a cropped three-tooth sector
+as a single functional contour in the same broken-out style as the chain
+sprockets, with dashed pitch/base reference arcs and outside/pitch/root
+dimensions; a side view traces the real tooth-face lines across the face width.
+The summary lists control measurements (span length, constant chord, over-pin
+size, base pitch) and the verification status.
 
-The form separates the basic-rack **standard** from its **contour
-modification** (types A–D or a user-defined contour). Named modifications
-derive the profile angle and the head, clearance, and fillet coefficients from
-the standard and show them as read-only fields; the module is selected from the
-ГОСТ 9563-60 rows. Choosing the user-defined modification turns the module into
-a free numeric value and enables all contour coefficients. Off-row modules,
-small-module contours, undercut, low tip thickness, and unusable span or
-over-pin measurements are reported instead of silently corrected. **Create in
-KOMPAS** builds a new unsaved part with a cylindrical blank, one tooth-space
-cut whose flanks are smooth cubic Bézier-NURBS curves, and a full circular
-pattern; the bridge verifies volume, bounds, and pattern count against the
-plan. A recognized gear block is create-only: the editor restores its recipe
-for a new part, and in-place parameter editing is not available yet. See
-[spur gear](gear-spur.md) for inputs, representation limits, and evidence.
+The form groups its inputs: standard and modification, tooth direction and
+angle, main dimensions, derived coefficients, tip chamfers, and over-pin
+measurement. Four basic-rack systems are available: ГОСТ 13755-2015 (large
+module), ГОСТ 9587-81 (small module), ГОСТ Р 50531-93 (high stress), and
+ISO 53:1998 with ISO 54:1996 module rows. Named modifications derive the profile
+angle and the head, clearance, and fillet coefficients from the standard and
+show them as read-only fields; the derived-coefficient block is collapsed while
+the named modification supplies the coefficients. The module dropdown lists only
+the sizes valid for the selected standard and modification (including the
+ГОСТ 9587-81 sub-ranges), and the help under the selectors describes the
+concrete standard and the concrete modification coefficients. Choosing the user-defined
+modification turns the module into a free numeric value and enables all contour
+coefficients. Off-row modules, modules outside the selected contour's range,
+undercut, low tip thickness, and unusable span or over-pin measurements are
+reported instead of silently corrected. The over-pin block is collapsed by
+default and picks the nearest cached standard pin that fits below the tips
+(ГОСТ 2475-88, ГОСТ 25255-82, ГОСТ 22696-77 rows); an explicit size is used as
+given. **Create in KOMPAS** builds a new unsaved part with a cylindrical blank,
+one tooth-space cut whose flanks are smooth cubic Bézier-NURBS curves, and a
+full circular pattern; the bridge verifies volume, bounds, and pattern count
+against the plan. A recognized gear block is create-only: the editor restores
+its recipe for a new part, and in-place parameter editing is not available yet.
+The same family is exposed to MCP clients as `list_gear_standards`,
+`preview_cylindrical_gear`, `create_cylindrical_gear`, and
+`inspect_cylindrical_gear`. See [cylindrical gear](gear-spur.md) for inputs,
+representation limits, and evidence.
 
 - Parameter edits trigger a new preview automatically after a short debounce.
   If inputs change again while a request is running, the old request is
@@ -317,7 +335,8 @@ Without additional input values, the preview remains a source reference. Its
 schematic breaks and provisional reconstructions are not manufacturing geometry.
 Entering all applicable additional dimensions closes the functional rim's
 geometric degrees of freedom without claiming those dimensions came from a
-standard. Readiness is inferred automatically and does not enable CAD creation.
+standard. Readiness is inferred automatically and enables the separate CAD
+creation action, which still requires explicit write confirmation.
 
 1. Select the source, chain/pitch, tooth count and applicable width.
 2. Expand **Additional dimensions** and use **Fill with suggested values**, or enter the
@@ -344,9 +363,13 @@ corner arcs. The selected conservative clearance rule retains the full throat
 width through the maximum-dg bound before starting those arcs. Entered tooth-floor
 depths are exact: insufficient depth is rejected rather than silently increased.
 
-Radial rim thickness specifies a physical inner surface (inner diameter equals
-outside diameter minus twice that thickness). It is not a shaft-seat/bore design.
-Positive common material must remain below every tooth and guide cut. Invalid
+Detail-view depth crops the displayed section below the tooth and guide cuts;
+it is optional, uses automatic framing when omitted or outside the useful view
+range, and never blocks CAD readiness or defines a physical inner surface.
+The CAD material outline closes on
+the rotational axis, so the blank is solid without a central hole. Bores and
+shaft seats belong to subsequent modules. Positive common material must remain
+below every tooth and guide cut. Invalid
 depths, overlapping entrances and impossible radii are
 rejected; source dimensions are retained except explicitly resolved conflicts
 and source-marked approximate dimensions selected by the user.
@@ -367,15 +390,21 @@ formatted to six decimal places before the user accepts them.
 
 CAD creation revolves the completed axial material outline, cuts one radial
 profile and repeats it around global X. GOST II ribs share one angular phase.
-Circular runs become native arcs; noncircular runs use source-resolution segments
-with at most 0.0005 mm additional deviation from source points. The source's
+DIN's analytic involutes and rolling-rack envelopes become three or five cubic
+NURBS with a 0.0005 mm held-out analytic-sample fit limit. The curves remain
+separate across undercut/trimmed corners; there is no segment fallback.
+For GOST/ASME, circular runs become native arcs; residual noncircular sampled
+runs use segments with at most 0.0005 mm additional deviation from source points. The source's
 0.002 mm circular sampling bound is separate; neither value is a manufacturing
 tolerance or a claim of analytic DIN/ASME conformity.
-The bridge checks actual sketch endpoints, arc centers/radii/directions, closure,
+The bridge checks actual sketch endpoints, arc centers/radii/directions,
+NURBS order/poles/weights/knots and evaluated-curve topology, closure,
 pattern axis/count/step, rebuild, body bounds, and positive single-solid volume.
 An independent volume estimate has a 0.5% acceptance bound; material removed by
 all pattern instances must match the source cut times the physical tooth count
-within 0.01% (with a 0.001 mm³ comparison floor).
+within 0.05% (with a 0.001 mm³ comparison floor), allowing small observed native
+mass-property non-additivity on rounded ASME tips. The actual relative error is
+returned; this bound remains below a missing instance at the maximum 114 teeth.
 
 The result is a new unsaved part. Save it through workspace document actions.
 Persisted `GW_SILENT_VERSION`/`SC_*` ownership and the entered form restore a
@@ -383,6 +412,11 @@ create-only block after reopening. **Create new from parameters** restores the
 form without editing the original part. Native sketch editing and in-place
 parameter updates are not this module's contract. A failed creation reports the
 partial document and completed operation IDs; cancellation is not rollback.
+The calculation is shared with MCP through `transmissions/silent_geometry/`.
+MCP catalog/preview/create/inspect tools are documented in the
+[chain-transmission contract](chain-transmission-concept.md#mcp-для-пластинчато-зубчатой-звёздочки).
+Restoring the form and building still creates a new document; replacing the old
+body inside the existing document is not implemented.
 
 ## HTTP contract
 

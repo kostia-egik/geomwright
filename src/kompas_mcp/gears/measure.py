@@ -27,17 +27,26 @@ def span_measurement(
     base_radius: float,
     outside_radius: float,
     root_radius: float,
+    normal_pressure_angle_rad: float | None = None,
+    transverse_pressure_angle_rad: float | None = None,
 ) -> dict:
-    """Span measurement W_k over the closest usable number of teeth."""
-    inv_alpha = _involute(pressure_angle_rad)
-    baseline = tooth_count * pressure_angle_rad / math.pi + 0.5
+    """Span measurement W_k over the closest usable number of teeth.
+
+    `module_mm` is the normal module. For a helical gear the span is measured
+    in the normal plane: `inv` and the tooth wrap use the transverse pressure
+    angle, while the sine/cosine weights use the normal one.
+    """
+    alpha_n = pressure_angle_rad if normal_pressure_angle_rad is None else normal_pressure_angle_rad
+    alpha_t = pressure_angle_rad if transverse_pressure_angle_rad is None else transverse_pressure_angle_rad
+    inv_alpha = _involute(alpha_t)
+    baseline = tooth_count * alpha_t / math.pi + 0.5
     candidates = sorted({max(2, int(math.floor(baseline))), max(2, int(math.ceil(baseline)))})
     results = []
     for count in candidates:
         length = (
-            module_mm * math.cos(pressure_angle_rad)
+            module_mm * math.cos(alpha_n)
             * (math.pi * (count - 0.5) + tooth_count * inv_alpha)
-            + 2.0 * profile_shift * module_mm * math.sin(pressure_angle_rad)
+            + 2.0 * profile_shift * module_mm * math.sin(alpha_n)
         )
         half = length / 2.0
         contact_radius = math.sqrt(base_radius ** 2 + half ** 2)
@@ -91,13 +100,22 @@ def over_pin_measurement(
     pitch_radius: float,
     outside_radius: float,
     pin_diameter_mm: float,
+    normal_pressure_angle_rad: float | None = None,
+    transverse_pressure_angle_rad: float | None = None,
 ) -> dict:
-    inv_alpha = _involute(pressure_angle_rad)
+    """Over-pin size; `module_mm` is the normal module.
+
+    `inv(a_D) = inv(a_t) + D / (m_n z cos(a_n)) - pi / (2 z) + 2 x tan(a_n) / z`
+    with `d_D = d cos(a_t) / cos(a_D)`.
+    """
+    alpha_n = pressure_angle_rad if normal_pressure_angle_rad is None else normal_pressure_angle_rad
+    alpha_t = pressure_angle_rad if transverse_pressure_angle_rad is None else transverse_pressure_angle_rad
+    inv_alpha = _involute(alpha_t)
     angle_ratio = (
         inv_alpha
-        + pin_diameter_mm / (module_mm * tooth_count * math.cos(pressure_angle_rad))
+        + pin_diameter_mm / (module_mm * tooth_count * math.cos(alpha_n))
         - math.pi / (2.0 * tooth_count)
-        + 2.0 * profile_shift * math.tan(pressure_angle_rad) / tooth_count
+        + 2.0 * profile_shift * math.tan(alpha_n) / tooth_count
     )
     # Invert inv(a_D) by bisection on [1e-6, 70 degrees].
     low, high = 1e-9, math.radians(70.0)
@@ -113,7 +131,7 @@ def over_pin_measurement(
             else:
                 high = middle
         alpha_d = (low + high) / 2.0
-    center_diameter = 2.0 * pitch_radius * math.cos(pressure_angle_rad) / math.cos(alpha_d)
+    center_diameter = 2.0 * pitch_radius * math.cos(alpha_t) / math.cos(alpha_d)
     if tooth_count % 2 == 0:
         measurement = center_diameter + pin_diameter_mm
     else:

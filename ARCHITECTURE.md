@@ -310,9 +310,11 @@ sketch, pattern count, rebuild, and one positive-volume solid. In-place editing
 remains outside this slice. Workspace readback does
 recognize the create-only block from `GW_FAMILY_CODE=6`, the complete `CH_*`
 fingerprint, and five root objects; generated pattern copies are owned but do not
-participate in stable block identity. Because designation and profile variant are
-not yet persisted as reconstructable metadata, reopened chain blocks remain
-read-only.
+participate in stable block identity. Creation also persists a checksummed
+`geomwright.chain.recipe` with the Studio designation, chain type, tooth count,
+row count, and tooth-gap variant. Recognition restores that profile and marks the
+block recreatable, so a reopened model offers a new build with edited inputs while
+the saved document stays unchanged.
 
 Multi-row creation is available for catalog rows with both transverse pitch and
 plate height. ISO 606:1994 A/B rows through 32A/32B are sourced from GOST
@@ -415,24 +417,67 @@ post-build relation readback, radial-dimension readback, closed topology, full
 feature completion, positive body, rebuild, and save/reopen evidence.
 
 The `gear_spur` Studio module is the first cylindrical-gear family slice. Layer 2
-`src/kompas_mcp/gears/` owns the ГОСТ 13755-2015 basic-rack standard with its
-A–D modifications, the ГОСТ 9563-60 module rows, the analytic involute flank,
-the theoretical sharp-rack trochoid root with undercut trimming, control
-measurements (span length, constant chord, over-pin), and a structured check
-report; the representation is `nominal`, not `generated_exact`. The Studio form
-separates the standard from the contour modification and derives the profile
-coefficients from that pair; only the user-defined modification exposes them as
-inputs. Layer 3 `gears/cad.py` builds a create-only numeric plan: cylindrical
-blank, one through-all cut whose flanks are smooth cubic Bézier-NURBS curves
-split at the form point (root curve plus involute curve, seven entities per
-tooth space), and a full circular pattern. The bridge
-adds `GW_GEAR_VERSION=1`, `GW_FAMILY_CODE=8`, a `GEAR_*` readback fingerprint
-with standard/modification codes, and a checksummed recipe; reopened blocks are
-read-only and can recreate a new part from the persisted Studio profile. Live
-create, volume/bounds/pattern verification, save/reopen recognition, and an
-odd-tooth-count profile-shift case are accepted. Rounded cutter-tip
-`generated_exact` roots, internal and helical families, pairs, and ISO
-small-module contours remain outside this slice.
+`src/kompas_mcp/gears/` owns four basic-rack systems: ГОСТ 13755-2015 with its
+A–D modifications (ГОСТ 9563-60 module rows), ГОСТ 9587-81 small-module shapes,
+ГОСТ Р 50531-93 high-stress types 1–2, and ISO 53:1998 profiles A–D with
+ISO 54:1996 module rows. It also owns the analytic involute flank, the
+theoretical sharp-rack trochoid root with undercut trimming, control
+measurements (span length, constant chord, over-pin), the cached standard
+wire/roller rows for the over-pin input, and a structured check report; the
+representation is `nominal`, not `generated_exact`. A positive
+`helix_angle_deg` plus a separate `hand` field turns the same request into a
+helical gear: the end view is the transverse section (`m_t`, `α_t`, `β_b`), the
+addendum/dedendum stay normal, and the summary adds lead, axial pitch, and
+axial overlap. The Studio form separates the standard from the contour
+modification and derives the profile coefficients from that pair; only the
+user-defined modification exposes them as inputs, and a module outside the
+selected contour's declared range is reported instead of silently accepted.
+Layer 3 `gears/cad.py` builds
+a create-only numeric plan: cylindrical blank, one tooth-space cut whose flanks
+are smooth cubic Bézier-NURBS curves split at the form point (root curve plus
+involute curve, seven entities per tooth space), and a full circular pattern.
+For `β = 0` the cut is a through-all extrusion; for `β > 0` the
+`helical_cut_evolution` bridge scenario sweeps the transverse sketch along a
+cylindrical spiral with `Step = lead`, `Height = b`, and the spiral position
+point anchored **on the gear axis** (the anchor is what makes the sweep exact;
+`CAD_PATTERNS.md` `EVO-001`). Optional end chamfers (`tip_chamfer_mm`) are two
+`rotational_cut` cone cuts on the blank before the tooth-space cut, so the
+expensive circular pattern stays the last feature; the final Boolean body is
+identical to chamfering the finished teeth. After the final rebuild the bridge
+hides the spiral, the 3D points/axis, all sketches, and the default planes. The
+bridge adds `GW_GEAR_VERSION=1`,
+`GW_FAMILY_CODE=8`, a `GEAR_*` readback fingerprint with standard/modification
+codes plus `GEAR_BETA_DEG`/`GEAR_HAND`, and a checksummed recipe; reopened blocks
+are read-only and can recreate a new part from the persisted Studio profile.
+`gear_tools.py` exposes the same Layer 2/3 core through
+`list_gear_standards`, `preview_cylindrical_gear`, `create_cylindrical_gear`,
+and `inspect_cylindrical_gear`.
+Live create, volume/bounds/pattern verification, save/reopen recognition, spur
+and helical cases (β=20° right and β=30° left), and an odd-tooth-count
+profile-shift case are accepted. Rounded cutter-tip `generated_exact` roots,
+herringbone, bevel, and worm families, and gear pairs remain outside this
+slice.
+
+The `gear_internal` Studio module is the second cylindrical-gear family slice
+and reuses the same basic-rack catalog, but follows ГОСТ 19274-73 for the wheel:
+`d_a2 = d2 - 2 (h_a* - x2 - 0.2) m`, `d_f2 = d2 + 2 (h_a* + c* + x2) m`, and
+the controls are measured across the internal tooth spaces. Layer 2
+`gears/internal.py` owns the nominal involute space, the radial tip extension
+when the tip circle lies inside the base circle, the ring-wall and tip checks,
+and the span/constant-chord/over-pin measurement set. Layer 3 `gears/cad.py`
+builds a create-only numeric plan: a ring blank with an explicit outside
+diameter, a full-rotation rectangular bore at the tip diameter, one internal
+tooth-space cut closed by exact root and bore arcs, and a circular pattern; the
+space cut is a through-all extrusion for a spur gear and a cut evolution along
+the cylindrical spiral for `β > 0`. The bridge persists `GW_GEAR_VERSION=2`,
+`GW_FAMILY_CODE=9`, `GEAR_RING_DA`, the `GEAR_*` fingerprint, and a checksummed
+internal recipe; reopened blocks are read-only and recreatable. Live acceptance
+covers an internal spur `m2 z40 D100 × 20` and an internal helical `m2 z40`,
+`β=20°` left with one positive solid, expected bounds, the physical tooth
+count, volume within 0.02 % of the analytic ring section, and save/reopen.
+Pinion-cutter `generated_exact` roots, end chamfers, hubs, keyways, housings,
+and gear pairs remain outside this slice. The contract is in
+[docs/gear-internal.md](docs/gear-internal.md).
 
 `silent_chain_sprocket` Studio preview adapts separate host-side GOST, DIN and
 ASME-compatible profile mechanics plus their axial layout metadata into two
@@ -441,7 +486,9 @@ rows, and ASME-compatible open-reconstruction pitch/guide metadata. DIN/ASME
 choices retain explicit provenance and no-conformity warnings. The
 descriptor advertises `preview=true`, `build=true` with a create-only Layer 4
 functional-rim contract.
-Its Layer 2 completion owner `studio/silent_chain_completion.py` separates source
+Its Layer 2 owner `transmissions/silent_geometry/` is presentation-independent;
+Studio's former calculation files remain thin compatibility facades. The shared
+`silent_chain_completion.py` separates source
 data from explicit user construction choices. It exports a bounded completeness
 report and a validated functional-rim geometry specification for CAD
 planning, never a COM action. Construction intent is inferred from actual input
@@ -449,17 +496,35 @@ values; no mode selector or confirmation checkbox is required. Missing values
 and unresolved radial conflicts cannot become CAD-planning-ready; this is not conformity,
 strength, native sketch or B-Rep verification.
 `transmissions/silent_chain.py` consumes that specification without importing
-Studio or COM. Its numeric Layer 3 plan revolves the completed axial outline,
-cuts a radial profile and patterns it around global X. Exact circular sample
-runs become native arcs; other runs have bounded 0.0005 mm source-point
-simplification. The bridge owns execution and actual profile/body readback,
-including a source-cut-volume multiplier check for every pattern instance.
+Studio or COM. Its numeric Layer 3 plan revolves the completed axial outline
+closed on the rotational axis: the blank is solid, with no central hole. The
+detail-view depth only crops the preview and never creates an inner CAD surface;
+it is optional and excluded from required construction inputs. Automatic view
+framing is permitted without inventing an engineering dimension.
+Holes, shaft seats and hubs belong to subsequent modules. The plan
+cuts a radial profile and patterns it around global X. DIN's analytic involute
+and rolling-rack envelopes become three or five cubic NURBS, fitted independently
+across intentional undercut/trim corners. Neutral `sketch_runtime/cubic.py` owns
+the shared C2 interpolator used by cams and the bounded analytic-path fitter;
+held-out source samples enforce a 0.0005 mm fit limit. Circular GOST/ASME runs
+become native arcs; residual noncircular sampled runs have bounded 0.0005 mm
+source-point simplification. The bridge owns execution and actual profile/body readback,
+including NURBS order/poles/weights/knots, actual-curve topology sampling, and a
+source-cut-volume multiplier check for every pattern instance.
 Missing construction inputs and unresolved source conflicts fail before document
 creation. The `GW_SILENT_VERSION`/`SC_*` fingerprint recognizes five stable root
 objects; generated copies are owned but excluded from identity. A persisted form
 restores a new-part draft, not an in-place editor. Failures retain a structured
 partial-document result; cancellation does not roll back KOMPAS operations.
 DIN/ASME provenance warnings remain in force after CAD creation.
+`silent_chain_tools.py` registers paginated catalog discovery, bounded preview,
+new-part preflight/creation and read-only saved-recipe inspection in the public
+MCP registry and transmission-design catalog. Studio and MCP use the same Layer 2
+schema/calculation and Layer 3 CAD plan. Preflight never calls COM; execution
+requires explicit write confirmation. Tool responses omit sampled contours and
+raw sketch readback arrays, retaining actual body checks, exact document IDs and
+semantic references. Recipe recognition is not a fresh geometry audit. Neither
+interface currently replaces the old body inside an existing document.
 
 Geomwright Studio owns document/session navigation above Layer 4 modules. Its
 workspace discovers open KOMPAS documents, opens saved files, presents managed
@@ -561,7 +626,7 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | managed spring families | L2–L4 | implemented, see family contracts |
 | cam profiles | L2–L4 | create-only single cam, shared Studio/MCP plan, actual curve/contact/body verification |
 | diaphragm module | L2–L4 | complete and live-verified |
-| mechanical-transmission platform | L2–L4 | managed V-belt, Poly-V, timing and flat-belt pulley workflows plus live-verified create-only single-row ISO/GOST chain sprockets and external spur gears |
+| mechanical-transmission platform | L2–L4 | managed V-belt, Poly-V, timing and flat-belt pulley workflows plus live-verified create-only single-row ISO/GOST chain sprockets and external/internal cylindrical gears |
 | Geomwright Studio | presentation over L2–L4 | experimental; create-only completed silent-chain rims and gear blocks, managed pulley previews/build, and no arbitrary-body write path |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for registration and launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |

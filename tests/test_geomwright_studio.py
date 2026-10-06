@@ -14,23 +14,26 @@ from kompas_mcp.transmissions import build_chain_sprocket_plan, list_chain_profi
 def test_registry_exposes_schema_driven_transmission_modules() -> None:
     modules = list_modules()
 
-    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket", "silent_chain_sprocket", "gear_spur", "camshaft_lobe"]
+    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket", "silent_chain_sprocket", "gear_spur", "gear_internal", "camshaft_lobe"]
     transmissions = [item for item in modules if item["group"] == "mechanical_transmissions"]
     valvetrain = [item for item in modules if item["group"] == "valvetrain"]
     assert [item["kind"] for item in valvetrain] == ["camshaft_lobe"]
     assert valvetrain[0]["subgroup"] == "valvetrain"
-    assert all(item["subgroup"] == "belt_drives" for item in transmissions[:-3])
-    assert all(item["subgroup"] == "chain_drives" for item in transmissions[-3:-1])
-    assert transmissions[-1]["subgroup"] == "gear_drives"
-    assert [item["icon"] for item in transmissions[-3:-1]] == [
+    assert all(item["subgroup"] == "belt_drives" for item in transmissions[:-4])
+    assert all(item["subgroup"] == "chain_drives" for item in transmissions[-4:-2])
+    assert all(item["subgroup"] == "gear_drives" for item in transmissions[-2:])
+    assert [item["icon"] for item in transmissions[-4:-2]] == [
         "/static/icons/roller-sprocket.svg", "/static/icons/silent-sprocket.svg",
     ]
-    assert transmissions[-1]["icon"] == "/static/icons/gear-spur.svg"
+    assert [item["icon"] for item in transmissions[-2:]] == [
+        "/static/icons/gear-spur.svg", "/static/icons/gear-internal.svg",
+    ]
     assert valvetrain[0]["icon"] == "/static/icons/cam.svg"
     assert get_module("timing_trapezoidal").descriptor()["capabilities"]["build"] is True
     assert get_module("timing_curvilinear").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
     assert get_module("gear_spur").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
-    for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "gear_spur"):
+    assert get_module("gear_internal").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "gear_spur", "gear_internal"):
         module = get_module(kind)
         spec = module.spec()
         validated = module.request_model.model_validate(spec["defaults"])
@@ -368,6 +371,7 @@ def test_silent_chain_source_envelope_and_tool_policy() -> None:
 
 def test_silent_chain_explicit_completion_gate_and_geometry() -> None:
     from geomwright.studio.silent_chain_preview import build_silent_chain_preview
+    from geomwright.studio.registry import managed_pulley_plan
 
     def propose(request):
         base = preview_module("silent_chain_sprocket", request)
@@ -386,7 +390,11 @@ def test_silent_chain_explicit_completion_gate_and_geometry() -> None:
     spec = ready["construction_spec"]
     assert spec["axial_material_outline"][0] == spec["axial_material_outline"][-1]
     assert spec["relative_rib_phases_deg"] == [0.0]*4
-    assert spec["inner_rim_diameter_mm"] > 0
+    assert spec["inner_rim_diameter_mm"] == 0
+    assert spec["blank_policy"] == "solid_to_axis"
+    assert max(p[1] for p in spec["axial_material_outline"]) == pytest.approx(spec["outside_diameter_mm"]/2)
+    plan = managed_pulley_plan("silent_chain_sprocket", choices)
+    assert min(p[k][1] for p in plan["rim_entities"] for k in ("start", "end")) == pytest.approx(0)
     assert ready["summary"]["overall_width_mm"] == pytest.approx(spec["functional_width_mm"])
     assert spec["axial_extent_mm"] == pytest.approx([0.0, spec["functional_width_mm"]])
     assert not any("projection" in name for name in ready["completion"]["fields"])
@@ -394,11 +402,18 @@ def test_silent_chain_explicit_completion_gate_and_geometry() -> None:
     assert not ready["secondary_view"]["drawing"]["break_paths"]
     assert ready["feature_paths"] == preview_module("silent_chain_sprocket", gost)["feature_paths"]
     assert {"construction_mode", "construction_confirmed"}.isdisjoint(get_module("silent_chain_sprocket").request_model.model_json_schema()["properties"])
-    with pytest.raises(ValueError, match="Body depth"):
-        preview_module("silent_chain_sprocket", {**choices, "body_depth_mm": .1})
     missing = preview_module("silent_chain_sprocket", {**choices, "body_depth_mm": None})
-    assert not missing["completion"]["geometry_complete"] and missing["construction_spec"] is None
-    assert not missing["completion"]["ready_for_cad_planning"]
+    assert missing["completion"]["ready_for_cad_planning"]
+    assert not missing["completion"]["fields"]["body_depth_mm"]["required"]
+    assert missing["construction_spec"]["axial_material_outline"] == spec["axial_material_outline"]
+    cropped = managed_pulley_plan("silent_chain_sprocket", {**choices, "body_depth_mm": .1})
+    assert cropped["rim_entities"] == plan["rim_entities"]
+    assert cropped["verification"] == plan["verification"]
+    source_din = preview_module("silent_chain_sprocket", {
+        "standard": "din_8190_8191_open", "family": "outer", "designation": "08-020A",
+        "physical_tooth_count": 23})
+    assert source_din["completion"]["ready_for_cad_planning"]
+    assert source_din["completion"]["missing_fields"] == []
 
     din = {"standard": "din_8190_8191_open", "family": "inner", "designation": "06-025B", "physical_tooth_count": 21}
     choices = propose(din)
@@ -524,7 +539,6 @@ def test_chain_sprocket_exposes_hierarchical_catalog_preview_and_icon() -> None:
     assert min(point[1] for point in roller["guide_paths"][0]) < roller["summary"]["root_diameter_mm"] / 2.0
     assert {item["code"] for item in roller["warning_items"]} == {
         "chain_profile_standard_scope",
-        "chain_downstream_operations_external",
         "chain_multirow_axial_preview_pending",
     }
 
@@ -930,6 +944,10 @@ def test_chain_sprocket_cad_plan_uses_true_arcs_and_rejects_unmodelled_multirow_
         assert boundary["r3"] >= boundary["minimum_radius"] - 1e-10
         assert boundary["tip_land_width"] >= 0.2 * width - 1e-10
         assert boundary["r3"] == pytest.approx(1.7 * 7.75, abs=1e-4)
+    with pytest.raises(ValueError, match="simplex-only"):
+        preview_chain_sprocket(
+            designation="ISO_081", chain_type="roller", tooth_count=19, row_count=2,
+        )
     native_preview = preview_chain_sprocket(
         designation="ISO_081",
         chain_type="roller",
@@ -1035,6 +1053,43 @@ def test_chain_sprocket_cad_plan_uses_true_arcs_and_rejects_unmodelled_multirow_
         build_chain_sprocket_plan(
             designation="ISO_24B", chain_type="roller", tooth_count=200,
         )
+
+
+def test_chain_sprocket_recipe_roundtrip_restores_studio_profile() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    plan = build_chain_sprocket_plan(
+        designation="ISO_08B", chain_type="roller", tooth_count=19, row_count=1,
+    )
+    bridge_path = Path(__file__).resolve().parents[1] / "bridge" / "kompas_bridge.py"
+    spec = importlib.util.spec_from_file_location("test_kompas_bridge_chain_recipe", bridge_path)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+
+    variables = bridge._chain_recipe_variables(plan)
+    items = [
+        {"name": item["name"], "value": item["value"], "note": item["note"]}
+        for item in variables
+    ]
+    recipe, error = bridge._read_chain_recipe(items)
+    assert error is None
+    assert recipe["schema"] == "geomwright.chain.recipe"
+    assert recipe["version"] == 1
+    assert recipe["studio_profile"] == {
+        "designation": "ISO_08B",
+        "chain_type": "roller",
+        "tooth_count": 19,
+        "row_count": 1,
+        "gost_profile_variant": "offset",
+    }
+
+    corrupted = [dict(item) for item in items]
+    corrupted[1]["note"] = corrupted[1]["note"] + "x"
+    recipe, error = bridge._read_chain_recipe(corrupted)
+    assert recipe is None
+    assert "checksum" in error
 
 
 def test_chain_sprocket_multirow_representatives_cover_every_standard_in_mcp_and_studio() -> None:
@@ -1523,6 +1578,11 @@ def test_bundled_bridge_contains_managed_pulley_create_and_ownership_paths() -> 
     assert '"managed-chain-sprocket:"' in source
     assert "def handle_apply_existing_sketch_constraint(payload):" in source
     assert 'if action == "apply_existing_sketch_constraint":' in source
+    assert "def _chain_recipe_variables(plan):" in source
+    assert "CHAIN_RECIPE_SCHEMA" in source
+    assert "CHAIN_RECIPE_HASH" in source
+    assert '"recipe": chain_recipe' in source
+    assert 'inspection.get("recreatable")' in source
 
 
 def test_shared_pulley_body_verification_calls_api5_active_document_accessor() -> None:
@@ -1551,6 +1611,42 @@ def test_flat_belt_preview_is_registered_in_the_public_tool_catalog() -> None:
     category = next(item for item in catalog["categories"] if item["name"] == "transmission_design")
     assert "preview_flat_belt_pulley" in category["tools"]
     assert "preview_timing_belt_pulley" in category["tools"]
+    assert {
+        "list_chain_profiles",
+        "preview_chain_sprocket",
+        "create_chain_sprocket",
+        "inspect_chain_sprocket",
+    } <= set(category["tools"])
+
+
+def test_chain_sprocket_mcp_tools_are_registered_and_plan_without_com() -> None:
+    from kompas_mcp.transmission_tools import ChainSprocketCreateRequest, ChainSprocketPreviewRequest
+    from geomwright.kompas import server
+
+    tools = server.mcp._tool_manager._tools
+    assert {
+        "list_chain_profiles",
+        "preview_chain_sprocket",
+        "create_chain_sprocket",
+        "inspect_chain_sprocket",
+    } <= set(tools)
+
+    listing = tools["list_chain_profiles"].fn()
+    assert listing["profile_count"] == 215
+
+    preview = tools["preview_chain_sprocket"].fn(
+        ChainSprocketPreviewRequest(designation="ISO_08B", chain_type="roller", tooth_count=19)
+    )
+    assert preview["success"] is True
+    assert preview["profile_family"] == "iso_b"
+    assert preview["derived"]["tooth_count"] == 19
+
+    planned = tools["create_chain_sprocket"].fn(
+        ChainSprocketCreateRequest(designation="ISO_08B", chain_type="roller", tooth_count=19)
+    )
+    assert planned["stage"] == "planned"
+    assert planned["plan"]["stage"] == "managed_chain_sprocket_plan"
+    assert planned["plan"]["ownership"]["schema"] == "geomwright.managed_chain_sprocket"
 
 
 def test_v_belt_warning_codes_follow_conditions_instead_of_list_positions() -> None:
@@ -1686,7 +1782,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert f"styles.css?v={health['static_version']}" in page
     assert f"app.js?v={health['static_version']}" in page
     assert "managed_pulley_create_job" in health["capabilities"]
-    assert client.get("/modules").json()["count"] == 9
+    assert client.get("/modules").json()["count"] == 10
     gear_spec = client.get("/modules/gear_spur/spec").json()
     assert gear_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
     gear_preview = client.post("/modules/gear_spur/preview", json=gear_spec["defaults"])
@@ -1696,6 +1792,8 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert len(gear_body["closed_points"][0]) > 200
     assert gear_body["summary"]["pitch_diameter_mm"] == 40.0
     assert gear_body["summary"]["verification_status"] == "ok"
+    assert gear_body["secondary_view"]["helix_angle_deg"] == 0.0
+    assert gear_body["secondary_view"]["hand"] == "right"
     gear_plan = client.post("/modules/gear_spur/cad/plan", json=gear_spec["defaults"])
     assert gear_plan.status_code == 200
     assert gear_plan.json()["stage"] == "gear_spur_cad_plan"
@@ -1703,6 +1801,109 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert gear_plan.json()["geometry"]["entity_count"] < 200
     invalid_gear = client.post("/modules/gear_spur/preview", json={"tooth_count": 3})
     assert invalid_gear.status_code == 422
+    helical_request = {**gear_spec["defaults"], "helix_angle_deg": 20.0, "hand": "left"}
+    helical_preview = client.post("/modules/gear_spur/preview", json=helical_request)
+    assert helical_preview.status_code == 200
+    helical_body = helical_preview.json()
+    helical_summary = helical_body["summary"]
+    assert helical_summary["verification_status"] == "ok"
+    assert round(helical_summary["helix_angle_deg"], 6) == 20.0
+    assert helical_summary["hand"] == "left"
+    assert round(helical_summary["pitch_diameter_mm"], 4) == 42.5671
+    assert round(helical_summary["transverse_module_mm"], 4) == 2.1284
+    assert round(helical_summary["transverse_pressure_angle_deg"], 4) == 21.1728
+    assert round(helical_summary["lead_mm"], 3) == 367.416
+    assert round(helical_summary["axial_overlap"], 4) == 1.0887
+    assert helical_summary["tip_thickness_normal_mm"] > 0.0
+    assert helical_body["secondary_view"]["helix_angle_deg"] == 20.0
+    assert helical_body["secondary_view"]["hand"] == "left"
+    assert round(helical_body["secondary_view"]["lead_mm"], 3) == 367.416
+    helical_plan = client.post("/modules/gear_spur/cad/plan", json=helical_request)
+    assert helical_plan.status_code == 200
+    helical_plan_body = helical_plan.json()
+    helical_cut = helical_plan_body["workflow"]["params"]["operations"][2]
+    assert helical_cut["scenario"] == "helical_cut_evolution"
+    assert helical_cut["params"]["hand"] == "left"
+    assert helical_cut["params"]["anchor_radius_mm"] == 0.0
+    assert round(helical_cut["params"]["lead"], 3) == 367.416
+    assert helical_plan_body["geometry"]["cut_scenario"] == "helical_cut_evolution"
+    assert helical_plan_body["verification"]["expected_volume_mm3"] > 0.0
+    chamfer_request = {**gear_spec["defaults"], "tip_chamfer_mm": 0.5, "tip_chamfer_angle_deg": 45.0}
+    chamfer_preview = client.post("/modules/gear_spur/preview", json=chamfer_request)
+    assert chamfer_preview.status_code == 200
+    chamfer_body = chamfer_preview.json()
+    assert chamfer_body["ok"] is True
+    assert chamfer_body["summary"]["tip_chamfer_mm"] == 0.5
+    assert round(chamfer_body["summary"]["tip_chamfer_depth_mm"], 6) == 0.5
+    chamfer_plan = client.post("/modules/gear_spur/cad/plan", json=chamfer_request)
+    assert chamfer_plan.status_code == 200
+    chamfer_plan_body = chamfer_plan.json()
+    assert [op["scenario"] for op in chamfer_plan_body["workflow"]["params"]["operations"]] == [
+        "cylindrical_blank",
+        "rotational_cut",
+        "rotational_cut",
+        "numeric_profile_sketch",
+        "cut_extrusion",
+        "circular_pattern",
+    ]
+    assert chamfer_plan_body["geometry"]["tip_chamfer_volume_mm3"] > 0.0
+    assert (
+        chamfer_plan_body["verification"]["expected_volume_mm3"]
+        < gear_plan.json()["verification"]["expected_volume_mm3"]
+    )
+    oversized_chamfer = client.post(
+        "/modules/gear_spur/preview", json={**chamfer_request, "tip_chamfer_mm": 12.0}
+    )
+    assert oversized_chamfer.status_code == 200
+    assert oversized_chamfer.json()["ok"] is False
+    assert any(
+        item["code"] == "gear_chamfer_exceeds_face_width"
+        for item in oversized_chamfer.json()["report"]["errors"]
+    )
+
+    internal_spec = client.get("/modules/gear_internal/spec").json()
+    assert internal_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    internal_preview = client.post("/modules/gear_internal/preview", json=internal_spec["defaults"])
+    assert internal_preview.status_code == 200
+    internal_body = internal_preview.json()
+    assert internal_body["family"] == "gear_internal"
+    assert internal_body["summary"]["ring_outside_diameter_mm"] == 100.0
+    assert internal_body["summary"]["tip_diameter_mm"] == 76.8
+    assert internal_body["summary"]["root_diameter_mm"] == 85.0
+    assert internal_body["summary"]["verification_status"] == "ok"
+    assert len(internal_body["closed_points"][0]) > 200
+    assert internal_body["secondary_view"]["internal"] is True
+    assert internal_body["secondary_view"]["outside_diameter_mm"] == 100.0
+    internal_plan = client.post("/modules/gear_internal/cad/plan", json=internal_spec["defaults"])
+    assert internal_plan.status_code == 200
+    internal_plan_body = internal_plan.json()
+    assert internal_plan_body["stage"] == "internal_gear_cad_plan"
+    assert [op["scenario"] for op in internal_plan_body["workflow"]["params"]["operations"]] == [
+        "cylindrical_blank",
+        "rotational_cut",
+        "numeric_profile_sketch",
+        "cut_extrusion",
+        "circular_pattern",
+    ]
+    assert internal_plan_body["verification"]["pattern_count"] == 40
+    assert internal_plan_body["verification"]["expected_volume_mm3"] > 0.0
+    internal_helical = {**internal_spec["defaults"], "helix_angle_deg": 20.0, "hand": "left"}
+    internal_helical_preview = client.post("/modules/gear_internal/preview", json=internal_helical)
+    assert internal_helical_preview.status_code == 200
+    assert internal_helical_preview.json()["summary"]["hand"] == "left"
+    assert internal_helical_preview.json()["measurements"]["over_pin"]["available"] is False
+    internal_helical_plan = client.post("/modules/gear_internal/cad/plan", json=internal_helical)
+    assert internal_helical_plan.status_code == 200
+    assert internal_helical_plan.json()["geometry"]["cut_scenario"] == "helical_cut_evolution"
+    internal_bad_ring = client.post(
+        "/modules/gear_internal/preview", json={**internal_spec["defaults"], "ring_outside_diameter_mm": 80.0}
+    )
+    assert internal_bad_ring.status_code == 200
+    assert internal_bad_ring.json()["ok"] is False
+    assert any(
+        item["code"] == "gear_internal_ring_outside_below_root"
+        for item in internal_bad_ring.json()["report"]["errors"]
+    )
 
     cam_spec = client.get("/modules/camshaft_lobe/spec").json()
     assert cam_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
@@ -2342,3 +2543,71 @@ def test_legacy_mechanics_ui_imports_remain_compatible() -> None:
 
     assert former_studio_list_modules() == list_modules()
     assert legacy_list_modules() == list_modules()
+
+
+def test_gear_standard_catalog_and_pin_cache_cover_small_module_high_stress_and_iso() -> None:
+    from kompas_mcp.gears import (
+        SpurGearRequest,
+        build_spur_gear_preview,
+        gear_selection,
+        resolve_rack,
+    )
+
+    selection = gear_selection()
+    assert [item["value"] for item in selection["standards"]] == [
+        "gost_13755_2015",
+        "gost_9587_81",
+        "gost_r_50531_93",
+        "iso_53_1998",
+    ]
+    by_standard = {item["value"]: item for item in selection["standards"]}
+    assert by_standard["gost_9587_81"]["module_system"] == "gost_9563_60"
+    assert by_standard["gost_9587_81"]["module_max"] == 1.0
+    assert by_standard["gost_9587_81"]["module_max_exclusive"] is True
+    small_mods = {item["value"]: item for item in by_standard["gost_9587_81"]["modifications"]}
+    assert small_mods["h11_c40"]["module_max"] == 0.5
+    assert small_mods["h11_c40"]["module_max_exclusive"] is True
+    assert small_mods["h11_c25"]["module_min"] == 0.5
+    assert by_standard["iso_53_1998"]["module_system"] == "iso_54_1996"
+    assert len(selection["module_rows"]["iso_54_1996"]["row_1"]) == 18
+    assert selection["module_rows"]["gost_9563_60"]["exceptions"]
+    assert any(source["id"] == "gost_2475_88_spline" for source in selection["pin_sources"])
+
+    small = resolve_rack("gost_9587_81", "h1_c25")
+    assert small.pressure_angle_deg == 20.0
+    assert small.clearance_coefficient == 0.25
+    assert small.fillet_coefficient == 0.38
+    high_stress = resolve_rack("gost_r_50531_93", "type_1")
+    assert high_stress.pressure_angle_deg == 25.0
+    assert high_stress.clearance_coefficient == 0.20328
+    assert abs(high_stress.fillet_coefficient - 0.35208) < 1e-9
+    iso_d = resolve_rack("iso_53_1998", "d")
+    assert iso_d.clearance_coefficient == 0.4
+    assert iso_d.fillet_coefficient == 0.39
+
+    preview = build_spur_gear_preview(
+        {"standard": "gost_9587_81", "modification": "h1_c25",
+         "module_mm": 0.5, "tooth_count": 24, "face_width_mm": 6.0}
+    )
+    assert preview["success"]
+    assert preview["summary"]["standard"] == "gost_9587_81"
+    assert abs(preview["summary"]["root_diameter_mm"] - 10.75) < 1e-9
+    assert not any(item["code"] == "gear_small_module_contour" for item in preview["warning_items"])
+
+    iso_preview = build_spur_gear_preview(
+        {"standard": "iso_53_1998", "modification": "b",
+         "module_mm": 5.5, "tooth_count": 30, "face_width_mm": 40.0}
+    )
+    assert iso_preview["success"]
+    module_check = next(item for item in iso_preview["report"]["checks"] if item["code"] == "gear_module_row")
+    assert module_check["status"] == "ok"
+    assert iso_preview["summary"]["over_pin_source"].startswith("gost_")
+
+    out_of_range = build_spur_gear_preview(
+        {"standard": "gost_13755_2015", "modification": "a",
+         "module_mm": 0.5, "tooth_count": 24, "face_width_mm": 6.0}
+    )
+    assert any(item["code"] == "gear_standard_module_range" for item in out_of_range["warning_items"])
+
+    with pytest.raises(ValueError):
+        SpurGearRequest(standard="iso_53_1998", modification="h1_c25")
