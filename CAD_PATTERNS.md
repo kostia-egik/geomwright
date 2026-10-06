@@ -135,6 +135,10 @@ Rule:
   bridge-side messages.
 - Verify with the KOMPAS interpreter, not the project venv:
   `& "C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe" -m py_compile bridge\kompas_bridge.py`.
+- `ast.parse(..., feature_version=(3, 2))` under the host Python does **not**
+  reliably reject starred display expressions; the bundled-interpreter
+  `py_compile` and the source guard in `test_geomwright_studio.py` are the
+  dependable checks.
 
 Verification:
 - A clean `py_compile` exit under the KOMPAS interpreter before any live run.
@@ -144,6 +148,10 @@ Known example:
 - `_inspect_gear_spur_block` used `(blank, gap, *cuts, pattern)`; the host venv
   compiled it, and the Studio workspace failed until it was rewritten as a list
   concatenation.
+- `handle_create_gear_internal` then reintroduced
+  `["blank", *ring_chamfer_ids, ...]`; the venv compiled it, and the Studio
+  "Создать в КОМПАС" job failed with the same `SyntaxError` until it was
+  rewritten as list concatenation. The bundled-interpreter compile catches it.
 
 Related:
 - `SESSION-002`

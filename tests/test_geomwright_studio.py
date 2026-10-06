@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import math
 
@@ -1559,6 +1560,11 @@ def test_bundled_bridge_contains_managed_pulley_create_and_ownership_paths() -> 
     packaged = (root / "src" / "kompas_mcp" / "assets" / "bridge" / "kompas_bridge.py").read_text(encoding="utf-8")
 
     assert source == packaged
+    # BRIDGE-001: the bundled KOMPAS runtime is Python 3.2. f-strings and
+    # starred display expressions are 3.5+ syntax; an ast feature_version check
+    # does not catch the starred form reliably, so guard the source directly.
+    assert not re.search(r"(^|[^A-Za-z0-9_])f[\"']", source)
+    assert not re.search(r"^\s+\*\s*[A-Za-z_]", source, re.M)
     assert "def _build_managed_flat_pulley(" in source
     assert 'family not in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear")' in source
     assert '{"FP_OR", "FP_T"}.intersection(variable_names)' in source

@@ -29,6 +29,13 @@ Pass "bridge parity"
 if ($LASTEXITCODE -ne 0) { Fail "compile" }
 Pass "compile"
 
+$bundledPython = "C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe"
+if (Test-Path -LiteralPath $bundledPython) {
+    & $bundledPython -m py_compile (Join-Path $projectRoot "bridge\kompas_bridge.py")
+    if ($LASTEXITCODE -ne 0) { Fail "bundled bridge compile (Python 3.2)" }
+    Pass "bundled bridge compile"
+}
+
 if ($TestPath) {
     $pytestArgs = @("-m", "pytest", $TestPath, "-q", "--tb=short")
     if ($Keyword) { $pytestArgs += @("-k", $Keyword) }

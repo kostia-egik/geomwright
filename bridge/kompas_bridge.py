@@ -28677,15 +28677,13 @@ def handle_create_gear_internal(payload):
         if "tip_chamfer_face_a" in operation_ids
         else []
     )
-    expected_ids = [
-        "blank",
-        *ring_chamfer_ids,
-        "bore_cut",
-        *tip_chamfer_ids,
-        "tooth_space_sketch",
-        "tooth_space_cut",
-        "tooth_space_pattern",
-    ]
+    expected_ids = (
+        ["blank"]
+        + list(ring_chamfer_ids)
+        + ["bore_cut"]
+        + list(tip_chamfer_ids)
+        + ["tooth_space_sketch", "tooth_space_cut", "tooth_space_pattern"]
+    )
     if operation_ids != expected_ids:
         raise ValueError(
             "Managed internal gear requires ring blank, optional ring chamfers, "
