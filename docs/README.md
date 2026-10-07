@@ -46,6 +46,7 @@ specific task, not a changelog or a dump of live CAD experiments.
 | [Chain transmission](chain-transmission-concept.md) | Experimental, create-verified | ISO/GOST roller and bush sprocket profiles; create-only family slice |
 | [Cylindrical gear](gear-spur.md) | Implemented, live-verified | External spur and helical cylindrical gear with four basic-rack systems (ГОСТ 13755-2015, ГОСТ 9587-81, ГОСТ Р 50531-93, ISO 53:1998), cached pin rows, optional tip chamfers; nominal preview, create-only managed part, MCP tools |
 | [Internal gear](gear-internal.md) | Implemented, live-verified | Internal spur and helical ring gear with explicit blank outside diameter (ГОСТ 19274-73 nominal geometry); nominal preview, create-only managed part, MCP tools |
+| [Straight bevel gear](gear-bevel.md) | Implemented, live-verified | Straight bevel wheel from ГОСТ 19624-74 macro geometry and the Tredgold virtual-gear projection; nominal preview, create-only managed part, MCP tools; circular teeth are the next stage |
 | [Gear transmission plan](gear-transmission-concept.md) | Planned, research-backed | Cylindrical, bevel, hypoid, and worm families; native baseline, CAD/Studio split, phases |
 | [Gear standards register](gear-standards.md) | Reference | GOST/ISO/DIN/AGMA designations, applicability, and acquisition status |
 

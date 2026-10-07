@@ -76,7 +76,7 @@ function drawBackground(view) {
 function drawPath(
   points,
   view,
-  { fill = null, stroke = "#e3aa4f", dashed = false, dash = null, lineWidth = 1.8, holes = null, fillRule = "evenodd" } = {},
+  { fill = null, stroke = "#e3aa4f", dashed = false, dash = null, lineWidth = 1.8, holes = null, fillRule = "evenodd", closed = true } = {},
 ) {
   if (!points?.length) return;
   context.save();
@@ -88,7 +88,7 @@ function drawPath(
       const [x, y] = view.point(point);
       context.lineTo(x, y);
     }
-    context.closePath();
+    if (closed) context.closePath();
   };
   tracePath(points);
   for (const hole of holes || []) {
@@ -170,6 +170,7 @@ function drawReferencePaths(view) {
       stroke: "rgba(97, 192, 177, 0.68)",
       dash: [11, 4, 2, 4],
       lineWidth: 1.15,
+      closed: false,
     });
   }
 }

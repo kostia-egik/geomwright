@@ -165,9 +165,27 @@ class SpurGearCreateRequest(SpurGearRequest):
 def gear_selection() -> dict:
     """Studio selection metadata: standards, module rows, and pin rows."""
     return {
-        "standards": standard_options(),
+        "standards": standard_options(
+            (
+                "gost_13755_2015",
+                "gost_9587_81",
+                "gost_r_50531_93",
+                "iso_53_1998",
+            )
+        ),
+        "bevel_standards": standard_options(("gost_13754_68", "iso_53_1998")),
         "module_rows": module_rows_catalog(),
         "pin_sources": pin_source_catalog(),
+    }
+
+
+def bevel_gear_selection() -> dict:
+    """Studio selection metadata for the straight bevel gear family."""
+    selection = gear_selection()
+    return {
+        "standards": selection["bevel_standards"],
+        "module_rows": selection["module_rows"],
+        "pin_sources": selection["pin_sources"],
     }
 
 

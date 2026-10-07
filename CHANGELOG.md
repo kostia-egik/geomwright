@@ -2,10 +2,24 @@
 
 ## Unreleased
 
-- Rounded the internal-gear roots with a nominal circular fillet from the
-  selected contour radius, reduced automatically when it does not fit the
-  space, and fixed the preview period sampling that had broken the root
-  junctions between neighbouring teeth.
+- Added the `gear_bevel` Studio module: a straight bevel gear with ГОСТ
+  19624-74 macro geometry and the Tredgold virtual-gear projection, a cropped
+  back-face end view with `d_e`/`d_fₑ`/`d_ae` dimensions, and an axial section
+  with the face/root cones and cone angles.
+- Added the GOST 13754-68 basic-rack system and the bevel standard selector;
+  the cylindrical selector keeps its four-rack catalog.
+- Added three family-neutral bridge primitives: `conical_blank`,
+  `section_profile_sketch` (self-calibrated sketch frames on offset planes),
+  and `loft_cut` (`ILoft` cut between closed sections).
+- Exposed the straight bevel gear in the public MCP catalog with
+  `preview_bevel_gear`, `create_bevel_gear`, and `inspect_bevel_gear`; the
+  create-only managed part persists `GW_GEAR_VERSION=3`, `GW_FAMILY_CODE=10`
+  and a checksummed recipe for a new build after reopen.
+- Cropped the internal-gear end preview to a three-tooth sector, removed the
+  duplicate outside reference circle, and drew the tooth-tip chamfers in the
+  longitudinal view. The internal gear now has one chamfer pair, matching the
+  external-gear contract. The root transition now follows the native module's
+  tangent cubic-Bezier representation instead of a circular fillet.
 - Added ring end chamfers (0.5 x 45° by default) and optional tooth-tip
   chamfers to the internal gear, with integrated removal volumes and a hatched
   longitudinal section view.

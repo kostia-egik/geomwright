@@ -71,6 +71,8 @@ Evidence levels used by this file:
 | Host tests create duplicate CAD models during unrelated work | `SESSION-004` |
 | Bridge fails with `SyntaxError` although the project venv accepts the file | `BRIDGE-001` |
 | Numeric sketch creation times out with hundreds of entities | `OP-004`, `BRIDGE-001` |
+| Need a variable-section cut without a loft/loft-cut primitive | `LOFT-001`, `LOFT-002` |
+| An API-created plane's sketch 2D frame is unknown or mirrored | `FRAME-001`, `CS-004` |
 
 ## Rules
 
@@ -2596,6 +2598,59 @@ Failed approach: updating only the blank sketch, or repeatedly calling
 the second and later edits. Do not use a `BeginEdit()` geometry readback as the
 refresh mechanism during the active transaction; on some KOMPAS builds it can
 block while the new feature tree is still resolving.
+
+### LOFT-001: Use `ILoft` For Variable-Section Cuts
+
+Applies when: a body must be cut with a contour whose cross-section scales or
+changes along a path, and no extrusion/evolution primitive expresses it (for
+example a straight bevel-gear tooth space).
+
+Verified on KOMPAS v23 through API7:
+
+- `IModelContainer.Lofts.Add(32)` creates a cut loft (`o3d_cutLoft`);
+- `ILoft.OperationResult = 2` (`ksOperationResultEnum::ksOperationCut`) makes
+  it subtractive;
+- `ILoft.Sketchs` takes a VARIANT array of sketch objects. A
+  `win32com.client.VARIANT(VT_ARRAY | VT_DISPATCH, [...])` payload works with
+  dynamic dispatch; a plain Python list is the fallback attempt, not the
+  primary one;
+- `ILoft.Update()` then `part.Update()` and the same body-count / material-
+  removal checks used by `cut_extrusion` keep the operation verifiable.
+
+For a bevel tooth space, two frontal sections are enough when both are exact
+central projections of the same contour from the wheel apex: the inner section
+is a uniform 3D scaling of the outer one, so a ruled loft between corresponding
+points reproduces the projected cone surface exactly. Do not fit the two
+sections independently; scale the fitted control points of the outer section.
+
+### LOFT-002: A Cut Loft Sees Pattern Copies In Its Own Collection
+
+`FeaturePatterns` copies of a loft cut appear as additional `ILoft` objects in
+`IModelContainer.Lofts` with the source feature's name. Managed-block
+recognition must accept `len(lofts) >= 1` and use the first (root) feature for
+owned references, as the extrusion-based gear inspection already does with
+`Extrusions`. Requiring exactly one loft silently rejects every patterned cut.
+
+### FRAME-001: Measure An API-Created Plane's Sketch Frame With Probe Points
+
+Applies when: a profile must be written in 2D sketch coordinates on a plane
+created through the API (offset/angled/custom planes), and the plane's local
+axis order or sign is unknown (see also `CS-004`).
+
+Do not assume the frame. Create a small probe sketch on the plane with points at
+`(0,0)`, `(1,0)`, `(2,0)`, `(0,1)` (and optionally `(1,1)`), finish and update
+it, then read the persistent vertices through `IFeature7.ModelObjects(8)`
+(`EDGE-001`). The world coordinates of the probe points give the affine
+2D-to-3D frame of that plane: origin, U vector, V vector, and scale. The point
+at `(2,0)` disambiguates the U axis from the V axis. Invert that measured frame
+to convert host 3D points into the exact 2D sketch coordinates, and validate
+that the U/V vectors are orthogonal, have equal lengths, and are parallel to the
+requested base plane. Reuse the same measured frame for every sketch created on
+that plane.
+
+Verified live: on a `YOZ`-parallel offset plane KOMPAS mapped sketch U to
+global -Z and sketch V to global -Y; writing untransformed host coordinates
+would have produced a mirrored, axis-swapped section.
 
 ## Case Studies
 

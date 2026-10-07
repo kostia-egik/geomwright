@@ -1,4 +1,4 @@
-"""Public request contract for the internal cylindrical gear module."""
+"""Public request contract for the bevel gear module."""
 from __future__ import annotations
 
 from typing import Literal
@@ -8,64 +8,67 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .basic_racks import resolve_rack
 
 
-class InternalGearRequest(BaseModel):
-    """Internal cylindrical gear (ring gear) with a nominal involute profile.
+class BevelGearRequest(BaseModel):
+    """Straight bevel gear with a nominal Tredgold virtual-gear profile.
 
-    The gear is cut from a ring blank whose outside diameter is an explicit
-    input; the internal tooth spaces are cut from the bore. `standard` and
-    `modification` select the basic-rack system exactly as for the external
-    gear; only `modification="custom"` exposes the rack coefficients.
+    The module builds one wheel from an explicit pitch cone angle. The tooth
+    flank is the classic Tredgold construction: the tooth space of the
+    equivalent (virtual) spur gear on the back cone is projected to the gear
+    apex. `tooth_type="straight"` is the implemented modification;
+    `tooth_type="circular"` is reserved for the circular-tooth stage and is
+    rejected until that method has its own named geometry.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    tooth_type: Literal["straight", "circular"] = Field(
+        default="straight",
+        title="Tooth type",
+        description=(
+            "straight - прямозубая (реализовано); "
+            "circular - с круговым зубом (следующий этап, пока не строится)."
+        ),
+    )
     standard: str = Field(
-        default="gost_13755_2015",
+        default="gost_13754_68",
         title="Basic rack standard",
         description=(
-            "Basic-rack system: ГОСТ 13755-2015, ГОСТ 9587-81, ГОСТ Р 50531-93, "
-            "or ISO 53:1998."
+            "Basic-rack system: ГОСТ 13754-68 (default for bevel gears), "
+            "ГОСТ 13755-2015, ГОСТ 9587-81, ГОСТ Р 50531-93, or ISO 53:1998."
         ),
     )
     modification: str = Field(
-        default="a",
+        default="standard",
         title="Contour modification",
         description="Named modification of the selected standard, or a user-defined contour.",
     )
     module_mm: float = Field(
-        default=2.0, gt=0.0, le=100.0,
-        title="Normal module, mm",
-        description="Normal module m selected from the standard module rows.",
+        default=3.0, gt=0.0, le=100.0,
+        title="Outer circumferential module, mm",
+        description="External circumferential module m_e on the back cone.",
     )
     tooth_count: int = Field(
-        default=40, ge=8, le=400,
+        default=20, ge=6, le=400,
         title="Tooth count",
-        description="Number of internal teeth z.",
+        description="Number of teeth z.",
+    )
+    pitch_cone_angle_deg: float = Field(
+        default=45.0, ge=5.0, le=85.0,
+        title="Pitch cone angle, deg",
+        description="Pitch cone half-angle delta; 45 degrees is a 1:1 orthogonal pair.",
     )
     profile_shift: float = Field(
         default=0.0, ge=-1.5, le=1.5,
         title="Profile shift coefficient",
-        description="Rack shift coefficient x2 of the internal gear; positive values thin the tooth.",
+        description="Rack shift coefficient x of the wheel.",
     )
-    face_width_mm: float = Field(
-        default=20.0, gt=0.0, le=1000.0,
+    face_width_mm: float | None = Field(
+        default=None, gt=0.0, le=1000.0,
         title="Face width, mm",
-        description="Functional tooth width b of the ring.",
-    )
-    ring_outside_diameter_mm: float = Field(
-        default=100.0, gt=0.0, le=5000.0,
-        title="Ring blank outside diameter, mm",
-        description="Outside diameter of the ring blank on whose inner surface the teeth are cut.",
-    )
-    helix_angle_deg: float = Field(
-        default=0.0, ge=0.0, le=45.0,
-        title="Helix angle, deg",
-        description="Tooth helix angle beta on the reference cylinder; 0 keeps a spur internal gear.",
-    )
-    hand: Literal["right", "left"] = Field(
-        default="right",
-        title="Helix hand",
-        description="Right- or left-hand tooth direction; ignored when the helix angle is 0.",
+        description=(
+            "Functional face width b along the pitch cone. Empty selects the "
+            "ГОСТ 19624-74 recommendation b = 0.285 R_e."
+        ),
     )
     pressure_angle_deg: float | None = Field(
         default=None, gt=10.0, lt=35.0,
@@ -87,27 +90,14 @@ class InternalGearRequest(BaseModel):
         title="Root fillet coefficient",
         description="User-defined modification only; named modifications derive rho_f* from the standard.",
     )
-    pin_diameter_mm: float | None = Field(
-        default=None, gt=0.0, le=200.0,
-        title="Over-pin diameter, mm",
-        description=(
-            "Measurement pin/ball diameter. Empty selects the nearest cached "
-            "standard pin that fits the internal tooth space."
-        ),
-    )
-    tip_chamfer_mm: float = Field(
-        default=0.0, ge=0.0, le=20.0,
-        title="Tooth tip chamfer width, mm",
-        description="Axial width of the chamfer on the internal tooth tips at both bore edges; 0 keeps sharp tips.",
-    )
-    tip_chamfer_angle_deg: float = Field(
-        default=45.0, ge=15.0, le=75.0,
-        title="Tooth tip chamfer angle, deg",
-        description="Angle between the tooth-tip chamfer surface and the end face; 45 degrees is the c x 45 form.",
-    )
 
     @model_validator(mode="after")
-    def _validate_rack_selection(self) -> "InternalGearRequest":
+    def _validate_selection(self) -> "BevelGearRequest":
+        if self.tooth_type != "straight":
+            raise ValueError(
+                "Круговая модификация конической передачи входит в следующий этап; "
+                "сейчас доступна tooth_type='straight'."
+            )
         if self.mode != "custom":
             if any(
                 value is not None
@@ -121,8 +111,6 @@ class InternalGearRequest(BaseModel):
                 raise ValueError(
                     "coefficient overrides are only available for modification='custom'"
                 )
-        if self.hand not in ("right", "left"):
-            raise ValueError("hand must be 'right' or 'left'")
         resolve_rack(
             self.standard,
             self.modification,
@@ -148,16 +136,16 @@ class InternalGearRequest(BaseModel):
         )
 
 
-class InternalGearCreateRequest(InternalGearRequest):
+class BevelGearCreateRequest(BevelGearRequest):
     """Create-only MCP request: plan with execute=false, write with both flags."""
 
-    name: str = Field(default="Geomwright internal gear", min_length=1, max_length=120)
+    name: str = Field(default="Geomwright bevel gear", min_length=1, max_length=120)
     execute: bool = False
     confirm_write: bool = False
     visible: bool = True
 
     @model_validator(mode="after")
-    def _validate_write_confirmation(self) -> "InternalGearCreateRequest":
+    def _validate_write_confirmation(self) -> "BevelGearCreateRequest":
         if self.execute and self.confirm_write is not True:
             raise ValueError("confirm_write=true is required when execute=true")
         return self

@@ -15,26 +15,27 @@ from kompas_mcp.transmissions import build_chain_sprocket_plan, list_chain_profi
 def test_registry_exposes_schema_driven_transmission_modules() -> None:
     modules = list_modules()
 
-    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket", "silent_chain_sprocket", "gear_spur", "gear_internal", "camshaft_lobe"]
+    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket", "silent_chain_sprocket", "gear_spur", "gear_internal", "gear_bevel", "camshaft_lobe"]
     transmissions = [item for item in modules if item["group"] == "mechanical_transmissions"]
     valvetrain = [item for item in modules if item["group"] == "valvetrain"]
     assert [item["kind"] for item in valvetrain] == ["camshaft_lobe"]
     assert valvetrain[0]["subgroup"] == "valvetrain"
-    assert all(item["subgroup"] == "belt_drives" for item in transmissions[:-4])
-    assert all(item["subgroup"] == "chain_drives" for item in transmissions[-4:-2])
-    assert all(item["subgroup"] == "gear_drives" for item in transmissions[-2:])
-    assert [item["icon"] for item in transmissions[-4:-2]] == [
+    assert all(item["subgroup"] == "belt_drives" for item in transmissions[:-5])
+    assert all(item["subgroup"] == "chain_drives" for item in transmissions[-5:-3])
+    assert all(item["subgroup"] == "gear_drives" for item in transmissions[-3:])
+    assert [item["icon"] for item in transmissions[-5:-3]] == [
         "/static/icons/roller-sprocket.svg", "/static/icons/silent-sprocket.svg",
     ]
-    assert [item["icon"] for item in transmissions[-2:]] == [
-        "/static/icons/gear-spur.svg", "/static/icons/gear-internal.svg",
+    assert [item["icon"] for item in transmissions[-3:]] == [
+        "/static/icons/gear-spur.svg", "/static/icons/gear-internal.svg", "/static/icons/gear-bevel.svg",
     ]
     assert valvetrain[0]["icon"] == "/static/icons/cam.svg"
     assert get_module("timing_trapezoidal").descriptor()["capabilities"]["build"] is True
     assert get_module("timing_curvilinear").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
     assert get_module("gear_spur").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
     assert get_module("gear_internal").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
-    for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "gear_spur", "gear_internal"):
+    assert get_module("gear_bevel").descriptor()["capabilities"] == {"preview": True, "build": True, "inspect": False}
+    for kind in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "gear_spur", "gear_internal", "gear_bevel"):
         module = get_module(kind)
         spec = module.spec()
         validated = module.request_model.model_validate(spec["defaults"])
@@ -1788,7 +1789,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert f"styles.css?v={health['static_version']}" in page
     assert f"app.js?v={health['static_version']}" in page
     assert "managed_pulley_create_job" in health["capabilities"]
-    assert client.get("/modules").json()["count"] == 10
+    assert client.get("/modules").json()["count"] == 11
     gear_spec = client.get("/modules/gear_spur/spec").json()
     assert gear_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
     gear_preview = client.post("/modules/gear_spur/preview", json=gear_spec["defaults"])
@@ -1878,6 +1879,19 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert internal_body["summary"]["root_diameter_mm"] == 85.0
     assert internal_body["summary"]["verification_status"] == "ok"
     assert len(internal_body["closed_points"][0]) > 200
+    assert internal_body["preview_window"] == {
+        "tooth_gap_count": 3,
+        "visible_tooth_count": 3,
+        "section_style": "cropped_sector",
+    }
+    assert [item["key"] for item in internal_body["reference_paths"]] == [
+        "pitch_circle",
+        "tip_circle",
+        "root_circle",
+    ]
+    assert len(internal_body["dimensions"]) == 3
+    assert internal_body["summary"]["root_transition_mode"] == "cubic_bezier_root_transition"
+    assert internal_body["summary"]["root_transition_size_mm"] == 0.6
     assert internal_body["secondary_view"]["internal"] is True
     assert internal_body["secondary_view"]["outside_diameter_mm"] == 100.0
     internal_plan = client.post("/modules/gear_internal/cad/plan", json=internal_spec["defaults"])
@@ -1886,8 +1900,6 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert internal_plan_body["stage"] == "internal_gear_cad_plan"
     assert [op["id"] for op in internal_plan_body["workflow"]["params"]["operations"]] == [
         "blank",
-        "ring_chamfer_face_a",
-        "ring_chamfer_face_b",
         "bore_cut",
         "tooth_space_sketch",
         "tooth_space_cut",
@@ -1896,14 +1908,41 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert [op["scenario"] for op in internal_plan_body["workflow"]["params"]["operations"]] == [
         "cylindrical_blank",
         "rotational_cut",
-        "rotational_cut",
-        "rotational_cut",
         "numeric_profile_sketch",
         "cut_extrusion",
         "circular_pattern",
     ]
     assert internal_plan_body["verification"]["pattern_count"] == 40
     assert internal_plan_body["verification"]["expected_volume_mm3"] > 0.0
+    tooth_entities = next(
+        op for op in internal_plan_body["workflow"]["params"]["operations"]
+        if op["id"] == "tooth_space_sketch"
+    )["params"]["entities"]
+    assert [
+        entity["kind"] for entity in tooth_entities
+        if "root_transition" in entity["id"]
+    ] == ["nurbs", "nurbs"]
+    internal_chamfer = client.post(
+        "/modules/gear_internal/preview",
+        json={**internal_spec["defaults"], "tip_chamfer_mm": 0.5},
+    ).json()
+    assert internal_chamfer["secondary_view"]["tip_chamfer_mm"] == 0.5
+    assert internal_chamfer["secondary_view"]["tip_chamfer_depth_mm"] == pytest.approx(0.5)
+    internal_chamfer_plan = client.post(
+        "/modules/gear_internal/cad/plan",
+        json={**internal_spec["defaults"], "tip_chamfer_mm": 0.5},
+    ).json()
+    chamfer_a = next(
+        op for op in internal_chamfer_plan["workflow"]["params"]["operations"]
+        if op["id"] == "tip_chamfer_face_a"
+    )
+    expected_chamfer_points = [
+        [-20.0, 38.4],
+        [-20.0, 38.9],
+        [-19.5, 38.4],
+    ]
+    for actual, expected in zip(chamfer_a["params"]["profile_points"], expected_chamfer_points):
+        assert actual == pytest.approx(expected)
     internal_helical = {**internal_spec["defaults"], "helix_angle_deg": 20.0, "hand": "left"}
     internal_helical_preview = client.post("/modules/gear_internal/preview", json=internal_helical)
     assert internal_helical_preview.status_code == 200

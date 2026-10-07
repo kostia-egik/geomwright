@@ -15,10 +15,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .bevel import build_bevel_gear_geometry, build_bevel_gear_preview
+from .bevel_spec import BevelGearRequest
 from .internal import (
     build_internal_gear_geometry,
     build_internal_gear_preview,
-    internal_ring_chamfer_volume,
     internal_tip_chamfer_volume,
 )
 from .internal_spec import InternalGearRequest
@@ -33,6 +34,9 @@ PLAN_STAGE = "gear_spur_cad_plan"
 INTERNAL_FAMILY_CODE = 9
 INTERNAL_OWNERSHIP_SCHEMA = "geomwright.managed_gear_internal"
 INTERNAL_PLAN_STAGE = "internal_gear_cad_plan"
+BEVEL_FAMILY_CODE = 10
+BEVEL_OWNERSHIP_SCHEMA = "geomwright.managed_gear_bevel"
+BEVEL_PLAN_STAGE = "bevel_gear_cad_plan"
 STANDARD_CODES = {"gost_13755_2015": 1}
 MODIFICATION_CODES = {"a": 1, "b": 2, "c": 3, "d": 4, "custom": 0}
 
@@ -631,24 +635,19 @@ def build_internal_gear_plan(
             }
         )
     entities.append(_nurbs_entity(left_spline, "internal_space_involute_left"))
-    fillet_radius = geometry.root_fillet_radius_effective_mm
-    if geometry.root_fillet_mode.startswith("circular") and fillet_radius > 0.0:
-        left_arc = list(geometry.left_fillet_arc)
-        if len(left_arc) >= 2:
-            left_mid = left_arc[len(left_arc) // 2]
+    if geometry.root_transition_mode == "cubic_bezier_root_transition":
+        left_controls = list(geometry.left_transition_controls)
+        if len(left_controls) == 4:
             entities.append(
-                {
-                    "id": "internal_space_root_fillet_left",
-                    "kind": "arc",
-                    "center": list(geometry.left_fillet_center),
-                    "radius": fillet_radius,
-                    "start": list(geometry.left_fillet_start),
-                    "end": list(geometry.left_fillet_end),
-                    "direction": _clockwise(
-                        list(geometry.left_fillet_start), left_mid, list(geometry.left_fillet_end)
-                    ),
-                    "style": 1,
-                }
+                _nurbs_entity(
+                    {
+                        "points": left_controls,
+                        "weights": [1.0] * 4,
+                        "knots": [0.0] * 4 + [1.0] * 4,
+                        "degree": 3,
+                    },
+                    "internal_space_root_transition_left",
+                )
             )
         root_middle = list(geometry.root_middle_arc)
         if len(root_middle) >= 2 and math.dist(root_middle[0], root_middle[-1]) > 1e-6:
@@ -667,22 +666,18 @@ def build_internal_gear_plan(
                     "style": 1,
                 }
             )
-        right_arc = list(geometry.right_fillet_arc)
-        if len(right_arc) >= 2:
-            right_mid = right_arc[len(right_arc) // 2]
+        right_controls = list(reversed(geometry.right_transition_controls))
+        if len(right_controls) == 4:
             entities.append(
-                {
-                    "id": "internal_space_root_fillet_right",
-                    "kind": "arc",
-                    "center": list(geometry.right_fillet_center),
-                    "radius": fillet_radius,
-                    "start": list(geometry.right_fillet_end),
-                    "end": list(geometry.right_fillet_start),
-                    "direction": _clockwise(
-                        list(geometry.right_fillet_end), right_mid, list(geometry.right_fillet_start)
-                    ),
-                    "style": 1,
-                }
+                _nurbs_entity(
+                    {
+                        "points": right_controls,
+                        "weights": [1.0] * 4,
+                        "knots": [0.0] * 4 + [1.0] * 4,
+                        "degree": 3,
+                    },
+                    "internal_space_root_transition_right",
+                )
             )
     else:
         root_point_right = list(geometry.root_point_right)
@@ -703,20 +698,13 @@ def build_internal_gear_plan(
     _validate_entity_contour(entities, geometry.module_mm)
 
     pattern_count = int(geometry.tooth_count)
-    ring_chamfer_volume = internal_ring_chamfer_volume(
-        geometry,
-        width_mm=geometry.ring_chamfer_mm,
-        angle_deg=geometry.ring_chamfer_angle_deg,
-    )
     tip_chamfer_volume = internal_tip_chamfer_volume(
         geometry,
         width_mm=geometry.tip_chamfer_mm,
         angle_deg=geometry.tip_chamfer_angle_deg,
     )
     expected_section = geometry.section_area_mm2
-    expected_volume = (
-        expected_section * geometry.face_width_mm - ring_chamfer_volume - tip_chamfer_volume
-    )
+    expected_volume = expected_section * geometry.face_width_mm - tip_chamfer_volume
     if expected_volume <= 0.0 or not math.isfinite(expected_volume):
         raise ValueError("Internal gear expected volume is not positive")
 
@@ -771,45 +759,6 @@ def build_internal_gear_plan(
             },
         },
     ]
-    if geometry.ring_chamfer_mm > 0.0:
-        ring_depth = geometry.ring_chamfer_depth_mm
-        ring_width = geometry.ring_chamfer_mm
-        operations.extend(
-            [
-                {
-                    "id": "ring_chamfer_face_a",
-                    "scenario": "rotational_cut",
-                    "params": {
-                        "name": f"{requested_name} ring chamfer A",
-                        "plane": "XOY",
-                        "axis": "blank.axis",
-                        "profile_points": [
-                            [-width, ring_radius - ring_depth],
-                            [-width + ring_width, ring_radius],
-                            [-width, ring_radius],
-                        ],
-                        "angle_degrees": 360.0,
-                        "require_fully_defined": False,
-                    },
-                },
-                {
-                    "id": "ring_chamfer_face_b",
-                    "scenario": "rotational_cut",
-                    "params": {
-                        "name": f"{requested_name} ring chamfer B",
-                        "plane": "XOY",
-                        "axis": "blank.axis",
-                        "profile_points": [
-                            [0.0, ring_radius - ring_depth],
-                            [-ring_width, ring_radius],
-                            [0.0, ring_radius],
-                        ],
-                        "angle_degrees": 360.0,
-                        "require_fully_defined": False,
-                    },
-                },
-            ]
-        )
     operations.append(
         {
             "id": "bore_cut",
@@ -845,7 +794,7 @@ def build_internal_gear_plan(
                         "profile_points": [
                             [-width, tip_radius],
                             [-width, tip_radius + tip_depth],
-                            [-width + tip_width, tip_radius + tip_depth],
+                            [-width + tip_width, tip_radius],
                         ],
                         "angle_degrees": 360.0,
                         "require_fully_defined": False,
@@ -861,7 +810,7 @@ def build_internal_gear_plan(
                         "profile_points": [
                             [0.0, tip_radius],
                             [0.0, tip_radius + tip_depth],
-                            [-tip_width, tip_radius + tip_depth],
+                            [-tip_width, tip_radius],
                         ],
                         "angle_degrees": 360.0,
                         "require_fully_defined": False,
@@ -904,13 +853,6 @@ def build_internal_gear_plan(
         {"name": "tooth_space_cut", "ref": "tooth_space_cut.feature"},
         {"name": "tooth_space_pattern", "ref": "tooth_space_pattern.feature"},
     ]
-    if geometry.ring_chamfer_mm > 0.0:
-        exports.extend(
-            [
-                {"name": "ring_chamfer_a", "ref": "ring_chamfer_face_a.feature"},
-                {"name": "ring_chamfer_b", "ref": "ring_chamfer_face_b.feature"},
-            ]
-        )
     if geometry.tip_chamfer_mm > 0.0:
         exports.extend(
             [
@@ -957,15 +899,11 @@ def build_internal_gear_plan(
             "spline_control_points": len(right_spline["points"]) + len(left_spline["points"]),
             "spline_deviation_mm": deviation,
             "tip_below_base": geometry.tip_below_base,
-            "root_fillet_mode": geometry.root_fillet_mode,
-            "root_fillet_radius_effective_mm": geometry.root_fillet_radius_effective_mm,
-            "ring_chamfer_mm": geometry.ring_chamfer_mm,
-            "ring_chamfer_angle_deg": geometry.ring_chamfer_angle_deg,
-            "ring_chamfer_depth_mm": geometry.ring_chamfer_depth_mm,
+            "root_transition_mode": geometry.root_transition_mode,
+            "root_transition_size_mm": geometry.root_transition_size_mm,
             "tip_chamfer_mm": geometry.tip_chamfer_mm,
             "tip_chamfer_angle_deg": geometry.tip_chamfer_angle_deg,
             "tip_chamfer_depth_mm": geometry.tip_chamfer_depth_mm,
-            "ring_chamfer_volume_mm3": ring_chamfer_volume,
             "tip_chamfer_volume_mm3": tip_chamfer_volume,
         },
         "ownership": {
@@ -988,21 +926,15 @@ def build_internal_gear_plan(
         },
         "accuracy": {
             "profile": (
-                "analytic_transverse_involute_with_nominal_tip_extension_and_circular_root_fillet"
+                "analytic_transverse_involute_with_nominal_tip_extension_and_cubic_bezier_root_transition"
                 if geometry.tip_below_base
-                else "analytic_transverse_involute_with_circular_root_fillet"
+                else "analytic_transverse_involute_with_cubic_bezier_root_transition"
             ),
-            "profile_encoding": "involute_cubic_bezier_nurbs_per_flank_with_root_fillet_and_bore_arcs",
+            "profile_encoding": "involute_and_root_transition_cubic_bezier_nurbs_per_flank_with_bore_arcs",
             "root_fillet": (
-                "circular_radius_%s_mm" % round(geometry.root_fillet_radius_effective_mm, 6)
-                if geometry.root_fillet_mode.startswith("circular")
+                "cubic_bezier_transition_scale_%s_mm" % round(geometry.root_transition_size_mm, 6)
+                if geometry.root_transition_mode == "cubic_bezier_root_transition"
                 else "sharp_nominal_root"
-            ),
-            "ring_chamfer": (
-                "two_cut_rotations_width_%s_angle_%s"
-                % (round(geometry.ring_chamfer_mm, 6), round(geometry.ring_chamfer_angle_deg, 3))
-                if geometry.ring_chamfer_mm > 0.0
-                else "none"
             ),
             "tip_chamfer": (
                 "two_cut_rotations_width_%s_angle_%s"
@@ -1015,6 +947,268 @@ def build_internal_gear_plan(
                 if helical
                 else "cut_extrusion_through_all"
             ),
+            "flank_spline_deviation_mm": deviation,
+            "parameterization": "numeric_create_only",
+            "representation_mode": "nominal",
+            "conformity_claim": False,
+        },
+    }
+
+
+def _mirror_spline(spline: dict) -> dict:
+    """Mirror a fitted Bezier-chain spline across the Y=0 plane and reverse it."""
+    knots = [float(value) for value in spline["knots"]]
+    total = knots[-1]
+    return {
+        "degree": int(spline["degree"]),
+        "points": [[-float(point[0]), float(point[1])] for point in reversed(spline["points"])],
+        "weights": [float(value) for value in reversed(spline["weights"])],
+        "knots": [total - float(value) for value in reversed(knots)],
+    }
+
+
+def _bevel_section_entities(section: dict, module_mm: float) -> tuple[list[dict], dict]:
+    """Fit one frontal tooth-space section into CAD entities.
+
+    The section is the exact central projection of the virtual tooth space; the
+    flank and root paths become smooth Bezier-chain splines, the cap outside
+    the blank stays one smooth curve, and the left flank is the exact mirror of
+    the fitted right flank.
+    """
+    root_points, root_spline, root_deviation = _fit_smooth_curve(section["root_path"], module_mm)
+    involute_points, involute_spline, involute_deviation = _fit_smooth_curve(
+        section["involute_path"], module_mm
+    )
+    # The cap contains the sharp radial extension at both tips; keep it as
+    # exact segments instead of smoothing a corner outside the material.
+    cap_segments = []
+    cap_points = [list(point) for point in section["cap_points"]]
+    for index in range(len(cap_points) - 1):
+        cap_segments.append(
+            {
+                "id": "bevel_space_cap_%d" % index,
+                "kind": "segment",
+                "start": cap_points[index],
+                "end": cap_points[index + 1],
+                "style": 1,
+            }
+        )
+    left_involute_spline = _mirror_spline(involute_spline)
+    left_root_spline = _mirror_spline(root_spline)
+    entities = [
+        _nurbs_entity(root_spline, "bevel_space_root_right"),
+        _nurbs_entity(involute_spline, "bevel_space_involute_right"),
+        *cap_segments,
+        _nurbs_entity(left_involute_spline, "bevel_space_involute_left"),
+        _nurbs_entity(left_root_spline, "bevel_space_root_left"),
+    ]
+    return entities, {
+        "root_deviation_mm": root_deviation,
+        "involute_deviation_mm": involute_deviation,
+        "deviation_mm": max(root_deviation, involute_deviation),
+        "root_control_points": len(root_spline["points"]),
+        "involute_control_points": len(involute_spline["points"]),
+        "cap_segment_count": len(cap_segments),
+        "root_samples": len(root_points),
+        "involute_samples": len(involute_points),
+        "cap_samples": len(cap_points),
+    }
+
+
+def _bevel_entities_3d(entities_2d: list[dict], x_mm: float, *, scale: float = 1.0) -> list[dict]:
+    """Lift fitted section entities to 3D points on the frontal plane x=x_mm."""
+
+    def point3(point) -> list[float]:
+        return [x_mm, float(point[0]) * scale, float(point[1]) * scale]
+
+    result = []
+    for entity in entities_2d:
+        item = dict(entity)
+        if item["kind"] == "nurbs":
+            item["points3"] = [point3(point) for point in item["points"]]
+        elif item["kind"] == "segment":
+            item["start3"] = point3(item["start"])
+            item["end3"] = point3(item["end"])
+        else:
+            raise ValueError("Bevel section entities must be NURBS or segments")
+        result.append(item)
+    return result
+
+
+def build_bevel_gear_plan(
+    request: dict,
+    *,
+    name: str = "Geomwright bevel gear",
+) -> dict[str, Any]:
+    """Build a create-only managed straight-bevel-gear plan without touching KOMPAS."""
+    requested_name = str(name or "").strip()
+    if not requested_name:
+        raise ValueError("name must not be empty")
+    request = BevelGearRequest.model_validate(request).model_dump(exclude_none=True)
+    preview = build_bevel_gear_preview(request)
+    if not preview.get("success"):
+        errors = ", ".join(str(item.get("code")) for item in preview.get("errors") or [])
+        raise ValueError("Bevel gear preview rejected the request: " + (errors or "invalid geometry"))
+    geometry = build_bevel_gear_geometry(request, curve_samples=260)
+    if not geometry.section_outer or not geometry.section_inner:
+        raise ValueError("Bevel gear sections are missing")
+    outer_2d, outer_report = _bevel_section_entities(geometry.section_outer, geometry.module_mm)
+    _validate_entity_contour(outer_2d, geometry.module_mm)
+    inner_scale = float(geometry.section_inner.get("scale") or 1.0)
+    x_outer = float(geometry.section_outer["x_mm"])
+    x_inner = float(geometry.section_inner["x_mm"])
+    outer_entities = _bevel_entities_3d(outer_2d, x_outer)
+    inner_entities = _bevel_entities_3d(outer_2d, x_inner, scale=inner_scale)
+    deviation = float(outer_report["deviation_mm"])
+
+    pattern_count = int(geometry.tooth_count)
+    expected_volume = float(geometry.expected_volume_mm3)
+    if expected_volume <= 0.0 or not math.isfinite(expected_volume):
+        raise ValueError("Bevel gear expected volume is not positive")
+    expected_bounds = [float(value) for value in geometry.expected_bounds_mm]
+    disk_radius = float(geometry.back_radius_mm)
+    disk_bounds = [
+        -float(geometry.apex_to_back_mm), -disk_radius, -disk_radius,
+        -float(geometry.apex_to_inner_mm), disk_radius, disk_radius,
+    ]
+    operations = [
+        {
+            "id": "blank",
+            "scenario": "conical_blank",
+            "params": {
+                "name": "%s blank" % requested_name,
+                "sketch_name": "%s blank sketch" % requested_name,
+                "x_back_mm": -float(geometry.apex_to_back_mm),
+                "x_inner_mm": -float(geometry.apex_to_inner_mm),
+                "outer_radius_mm": float(geometry.back_radius_mm),
+                "inner_radius_mm": float(geometry.inner_radius_mm),
+                "parameterize": False,
+                "require_fully_defined": False,
+            },
+        },
+        {
+            "id": "tooth_space_outer",
+            "scenario": "section_profile_sketch",
+            "params": {
+                "name": "%s tooth space outer section" % requested_name,
+                "sketch_name": "%s tooth space outer section" % requested_name,
+                "base_plane": "YOZ",
+                "anchor": [x_outer, 0.0, 0.0],
+                "entities": outer_entities,
+                "require_closure": True,
+                "profile_status": "nominal_tredgold_projection_outer_section",
+            },
+        },
+        {
+            "id": "tooth_space_inner",
+            "scenario": "section_profile_sketch",
+            "params": {
+                "name": "%s tooth space inner section" % requested_name,
+                "sketch_name": "%s tooth space inner section" % requested_name,
+                "base_plane": "YOZ",
+                "anchor": [x_inner, 0.0, 0.0],
+                "entities": inner_entities,
+                "require_closure": True,
+                "profile_status": "nominal_tredgold_projection_inner_section",
+            },
+        },
+        {
+            "id": "tooth_space_cut",
+            "scenario": "loft_cut",
+            "params": {
+                "name": "%s one tooth space cut" % requested_name,
+                "sections": ["tooth_space_outer.sketch", "tooth_space_inner.sketch"],
+                "require_material_removal": True,
+            },
+        },
+        {
+            "id": "tooth_space_pattern",
+            "scenario": "circular_pattern",
+            "params": {
+                "name": "%s tooth space pattern" % requested_name,
+                "source": "tooth_space_cut.feature",
+                "axis": "blank.axis",
+                "count": pattern_count,
+                "span_angle": 360.0,
+                "parameterize": False,
+            },
+        },
+    ]
+    exports = [
+        {"name": "blank_body", "operation_id": "blank", "output_key": "body"},
+        {"name": "blank_sketch", "operation_id": "blank", "output_key": "sketch"},
+        {"name": "blank_axis", "operation_id": "blank", "output_key": "axis"},
+        {"name": "tooth_space_outer", "operation_id": "tooth_space_outer", "output_key": "sketch"},
+        {"name": "tooth_space_inner", "operation_id": "tooth_space_inner", "output_key": "sketch"},
+        {"name": "tooth_space_cut", "operation_id": "tooth_space_cut", "output_key": "feature"},
+        {"name": "tooth_space_pattern", "operation_id": "tooth_space_pattern", "output_key": "feature"},
+    ]
+    return {
+        "ok": True,
+        "stage": BEVEL_PLAN_STAGE,
+        "plan_version": 1,
+        "family": "gear_bevel",
+        "name": requested_name,
+        "profile_request": dict(request),
+        "profile_preview": preview,
+        "workflow": {
+            "scenario": "workflow",
+            "params": {
+                "name": requested_name,
+                "operations": operations,
+                "exports": exports,
+            },
+        },
+        "geometry": {
+            "tooth_type": "straight",
+            "module_mm": geometry.module_mm,
+            "tooth_count": pattern_count,
+            "pitch_cone_angle_deg": math.degrees(geometry.pitch_cone_angle_rad),
+            "face_cone_angle_deg": math.degrees(geometry.face_cone_angle_rad),
+            "root_cone_angle_deg": math.degrees(geometry.root_cone_angle_rad),
+            "outer_pitch_diameter_mm": geometry.outer_pitch_diameter_mm,
+            "outer_tip_diameter_mm": geometry.outer_tip_diameter_mm,
+            "outer_root_diameter_mm": geometry.outer_root_diameter_mm,
+            "outer_cone_distance_mm": geometry.outer_cone_distance_mm,
+            "face_width_mm": geometry.face_width_mm,
+            "apex_to_back_mm": geometry.apex_to_back_mm,
+            "apex_to_inner_mm": geometry.apex_to_inner_mm,
+            "back_radius_mm": geometry.back_radius_mm,
+            "inner_radius_mm": geometry.inner_radius_mm,
+            "virtual_tooth_count": geometry.virtual_tooth_count,
+            "virtual_pitch_radius_mm": geometry.virtual_pitch_radius_mm,
+            "cut_scenario": "loft_cut_between_projected_frontal_sections",
+            "outer_section_x_mm": x_outer,
+            "inner_section_x_mm": x_inner,
+            "inner_section_scale": inner_scale,
+            "entity_count_per_section": len(outer_entities),
+            "spline_deviation_mm": deviation,
+            "expected_volume_mm3": expected_volume,
+            "blank_volume_mm3": geometry.blank_volume_mm3,
+            "removed_volume_mm3": geometry.removed_volume_mm3,
+        },
+        "ownership": {
+            "schema": BEVEL_OWNERSHIP_SCHEMA,
+            "version": 1,
+            "family_code": BEVEL_FAMILY_CODE,
+            "standard_code": STANDARD_CODES.get(str(request.get("standard")), 0),
+            "modification_code": MODIFICATION_CODES.get(str(request.get("modification")), 0),
+            "source_profile": dict(request),
+        },
+        "verification": {
+            "expected_volume_mm3": expected_volume,
+            "volume_relative_tolerance": 0.012,
+            "expected_bounds_mm": expected_bounds,
+            "expected_bounds_candidates_mm": [expected_bounds, disk_bounds],
+            "bounds_tolerance_mm": 0.08,
+            "max_radius_mm": disk_radius,
+            "face_width_mm": geometry.face_width_mm,
+            "pattern_count": pattern_count,
+        },
+        "accuracy": {
+            "profile": "tredgold_virtual_gear_projection_to_the_apex",
+            "profile_encoding": "root_and_involute_cubic_bezier_nurbs_per_flank_plus_cap_curve_per_section",
+            "sweep": "cut_loft_between_exact_projected_frontal_sections",
             "flank_spline_deviation_mm": deviation,
             "parameterization": "numeric_create_only",
             "representation_mode": "nominal",

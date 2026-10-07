@@ -9,15 +9,18 @@ from __future__ import annotations
 from typing import Any
 
 from .gears import (
+    BevelGearCreateRequest,
+    BevelGearRequest,
     InternalGearCreateRequest,
     InternalGearRequest,
     SpurGearCreateRequest,
     SpurGearRequest,
+    build_bevel_gear_preview,
     build_internal_gear_preview,
     build_spur_gear_preview,
     gear_selection,
 )
-from .gears.cad import build_gear_spur_plan, build_internal_gear_plan
+from .gears.cad import build_bevel_gear_plan, build_gear_spur_plan, build_internal_gear_plan
 
 
 def register_gear_tools(mcp: Any, adapter: Any) -> None:
@@ -89,4 +92,37 @@ def register_gear_tools(mcp: Any, adapter: Any) -> None:
         result = adapter.inspect_gear_internal(document_id=document_id)
         if result.get("module") != "gear_internal":
             raise ValueError("The exact document does not contain a recognized internal gear block")
+        return result
+
+    @mcp.tool()
+    def preview_bevel_gear(request: BevelGearRequest) -> dict:
+        """Preview one straight bevel gear (Tredgold nominal geometry); no CAD write."""
+        return build_bevel_gear_preview(request.model_dump(exclude_none=True))
+
+    @mcp.tool()
+    def create_bevel_gear(request: BevelGearCreateRequest) -> dict:
+        """Plan (execute=false) or create one verified create-only straight bevel gear part.
+
+        The module builds a conical blank and one tooth-space cut lofted between
+        two exact projected frontal sections. Creation stores a checksummed
+        recipe so a reopened block restores its Studio form for a new build.
+        """
+        profile = request.model_dump(
+            exclude={"name", "execute", "confirm_write", "visible"},
+            exclude_none=True,
+        )
+        plan = build_bevel_gear_plan(profile, name=request.name)
+        return adapter.create_gear_bevel(
+            plan,
+            execute=request.execute,
+            confirm_write=request.confirm_write,
+            visible=request.visible,
+        )
+
+    @mcp.tool()
+    def inspect_bevel_gear(document_id: str) -> dict:
+        """Read one saved managed bevel-gear block with its recipe and status."""
+        result = adapter.inspect_gear_bevel(document_id=document_id)
+        if result.get("module") != "gear_bevel":
+            raise ValueError("The exact document does not contain a recognized bevel gear block")
         return result

@@ -58,6 +58,15 @@ transmissions:
     mcp_symbols: [register_gear_tools]
     focused_test: tests/test_geomwright_studio.py -k gear
     mcp_test: tests/test_tool_catalog.py -k gear
+  bevel_gear:
+    owner: src/kompas_mcp/gears/bevel.py
+    symbols: [build_bevel_gear_preview, build_bevel_gear_plan, BevelGearRequest]
+    bridge_symbols: [handle_create_gear_bevel, handle_inspect_gear_bevel, _inspect_gear_bevel_block]
+    bridge_primitives: [conical_blank, section_profile_sketch, loft_cut]
+    studio_symbol: _adapt_gear_bevel
+    mcp_symbols: [register_gear_tools]
+    focused_test: tests/test_tool_catalog.py -k gear
+    docs: docs/gear-bevel.md
 
 studio:
   module_registry:

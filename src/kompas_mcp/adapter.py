@@ -2902,6 +2902,28 @@ class KompasAdapter:
             raise ValueError("document_id is required")
         return self.runner.call("inspect_gear_internal", {"document_id": str(document_id)})
 
+    def create_gear_bevel(
+        self, plan: dict[str, Any], *, execute: bool = False,
+        confirm_write: bool = False, visible: bool = True,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Execute a create-only managed straight-bevel-gear plan in a new part."""
+        if plan.get("stage") != "bevel_gear_cad_plan" or plan.get("plan_version") != 1:
+            raise ValueError("A bevel_gear_cad_plan version 1 is required")
+        if not execute:
+            return {"ok": True, "success": True, "executed": False, "stage": "planned", "plan": plan}
+        if confirm_write is not True:
+            raise ValueError("confirm_write=true is required when execute=true")
+        return self.runner.call("create_gear_bevel", {
+            "plan": plan, "execute": True, "confirm_write": True, "visible": bool(visible),
+        }, progress_callback=progress_callback)
+
+    def inspect_gear_bevel(self, *, document_id: str) -> dict[str, Any]:
+        """Read one recognized managed bevel-gear block with its stored recipe."""
+        if not str(document_id or "").strip():
+            raise ValueError("document_id is required")
+        return self.runner.call("inspect_gear_bevel", {"document_id": str(document_id)})
+
     def create_managed_pulley(
         self,
         *,

@@ -239,6 +239,13 @@ def create_app(
                 plan, execute=True, confirm_write=True, visible=True,
                 progress_callback=progress_callback,
             )
+        if module_kind == "gear_bevel":
+            plan = managed_pulley_plan(module_kind, profile)
+            plan["name"] = name
+            return adapter.create_gear_bevel(
+                plan, execute=True, confirm_write=True, visible=True,
+                progress_callback=progress_callback,
+            )
         if module_kind == "camshaft_lobe":
             request = CamshaftPhasesRequest.model_validate(profile)
             if request.step != "cam":

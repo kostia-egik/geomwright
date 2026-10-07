@@ -213,6 +213,127 @@ def _involute_sample_count(outside_radius: float, base_radius: float) -> int:
     return max(24, min(120, int(math.ceil(roll / step))))
 
 
+def build_tooth_space_flank(
+    *,
+    pitch_radius: float,
+    base_radius: float,
+    outside_radius: float,
+    root_radius: float,
+    module_mm: float,
+    pressure_angle_rad: float,
+    base_half_angle_rad: float,
+    rack_depth_mm: float,
+    corner_depth_mm: float,
+    curve_samples: int = 260,
+    max_involute_samples: int | None = None,
+) -> dict:
+    """Half tooth-space boundary of a sharp-rack generated involute profile.
+
+    The theoretical sharp generating rack is rolled on the pitch circle; its
+    corner produces the trochoid root, trimmed against the involute flank when
+    the two intersect. `base_half_angle_rad` is the involute base offset of
+    this flank. The function is shared by the cylindrical module (integer tooth
+    count) and by the bevel module, whose Tredgold virtual tooth count is
+    continuous.
+
+    Returns the half-gap path from the root-circle centre to the tip point
+    (`surface`), its split index at the form point, and the diagnostic paths.
+    A rejected profile returns an `errors` list without a surface.
+    """
+    errors: list[dict] = []
+    lateral = math.pi * module_mm / 4.0 - rack_depth_mm * math.tan(pressure_angle_rad)
+    t_root = -lateral / pitch_radius
+    trochoid_curve = [
+        _trochoid_point(pitch_radius, corner_depth_mm, lateral, t_root + 1.2 * index / curve_samples)
+        for index in range(curve_samples + 1)
+    ]
+    involute_count = _involute_sample_count(outside_radius, base_radius)
+    if max_involute_samples is not None:
+        involute_count = max(6, min(involute_count, int(max_involute_samples)))
+    inv_alpha = involute(pressure_angle_rad)
+    full_involute = sample_involute_flank(
+        base_radius=base_radius,
+        radius_start=base_radius,
+        radius_end=outside_radius,
+        base_half_angle=base_half_angle_rad,
+        inv_pressure_angle=inv_alpha,
+        count=involute_count,
+    )
+    hits = _polyline_intersections(trochoid_curve, full_involute)
+    trochoid_used = bool(hits)
+    if hits:
+        form_point = min(hits, key=_radius)
+        form_radius = _radius(form_point)
+        if form_radius >= outside_radius - 1e-9:
+            errors.append(
+                error_item(
+                    "gear_fillet_reaches_tip",
+                    "The generated root trochoid reaches the outside circle; the tooth space is not valid.",
+                    form_radius_mm=form_radius,
+                    outside_radius_mm=outside_radius,
+                )
+            )
+            return {"errors": errors}
+        trochoid_trim: list[list[float]] = []
+        for point in trochoid_curve:
+            trochoid_trim.append(point)
+            if _radius(point) >= form_radius - 1e-9:
+                break
+        involute_trim = [point for point in full_involute if _radius(point) >= form_radius - 1e-9]
+        if not involute_trim or math.dist(involute_trim[0], form_point) > 1e-6:
+            involute_trim.insert(0, [float(form_point[0]), float(form_point[1])])
+        boundary = _dedupe([*trochoid_trim, *involute_trim], tolerance=max(1e-9, module_mm * 1e-6))
+        root_angle = _angle(trochoid_curve[0])
+        split_point = form_point
+    else:
+        # The trochoid stays below the involute (no undercut trim). Keep the
+        # trochoid from the root up to the base circle, then the involute; a
+        # short connector at the base circle is a nominal junction.
+        start_radius = max(base_radius, root_radius)
+        involute_trim = [point for point in full_involute if _radius(point) >= start_radius - 1e-9]
+        if not involute_trim:
+            errors.append(
+                error_item(
+                    "gear_flank_missing",
+                    "No usable involute flank exists between the root and outside circles.",
+                )
+            )
+            return {"errors": errors}
+        trochoid_prefix: list[list[float]] = []
+        if _radius(trochoid_curve[0]) < start_radius - 1e-9:
+            for point in trochoid_curve:
+                trochoid_prefix.append(point)
+                if _radius(point) >= start_radius - 1e-9:
+                    break
+        if not trochoid_prefix:
+            boundary = _dedupe(involute_trim, tolerance=max(1e-9, module_mm * 1e-6))
+        else:
+            if len(trochoid_prefix) < 2:
+                trochoid_prefix = [trochoid_curve[0], involute_trim[0]]
+            boundary = _dedupe([*trochoid_prefix, *involute_trim], tolerance=max(1e-9, module_mm * 1e-6))
+        form_radius = _radius(involute_trim[0])
+        root_angle = _angle(boundary[0])
+        split_point = involute_trim[0]
+
+    root_arc_steps = max(3, int(8 * max(root_angle, 1e-3) / 0.1))
+    root_arc = _arc_points(root_radius, 0.0, root_angle, root_arc_steps)
+    surface = _dedupe([*root_arc, *boundary])
+    surface_split_index = min(
+        range(len(surface)), key=lambda index: math.dist(surface[index], split_point)
+    )
+    return {
+        "errors": [],
+        "surface": surface,
+        "surface_split_index": int(surface_split_index),
+        "root_angle_rad": root_angle,
+        "form_radius_mm": form_radius,
+        "root_envelope": "sharp_rack_trochoid" if trochoid_used else "involute_root_circle",
+        "involute_path": involute_trim,
+        "fillet_path": trochoid_curve if trochoid_used else [],
+        "root_arc_path": root_arc,
+    }
+
+
 def build_spur_gear_geometry(
     request: dict,
     *,
@@ -439,89 +560,30 @@ def build_spur_gear_geometry(
     # py_gearworks reference construction (rolling on the reference radius).
     # For a helical gear the rack is sliced in the transverse plane: the flank
     # angle and pitch widen to alpha_t / m_t while the depths stay normal.
-    rack_depth = (ha + clearance) * module
-    corner_depth = (ha + clearance - shift) * module
-    lateral = math.pi * module_t / 4.0 - rack_depth * math.tan(pressure_angle)
-    t_root = -lateral / pitch_radius
-    trochoid_curve = [
-        _trochoid_point(pitch_radius, corner_depth, lateral, t_root + 1.2 * index / curve_samples)
-        for index in range(curve_samples + 1)
-    ]
-    involute_count = _involute_sample_count(outside_radius, base_radius)
-    if max_involute_samples is not None:
-        involute_count = max(6, min(involute_count, int(max_involute_samples)))
-    full_involute = sample_involute_flank(
+    flank = build_tooth_space_flank(
+        pitch_radius=pitch_radius,
         base_radius=base_radius,
-        radius_start=base_radius,
-        radius_end=outside_radius,
-        base_half_angle=base_half_angle,
-        inv_pressure_angle=inv_alpha,
-        count=involute_count,
+        outside_radius=outside_radius,
+        root_radius=root_radius,
+        module_mm=module_t,
+        pressure_angle_rad=pressure_angle,
+        base_half_angle_rad=base_half_angle,
+        rack_depth_mm=(ha + clearance) * module,
+        corner_depth_mm=(ha + clearance - shift) * module,
+        curve_samples=curve_samples,
+        max_involute_samples=max_involute_samples,
     )
-    hits = _polyline_intersections(trochoid_curve, full_involute)
-    trochoid_used = bool(hits)
-    if hits:
-        form_point = min(hits, key=_radius)
-        form_radius = _radius(form_point)
-        if form_radius >= outside_radius - 1e-9:
-            errors.append(
-                error_item(
-                    "gear_fillet_reaches_tip",
-                    "The generated root trochoid reaches the outside circle; the tooth space is not valid.",
-                    form_radius_mm=form_radius,
-                    outside_radius_mm=outside_radius,
-                )
-            )
-            geometry.errors = errors
-            return geometry
-        trochoid_trim: list[list[float]] = []
-        for point in trochoid_curve:
-            trochoid_trim.append(point)
-            if _radius(point) >= form_radius - 1e-9:
-                break
-        involute_trim = [point for point in full_involute if _radius(point) >= form_radius - 1e-9]
-        if not involute_trim or math.dist(involute_trim[0], form_point) > 1e-6:
-            involute_trim.insert(0, [float(form_point[0]), float(form_point[1])])
-        boundary = _dedupe([*trochoid_trim, *involute_trim], tolerance=max(1e-9, module * 1e-6))
-        root_angle = _angle(trochoid_curve[0])
-        split_point = form_point
-    else:
-        # The trochoid stays below the involute (no undercut trim). Keep the
-        # trochoid from the root up to the base circle, then the involute; a
-        # short connector at the base circle is a nominal junction.
-        start_radius = max(base_radius, root_radius)
-        involute_trim = [point for point in full_involute if _radius(point) >= start_radius - 1e-9]
-        if not involute_trim:
-            errors.append(
-                error_item(
-                    "gear_flank_missing",
-                    "No usable involute flank exists between the root and outside circles.",
-                )
-            )
-            geometry.errors = errors
-            return geometry
-        trochoid_prefix: list[list[float]] = []
-        if _radius(trochoid_curve[0]) < start_radius - 1e-9:
-            for point in trochoid_curve:
-                trochoid_prefix.append(point)
-                if _radius(point) >= start_radius - 1e-9:
-                    break
-        if not trochoid_prefix:
-            boundary = _dedupe(involute_trim, tolerance=max(1e-9, module * 1e-6))
-        else:
-            if len(trochoid_prefix) < 2:
-                trochoid_prefix = [trochoid_curve[0], involute_trim[0]]
-            boundary = _dedupe([*trochoid_prefix, *involute_trim], tolerance=max(1e-9, module * 1e-6))
-        form_radius = _radius(involute_trim[0])
-        root_angle = _angle(boundary[0])
-        split_point = involute_trim[0]
-
-    root_arc_steps = max(3, int(8 * max(root_angle, 1e-3) / 0.1))
-    root_arc = _arc_points(root_radius, 0.0, root_angle, root_arc_steps)
-    surface = _dedupe([*root_arc, *boundary])
-    surface_split_index = min(
-        range(len(surface)), key=lambda index: math.dist(surface[index], split_point)
-    )
+    if flank.get("errors"):
+        geometry.errors = list(flank["errors"])
+        return geometry
+    surface = flank["surface"]
+    surface_split_index = flank["surface_split_index"]
+    root_angle = flank["root_angle_rad"]
+    form_radius = flank["form_radius_mm"]
+    trochoid_used = flank["root_envelope"] == "sharp_rack_trochoid"
+    involute_trim = flank["involute_path"]
+    trochoid_curve = flank["fillet_path"]
+    root_arc = flank["root_arc_path"]
 
     # Closed tooth-space cut contour with an overshoot cap outside the blank.
     overshoot = outside_radius + max(1.0, 0.02 * outside_radius)

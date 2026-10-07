@@ -16,7 +16,7 @@ function updateLayout() {
   wrap.classList.toggle("has-side-section", Boolean(data));
   wrap.classList.toggle("side-section-collapsed", Boolean(data) && manuallyHidden);
   toggle.setAttribute("aria-expanded", String(!panel.hidden));
-  const gear = ["gear_spur", "gear_internal"].includes(data?.family);
+  const gear = ["gear_spur", "gear_internal", "gear_bevel"].includes(data?.family);
   toggle.title = gear
     ? t(manuallyHidden ? "gear.axial_show" : "gear.axial_hide")
     : t(manuallyHidden ? "chain.axial_show" : "chain.axial_hide");
@@ -161,7 +161,9 @@ function drawGearSideView(rect) {
   const handSign = rightHand ? 1 : -1;
   const twistPerUnit = lead > 0 ? 2 * Math.PI / lead : 0;
   const outsideRadius = outside / 2;
-  const chamferWidth = Math.max(0, Number(data.tip_chamfer_mm) || 0);
+  // External gears chamfer the outside silhouette. Internal gears use the
+  // same parameter for the two tooth-tip edges of the bore, drawn below.
+  const chamferWidth = data.internal ? 0 : Math.max(0, Number(data.tip_chamfer_mm) || 0);
   const chamferAngle = ((Number(data.tip_chamfer_angle_deg) || 45) * Math.PI) / 180;
   const chamferDepth = Number(data.tip_chamfer_depth_mm) > 0
     ? Number(data.tip_chamfer_depth_mm)
@@ -272,28 +274,24 @@ function drawGearSideView(rect) {
     ctx.moveTo(left, boreTopY); ctx.lineTo(right, boreTopY);
     ctx.moveTo(left, boreBottomY); ctx.lineTo(right, boreBottomY);
     ctx.stroke();
-    const ringChamfer = Math.max(0, Number(data.ring_chamfer_mm) || 0);
-    const ringDepth = Math.max(0, Number(data.ring_chamfer_depth_mm) || 0);
     const tipChamfer = Math.max(0, Number(data.tip_chamfer_mm) || 0);
     const tipDepth = Math.max(0, Number(data.tip_chamfer_depth_mm) || 0);
     ctx.strokeStyle = "#e3aa4f";
     ctx.lineWidth = 1.6;
     ctx.beginPath();
-    if (ringChamfer > 0 && ringDepth > 0) {
-      const cx = Math.min(ringChamfer * scale, width / 2);
-      const cy = Math.min(ringDepth * scale, height / 2);
-      ctx.moveTo(left, top + cy); ctx.lineTo(left + cx, top);
-      ctx.moveTo(right - cx, top); ctx.lineTo(right, top + cy);
-      ctx.moveTo(left, bottom - cy); ctx.lineTo(left + cx, bottom);
-      ctx.moveTo(right - cx, bottom); ctx.lineTo(right, bottom - cy);
-    }
     if (tipChamfer > 0 && tipDepth > 0) {
-      const cx = Math.min(tipChamfer * scale, width / 2);
-      const cy = Math.min(tipDepth * scale, Math.max(0, rootTopY - boreTopY));
-      ctx.moveTo(left, boreTopY); ctx.lineTo(left + cx, boreTopY - cy);
-      ctx.moveTo(right - cx, boreTopY - cy); ctx.lineTo(right, boreTopY);
-      ctx.moveTo(left, boreBottomY); ctx.lineTo(left + cx, boreBottomY + cy);
-      ctx.moveTo(right - cx, boreBottomY + cy); ctx.lineTo(right, boreBottomY);
+      // Preserve the true endpoints at normal scales, but keep a small
+      // drafting minimum so a sub-millimetre chamfer does not disappear in a
+      // narrow side-view panel.
+      const cx = Math.min(Math.max(4, tipChamfer * scale), width / 2);
+      const cy = Math.min(
+        Math.max(4, tipDepth * scale),
+        Math.max(0, boreTopY - rootTopY),
+      );
+      ctx.moveTo(left, boreTopY - cy); ctx.lineTo(left + cx, boreTopY);
+      ctx.moveTo(right - cx, boreTopY); ctx.lineTo(right, boreTopY - cy);
+      ctx.moveTo(left, boreBottomY + cy); ctx.lineTo(left + cx, boreBottomY);
+      ctx.moveTo(right - cx, boreBottomY); ctx.lineTo(right, boreBottomY + cy);
     }
     ctx.stroke();
   }
@@ -363,6 +361,94 @@ function drawGearSideView(rect) {
     : t(data.internal ? "gear.axial_note_spur_internal" : "gear.axial_note_spur", "Прямозубое колесо.");
 }
 
+function drawBevelSideView(rect) {
+  const outline = Array.isArray(data.outline) ? data.outline : [];
+  const pitchLine = Array.isArray(data.pitch_line) ? data.pitch_line : [];
+  const rootLine = Array.isArray(data.root_line) ? data.root_line : [];
+  const length = Math.max(1e-6, Math.abs(Number(data.axial_length_mm) || 0));
+  const backRadius = Math.max(1e-6, Number(data.back_radius_mm) || 0);
+  const leftMargin = 92;
+  const rightMargin = 56;
+  const topMargin = 70;
+  const bottomMargin = 118;
+  const scale = Math.max(0.01, Math.min(
+    (rect.width - leftMargin - rightMargin) / length,
+    (rect.height - topMargin - bottomMargin) / (2 * backRadius),
+  ));
+  const width = length * scale;
+  const height = 2 * backRadius * scale;
+  const left = leftMargin + Math.max(0, (rect.width - leftMargin - rightMargin - width) / 2);
+  const top = topMargin + Math.max(0, (rect.height - topMargin - bottomMargin - height) / 2);
+  const right = left + width;
+  const centerY = top + height / 2;
+  const project = ([x, r]) => [right - (Math.abs(x) / length) * width, centerY - r * scale];
+
+  const topPoints = outline.map(project);
+  const bottomPoints = outline.map(([x, r]) => [right - (Math.abs(x) / length) * width, centerY + r * scale]);
+  const silhouette = new Path2D();
+  if (topPoints.length) {
+    silhouette.moveTo(...topPoints[0]);
+    for (const point of topPoints.slice(1)) silhouette.lineTo(...point);
+    for (const point of [...bottomPoints].reverse()) silhouette.lineTo(...point);
+    silhouette.closePath();
+    ctx.fillStyle = "rgba(227,170,79,.05)";
+    ctx.fill(silhouette);
+    ctx.strokeStyle = "#e3aa4f";
+    ctx.lineWidth = 2;
+    ctx.stroke(silhouette);
+  }
+  ctx.setLineDash([6, 4]);
+  ctx.strokeStyle = "rgba(227,170,79,.72)";
+  ctx.lineWidth = 1.2;
+  for (const line of [pitchLine, rootLine]) {
+    if (line.length < 2) continue;
+    const a = project(line[0]);
+    const b = project(line[1]);
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+    ctx.moveTo(a[0], centerY + (centerY - a[1])); ctx.lineTo(b[0], centerY + (centerY - b[1]));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  dimension(left, right, top, top - 30,
+    t("gear.bevel_axial_width", "b = {value}", { value: formatNumber(Number(data.face_width_mm) || 0, 2) }));
+  const dimensionX = right + 34;
+  ctx.strokeStyle = "#8eacc0";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(right, top);
+  ctx.lineTo(dimensionX + 5, top);
+  ctx.moveTo(right, top + height);
+  ctx.lineTo(dimensionX + 5, top + height);
+  ctx.moveTo(dimensionX, top);
+  ctx.lineTo(dimensionX, top + height);
+  for (const [y, direction] of [[top, 1], [top + height, -1]]) {
+    ctx.moveTo(dimensionX - 3, y + direction * 5);
+    ctx.lineTo(dimensionX, y);
+    ctx.lineTo(dimensionX + 3, y + direction * 5);
+  }
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(dimensionX + 14, centerY);
+  ctx.rotate(-Math.PI / 2);
+  label(t("gear.bevel_axial_tip", "dₐₑ = {value}", {
+    value: formatNumber(Number(data.outer_tip_diameter_mm) || 0, 2),
+  }), 0, 0);
+  ctx.restore();
+  const angleText = [
+    t("gear.bevel_angle_delta", "δ = {value}°", { value: formatNumber(Number(data.pitch_cone_angle_deg) || 0, 2) }),
+    t("gear.bevel_angle_face", "δₐ = {value}°", { value: formatNumber(Number(data.face_cone_angle_deg) || 0, 2) }),
+    t("gear.bevel_angle_root", "δ_f = {value}°", { value: formatNumber(Number(data.root_cone_angle_deg) || 0, 2) }),
+  ].join("   ");
+  label(angleText, left + width / 2, top + height + 34);
+  document.querySelector("#axial-row-count").textContent = t(
+    "gear.axial_teeth", "z = {count}", { count: data.tooth_count });
+  document.querySelector("#axial-preview-note").textContent = t(
+    "gear.bevel_axial_note",
+    "Осевое сечение: конусы вершин и впадин, делительная линия и виртуальное колесо Тредголда.",
+  );
+}
+
 function draw() {
   if (panel.hidden || !data) return;
   const rect = canvas.getBoundingClientRect();
@@ -372,6 +458,7 @@ function draw() {
   canvas.height = Math.round(rect.height * ratio);
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
+  if (data.family === "gear_bevel") { drawBevelSideView(rect); return; }
   if (["gear_spur", "gear_internal"].includes(data.family)) { drawGearSideView(rect); return; }
   const silent = data.family === "silent_chain_sprocket";
   document.querySelector("#axial-row-count").textContent = t(silent ? "silent.axial_ribs" : "chain.axial_rows", "", { count: data.row_count });
@@ -493,14 +580,19 @@ function draw() {
 
 window.addEventListener("geomwright-preview", (event) => {
   const result = event.detail;
-  if (["gear_spur", "gear_internal"].includes(result?.family)) {
+  if (["gear_spur", "gear_internal", "gear_bevel"].includes(result?.family)) {
     data = result?.secondary_view ? { ...result.secondary_view, family: result.family } : null;
+    const bevel = result?.family === "gear_bevel";
     for (const node of [panel.querySelector("h3"), rail.querySelector(".axial-rail-caption")]) {
       node.dataset.i18n = "gear.axial_title";
       node.textContent = t("gear.axial_title");
     }
-    panel.querySelector(".axial-legend").dataset.i18n = "gear.axial_legend";
-    panel.querySelector(".axial-legend").textContent = t("gear.axial_legend");
+    const legendKey = bevel ? "gear.bevel_axial_legend" : "gear.axial_legend";
+    panel.querySelector(".axial-legend").dataset.i18n = legendKey;
+    panel.querySelector(".axial-legend").textContent = t(
+      legendKey,
+      bevel ? "δ — угол делительного конуса · b — ширина венца" : "β — угол наклона · b — ширина венца",
+    );
     canvas.setAttribute("aria-label", t("gear.axial_label"));
     updateLayout();
     panel.dataset.state = "ready";

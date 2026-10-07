@@ -11,8 +11,11 @@ from kompas_mcp.transmission_tools import ChainSprocketPreviewRequest, FlatBeltP
 from kompas_mcp.transmissions import build_chain_sprocket_plan, chain_profile_selection, preview_chain_sprocket, preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
 from kompas_mcp.gears import (
+    BevelGearRequest,
     InternalGearRequest,
     SpurGearRequest,
+    bevel_gear_selection,
+    build_bevel_gear_preview,
     build_internal_gear_preview,
     build_spur_gear_preview,
     gear_selection,
@@ -351,6 +354,26 @@ def _section_break_contour(
         radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
         angle = left_angle - math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
         points.append(_polar(radius, angle))
+    return points
+
+
+def _radial_break_contour(
+    *,
+    start_radius: float,
+    end_radius: float,
+    angle: float,
+    wave_depth: float,
+    count: int = 40,
+) -> list[list[float]]:
+    """Draw one wavy radial break edge for a cropped annular sector."""
+    points: list[list[float]] = []
+    for index in range(count + 1):
+        progress = index / count
+        radius = start_radius + (end_radius - start_radius) * progress
+        envelope = math.sin(math.pi * progress) ** 0.35
+        tangent_offset = math.sin(progress * math.pi * 6.0) * wave_depth * envelope
+        local_angle = angle + tangent_offset / max(radius, 1e-9)
+        points.append(_polar(radius, local_angle))
     return points
 
 
@@ -1651,92 +1674,102 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
     base_radius = float(geometry.get("base_radius_mm") or 0.0)
     tip_radius = float(geometry.get("outside_radius_mm") or 0.0)
     root_radius = float(geometry.get("root_radius_mm") or 0.0)
-    ring_outline = _points(geometry.get("full_ring_outline"))
-    inner_path = _points(geometry.get("inner_profile_path"))
-    outer_path = _radial_arc(ring_radius, 0.0, 2.0 * math.pi, count=240)
+    period = _points(geometry.get("period_outline"))
+    inner_path = _gear_sector_outline(period, tooth_count, 3)
+    step = 2.0 * math.pi / max(1, tooth_count)
+    if inner_path:
+        left_angle = math.atan2(inner_path[0][0], inner_path[0][1])
+        right_angle = math.atan2(inner_path[-1][0], inner_path[-1][1])
+        outer_path = _radial_arc(ring_radius, right_angle, left_angle, count=96)
+        wave_depth = max(0.12 * (root_radius - tip_radius), 0.002 * ring_radius)
+        right_break = _radial_break_contour(
+            start_radius=math.hypot(*inner_path[-1]),
+            end_radius=ring_radius,
+            angle=right_angle,
+            wave_depth=wave_depth,
+        )
+        left_break = _radial_break_contour(
+            start_radius=ring_radius,
+            end_radius=math.hypot(*inner_path[0]),
+            angle=left_angle,
+            wave_depth=wave_depth,
+        )
+        right_break[0] = list(inner_path[-1])
+        right_break[-1] = _polar(ring_radius, right_angle)
+        left_break[0] = _polar(ring_radius, left_angle)
+        left_break[-1] = list(inner_path[0])
+        outline = _dedupe_points([
+            *inner_path,
+            *right_break[1:],
+            *outer_path[1:],
+            *left_break[1:],
+        ])
+    else:
+        left_angle, right_angle = -1.5 * step, 1.5 * step
+        outer_path = []
+        outline = []
     reference_paths = [
-        {"key": "ring_circle", "points": _radial_arc(ring_radius, 0.0, 2.0 * math.pi, count=180)},
-        {"key": "pitch_circle", "points": _radial_arc(pitch_radius, 0.0, 2.0 * math.pi, count=180)},
-        {"key": "base_circle", "points": _radial_arc(base_radius, 0.0, 2.0 * math.pi, count=180)},
-        {"key": "tip_circle", "points": _radial_arc(tip_radius, 0.0, 2.0 * math.pi, count=180)},
-        {"key": "root_circle", "points": _radial_arc(root_radius, 0.0, 2.0 * math.pi, count=180)},
+        {"key": "pitch_circle", "points": _radial_arc(pitch_radius, left_angle, right_angle, count=96)},
+        {"key": "tip_circle", "points": _radial_arc(tip_radius, left_angle, right_angle, count=96)},
+        {"key": "root_circle", "points": _radial_arc(root_radius, left_angle, right_angle, count=96)},
     ]
-    # The ring material is the area between the outside circle and the toothed
-    # inner boundary. The two contours stay separate so no radial closure line
-    # crosses the view.
     tone_paths: list[dict[str, Any]] = []
-    if outer_path:
+    if outline:
         tone_paths.append(
             {
-                "points": outer_path,
-                "holes": [inner_path] if inner_path else [],
+                "points": outline,
                 "tone": "exhaust",
                 "width": 2.2,
                 "fill": "rgba(227,170,79,.09)",
                 "stroke": "#e3aa4f",
             }
         )
-    if inner_path:
-        tone_paths.append(
-            {
-                "points": inner_path,
-                "stroke": "#61c0b1",
-                "width": 1.3,
-                "fill": False,
-            }
-        )
     bounds = _bounds(
-        [path for path in (ring_outline, inner_path) if path],
+        [outline] if outline else [],
         [item["points"] for item in reference_paths],
     )
-    dimension_start = max(1.0, 0.28 * ring_radius)
+    dimension_start = max(1.0, 0.72 * tip_radius)
+    sector_span = right_angle - left_angle
+    dimension_angles = [
+        left_angle + 0.18 * sector_span,
+        left_angle + 0.50 * sector_span,
+        left_angle + 0.82 * sector_span,
+    ]
     dimensions = [
-        {
-            "key": "ring_outside_diameter",
-            "symbol": "D",
-            "orientation": "radial",
-            "start": _polar(dimension_start, 0.7),
-            "end": _polar(ring_radius, 0.7),
-            "value": summary.get("ring_outside_diameter_mm"),
-            "unit": "mm",
-            "label_normal": 0.0,
-            "label_tangent": 26,
-        },
         {
             "key": "pitch_diameter",
             "symbol": "d",
             "orientation": "radial",
-            "start": _polar(dimension_start, -0.7),
-            "end": _polar(pitch_radius, -0.7),
+            "start": _polar(dimension_start, dimension_angles[0]),
+            "end": _polar(pitch_radius, dimension_angles[0]),
             "value": summary.get("pitch_diameter_mm"),
             "unit": "mm",
-            "label_normal": 0.0,
-            "label_tangent": -26,
+            "label_normal": -24,
+            "label_tangent": 0,
         },
         {
             "key": "root_diameter",
             "symbol": "d_f",
             "orientation": "radial",
-            "start": _polar(dimension_start, 2.6),
-            "end": _polar(root_radius, 2.6),
+            "start": _polar(dimension_start, dimension_angles[1]),
+            "end": _polar(root_radius, dimension_angles[1]),
             "value": summary.get("root_diameter_mm"),
             "unit": "mm",
-            "label_normal": 0.0,
-            "label_tangent": 26,
+            "label_normal": 24,
+            "label_tangent": 0,
         },
         {
             "key": "tip_diameter",
             "symbol": "d_a",
             "orientation": "radial",
-            "start": _polar(dimension_start, -2.6),
-            "end": _polar(tip_radius, -2.6),
+            "start": _polar(dimension_start, dimension_angles[2]),
+            "end": _polar(tip_radius, dimension_angles[2]),
             "value": summary.get("tip_diameter_mm"),
             "unit": "mm",
-            "label_normal": 0.0,
-            "label_tangent": -26,
+            "label_normal": -24,
+            "label_tangent": 0,
         },
     ]
-    step = 2.0 * math.pi / max(1, tooth_count)
     tip_half = math.pi / max(1, tooth_count) - float(geometry.get("tip_space_half_angle_rad") or 0.0)
     root_half = float(geometry.get("root_space_half_angle_rad") or 0.0)
     tip_edges: list[dict[str, float]] = []
@@ -1767,7 +1800,7 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
         "ok": bool(preview.get("success")),
         "family": "gear_internal",
         "view_mode": "end",
-        "closed_points": [ring_outline] if ring_outline else [],
+        "closed_points": [outline] if outline else [],
         "feature_paths": [],
         "tone_paths": tone_paths,
         "guide_paths": [],
@@ -1783,9 +1816,9 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
         "warnings": warnings,
         "warning_items": warning_items,
         "preview_window": {
-            "tooth_gap_count": tooth_count,
-            "visible_tooth_count": tooth_count,
-            "section_style": "full_ring",
+            "tooth_gap_count": 3,
+            "visible_tooth_count": 3,
+            "section_style": "cropped_sector",
         },
         "secondary_view": {
             "family": "gear_internal",
@@ -1799,10 +1832,7 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
             "tip_diameter_mm": summary.get("tip_diameter_mm"),
             "tooth_count": tooth_count,
             "tip_thickness_mm": summary.get("tip_thickness_mm"),
-            "root_fillet_radius_mm": summary.get("root_fillet_radius_effective_mm"),
-            "ring_chamfer_mm": summary.get("ring_chamfer_mm", 0.0),
-            "ring_chamfer_angle_deg": summary.get("ring_chamfer_angle_deg", 45.0),
-            "ring_chamfer_depth_mm": summary.get("ring_chamfer_depth_mm", 0.0),
+            "root_transition_size_mm": summary.get("root_transition_size_mm"),
             "tip_chamfer_mm": summary.get("tip_chamfer_mm", 0.0),
             "tip_chamfer_angle_deg": summary.get("tip_chamfer_angle_deg", 45.0),
             "tip_chamfer_depth_mm": summary.get("tip_chamfer_depth_mm", 0.0),
@@ -1812,6 +1842,180 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
             "axial_pitch_mm": summary.get("axial_pitch_mm", 0.0),
             "axial_overlap": summary.get("axial_overlap", 0.0),
         },
+        "request": dict(request),
+    }
+
+
+def _build_gear_bevel_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_bevel_gear_preview(payload)
+
+
+def _adapt_gear_bevel(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    if not preview.get("success"):
+        return {
+            "ok": False,
+            "family": "gear_bevel",
+            "view_mode": "end",
+            "closed_points": [],
+            "feature_paths": [],
+            "tone_paths": [],
+            "guide_paths": [],
+            "reference_paths": [],
+            "phantom_bodies": [],
+            "bounds": None,
+            "summary": {},
+            "derived": {},
+            "measurements": {},
+            "report": dict(preview.get("report") or {}),
+            "dimensions": [],
+            "warnings": list(preview.get("warnings") or []),
+            "warning_items": list(preview.get("warning_items") or []),
+            "errors": list(preview.get("errors") or []),
+            "secondary_view": None,
+            "request": dict(request),
+        }
+    geometry = dict(preview.get("geometry") or {})
+    summary = dict(preview.get("summary") or {})
+    report = dict(preview.get("report") or {})
+    period = _points(geometry.get("end_view_period"))
+    tooth_count = int(request.get("tooth_count") or summary.get("tooth_count") or 0)
+    sector = _gear_sector_outline(period, tooth_count, 3)
+    tip_radius = float(geometry.get("tip_radius_mm") or 0.0)
+    pitch_radius = float(geometry.get("pitch_radius_mm") or 0.0)
+    root_radius = float(geometry.get("root_radius_mm") or 0.0)
+    gap_root_radius = float(geometry.get("back_face_root_radius_mm") or root_radius)
+    step = 2.0 * math.pi / max(1, tooth_count)
+    if sector:
+        left_angle = math.atan2(sector[0][0], sector[0][1])
+        right_angle = math.atan2(sector[-1][0], sector[-1][1])
+        tooth_depth = max(0.1, tip_radius - gap_root_radius)
+        break_radius = max(gap_root_radius * 0.58, gap_root_radius - tooth_depth * 1.6)
+        break_path = _section_break_contour(
+            outside_radius=gap_root_radius,
+            break_radius=break_radius,
+            left_angle=left_angle,
+            right_angle=right_angle,
+            wave_depth=max(tooth_depth * 0.08, tip_radius * 0.0015),
+        )
+        break_path[0] = list(sector[-1])
+        break_path[-1] = list(sector[0])
+        outline = [*sector, *break_path[1:]]
+    else:
+        outline = []
+        left_angle, right_angle, break_radius = -step, step, gap_root_radius * 0.7
+    closed = _dedupe_points(outline) if outline else []
+    reference_paths = [
+        {"key": "tip_circle", "points": _radial_arc(tip_radius, left_angle, right_angle, count=96)},
+        {"key": "pitch_circle", "points": _radial_arc(pitch_radius, left_angle, right_angle, count=96)},
+        {"key": "root_circle", "points": _radial_arc(root_radius, left_angle, right_angle, count=96)},
+    ]
+    bounds = _bounds(
+        [closed] if closed else [],
+        [item["points"] for item in reference_paths],
+    )
+    dimension_start = max(1.0, break_radius * 1.12)
+    gap_angle = 0.5 * step
+    dimensions = [
+        {
+            "key": "tip_diameter",
+            "symbol": "dₐₑ",
+            "orientation": "radial",
+            "start": _polar(dimension_start, step),
+            "end": _polar(tip_radius, step),
+            "value": summary.get("outer_tip_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 52,
+            "label_tangent": 62,
+        },
+        {
+            "key": "pitch_diameter",
+            "symbol": "dₑ",
+            "orientation": "radial",
+            "start": _polar(dimension_start, -gap_angle),
+            "end": _polar(pitch_radius, -gap_angle),
+            "value": summary.get("outer_pitch_diameter_mm"),
+            "unit": "mm",
+            "label_normal": -30,
+            "label_tangent": -6,
+        },
+        {
+            "key": "root_diameter",
+            "symbol": "d_fₑ",
+            "orientation": "radial",
+            "start": _polar(dimension_start, gap_angle),
+            "end": _polar(root_radius, gap_angle),
+            "value": summary.get("outer_root_diameter_mm"),
+            "unit": "mm",
+            "label_normal": 22,
+            "label_tangent": 2,
+        },
+    ]
+    axial = dict((geometry.get("axial_section") or {}))
+    axial_length = float(geometry.get("axial_length_mm") or 0.0)
+    back_x = 0.0
+    inner_x = -axial_length
+    outline_half = [
+        [back_x, 0.0],
+        [back_x, tip_radius],
+        [inner_x, float(geometry.get("inner_tip_radius_mm") or 0.0)],
+        [inner_x, 0.0],
+        [back_x, 0.0],
+    ]
+    secondary_view = {
+        "family": "gear_bevel",
+        "tooth_type": "straight",
+        "outline": outline_half,
+        "pitch_line": [
+            [back_x, float(axial.get("pitch_radius_back_mm") or 0.0)],
+            [inner_x, float(axial.get("pitch_radius_inner_mm") or 0.0)],
+        ],
+        "root_line": [
+            [back_x, float(axial.get("root_radius_back_mm") or 0.0)],
+            [inner_x, float(axial.get("root_radius_inner_mm") or 0.0)],
+        ],
+        "back_radius_mm": tip_radius,
+        "inner_radius_mm": float(geometry.get("inner_tip_radius_mm") or 0.0),
+        "axial_length_mm": axial_length,
+        "face_width_mm": summary.get("face_width_mm"),
+        "outer_tip_diameter_mm": summary.get("outer_tip_diameter_mm"),
+        "outer_pitch_diameter_mm": summary.get("outer_pitch_diameter_mm"),
+        "outer_root_diameter_mm": summary.get("outer_root_diameter_mm"),
+        "outer_cone_distance_mm": summary.get("outer_cone_distance_mm"),
+        "pitch_cone_angle_deg": summary.get("pitch_cone_angle_deg"),
+        "face_cone_angle_deg": summary.get("face_cone_angle_deg"),
+        "root_cone_angle_deg": summary.get("root_cone_angle_deg"),
+        "tooth_count": tooth_count,
+        "virtual_tooth_count": summary.get("virtual_tooth_count"),
+    }
+    return {
+        "ok": bool(preview.get("success")),
+        "family": "gear_bevel",
+        "view_mode": "end",
+        "closed_points": [closed] if closed else [],
+        "feature_paths": [],
+        "tone_paths": (
+            [{"points": closed, "tone": "exhaust", "width": 2.4, "fill": "rgba(227,170,79,.05)"}]
+            if closed
+            else []
+        ),
+        "guide_paths": [],
+        "reference_paths": reference_paths,
+        "phantom_bodies": [],
+        "bounds": bounds,
+        "coordinate_system": geometry.get("coordinate_system"),
+        "summary": summary,
+        "derived": preview.get("derived"),
+        "measurements": preview.get("measurements"),
+        "report": report,
+        "dimensions": dimensions,
+        "warnings": list(preview.get("warnings") or []),
+        "warning_items": list(preview.get("warning_items") or []),
+        "preview_window": {
+            "tooth_gap_count": 3,
+            "visible_tooth_count": 3,
+            "section_style": "cropped_sector",
+        },
+        "secondary_view": secondary_view,
         "request": dict(request),
     }
 
@@ -1961,6 +2165,22 @@ _MODULES: dict[str, PreviewModule] = {
         icon="/static/icons/gear-internal.svg",
         selection=gear_selection(),
     ),
+    "gear_bevel": PreviewModule(
+        kind="gear_bevel",
+        name="Коническая шестерня (прямозубая)",
+        description="Коническое колесо с прямыми зубьями: макрогеометрия ГОСТ 19624-74, виртуальное колесо Тредголда, торцовое и осевое сечение с контрольными размерами.",
+        standard="ГОСТ 19624-74 / ГОСТ 13754-68 (nominal)",
+        request_model=BevelGearRequest,
+        defaults=BevelGearRequest().model_dump(exclude_none=True),
+        builder=_build_gear_bevel_preview,
+        adapter=_adapt_gear_bevel,
+        subgroup="gear_drives",
+        family="gear_drives",
+        build=True,
+        preview_available=True,
+        icon="/static/icons/gear-bevel.svg",
+        selection=bevel_gear_selection(),
+    ),
     "camshaft_lobe": PreviewModule(
         kind="camshaft_lobe",
         name="Кулачок ГРМ",
@@ -2024,6 +2244,9 @@ def managed_pulley_plan(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     if module.kind == "gear_internal":
         from kompas_mcp.gears.cad import build_internal_gear_plan
         return build_internal_gear_plan(normalized_request)
+    if module.kind == "gear_bevel":
+        from kompas_mcp.gears.cad import build_bevel_gear_plan
+        return build_bevel_gear_plan(normalized_request)
     if module.kind == "silent_chain_sprocket":
         preview = build_silent_chain_preview(normalized_request)
         missing = preview["completion"]["missing_fields"]

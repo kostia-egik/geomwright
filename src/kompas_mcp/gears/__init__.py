@@ -1,4 +1,4 @@
-"""Cylindrical gear module: external and internal involute slices.
+"""Gear module: external, internal, and bevel involute slices.
 
 Host-side geometry, checks, and measurements live in this package. CAD planning
 is added in `cad.py`; no COM access happens here.
@@ -6,6 +6,8 @@ is added in `cad.py`; no COM access happens here.
 from __future__ import annotations
 
 from .basic_racks import STANDARD_EDITION, STANDARDS, BasicRack, resolve_rack, standard_options
+from .bevel import BevelGearGeometry, build_bevel_gear_geometry, build_bevel_gear_preview
+from .bevel_spec import BevelGearCreateRequest, BevelGearRequest
 from .checks import evaluate_gear_checks
 from .internal import (
     InternalGearGeometry,
@@ -21,12 +23,15 @@ from .measure import base_pitch, constant_chord, over_pin_measurement, span_meas
 from .modules import describe_module, is_standard_module, module_row, module_rows_catalog
 from .pins import pin_source_catalog, select_standard_pin, standard_pin_candidates
 from .preview import build_spur_gear_preview
-from .spec import SpurGearCreateRequest, SpurGearRequest, gear_selection
+from .spec import SpurGearCreateRequest, SpurGearRequest, bevel_gear_selection, gear_selection
 
 __all__ = [
     "BasicRack",
     "STANDARDS",
     "STANDARD_EDITION",
+    "BevelGearCreateRequest",
+    "BevelGearGeometry",
+    "BevelGearRequest",
     "InternalGearCreateRequest",
     "InternalGearGeometry",
     "InternalGearRequest",
@@ -34,6 +39,9 @@ __all__ = [
     "SpurGearGeometry",
     "SpurGearRequest",
     "base_pitch",
+    "bevel_gear_selection",
+    "build_bevel_gear_geometry",
+    "build_bevel_gear_preview",
     "build_internal_gear_geometry",
     "build_internal_gear_preview",
     "build_spur_gear_geometry",

@@ -22314,6 +22314,35 @@ def _normalize_runtime_output_key(scenario, output_key):
         if normalized not in ("body", "feature", "sketch", "axis"):
             raise RuntimeError("Unsupported cylindrical_blank output: %s" % output_key)
         return normalized
+    if scenario_name == "conical_blank":
+        aliases = {
+            "body": "body",
+            "result": "body",
+            "feature": "feature",
+            "revolution": "feature",
+            "sketch": "sketch",
+            "axis": "axis",
+        }
+        normalized = aliases.get(key, key)
+        if normalized not in ("body", "feature", "sketch", "axis"):
+            raise RuntimeError("Unsupported conical_blank output: %s" % output_key)
+        return normalized
+    if scenario_name in ("section_profile_sketch", "numeric_profile_sketch"):
+        if key not in ("sketch", "result", "profile_sketch"):
+            raise RuntimeError("Unsupported section_profile_sketch output: %s" % output_key)
+        return "sketch"
+    if scenario_name == "loft_cut":
+        aliases = {
+            "feature": "feature",
+            "cut": "feature",
+            "loft": "feature",
+            "operation": "feature",
+            "body": "feature",
+        }
+        normalized = aliases.get(key, key)
+        if normalized != "feature":
+            raise RuntimeError("Unsupported loft_cut output: %s" % output_key)
+        return normalized
     if scenario_name == "cut_extrusion":
         aliases = {
             "feature": "feature",
@@ -23009,6 +23038,45 @@ def _resolve_runtime_workflow_output(runtime_objects, operation_id, output_key):
                 "origin": [safe_get(lcs, "X", 0.0), safe_get(lcs, "Y", 0.0), safe_get(lcs, "Z", 0.0)],
             }
 
+    if scenario == "conical_blank":
+        output_map = {
+            "body": ("body", "body"),
+            "feature": ("feature", "feature"),
+            "sketch": ("sketch", "sketch"),
+            "axis": ("axis", "axis"),
+        }
+        expected = output_map.get(normalized_output)
+        if expected is None or target.get(expected[1]) is None:
+            raise RuntimeError(
+                "Workflow output %s.%s is unavailable; operation scenario=%s; available outputs: %s"
+                % (operation_id, normalized_output, scenario, available_outputs_text)
+            )
+        return {"type": expected[0], "object": target[expected[1]]}
+
+    if scenario == "section_profile_sketch":
+        if normalized_output != "sketch" or target.get("sketch") is None:
+            raise RuntimeError(
+                "Workflow output %s.%s does not resolve to a sketch; operation scenario=%s; available outputs: %s"
+                % (operation_id, normalized_output, scenario, available_outputs_text)
+            )
+        return {"type": "sketch", "object": target["sketch"]}
+
+    if scenario == "loft_cut":
+        aliases = {
+            "feature": "feature",
+            "cut": "feature",
+            "loft": "feature",
+            "operation": "feature",
+            "body": "feature",
+        }
+        normalized = aliases.get(normalized_output, normalized_output)
+        if normalized != "feature" or target.get("feature") is None:
+            raise RuntimeError(
+                "Workflow output %s.%s does not resolve to a loft feature; operation scenario=%s; available outputs: %s"
+                % (operation_id, normalized_output, scenario, available_outputs_text)
+            )
+        return {"type": "feature", "object": target["feature"]}
+
     raise RuntimeError(
         "Workflow output resolution is unsupported for scenario=%s on operation %s; available outputs: %s"
         % (scenario, operation_id, available_outputs_text)
@@ -23141,6 +23209,233 @@ def _active_api5_primary_body_metrics():
         "surface_area": float(safe_get(properties, "F", 0.0) or 0.0),
         "solid": bool(body.IsSolid()),
     }
+
+
+def _point_distance(first, second):
+    """Euclidean distance between two 3D point sequences (Python 3.2 safe)."""
+    return math.sqrt(
+        sum((float(first[index]) - float(second[index])) ** 2 for index in range(3))
+    )
+
+
+def _com_point_values(point):
+    """Read an [x, y, z] world point from an IVertex/IPoint-like COM object."""
+    if point is None:
+        return None
+    values = None
+    for attr in ("GetPoint",):
+        getter = safe_get(point, attr)
+        if callable(getter):
+            try:
+                values = getter()
+                break
+            except Exception:
+                values = None
+    if values is None and isinstance(point, (list, tuple)):
+        values = point
+    if values is None:
+        return None
+    try:
+        items = list(values)
+    except Exception:
+        return None
+    if len(items) >= 4:
+        items = items[1:4]
+    if len(items) < 3:
+        return None
+    try:
+        return [float(items[0]), float(items[1]), float(items[2])]
+    except Exception:
+        return None
+
+
+def _read_sketch_vertex_points(sketch):
+    """World coordinates of all result vertices owned by a sketch (EDGE-001)."""
+    import win32com.client
+
+    feature = win32com.client.CastTo(sketch, "IFeature7")
+    if feature is None:
+        raise RuntimeError("Sketch does not expose IFeature7 for vertex readback")
+    raw = feature.ModelObjects(8)
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        count = collection_count(raw)
+        items = iter_collection(raw) if count else [raw]
+    points = []
+    for item in items:
+        world = _com_point_values(item)
+        if world is not None:
+            points.append(world)
+    return points
+
+
+def _measure_sketch_frame(model_container, part, base_plane, anchor, name):
+    """Create a probe sketch on a plane parallel to `base_plane` through
+    `anchor` and measure the sketch's affine 2D-to-3D frame.
+
+    The probe draws explicit sketch points at (0,0), (1,0), (2,0), (0,1) and
+    (1,1); their world coordinates reveal the actual plane frame, so the host
+    can hand over geometry as 3D points without assuming plane orientation
+    (CS-004). Returns origin/u/v vectors in world coordinates.
+    """
+    anchor_point = _create_point3d(model_container, "%s section anchor" % name, anchor)
+    plane = _create_plane_parallel_by_point(
+        part, "%s section plane" % name, base_plane, anchor_point
+    )
+    probe_sketch, _target, _entities, _parameterization = _create_sketch_entities(
+        model_container,
+        part,
+        {
+            "name": "%s frame probe" % name,
+            "plane": plane,
+            "create_new_sketch": True,
+            "entities": [
+                {"id": "frame_origin", "kind": "point", "point": [0.0, 0.0], "line_style": 6},
+                {"id": "frame_u", "kind": "point", "point": [1.0, 0.0], "line_style": 6},
+                {"id": "frame_u2", "kind": "point", "point": [2.0, 0.0], "line_style": 6},
+                {"id": "frame_v", "kind": "point", "point": [0.0, 1.0], "line_style": 6},
+                {"id": "frame_uv", "kind": "point", "point": [1.0, 1.0], "line_style": 6},
+            ],
+        },
+    )
+    vertices = _read_sketch_vertex_points(probe_sketch)
+    unique = []
+    for point in vertices:
+        if not any(_point_distance(point, existing) <= 1e-7 for existing in unique):
+            unique.append(point)
+    if len(unique) < 5:
+        raise RuntimeError("Section frame probe returned %s vertices" % len(unique))
+
+    frame = None
+    for origin in unique:
+        for first in unique:
+            if first is origin:
+                continue
+            delta_u = [first[index] - origin[index] for index in range(3)]
+            length_u = math.sqrt(sum(value * value for value in delta_u))
+            if length_u <= 1e-9:
+                continue
+            for second in unique:
+                if second is origin or second is first:
+                    continue
+                delta_v = [second[index] - origin[index] for index in range(3)]
+                length_v = math.sqrt(sum(value * value for value in delta_v))
+                if length_v <= 1e-9 or abs(length_u - length_v) > 0.2 * length_u:
+                    continue
+                dot = sum(delta_u[index] * delta_v[index] for index in range(3))
+                if abs(dot) > 0.05 * length_u * length_v:
+                    continue
+                for third in unique:
+                    if third in (origin, first, second):
+                        continue
+                    doubled = [origin[index] + 2.0 * delta_u[index] for index in range(3)]
+                    if _point_distance(doubled, third) <= 1e-3 * length_u:
+                        frame = {
+                            "origin": list(origin),
+                            "u": delta_u,
+                            "v": delta_v,
+                            "u_length": length_u,
+                            "v_length": length_v,
+                        }
+                        break
+                if frame is not None:
+                    break
+            if frame is not None:
+                break
+        if frame is not None:
+            break
+    if frame is None:
+        raise RuntimeError("Section frame probe could not identify the sketch frame")
+    for axis in ("u", "v"):
+        if abs(frame[axis][0]) > 1e-4 * frame["%s_length" % axis]:
+            raise RuntimeError("Section frame is not parallel to the requested base plane")
+    if abs(frame["origin"][0] - float(anchor[0])) > 1e-6 + 1e-4 * max(1.0, abs(float(anchor[0]))):
+        raise RuntimeError("Section frame origin does not lie on the section plane")
+    return {
+        "plane": plane,
+        "anchor_point": anchor_point,
+        "probe_sketch": probe_sketch,
+        "origin": frame["origin"],
+        "u": frame["u"],
+        "v": frame["v"],
+        "u_length": frame["u_length"],
+        "v_length": frame["v_length"],
+    }
+
+
+def _frame_to_sketch_2d(point3, frame):
+    delta = [float(point3[index]) - float(frame["origin"][index]) for index in range(3)]
+    u_length2 = max(1e-18, frame["u_length"] ** 2)
+    v_length2 = max(1e-18, frame["v_length"] ** 2)
+    u_value = sum(delta[index] * frame["u"][index] for index in range(3)) / u_length2
+    v_value = sum(delta[index] * frame["v"][index] for index in range(3)) / v_length2
+    return [u_value, v_value]
+
+
+def _section_entities_to_sketch_2d(entities, frame):
+    """Convert 3D section entities into 2D sketch entities for `frame`."""
+    converted = []
+    length_ratio = frame["u_length"] / frame["v_length"]
+    if abs(length_ratio - 1.0) > 1e-3:
+        raise RuntimeError("Section frame axes have different scales")
+    for raw_entity in entities:
+        entity = dict(raw_entity or {})
+        kind = str(entity.get("kind") or "").strip().lower()
+        item = {
+            "id": entity.get("id") or entity.get("entity_id"),
+            "kind": kind,
+            "role": entity.get("role") or kind,
+            "line_style": int(entity.get("line_style", 1)),
+        }
+        if kind == "segment":
+            item["start"] = _frame_to_sketch_2d(entity["start3"], frame)
+            item["end"] = _frame_to_sketch_2d(entity["end3"], frame)
+        elif kind == "nurbs":
+            points = []
+            for control in list(entity.get("points3") or []):
+                points.append(_frame_to_sketch_2d(control, frame))
+            if len(points) < 4:
+                raise RuntimeError("Section NURBS needs at least four control points")
+            item["points"] = points
+            item["weights"] = [float(value) for value in list(entity.get("weights") or [])]
+            item["knots"] = [float(value) for value in list(entity.get("knots") or [])]
+            item["degree"] = int(entity.get("degree") or 3)
+            item["closed"] = False
+        elif kind == "arc":
+            center = _frame_to_sketch_2d(entity["center3"], frame)
+            start = _frame_to_sketch_2d(entity["start3"], frame)
+            end = _frame_to_sketch_2d(entity["end3"], frame)
+            mid = _frame_to_sketch_2d(entity["mid3"], frame)
+            radius = float(
+                entity.get("radius_mm") or math.hypot(start[0] - center[0], start[1] - center[1])
+            ) / frame["u_length"]
+            item.update({"center": center, "radius": radius, "start": start, "end": end})
+            cross = (mid[0] - start[0]) * (end[1] - mid[1]) - (mid[1] - start[1]) * (end[0] - mid[0])
+            item["direction"] = cross < 0.0
+        elif kind == "circle":
+            center = _frame_to_sketch_2d(entity["center3"], frame)
+            item.update({"center": center, "radius": float(entity.get("radius_mm") or 0.0) / frame["u_length"]})
+        else:
+            raise RuntimeError("Unsupported section entity kind: %s" % kind)
+        converted.append(item)
+    return converted
+
+
+def _loft_section_array(sketches):
+    """Return (payload, strategy) for the ILoft.Sketchs OleVariant property."""
+    try:
+        import pythoncom
+        import win32com.client
+
+        return (
+            win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, list(sketches)),
+            "variant_dispatch_array",
+        )
+    except Exception:
+        return list(sketches), "python_list"
 
 
 def _execute_workflow_operation(part, model_container, operation, runtime_objects, steps_report):
@@ -23293,6 +23588,119 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         )
         return
 
+    if scenario == "conical_blank":
+        x_back = float(params.get("x_back_mm") or 0.0)
+        x_inner = float(params.get("x_inner_mm") or 0.0)
+        outer_radius = float(params.get("outer_radius_mm") or 0.0)
+        inner_radius = float(params.get("inner_radius_mm") or 0.0)
+        if x_back >= -1e-9 or x_inner <= x_back + 1e-9 or outer_radius <= 0.0 or inner_radius <= 0.0:
+            raise RuntimeError("conical_blank requires x_inner > x_back and x_back < 0 with positive radii")
+        name = str(params.get("name") or "Conical blank")
+        profile_points = [
+            [x_back, 0.0],
+            [x_back, outer_radius],
+            [x_inner, inner_radius],
+            [x_inner, 0.0],
+            [x_back, 0.0],
+        ]
+        axis = {
+            "id": "conical_blank_axis",
+            "kind": "segment",
+            "start": [x_inner, 0.0],
+            "end": [x_back, 0.0],
+            "line_style": 3,
+        }
+        sketch, target, entities_report, parameterization_report = _create_sketch_entities(
+            model_container,
+            part,
+            {
+                "name": params.get("sketch_name") or ("%s sketch" % name),
+                "plane": "XOY",
+                "create_new_sketch": True,
+                "entities": [
+                    {
+                        "id": "conical_blank_profile",
+                        "kind": "polyline",
+                        "points": profile_points,
+                        "closed": False,
+                        "line_style": 1,
+                    },
+                    axis,
+                ],
+            },
+        )
+        preflight = _audit_sketch_profile_preflight(
+            model_container,
+            sketch,
+            closure_style=1,
+            expected_component_count=1,
+        )
+        if not bool(preflight.get("ok")):
+            raise RuntimeError("Conical blank profile preflight failed: %s" % preflight)
+        rotateds = safe_get(model_container, "Rotateds")
+        if rotateds is None:
+            get_rotateds = safe_get(model_container, "GetRotateds")
+            if callable(get_rotateds):
+                rotateds = get_rotateds()
+        if rotateds is None or not callable(safe_get(rotateds, "Add")):
+            raise RuntimeError("Part does not expose Rotateds.Add")
+        rotated = rotateds.Add(28)
+        if rotated is None:
+            raise RuntimeError("Rotateds.Add(o3d_bossRotated) returned None")
+        rotated.Name = name
+        rotated.Profile = sketch
+        set_profile = safe_get(rotated, "SetProfile")
+        if callable(set_profile):
+            set_profile(sketch)
+        rotated.Axis = part.DefaultObject(71)
+        rotated.Direction = 0
+        rotated.ToroidShapeType = False
+        rotated.SetAngle(True, 360.0)
+        rotated.SetRotatedType(True, 0)
+        if not rotated.Update():
+            raise RuntimeError("Conical blank revolution update failed")
+        update_part = safe_get(part, "Update")
+        part_update_result = bool(update_part()) if callable(update_part) else None
+        feature_valid = bool(safe_get(rotated, "Valid", False))
+        if not feature_valid:
+            raise RuntimeError("Conical blank revolution is invalid after update")
+        body_metrics = _active_api5_primary_body_metrics()
+        if body_metrics["body_count"] != 1 or body_metrics["volume"] <= 0.0 or not body_metrics["solid"]:
+            raise RuntimeError("conical_blank body verification failed: %s" % body_metrics)
+        axis_start = _create_point3d(model_container, "%s axis start" % name, [x_inner, 0.0, 0.0])
+        axis_end = _create_point3d(model_container, "%s axis end" % name, [x_back, 0.0, 0.0])
+        axis_object = _create_axis3d_by_2_points(part, "%s axis" % name, axis_start, axis_end)
+        runtime_objects[operation_id] = {
+            "scenario": scenario,
+            "body": rotated,
+            "feature": rotated,
+            "sketch": sketch,
+            "axis": axis_object,
+            "axis_start": axis_start,
+            "axis_end": axis_end,
+            "interface": operation.get("interface") or {},
+            "params": params,
+        }
+        steps_report.append(
+            {
+                "operation": "workflow_feature",
+                "id": operation_id,
+                "scenario": scenario,
+                "name": safe_get(rotated, "Name"),
+                "valid": feature_valid,
+                "part_update_result": part_update_result,
+                "x_back_mm": x_back,
+                "x_inner_mm": x_inner,
+                "outer_radius_mm": outer_radius,
+                "inner_radius_mm": inner_radius,
+                "target": target,
+                "entities": entities_report,
+                "profile_preflight": preflight,
+                "body_after": body_metrics,
+            }
+        )
+        return
+
     if scenario == "numeric_profile_sketch":
         parameterize = bool(params.get("parameterize", False))
         sketch, target, entities_report, parameterization_report = _create_sketch_entities(
@@ -23341,6 +23749,82 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                 "parameterization_level": "constrained" if parameterize else "none",
                 "sketch_state": sketch_state,
                 "profile_preflight": profile_preflight,
+            }
+        )
+        return
+
+    if scenario == "section_profile_sketch":
+        base_plane_value = str(params.get("base_plane") or "YOZ")
+        try:
+            base_plane_key = _normalize_sketch_plane(base_plane_value)
+        except Exception:
+            raise RuntimeError("section_profile_sketch base_plane must be a default plane")
+        base_plane = _resolve_default_part_object(part, base_plane_key)
+        anchor = params.get("anchor")
+        if not isinstance(anchor, list) or len(anchor) != 3:
+            raise RuntimeError("section_profile_sketch requires anchor [x, y, z]")
+        name = str(params.get("name") or params.get("sketch_name") or "Section profile")
+        frame = _measure_sketch_frame(model_container, part, base_plane, anchor, name)
+        sketch_entities = _section_entities_to_sketch_2d(params.get("entities") or [], frame)
+        if not sketch_entities:
+            raise RuntimeError("section_profile_sketch requires entities")
+        sketch, target, entities_report, parameterization_report = _create_sketch_entities(
+            model_container,
+            part,
+            {
+                "name": params.get("sketch_name") or name,
+                "plane": frame["plane"],
+                "create_new_sketch": True,
+                "entities": sketch_entities,
+                "constraints": [],
+                "dimensions": [],
+                "sketch_options": {},
+            },
+        )
+        sketch_state = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
+        profile_preflight = _audit_sketch_profile_preflight(
+            model_container,
+            sketch,
+            closure_style=1,
+            expected_component_count=1,
+        )
+        if bool(params.get("require_closure", True)) and not bool(profile_preflight.get("ok")):
+            raise RuntimeError("Section profile sketch preflight failed: %s" % profile_preflight)
+        runtime_objects[operation_id] = {
+            "scenario": scenario,
+            "sketch": sketch,
+            "feature": sketch,
+            "plane": frame["plane"],
+            "anchor_point": frame["anchor_point"],
+            "probe_sketch": frame["probe_sketch"],
+            "frame": {
+                "origin": frame["origin"],
+                "u": frame["u"],
+                "v": frame["v"],
+                "u_length": frame["u_length"],
+                "v_length": frame["v_length"],
+            },
+            "interface": operation.get("interface") or {},
+            "params": params,
+        }
+        steps_report.append(
+            {
+                "operation": "workflow_feature",
+                "id": operation_id,
+                "scenario": scenario,
+                "sketch": _describe_sketch_entity_for_report(sketch),
+                "target": target,
+                "entities": entities_report,
+                "sketch_state": sketch_state,
+                "profile_preflight": profile_preflight,
+                "frame": {
+                    "origin": frame["origin"],
+                    "u": frame["u"],
+                    "v": frame["v"],
+                    "u_length": frame["u_length"],
+                    "v_length": frame["v_length"],
+                },
+                "probe_sketch_reference": safe_get(frame["probe_sketch"], "Reference"),
             }
         )
         return
@@ -25149,6 +25633,129 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                     "constraints_state_deferred_until_reopen": deferred_constraints_state,
                     "primary_closure": primary_closure,
                 },
+                "body_before": body_before,
+                "body_after": body_after,
+                "volume_removed": volume_removed,
+            }
+        )
+        return
+
+    if scenario == "loft_cut":
+        section_references = params.get("sections")
+        if not isinstance(section_references, list) or len(section_references) < 2:
+            raise RuntimeError("Workflow loft_cut requires at least two section references")
+        section_sketches = []
+        section_reports = []
+        for section_index, section_reference in enumerate(section_references):
+            resolved = _resolve_runtime_output_reference(
+                runtime_objects,
+                section_reference,
+                default_output="sketch",
+                context_label="Workflow loft_cut section[%s] reference on operation %s"
+                % (section_index, operation_id),
+            )
+            if resolved is None or resolved.get("type") != "sketch":
+                raise RuntimeError("Workflow loft_cut section[%s] must resolve to a sketch" % section_index)
+            section_sketch = resolved["object"]
+            closure = _audit_sketch_profile_preflight(
+                model_container,
+                section_sketch,
+                closure_style=1,
+                expected_component_count=1,
+            )
+            if not bool(closure.get("ok")):
+                raise RuntimeError(
+                    "Workflow loft_cut section[%s] is not a closed single contour: %s"
+                    % (section_index, closure)
+                )
+            section_sketches.append(section_sketch)
+            section_reports.append(
+                {
+                    "operation_id": resolved.get("operation_id"),
+                    "reference": safe_get(section_sketch, "Reference"),
+                    "name": safe_get(section_sketch, "Name"),
+                    "closure": closure,
+                }
+            )
+        import win32com.client
+
+        lofts = safe_get(model_container, "Lofts")
+        if lofts is None:
+            get_lofts = safe_get(model_container, "GetLofts")
+            if callable(get_lofts):
+                lofts = get_lofts()
+        if lofts is None or not callable(safe_get(lofts, "Add")):
+            raise RuntimeError("Part does not expose Lofts.Add")
+        body_before = _active_api5_primary_body_metrics()
+        feature = lofts.Add(32)
+        if feature is None:
+            raise RuntimeError("Lofts.Add(o3d_cutLoft) returned None")
+        feature = win32com.client.CastTo(feature, "ILoft")
+        stage = "name"
+        try:
+            feature.Name = str(params.get("name") or "Loft cut")
+            stage = "operation_result"
+            feature.OperationResult = 2
+            try:
+                feature.Closed = False
+            except Exception:
+                pass
+            stage = "sections"
+            payload, strategy = _loft_section_array(section_sketches)
+            errors = []
+            for candidate in (payload, list(section_sketches)):
+                try:
+                    feature.Sketchs = candidate
+                    strategy = strategy if candidate is payload else "python_list"
+                    break
+                except Exception as exc:
+                    errors.append(str(exc))
+            else:
+                raise RuntimeError("ILoft.Sketchs assignment failed: %s" % "; ".join(errors))
+            stage = "update"
+            if not feature.Update():
+                raise RuntimeError("ILoft.Update returned False")
+        except Exception as exc:
+            raise RuntimeError("loft_cut failed at %s: %s" % (stage, exc))
+        update_part = safe_get(part, "Update")
+        part_update_result = bool(update_part()) if callable(update_part) else None
+        operation_valid = bool(safe_get(feature, "Valid", False))
+        if not operation_valid:
+            raise RuntimeError("KOMPAS API7 loft cut is invalid after update")
+        body_after = _active_api5_primary_body_metrics()
+        volume_removed = float(body_before["volume"]) - float(body_after["volume"])
+        volume_tolerance = max(1e-9, abs(float(body_before["volume"])) * 1e-9)
+        if body_after["body_count"] != body_before["body_count"]:
+            raise RuntimeError(
+                "loft_cut changed body count: before=%s after=%s"
+                % (body_before["body_count"], body_after["body_count"])
+            )
+        if bool(params.get("require_material_removal", True)) and volume_removed <= volume_tolerance:
+            raise RuntimeError(
+                "loft_cut removed no measurable material: before_volume=%s after_volume=%s"
+                % (body_before["volume"], body_after["volume"])
+            )
+        runtime_objects[operation_id] = {
+            "scenario": scenario,
+            "feature": feature,
+            "cut": feature,
+            "sections": section_sketches,
+            "interface": operation.get("interface") or {},
+            "params": params,
+        }
+        steps_report.append(
+            {
+                "operation": "workflow_feature",
+                "id": operation_id,
+                "scenario": scenario,
+                "name": safe_get(feature, "Name"),
+                "type": safe_get(feature, "Type"),
+                "reference": safe_get(feature, "Reference"),
+                "valid": operation_valid,
+                "part_update_result": part_update_result,
+                "section_count": len(section_sketches),
+                "sections": section_reports,
+                "section_array_strategy": strategy,
                 "body_before": body_before,
                 "body_after": body_after,
                 "volume_removed": volume_removed,
@@ -28180,9 +28787,28 @@ def handle_create_silent_chain_sprocket(payload):
                                    "completed_operation_ids": [s.get("id") for s in steps if s.get("id")]}}
 
 
-GEAR_STANDARD_CODES = {"gost_13755_2015": 1}
+GEAR_STANDARD_CODES = {
+    "gost_13754_68": 5,
+    "gost_13755_2015": 1,
+    "gost_9587_81": 2,
+    "gost_r_50531_93": 3,
+    "iso_53_1998": 4,
+}
 GEAR_STANDARD_NAMES = {value: key for key, value in GEAR_STANDARD_CODES.items()}
-GEAR_MODIFICATION_CODES = {"a": 1, "b": 2, "c": 3, "d": 4, "custom": 0}
+GEAR_MODIFICATION_CODES = {
+    "a": 1,
+    "b": 2,
+    "c": 3,
+    "d": 4,
+    "custom": 0,
+    "standard": 5,
+    "h1_c25": 6,
+    "h1_c30": 7,
+    "h11_c40": 8,
+    "h11_c25": 9,
+    "type_1": 10,
+    "type_2": 11,
+}
 GEAR_MODIFICATION_NAMES = {value: key for key, value in GEAR_MODIFICATION_CODES.items()}
 LEGACY_GEAR_CONTOUR_CODES = {"gost_a": 1, "gost_b": 2, "gost_c": 3, "gost_d": 4, "custom": 0}
 GEAR_RECIPE_CHUNK = 800
@@ -28934,6 +29560,308 @@ def _inspect_cam_block(doc3):
             "status":"legacy_unverified" if version == 1 else "verified" if verified else "partial",
             "recipe":recipe,"recipe_error":recipe_error,
             "recreatable":bool(recipe and recipe.get("studio_profile")), "owned_references": refs}
+
+
+def _inspect_gear_bevel_block(doc3):
+    part = safe_get(doc3, "TopPart")
+    if part is None:
+        return None
+    items = {str(safe_get(variable, "Name") or ""): variable for variable in _iter_operation_variables(part)}
+    variables = {name: safe_get(variable, "Value") for name, variable in items.items()}
+    if variables.get("GW_GEAR_VERSION") != 3:
+        return None
+    required = {
+        "GEAR_M", "GEAR_Z", "GEAR_X", "GEAR_ALPHA_DEG", "GEAR_DELTA_DEG",
+        "GEAR_DA", "GEAR_DF", "GEAR_B", "GEAR_VERIFIED",
+    }
+    if not required.issubset(variables):
+        return None
+    has_standard = "GEAR_STANDARD" in variables and "GEAR_MODIFICATION" in variables
+    model = cast_model_container(part)
+    if model is None:
+        return None
+    def object_name(item):
+        return str(safe_get(item, "Name") or "").lower()
+    sketches = list(iter_collection(safe_get(model, "Sketchs")))
+    blank_sketch = [item for item in sketches if object_name(item).endswith(" blank sketch")]
+    outer_sketch = [item for item in sketches if object_name(item).endswith(" tooth space outer section")]
+    inner_sketch = [item for item in sketches if object_name(item).endswith(" tooth space inner section")]
+    rotateds = safe_get(model, "Rotateds")
+    if rotateds is None:
+        get_rotateds = safe_get(model, "GetRotateds")
+        rotateds = get_rotateds() if callable(get_rotateds) else None
+    blanks = [
+        item for item in iter_collection(rotateds)
+        if object_name(item).endswith(" blank")
+    ]
+    lofts = []
+    loft_container = safe_get(model, "Lofts")
+    if loft_container is None:
+        get_lofts = safe_get(model, "GetLofts")
+        loft_container = get_lofts() if callable(get_lofts) else None
+    lofts = [
+        item for item in iter_collection(loft_container)
+        if object_name(item).endswith(" one tooth space cut")
+    ]
+    patterns = [
+        item for item in iter_collection(safe_get(model, "FeaturePatterns"))
+        if object_name(item).endswith(" tooth space pattern")
+    ]
+    if (
+        len(blank_sketch) != 1 or len(outer_sketch) != 1 or len(inner_sketch) != 1
+        or len(blanks) != 1 or not lofts or len(patterns) != 1
+    ):
+        return None
+    recipe, recipe_error = _read_gear_recipe(items)
+    if recipe is not None and recipe.get("kind") != "bevel":
+        recipe, recipe_error = None, "gear recipe kind differs"
+    standard = GEAR_STANDARD_NAMES.get(
+        int(round(float(variables.get("GEAR_STANDARD") or 0))), "gost_13754_68"
+    ) if has_standard else "gost_13754_68"
+    modification = GEAR_MODIFICATION_NAMES.get(
+        int(round(float(variables.get("GEAR_MODIFICATION") or 0))), "standard"
+    ) if has_standard else "standard"
+    profile = {
+        "tooth_type": "straight",
+        "standard": standard,
+        "modification": modification,
+        "module_mm": variables.get("GEAR_M"),
+        "tooth_count": int(round(float(variables.get("GEAR_Z") or 0))),
+        "pitch_cone_angle_deg": variables.get("GEAR_DELTA_DEG"),
+        "pressure_angle_deg": variables.get("GEAR_ALPHA_DEG"),
+        "profile_shift": variables.get("GEAR_X"),
+        "face_width_mm": variables.get("GEAR_B"),
+    }
+    if recipe and recipe.get("studio_profile"):
+        profile = dict(recipe["studio_profile"])
+    owned = [
+        safe_get(item, "Reference")
+        for item in [blank_sketch[0], outer_sketch[0], inner_sketch[0], blanks[0], lofts[0], patterns[0]]
+        if safe_get(item, "Reference")
+    ]
+    verified = bool(variables.get("GEAR_VERIFIED") == 1)
+    return {
+        "id": "gear-bevel:" + str(owned[0]) if owned else "gear-bevel:unknown",
+        "schema": "geomwright.managed_gear_bevel",
+        "version": 1,
+        "module": "gear_bevel",
+        "name": str(safe_get(part, "Name") or "Geomwright bevel gear"),
+        "profile": profile,
+        "editable": False,
+        "verified": verified,
+        "status": "verified" if verified else "partial",
+        "recipe": recipe,
+        "recipe_error": recipe_error,
+        "recreatable": bool(recipe and recipe.get("studio_profile")),
+        "owned_references": owned,
+    }
+
+
+def handle_inspect_gear_bevel(payload):
+    document_id = payload.get("document_id")
+    if not document_id:
+        raise ValueError("document_id is required")
+    app = make_app()
+    document = resolve_document(app, document_id)
+    if document is None:
+        raise RuntimeError("Bevel-gear document was not found")
+    doc3 = cast_document_3d(document)
+    if doc3 is None:
+        raise RuntimeError("Bevel-gear inspection requires a 3D document")
+    block = _inspect_gear_bevel_block(doc3)
+    if block is None:
+        raise RuntimeError("The document does not contain a recognized managed bevel-gear block")
+    return block
+
+
+def handle_create_gear_bevel(payload):
+    if payload.get("execute") is not True or payload.get("confirm_write") is not True:
+        raise ValueError("Bevel-gear creation requires execute=true and confirm_write=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "bevel_gear_cad_plan" or int(plan.get("plan_version") or 0) != 1:
+        raise ValueError("A bevel_gear_cad_plan version 1 is required")
+    if plan.get("family") != "gear_bevel":
+        raise ValueError("Managed bevel-gear plan family must be gear_bevel")
+    if (plan.get("ownership") or {}).get("schema") != "geomwright.managed_gear_bevel":
+        raise ValueError("Managed bevel-gear ownership schema is missing")
+    workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
+    operations = list(workflow_params.get("operations") or [])
+    scenario_list = [str(item.get("scenario") or "") for item in operations]
+    if scenario_list != [
+        "conical_blank", "section_profile_sketch", "section_profile_sketch",
+        "loft_cut", "circular_pattern",
+    ]:
+        raise ValueError(
+            "Managed bevel gear requires conical blank, two projected sections, "
+            "a loft cut, and a circular pattern"
+        )
+    name = str(plan.get("name") or "").strip()
+    if not name:
+        raise ValueError("Bevel gear plan name must not be empty")
+    app = make_app()
+    doc3 = None
+    steps_report = []
+    stage = "create_document"
+    try:
+        doc3, part, model = _create_part_document(app, bool(payload.get("visible", True)))
+        part = safe_get(cast_document_3d(doc3), "TopPart")
+        model = cast_model_container(part)
+        if part is None or model is None:
+            raise RuntimeError("Managed bevel-gear document has no top part or model container")
+        part.Name = name
+        if not part.Update():
+            raise RuntimeError("Bevel gear part name update failed")
+        runtime_objects = {}
+        for index, operation in enumerate(operations):
+            stage = str(operation.get("id") or "operation_%d" % index)
+            report_progress(
+                10 + int(70.0 * index / max(1, len(operations))),
+                str(operation.get("scenario") or "workflow_operation"),
+                name=str((operation.get("params") or {}).get("name") or ""),
+            )
+            _execute_workflow_operation(part, model, operation, runtime_objects, steps_report)
+        stage = "rebuild_and_body_verification"
+        if not cast_document_3d(doc3).RebuildDocument():
+            raise RuntimeError("Bevel gear final rebuild failed")
+        import win32com.client
+        bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+        body = _active_api5_primary_body_metrics()
+        if len(bodies) != 1 or not body["solid"] or not 0.0 < float(body["volume"]):
+            raise RuntimeError("Bevel gear result must be one positive-volume solid")
+        box = win32com.client.CastTo(bodies[0], "IBody7").GetGabarit()
+        if not box or not box[0] or len(box) != 7:
+            raise RuntimeError("Bevel gear body bounds unavailable")
+        body["bounds_mm"] = [float(value) for value in box[1:]]
+        verify = plan.get("verification") or {}
+        expected_volume = float(verify.get("expected_volume_mm3") or 0.0)
+        if expected_volume <= 0.0:
+            raise RuntimeError("Bevel gear plan expected volume is missing")
+        error = abs(float(body["volume"]) * 1000.0 / expected_volume - 1.0)
+        if error > float(verify.get("volume_relative_tolerance") or 0.012):
+            raise RuntimeError("Bevel gear body volume disagrees with the plan: " + str(error))
+        expected_bounds = [float(value) for value in (verify.get("expected_bounds_mm") or [])]
+        bound_candidates = [
+            [float(value) for value in candidate]
+            for candidate in (verify.get("expected_bounds_candidates_mm") or [expected_bounds])
+            if len(candidate) == 6
+        ]
+        bounds_tolerance = float(verify.get("bounds_tolerance_mm") or 0.08)
+        max_radius = float(verify.get("max_radius_mm") or 0.0)
+        actual = [float(value) for value in body["bounds_mm"]]
+        extent_ok = (
+            max_radius > 0.0
+            and actual[0] < actual[3] < 0.0
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5]))
+            <= max_radius + bounds_tolerance
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5]))
+            >= 0.5 * max_radius
+        )
+        if not extent_ok and not any(
+            all(abs(actual_value - expected) <= bounds_tolerance for actual_value, expected in zip(actual, candidate))
+            for candidate in bound_candidates
+        ):
+            raise RuntimeError("Bevel gear body bounds disagree with the plan: " + str(body["bounds_mm"]))
+        pattern_step = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
+        if pattern_step is None or int(pattern_step.get("count") or 0) != int(verify.get("pattern_count") or 0):
+            raise RuntimeError("Bevel gear physical tooth count readback failed")
+        cut_step = next((step for step in steps_report if step.get("id") == "tooth_space_cut"), None)
+        if cut_step is None or not bool(cut_step.get("valid")):
+            raise RuntimeError("Bevel gear loft cut readback failed")
+        stage = "hide_auxiliary_geometry"
+        auxiliary_objects = []
+        blank_runtime = runtime_objects.get("blank") or {}
+        for role in ("axis_start", "axis_end", "axis"):
+            if blank_runtime.get(role) is not None:
+                auxiliary_objects.append((role, blank_runtime[role]))
+        for operation_id in ("tooth_space_outer", "tooth_space_inner"):
+            section_runtime = runtime_objects.get(operation_id) or {}
+            for role in ("anchor_point", "probe_sketch", "sketch", "plane"):
+                if section_runtime.get(role) is not None:
+                    auxiliary_objects.append((operation_id + "_" + role, section_runtime[role]))
+        auxiliary_objects.extend(
+            ("sketch", sketch)
+            for sketch in iter_collection(safe_get(model, "Sketchs"))
+        )
+        default_object = safe_get(part, "DefaultObject")
+        if callable(default_object):
+            for plane_id in (1, 2, 3, 71, 72, 73):
+                try:
+                    plane_object = default_object(plane_id)
+                except Exception:
+                    plane_object = None
+                if plane_object is not None:
+                    auxiliary_objects.append(("default_%d" % plane_id, plane_object))
+        visibility_report = _hide_auxiliary_model_objects(auxiliary_objects, hidden=True)
+        visibility_failures = [
+            item for item in (visibility_report.get("objects") or [])
+            if not item.get("ok") and not str(item.get("role") or "").startswith("default_")
+        ]
+        steps_report.append(
+            {
+                "step": "hide_auxiliary_geometry",
+                "ok": bool(visibility_report.get("ok")),
+                "hidden_count": len(auxiliary_objects),
+                "failures": visibility_failures,
+            }
+        )
+        if visibility_failures:
+            raise RuntimeError("Bevel gear auxiliary geometry could not be hidden: %s" % visibility_failures)
+        stage = "persist_ownership"
+        profile_request = dict(plan.get("profile_request") or {})
+        geometry = plan.get("geometry") or {}
+        metadata = _apply_part_variables(part, [
+            {"name": "GW_GEAR_VERSION", "value": 3, "expression": None, "note": "Create-only straight bevel gear"},
+            {"name": "GW_FAMILY_CODE", "value": 10, "expression": None, "note": "Geomwright gear family code"},
+            {"name": "GEAR_M", "value": float(profile_request.get("module_mm") or 0.0), "expression": None},
+            {"name": "GEAR_Z", "value": int(profile_request.get("tooth_count") or 0), "expression": None},
+            {"name": "GEAR_X", "value": float(profile_request.get("profile_shift") or 0.0), "expression": None},
+            {"name": "GEAR_ALPHA_DEG", "value": float(profile_request.get("pressure_angle_deg") or 20.0), "expression": None},
+            {"name": "GEAR_STANDARD", "value": GEAR_STANDARD_CODES.get(str(profile_request.get("standard")), 0), "expression": None},
+            {"name": "GEAR_MODIFICATION", "value": GEAR_MODIFICATION_CODES.get(str(profile_request.get("modification")), 0), "expression": None},
+            {"name": "GEAR_D", "value": float(geometry.get("outer_pitch_diameter_mm") or 0.0), "expression": None},
+            {"name": "GEAR_DA", "value": float(geometry.get("outer_tip_diameter_mm") or 0.0), "expression": None},
+            {"name": "GEAR_DF", "value": float(geometry.get("outer_root_diameter_mm") or 0.0), "expression": None},
+            {"name": "GEAR_B", "value": float(geometry.get("face_width_mm") or 0.0), "expression": None},
+            {"name": "GEAR_DELTA_DEG", "value": float(geometry.get("pitch_cone_angle_deg") or 0.0), "expression": None},
+            {"name": "GEAR_ZA", "value": float(geometry.get("face_cone_angle_deg") or 0.0), "expression": None},
+            {"name": "GEAR_ZF", "value": float(geometry.get("root_cone_angle_deg") or 0.0), "expression": None},
+            {"name": "GEAR_VERIFIED", "value": 1, "expression": None, "note": "Host and native checks passed"},
+        ] + _gear_recipe_variables(plan, kind="bevel"))
+        if not metadata.get("ok"):
+            raise RuntimeError("Bevel gear metadata variables could not be created")
+        block = _inspect_gear_bevel_block(cast_document_3d(doc3))
+        if not block or block.get("module") != "gear_bevel" or block.get("profile") != profile_request:
+            raise RuntimeError("Bevel gear ownership/recipe readback failed")
+        report_progress(100, "completed", name=name)
+        return {
+            "ok": True,
+            "success": True,
+            "executed": True,
+            "stage": "verified",
+            "saved": False,
+            "closed": False,
+            "document": describe_runtime_document(doc3, app),
+            "block": block,
+            "body": body,
+            "steps": steps_report,
+            "exports": {
+                step["id"]: step.get("feature") or step.get("sketch")
+                for step in steps_report
+                if step.get("id")
+            },
+            "verification": {
+                "ok": True,
+                "final_rebuild_ok": True,
+                "pattern_count": pattern_step["count"],
+                "relative_volume_error": error,
+                "bounds_verified": True,
+                "loft_volume_removed_cm3": float(cut_step.get("volume_removed") or 0.0),
+            },
+            "accuracy": plan.get("accuracy"),
+        }
+    except Exception as exc:
+        raise RuntimeError("create_gear_bevel failed at %s: %s | partial_document=%s" %
+                           (stage, exc, json.dumps(describe_runtime_document(doc3, app) if doc3 else None)))
 
 
 def handle_create_cam(payload):
@@ -30261,6 +31189,10 @@ def handle_studio_workspace_snapshot(payload):
             if internal_gear_block is not None:
                 entry["blocks"].append(internal_gear_block)
                 owned.update(internal_gear_block["owned_references"])
+            bevel_gear_block = _inspect_gear_bevel_block(doc3)
+            if bevel_gear_block is not None:
+                entry["blocks"].append(bevel_gear_block)
+                owned.update(bevel_gear_block["owned_references"])
             model_container = cast_model_container(safe_get(doc3, "TopPart"))
             for collection_name, accessors in MODEL_OBJECT_COLLECTION_SPECS:
                 collection, _accessor, _errors = _resolve_model_object_collection(model_container, accessors)
@@ -30426,6 +31358,10 @@ def _dispatch_action(request):
         return handle_create_gear_internal(payload)
     if action == "inspect_gear_internal":
         return handle_inspect_gear_internal(payload)
+    if action == "create_gear_bevel":
+        return handle_create_gear_bevel(payload)
+    if action == "inspect_gear_bevel":
+        return handle_inspect_gear_bevel(payload)
     if action == "update_managed_pulley":
         return handle_update_managed_pulley(payload)
     if action == "inspect_managed_pulley":

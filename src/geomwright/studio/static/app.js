@@ -1040,7 +1040,7 @@ function gearCoefficientSummary(modificationMeta) {
 }
 
 function refreshGearDynamicText() {
-  if (!["gear_spur", "gear_internal"].includes(currentModule?.kind) || !currentSpec) return;
+  if (!["gear_spur", "gear_internal", "gear_bevel"].includes(currentModule?.kind) || !currentSpec) return;
   const standardSelect = fieldsContainer.querySelector("select[name='standard']");
   const modificationSelect = fieldsContainer.querySelector("select[name='modification']");
   const moduleSelect = fieldsContainer.querySelector("[data-field-name='module_mm'] select");
@@ -1117,6 +1117,7 @@ function createGearFieldGroup(key, legendKey, fallback, { collapsible = false, o
 }
 
 function createGearFields() {
+  const isBevel = currentModule?.kind === "gear_bevel";
   const properties = currentSpec.schema.properties || {};
   const required = new Set(currentSpec.schema.required || []);
   // Blocks follow the operator's importance order: what defines the gear,
@@ -1170,6 +1171,13 @@ function createGearFields() {
   append(groups.standard, modificationField);
   append(groups.main, moduleField);
   append(groups.main, createField("tooth_count", properties.tooth_count, required.has("tooth_count")));
+  if (isBevel) {
+    append(groups.main, createField(
+      "pitch_cone_angle_deg",
+      properties.pitch_cone_angle_deg,
+      required.has("pitch_cone_angle_deg"),
+    ));
+  }
   append(groups.main, createField("profile_shift", properties.profile_shift, required.has("profile_shift")));
   const faceWidthField = createField("face_width_mm", properties.face_width_mm, required.has("face_width_mm"));
   if (currentModule?.kind === "gear_internal") {
@@ -1181,6 +1189,15 @@ function createGearFields() {
         "Функциональная ширина зубчатого венца; расточка на диаметр вершин входит в модуль.",
       );
     }
+  } else if (isBevel) {
+    const faceWidthHelp = faceWidthField.querySelector("[data-field-help]");
+    if (faceWidthHelp) {
+      faceWidthHelp.dataset.i18n = "field.face_width_mm.help_bevel";
+      faceWidthHelp.textContent = t(
+        "field.face_width_mm.help_bevel",
+        "Ширина венца вдоль делительного конуса; пусто — рекомендация ГОСТ 19624-74 b = 0,285 R_e.",
+      );
+    }
   }
   append(groups.main, faceWidthField);
   if (properties.ring_outside_diameter_mm) {
@@ -1190,54 +1207,87 @@ function createGearFields() {
       required.has("ring_outside_diameter_mm"),
     ));
   }
-  const typeField = createField("hand", properties.hand, required.has("hand"));
-  const typeSelect = typeField.querySelector("select");
-  typeSelect.removeAttribute("name");
-  typeSelect.dataset.gearToothType = "";
-  const typeCode = typeField.querySelector("code");
-  if (typeCode) typeCode.textContent = "tooth_type";
-  typeSelect.replaceChildren();
-  for (const [value, key, fallback] of [
-    ["spur", "gear.tooth_spur", "Прямозубая"],
-    ["right", "gear.tooth_right", "Правое направление"],
-    ["left", "gear.tooth_left", "Левое направление"],
-  ]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.dataset.i18n = key;
-    option.textContent = t(key, fallback);
-    typeSelect.append(option);
-  }
-  const initialHand = baselinePayload.hand === "left" ? "left" : "right";
-  const initialHelix = Number(baselinePayload.helix_angle_deg || 0);
-  typeSelect.value = initialHelix > 1e-9 ? initialHand : "spur";
-  const helixField = createField("helix_angle_deg", properties.helix_angle_deg, required.has("helix_angle_deg"));
-  const helixNumber = helixField.querySelector("input");
-  const applyToothType = () => {
-    const spur = typeSelect.value === "spur";
-    helixNumber.disabled = spur;
-    helixField.classList.toggle("derived", spur);
-    let hint = helixField.querySelector("[data-gear-angle-hint]");
-    if (spur) {
-      if (!hint) {
-        hint = document.createElement("small");
-        hint.dataset.gearAngleHint = "";
-        hint.dataset.i18n = "gear.angle_spur_hint";
-        helixField.append(hint);
+  let applyToothType = () => {};
+  if (isBevel) {
+    const typeField = createField("tooth_type", properties.tooth_type, required.has("tooth_type"));
+    const typeSelect = typeField.querySelector("select");
+    typeSelect.removeAttribute("name");
+    typeSelect.dataset.gearToothType = "";
+    const typeCode = typeField.querySelector("code");
+    if (typeCode) typeCode.textContent = "tooth_type";
+    typeSelect.replaceChildren();
+    for (const [value, key, fallback, disabled] of [
+      ["straight", "gear.tooth_straight", "Прямозубая", false],
+      ["circular", "gear.tooth_circular_next", "С круговым зубом · следующий этап", true],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.dataset.i18n = key;
+      option.textContent = t(key, fallback);
+      option.disabled = disabled;
+      typeSelect.append(option);
+    }
+    const bevelTypeNote = document.createElement("small");
+    bevelTypeNote.dataset.i18n = "gear.bevel_type_note";
+    bevelTypeNote.textContent = t(
+      "gear.bevel_type_note",
+      "Первый этап реализует прямозубую модификацию; круговой зуб получит отдельную именованную методику.",
+    );
+    typeField.append(bevelTypeNote);
+    append(groups.tooth, typeField);
+  } else {
+    const typeField = createField("hand", properties.hand, required.has("hand"));
+    const typeSelect = typeField.querySelector("select");
+    typeSelect.removeAttribute("name");
+    typeSelect.dataset.gearToothType = "";
+    const typeCode = typeField.querySelector("code");
+    if (typeCode) typeCode.textContent = "tooth_type";
+    typeSelect.replaceChildren();
+    for (const [value, key, fallback] of [
+      ["spur", "gear.tooth_spur", "Прямозубая"],
+      ["right", "gear.tooth_right", "Правое направление"],
+      ["left", "gear.tooth_left", "Левое направление"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.dataset.i18n = key;
+      option.textContent = t(key, fallback);
+      typeSelect.append(option);
+    }
+    const initialHand = baselinePayload.hand === "left" ? "left" : "right";
+    const initialHelix = Number(baselinePayload.helix_angle_deg || 0);
+    typeSelect.value = initialHelix > 1e-9 ? initialHand : "spur";
+    const helixField = createField("helix_angle_deg", properties.helix_angle_deg, required.has("helix_angle_deg"));
+    const helixNumber = helixField.querySelector("input");
+    applyToothType = () => {
+      const spur = typeSelect.value === "spur";
+      helixNumber.disabled = spur;
+      helixField.classList.toggle("derived", spur);
+      let hint = helixField.querySelector("[data-gear-angle-hint]");
+      if (spur) {
+        if (!hint) {
+          hint = document.createElement("small");
+          hint.dataset.gearAngleHint = "";
+          hint.dataset.i18n = "gear.angle_spur_hint";
+          helixField.append(hint);
+        }
+        hint.textContent = t("gear.angle_spur_hint", "Для прямозубого колеса угол не задаётся");
+        return;
       }
-      hint.textContent = t("gear.angle_spur_hint", "Для прямозубого колеса угол не задаётся");
-      return;
-    }
-    if (hint) hint.remove();
-    if (!(Number(helixNumber.value) > 0)) {
-      helixNumber.value = String(initialHelix > 0 ? initialHelix : 20);
-    }
-  };
-  typeSelect.addEventListener("change", applyToothType);
-  append(groups.tooth, typeField);
-  append(groups.tooth, helixField);
+      if (hint) hint.remove();
+      if (!(Number(helixNumber.value) > 0)) {
+        helixNumber.value = String(initialHelix > 0 ? initialHelix : 20);
+      }
+    };
+    typeSelect.addEventListener("change", applyToothType);
+    append(groups.tooth, typeField);
+    append(groups.tooth, helixField);
+  }
   append(groups.coefficients, note);
   for (const name of coefficientNames) append(groups.coefficients, coefficientFields[name]);
+  if (isBevel) {
+    delete groups.measurement;
+  } else {
   const pinField = createField("pin_diameter_mm", properties.pin_diameter_mm, required.has("pin_diameter_mm"));
   const pinNumber = pinField.querySelector("input");
   pinNumber.setAttribute("list", "gear-pin-diameters");
@@ -1277,15 +1327,8 @@ function createGearFields() {
   applyPinMode();
   // A stored explicit pin is unusual enough that the block opens to show it.
   groups.measurement.root.open = initialPin != null;
-
-  if (properties.ring_chamfer_mm) {
-    append(groups.chamfer, createField(
-      "ring_chamfer_mm", properties.ring_chamfer_mm, required.has("ring_chamfer_mm"),
-    ));
-    append(groups.chamfer, createField(
-      "ring_chamfer_angle_deg", properties.ring_chamfer_angle_deg, required.has("ring_chamfer_angle_deg"),
-    ));
   }
+
   if (properties.tip_chamfer_mm) {
     const chamferField = createField("tip_chamfer_mm", properties.tip_chamfer_mm, required.has("tip_chamfer_mm"));
     const chamferAngleField = createField("tip_chamfer_angle_deg", properties.tip_chamfer_angle_deg, required.has("tip_chamfer_angle_deg"));
@@ -1417,7 +1460,7 @@ function renderFields() {
     fieldsContainer.append(createCamshaftWizard());
     return;
   }
-  if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) {
+  if (["gear_spur", "gear_internal", "gear_bevel"].includes(currentModule?.kind)) {
     createGearFields();
     syncConditionalFields();
     return;
@@ -1603,7 +1646,7 @@ function localizeFields() {
     }
   }
   if (currentModule?.kind === "silent_chain_sprocket") { syncConditionalFields(); syncSilentCompletion(); }
-  if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) refreshGearDynamicText();
+  if (["gear_spur", "gear_internal", "gear_bevel"].includes(currentModule?.kind)) refreshGearDynamicText();
   updateChainSelectionDetails();
 }
 
@@ -1657,16 +1700,20 @@ function collectPayload({ withoutCompletion = false } = {}) {
   if (baselinePayload.profile_overrides && typeof baselinePayload.profile_overrides === "object") {
     payload.profile_overrides = { ...baselinePayload.profile_overrides };
   }
-  if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) {
-    const toothType = fieldsContainer.querySelector("[data-gear-tooth-type]")?.value || "spur";
-    if (toothType === "spur") {
-      payload.helix_angle_deg = 0;
-      payload.hand = "right";
+  if (["gear_spur", "gear_internal", "gear_bevel"].includes(currentModule?.kind)) {
+    if (currentModule?.kind === "gear_bevel") {
+      payload.tooth_type = fieldsContainer.querySelector("[data-gear-tooth-type]")?.value || "straight";
     } else {
-      const angleInput = fieldsContainer.querySelector("[name='helix_angle_deg']");
-      const angle = angleInput ? angleInput.valueAsNumber : Number.NaN;
-      payload.helix_angle_deg = Number.isFinite(angle) && angle > 0 ? angle : 20;
-      payload.hand = toothType;
+      const toothType = fieldsContainer.querySelector("[data-gear-tooth-type]")?.value || "spur";
+      if (toothType === "spur") {
+        payload.helix_angle_deg = 0;
+        payload.hand = "right";
+      } else {
+        const angleInput = fieldsContainer.querySelector("[name='helix_angle_deg']");
+        const angle = angleInput ? angleInput.valueAsNumber : Number.NaN;
+        payload.helix_angle_deg = Number.isFinite(angle) && angle > 0 ? angle : 20;
+        payload.hand = toothType;
+      }
     }
     const properties = currentSpec?.schema?.properties || {};
     const ordered = {};
@@ -1734,6 +1781,19 @@ function summaryLabelKey(key) {
     };
     if (gearKeys[key]) return `summary.${gearKeys[key]}`;
   }
+  if (currentModule?.kind === "gear_bevel") {
+    const bevelKeys = {
+      outer_pitch_diameter_mm: "gear_bevel_pitch_diameter_mm",
+      outer_tip_diameter_mm: "gear_bevel_tip_diameter_mm",
+      outer_root_diameter_mm: "gear_bevel_root_diameter_mm",
+      pitch_cone_angle_deg: "gear_bevel_pitch_cone_angle_deg",
+      face_cone_angle_deg: "gear_bevel_face_cone_angle_deg",
+      root_cone_angle_deg: "gear_bevel_root_cone_angle_deg",
+      outer_cone_distance_mm: "gear_bevel_outer_cone_distance_mm",
+      virtual_tooth_count: "gear_bevel_virtual_tooth_count",
+    };
+    if (bevelKeys[key]) return `summary.${bevelKeys[key]}`;
+  }
   return `summary.${key}`;
 }
 
@@ -1750,7 +1810,7 @@ function renderSummary(values) {
     if (typeof value === "number") dd.textContent = formatNumber(value, key === "chain_pitch_mm" ? 4 : 2);
     else if (typeof value === "boolean") dd.textContent = t(value ? "value.yes" : "value.no");
     else if (key === "selected_law") dd.textContent = localizedEnumValue("law", value);
-    else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "family", "gost_profile_variant", "profile_construction", "profile_mechanics", "tooth_tip_shape", "profile_status", "axial_status", "construction_status", "hand", "over_pin_source"].includes(key)) dd.textContent = localizedEnumValue(key, value);
+    else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "family", "gost_profile_variant", "profile_construction", "profile_mechanics", "tooth_tip_shape", "profile_status", "axial_status", "construction_status", "hand", "over_pin_source", "tooth_type", "face_width_source"].includes(key)) dd.textContent = localizedEnumValue(key, value);
     else dd.textContent = String(value);
     summary.append(dt, dd);
   }
@@ -2082,6 +2142,7 @@ function managedBlockName(block) {
     timing_curvilinear: "block.timing_curvilinear",
     gear_spur: "block.gear_spur",
     gear_internal: "block.gear_internal",
+    gear_bevel: "block.gear_bevel",
     silent_chain_sprocket: "block.silent_chain_sprocket",
     camshaft_lobe: "block.camshaft_lobe",
   }[block.module] || "block.generic";
@@ -2584,6 +2645,12 @@ function cadPlanDisplayDimensions(plan) {
     };
   }
   const geometry = plan?.geometry || {};
+  if (Number.isFinite(geometry.outer_tip_diameter_mm) && Number.isFinite(geometry.face_width_mm)) {
+    return {
+      outerDiameter: geometry.outer_tip_diameter_mm,
+      faceWidth: geometry.face_width_mm,
+    };
+  }
   if (Number.isFinite(geometry.ring_outside_radius) && Number.isFinite(geometry.face_width)) {
     return {
       outerDiameter: 2 * geometry.ring_outside_radius,
@@ -2687,9 +2754,10 @@ async function createManagedPulley() {
   }
   const isCam = buildModule.kind === "camshaft_lobe";
   const isSilent = buildModule.kind === "silent_chain_sprocket";
-  const isGear = ["gear_spur", "gear_internal"].includes(buildModule.kind);
+  const isGear = ["gear_spur", "gear_internal", "gear_bevel"].includes(buildModule.kind);
+  const isBevel = buildModule.kind === "gear_bevel";
   const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : isSilent ? "Geomwright silent sprocket" : isGear ? "Geomwright gear" : "Geomwright pulley");
-  if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : isSilent ? "silent.cad.confirm" : isGear ? "gear.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
+  if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : isSilent ? "silent.cad.confirm" : isBevel ? "gear.cad.confirm_bevel" : isGear ? "gear.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
   cadBuildActive = true;
   cadCancelButton.hidden = false;
   cadCreateButton.disabled = true;

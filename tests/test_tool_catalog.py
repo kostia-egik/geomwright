@@ -279,6 +279,49 @@ class ToolCatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "recognized internal gear block"):
             tools["inspect_internal_gear"]("doc-2")
 
+        from kompas_mcp.gears import BevelGearCreateRequest, BevelGearRequest
+
+        bevel_preview = tools["preview_bevel_gear"](
+            BevelGearRequest(module_mm=3.0, tooth_count=20, pitch_cone_angle_deg=45.0)
+        )
+        self.assertTrue(bevel_preview["success"])
+        self.assertEqual(bevel_preview["family"], "gear_bevel")
+        self.assertGreater(
+            bevel_preview["summary"]["outer_tip_diameter_mm"],
+            bevel_preview["summary"]["outer_pitch_diameter_mm"],
+        )
+        adapter.create_gear_bevel.assert_not_called()
+        bevel_selection = tools["list_gear_standards"]()
+        self.assertIn(
+            "gost_13754_68",
+            [item["value"] for item in bevel_selection["bevel_standards"]],
+        )
+        with self.assertRaisesRegex(ValueError, "straight"):
+            BevelGearRequest(tooth_type="circular")
+
+        adapter.create_gear_bevel.return_value = {
+            "ok": True, "success": True, "executed": False, "stage": "planned",
+        }
+        bevel_planned = tools["create_bevel_gear"](
+            BevelGearCreateRequest(module_mm=3.0, tooth_count=20, pitch_cone_angle_deg=45.0)
+        )
+        self.assertFalse(bevel_planned["executed"])
+        adapter.create_gear_bevel.assert_called_once()
+        self.assertFalse(adapter.create_gear_bevel.call_args.kwargs["execute"])
+        adapter.create_gear_bevel.reset_mock()
+        with self.assertRaisesRegex(ValueError, "confirm_write"):
+            BevelGearCreateRequest(
+                module_mm=3.0, tooth_count=20, pitch_cone_angle_deg=45.0, execute=True,
+            )
+        adapter.create_gear_bevel.assert_not_called()
+
+        adapter.inspect_gear_bevel.return_value = {"module": "gear_bevel", "recipe": {"kind": "bevel"}}
+        bevel_inspected = tools["inspect_bevel_gear"]("doc-bevel")
+        self.assertEqual(bevel_inspected["module"], "gear_bevel")
+        adapter.inspect_gear_bevel.return_value = {"module": "gear_spur"}
+        with self.assertRaisesRegex(ValueError, "recognized bevel gear block"):
+            tools["inspect_bevel_gear"]("doc-bevel-2")
+
     def test_server_stays_bootstrap_sized(self) -> None:
         server_tool_names = _source_tool_names([SERVER_PATH])
         self.assertLessEqual(len(SERVER_PATH.read_text(encoding="utf-8").splitlines()), 120)

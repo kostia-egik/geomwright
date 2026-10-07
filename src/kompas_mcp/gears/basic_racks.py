@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+STANDARD_GOST_13754_68 = "gost_13754_68"
 STANDARD_GOST_13755_2015 = "gost_13755_2015"
 STANDARD_GOST_9587_81 = "gost_9587_81"
 STANDARD_GOST_R_50531_93 = "gost_r_50531_93"
@@ -94,6 +95,14 @@ class RackStandard:
         }
 
 
+# ГОСТ 13754-68 is the basic rack of straight bevel gears under ГОСТ 19624-74.
+# It keeps the 20-degree profile with h_a* = 1, c* = 0.2, rho_f* = 0.2; the
+# module rows come from ГОСТ 9563-60 exactly as for the cylindrical racks.
+GOST_13754_MODIFICATIONS: tuple[RackModification, ...] = (
+    RackModification("standard", "Исходный контур ГОСТ 13754-68", "ГОСТ 13754-68 basic rack", 20.0, 1.0, 0.2, 0.2),
+    RackModification("custom", "Пользовательский", "Custom", None, None, None, None),
+)
+
 GOST_13755_MODIFICATIONS: tuple[RackModification, ...] = (
     RackModification("a", "Тип A", "Type A", 20.0, 1.0, 0.25, 0.38),
     RackModification("b", "Тип B", "Type B", 20.0, 1.0, 0.25, 0.30),
@@ -150,6 +159,18 @@ ISO_53_MODIFICATIONS: tuple[RackModification, ...] = (
 )
 
 STANDARDS: dict[str, RackStandard] = {
+    STANDARD_GOST_13754_68: RackStandard(
+        STANDARD_GOST_13754_68,
+        "ГОСТ 13754-68",
+        "ГОСТ 13754-68",
+        "ГОСТ 13754-68",
+        GOST_13754_MODIFICATIONS,
+        MODULE_SYSTEM_GOST_9563_60,
+        1.0,
+        100.0,
+        "Исходный контур конических прямозубых передач по ГОСТ 19624-74.",
+        "Basic rack of straight bevel gears under ГОСТ 19624-74.",
+    ),
     STANDARD_GOST_13755_2015: RackStandard(
         STANDARD_GOST_13755_2015,
         "ГОСТ 13755-2015",
@@ -306,6 +327,9 @@ def resolve_rack(
     )
 
 
-def standard_options() -> list[dict]:
+def standard_options(values: tuple[str, ...] | None = None) -> list[dict]:
     """Catalog metadata for the Studio cascading selector."""
-    return [system.to_dict() for system in STANDARDS.values()]
+    if values is None:
+        return [system.to_dict() for system in STANDARDS.values()]
+    wanted = {str(value).strip().lower() for value in values}
+    return [system.to_dict() for system in STANDARDS.values() if system.value in wanted]

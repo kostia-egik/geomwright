@@ -126,20 +126,17 @@ class InternalGearGeometry:
     flank_start_radius_mm: float
     tip_below_base: bool
     root_fillet_radius_mm: float | None
-    root_fillet_radius_effective_mm: float = 0.0
-    root_fillet_mode: str = "sharp_root"
+    root_transition_mode: str = "sharp_root"
+    root_transition_size_mm: float = 0.0
+    right_transition_controls: list[list[float]] = field(default_factory=list)
+    left_transition_controls: list[list[float]] = field(default_factory=list)
     root_middle_arc: list[list[float]] = field(default_factory=list)
     right_fillet_arc: list[list[float]] = field(default_factory=list)
     left_fillet_arc: list[list[float]] = field(default_factory=list)
-    right_fillet_center: list[float] = field(default_factory=list)
-    left_fillet_center: list[float] = field(default_factory=list)
     right_fillet_start: list[float] = field(default_factory=list)
     right_fillet_end: list[float] = field(default_factory=list)
     left_fillet_start: list[float] = field(default_factory=list)
     left_fillet_end: list[float] = field(default_factory=list)
-    ring_chamfer_mm: float = 0.0
-    ring_chamfer_angle_deg: float = 45.0
-    ring_chamfer_depth_mm: float = 0.0
     tip_chamfer_mm: float = 0.0
     tip_chamfer_angle_deg: float = 45.0
     tip_chamfer_depth_mm: float = 0.0
@@ -219,154 +216,87 @@ def _flank_point_at(
     return _polar(radius, angle)
 
 
-def _flank_normal_into_space(
-    radius: float,
-    *,
-    space_half_angle: float,
-    inv_alpha: float,
-    base_radius: float,
-    step: float = 1e-4,
-) -> tuple[float, float]:
-    """Unit normal of the right flank pointing into the tooth space."""
-    lower = _flank_point_at(
-        radius - step,
-        space_half_angle=space_half_angle,
-        inv_alpha=inv_alpha,
-        base_radius=base_radius,
-    )
-    upper = _flank_point_at(
-        radius + step,
-        space_half_angle=space_half_angle,
-        inv_alpha=inv_alpha,
-        base_radius=base_radius,
-    )
-    tx, ty = upper[0] - lower[0], upper[1] - lower[1]
-    length = math.hypot(tx, ty)
-    if length <= 1e-15:
-        return 0.0, -1.0
-    tx, ty = tx / length, ty / length
-    point = _flank_point_at(
-        radius,
-        space_half_angle=space_half_angle,
-        inv_alpha=inv_alpha,
-        base_radius=base_radius,
-    )
-    reference_angle = math.atan2(point[0], point[1])
-    candidates = [(-ty, tx), (ty, -tx)]
-    best = candidates[0]
-    best_delta = None
-    for nx, ny in candidates:
-        probe_angle = math.atan2(point[0] + 1e-6 * nx, point[1] + 1e-6 * ny)
-        delta = probe_angle - reference_angle
-        if best_delta is None or delta < best_delta:
-            best_delta = delta
-            best = (nx, ny)
-    return best
+def _cubic_bezier_points(controls: list[list[float]], count: int) -> list[list[float]]:
+    points: list[list[float]] = []
+    for index in range(max(2, count) + 1):
+        t = index / max(2, count)
+        u = 1.0 - t
+        points.append(
+            [
+                u**3 * controls[0][axis]
+                + 3.0 * u * u * t * controls[1][axis]
+                + 3.0 * u * t * t * controls[2][axis]
+                + t**3 * controls[3][axis]
+                for axis in range(2)
+            ]
+        )
+    return points
 
 
-def _solve_root_fillet(
+def _build_root_transition(
     *,
     root_radius: float,
-    fillet_radius: float,
+    transition_size: float,
     flank_start_radius: float,
     space_half_angle: float,
     inv_alpha: float,
     base_radius: float,
 ) -> dict | None:
-    """Circular root fillet tangent to the flank and internally to the root circle.
-
-    The fillet center stays at ``root_radius - fillet_radius`` from the gear
-    axis; the tangent point on the flank is found by bisection of the offset
-    curve norm. This is a nominal circular fillet, not the exact pinion-cutter
-    envelope.
-    """
-    if fillet_radius <= 1e-9 or root_radius <= fillet_radius + 1e-9:
+    """Build a tangent cubic transition from the involute to the root circle."""
+    radial_room = root_radius - flank_start_radius
+    if transition_size <= 1e-9 or radial_room <= 1e-9:
         return None
+    flank_radius = max(flank_start_radius, root_radius - min(0.55 * transition_size, 0.45 * radial_room))
+    flank_point = _flank_point_at(
+        flank_radius,
+        space_half_angle=space_half_angle,
+        inv_alpha=inv_alpha,
+        base_radius=base_radius,
+    )
+    flank_angle = _angle(flank_point)
+    angular_span = min(0.90 * transition_size / root_radius, 0.85 * flank_angle)
+    root_angle = max(0.0, flank_angle - angular_span)
+    root_point = _polar(root_radius, root_angle)
 
-    def offset_center(radius: float) -> tuple[list[float], list[float]]:
-        point = _flank_point_at(
-            radius,
-            space_half_angle=space_half_angle,
-            inv_alpha=inv_alpha,
-            base_radius=base_radius,
-        )
-        nx, ny = _flank_normal_into_space(
-            radius,
-            space_half_angle=space_half_angle,
-            inv_alpha=inv_alpha,
-            base_radius=base_radius,
-        )
-        return [point[0] + fillet_radius * nx, point[1] + fillet_radius * ny], point
-
-    def residual(radius: float) -> float:
-        center, _point = offset_center(radius)
-        return math.hypot(center[0], center[1]) - (root_radius - fillet_radius)
-
-    low = max(flank_start_radius, root_radius - 5.0 * fillet_radius)
-    high = root_radius
-    f_low = residual(low)
-    f_high = residual(high)
-    if f_low * f_high > 0.0:
+    step = max(1e-5, 1e-4 * root_radius)
+    lower = _flank_point_at(
+        max(flank_start_radius, flank_radius - step),
+        space_half_angle=space_half_angle,
+        inv_alpha=inv_alpha,
+        base_radius=base_radius,
+    )
+    upper = _flank_point_at(
+        min(root_radius, flank_radius + step),
+        space_half_angle=space_half_angle,
+        inv_alpha=inv_alpha,
+        base_radius=base_radius,
+    )
+    tangent_flank = [upper[0] - lower[0], upper[1] - lower[1]]
+    tangent_length = math.hypot(*tangent_flank)
+    if tangent_length <= 1e-12:
         return None
-    for _ in range(90):
-        middle = (low + high) / 2.0
-        f_middle = residual(middle)
-        if f_middle * f_low <= 0.0:
-            high = middle
-        else:
-            low = middle
-            f_low = f_middle
-    radius = (low + high) / 2.0
-    center, flank_point = offset_center(radius)
-    center_radius = math.hypot(center[0], center[1])
-    if center_radius <= 1e-9:
-        return None
-    root_point = [
-        center[0] * root_radius / center_radius,
-        center[1] * root_radius / center_radius,
+    tangent_flank = [value / tangent_length for value in tangent_flank]
+    tangent_root = [-math.cos(root_angle), math.sin(root_angle)]
+    chord = math.dist(flank_point, root_point)
+    controls = [
+        flank_point,
+        [
+            flank_point[0] + 0.42 * chord * tangent_flank[0],
+            flank_point[1] + 0.42 * chord * tangent_flank[1],
+        ],
+        [
+            root_point[0] - 0.36 * chord * tangent_root[0],
+            root_point[1] - 0.36 * chord * tangent_root[1],
+        ],
+        root_point,
     ]
     return {
         "flank_point": flank_point,
-        "center": center,
-        "radius": fillet_radius,
         "root_point": root_point,
-        "flank_radius": radius,
+        "flank_radius": flank_radius,
+        "controls": controls,
+        "path": _cubic_bezier_points(controls, 20),
     }
-
-
-def _arc_points_about(
-    center: list[float],
-    radius: float,
-    start_angle: float,
-    end_angle: float,
-    count: int,
-) -> list[list[float]]:
-    if count <= 0:
-        count = 2
-    return [
-        [
-            center[0] + radius * math.sin(start_angle + (end_angle - start_angle) * index / count),
-            center[1] + radius * math.cos(start_angle + (end_angle - start_angle) * index / count),
-        ]
-        for index in range(count + 1)
-    ]
-
-
-def _arc_angle_about(center: list[float], point: list[float]) -> float:
-    return math.atan2(point[0] - center[0], point[1] - center[1])
-
-
-def _shortest_arc_delta(start_angle: float, end_angle: float) -> float:
-    delta = (end_angle - start_angle + math.pi) % (2.0 * math.pi) - math.pi
-    return delta
-
-
-def _fillet_arc_points(solution: dict, count: int) -> list[list[float]]:
-    center = solution["center"]
-    start_angle = _arc_angle_about(center, solution["flank_point"])
-    end_angle = _arc_angle_about(center, solution["root_point"])
-    delta = _shortest_arc_delta(start_angle, end_angle)
-    return _arc_points_about(center, solution["radius"], start_angle, start_angle + delta, count)
 
 
 def build_internal_gear_geometry(
@@ -632,37 +562,11 @@ def build_internal_gear_geometry(
             )
         )
 
-    ring_chamfer = float(request.get("ring_chamfer_mm") or 0.0)
-    ring_chamfer_angle = float(request.get("ring_chamfer_angle_deg") or 45.0)
-    ring_chamfer_depth = (
-        ring_chamfer * math.tan(math.radians(ring_chamfer_angle)) if ring_chamfer > 0.0 else 0.0
-    )
     tip_chamfer = float(request.get("tip_chamfer_mm") or 0.0)
     tip_chamfer_angle = float(request.get("tip_chamfer_angle_deg") or 45.0)
     tip_chamfer_depth = (
         tip_chamfer * math.tan(math.radians(tip_chamfer_angle)) if tip_chamfer > 0.0 else 0.0
     )
-    if ring_chamfer > 0.0:
-        if 2.0 * ring_chamfer >= face_width - 1e-9:
-            errors.append(
-                error_item(
-                    "gear_internal_ring_chamfer_exceeds_face_width",
-                    "The ring end chamfers from both faces meet; reduce the chamfer width.",
-                    ring_chamfer_mm=ring_chamfer,
-                    face_width_mm=face_width,
-                )
-            )
-        if ring_chamfer_depth >= (ring_outside_radius - root_radius) - 1e-9:
-            errors.append(
-                error_item(
-                    "gear_internal_ring_chamfer_reaches_root",
-                    "The ring end chamfer reaches the root cylinder; reduce the width or angle.",
-                    ring_chamfer_mm=ring_chamfer,
-                    ring_chamfer_angle_deg=ring_chamfer_angle,
-                    ring_chamfer_depth_mm=ring_chamfer_depth,
-                    rim_thickness_mm=ring_outside_radius - root_radius,
-                )
-            )
     if tip_chamfer > 0.0:
         if 2.0 * tip_chamfer >= face_width - 1e-9:
             errors.append(
@@ -713,9 +617,6 @@ def build_internal_gear_geometry(
         root_fillet_radius_mm=(
             None if rack.fillet_coefficient is None else rack.fillet_coefficient * module
         ),
-        ring_chamfer_mm=ring_chamfer,
-        ring_chamfer_angle_deg=ring_chamfer_angle,
-        ring_chamfer_depth_mm=ring_chamfer_depth,
         tip_chamfer_mm=tip_chamfer,
         tip_chamfer_angle_deg=tip_chamfer_angle,
         tip_chamfer_depth_mm=tip_chamfer_depth,
@@ -733,43 +634,41 @@ def build_internal_gear_geometry(
     if errors:
         return geometry
 
-    # Nominal circular root fillet: a cutter-tip analogue using the selected
-    # contour fillet radius. The fillet circle is tangent to the involute flank
-    # and internally tangent to the root circle. If the requested radius cannot
-    # fit the space, a smaller bounded radius is used and reported.
-    fillet_target = float(geometry.root_fillet_radius_mm or 0.0)
-    fillet_solution = None
-    fillet_scales = (1.0, 0.75, 0.5, 0.35, 0.25, 0.15)
-    if fillet_target > 1e-9:
-        for scale in fillet_scales:
-            candidate = _solve_root_fillet(
+    # The native internal-gear profile uses a generated transition represented
+    # by a cubic Bezier, not a constant-radius arc. The selected rack radius is
+    # only a scale bound for this nominal transition.
+    transition_target = min(float(geometry.root_fillet_radius_mm or 0.0), 0.30 * module)
+    transition_solution = None
+    transition_scales = (1.0, 0.75, 0.5, 0.35, 0.25, 0.15)
+    if transition_target > 1e-9:
+        for scale in transition_scales:
+            candidate = _build_root_transition(
                 root_radius=root_radius,
-                fillet_radius=fillet_target * scale,
+                transition_size=transition_target * scale,
                 flank_start_radius=flank_start_radius,
                 space_half_angle=space_half_angle,
                 inv_alpha=inv_alpha,
                 base_radius=base_radius,
             )
-            if candidate is None:
-                continue
-            if _angle(candidate["root_point"]) >= -1e-9:
-                fillet_solution = candidate
+            if candidate is not None and _angle(candidate["root_point"]) >= -1e-9:
+                transition_solution = candidate
+                geometry.root_transition_size_mm = transition_target * scale
                 break
-        if fillet_solution is None:
+        if transition_solution is None:
             warnings.append(
                 warning_item(
-                    "gear_internal_root_fillet_unresolved",
+                    "gear_internal_root_transition_unresolved",
                     (
-                        "The root fillet radius does not fit the tooth space; the "
+                        "The Bezier root transition does not fit the tooth space; the "
                         "nominal root is drawn with the root arc and sharp corners."
                     ),
-                    requested_radius_mm=fillet_target,
+                    requested_scale_mm=transition_target,
                 )
             )
 
     flank_root_radius = root_radius
-    if fillet_solution is not None:
-        flank_root_radius = float(fillet_solution["flank_radius"])
+    if transition_solution is not None:
+        flank_root_radius = float(transition_solution["flank_radius"])
     sample_count = max(24, min(240, int(
         flank_samples * max(1.0, (root_radius - flank_start_radius) / module)
     )))
@@ -781,7 +680,7 @@ def build_internal_gear_geometry(
         base_radius=base_radius,
         count=sample_count,
     )
-    right_involute = list(reversed(right_involute))  # root fillet tangent -> flank start
+    right_involute = list(reversed(right_involute))  # root transition tangent -> flank start
     tip_point_right = _polar(outside_radius, tip_space_half_angle)
     root_point_right = _polar(root_radius, root_space_half_angle)
     tip_point_left = _polar(outside_radius, -tip_space_half_angle)
@@ -792,7 +691,7 @@ def build_internal_gear_geometry(
         tip_extension = [list(right_flank[-1]), list(tip_point_right)]
         right_flank.append(list(tip_point_right))
     if not right_flank or (
-        fillet_solution is None
+        transition_solution is None
         and math.dist(right_flank[0], root_point_right) > 1e-6
     ):
         right_flank.insert(0, list(root_point_right))
@@ -806,46 +705,35 @@ def build_internal_gear_geometry(
     right_fillet_arc: list[list[float]] = []
     left_fillet_arc: list[list[float]] = []
     root_mid_arc: list[list[float]] = []
-    if fillet_solution is not None:
-        fillet_arc_count = max(10, min(40, int(40.0 * abs(
-            _shortest_arc_delta(
-                _arc_angle_about(fillet_solution["center"], fillet_solution["flank_point"]),
-                _arc_angle_about(fillet_solution["center"], fillet_solution["root_point"]),
-            )
-        ) / 0.2)))
-        right_fillet_arc = _fillet_arc_points(fillet_solution, fillet_arc_count)
-        right_fillet_arc[0] = list(fillet_solution["flank_point"])
-        right_fillet_arc[-1] = list(fillet_solution["root_point"])
+    if transition_solution is not None:
+        right_fillet_arc = [list(point) for point in transition_solution["path"]]
         left_fillet_arc = [[-point[0], point[1]] for point in right_fillet_arc]
-        root_theta = _angle(fillet_solution["root_point"])
+        root_theta = _angle(transition_solution["root_point"])
         if root_theta > 1e-7:
-            root_mid_arc = _arc_points(root_radius, -root_theta, root_theta, max(4, fillet_arc_count // 2))
+            root_mid_arc = _arc_points(root_radius, -root_theta, root_theta, 10)
         else:
-            root_mid_arc = [list(fillet_solution["root_point"])]
-        geometry.root_fillet_radius_effective_mm = float(fillet_solution["radius"])
-        geometry.root_fillet_mode = (
-            "circular_root_fillet"
-            if abs(float(fillet_solution["radius"]) - fillet_target) <= 1e-9
-            else "circular_root_fillet_reduced"
-        )
+            root_mid_arc = [list(transition_solution["root_point"])]
+        geometry.root_transition_mode = "cubic_bezier_root_transition"
         geometry.right_fillet_arc = _dedupe(right_fillet_arc)
         geometry.left_fillet_arc = _dedupe(left_fillet_arc)
         geometry.root_middle_arc = _dedupe(root_mid_arc)
-        geometry.right_fillet_center = list(fillet_solution["center"])
-        geometry.left_fillet_center = [-fillet_solution["center"][0], fillet_solution["center"][1]]
-        geometry.right_fillet_start = list(fillet_solution["flank_point"])
-        geometry.right_fillet_end = list(fillet_solution["root_point"])
-        geometry.left_fillet_start = [-fillet_solution["flank_point"][0], fillet_solution["flank_point"][1]]
-        geometry.left_fillet_end = [-fillet_solution["root_point"][0], fillet_solution["root_point"][1]]
+        geometry.right_transition_controls = [list(point) for point in transition_solution["controls"]]
+        geometry.left_transition_controls = [
+            [-point[0], point[1]] for point in transition_solution["controls"]
+        ]
+        geometry.right_fillet_start = list(transition_solution["flank_point"])
+        geometry.right_fillet_end = list(transition_solution["root_point"])
+        geometry.left_fillet_start = [-transition_solution["flank_point"][0], transition_solution["flank_point"][1]]
+        geometry.left_fillet_end = [-transition_solution["root_point"][0], transition_solution["root_point"][1]]
 
     tip_arc_steps = max(4, int(16 * max(2.0 * tip_space_half_angle, 1e-3) / 0.1))
     root_arc_steps = max(4, int(16 * max(2.0 * root_space_half_angle, 1e-3) / 0.1))
     tip_arc = _arc_points(outside_radius, tip_space_half_angle, -tip_space_half_angle, tip_arc_steps)
     root_arc = _arc_points(root_radius, -root_space_half_angle, root_space_half_angle, root_arc_steps)
     contour_tolerance = max(1e-9, module * 1e-6)
-    right_fillet_reverse = list(reversed(right_fillet_arc)) if fillet_solution is not None else []
+    right_fillet_reverse = list(reversed(right_fillet_arc)) if transition_solution is not None else []
 
-    if fillet_solution is not None:
+    if transition_solution is not None:
         space_surface = _dedupe(
             [
                 *right_flank,
@@ -891,7 +779,7 @@ def build_internal_gear_geometry(
     hole_point_left = _polar(closure_radius, -tip_space_half_angle)
     hole_arc_steps = max(4, int(16 * max(2.0 * tip_space_half_angle, 1e-3) / 0.1))
     hole_arc = _arc_points(closure_radius, tip_space_half_angle, -tip_space_half_angle, hole_arc_steps)
-    if fillet_solution is not None:
+    if transition_solution is not None:
         space_cut = _dedupe(
             [
                 *right_flank,
@@ -925,12 +813,12 @@ def build_internal_gear_geometry(
         step_angle - tip_space_half_angle,
         tip_arc_steps,
     )
-    if fillet_solution is not None:
-        root_theta = _angle(fillet_solution["root_point"])
+    if transition_solution is not None:
+        root_theta = _angle(transition_solution["root_point"])
         root_mid_half = (
             _arc_points(root_radius, 0.0, root_theta, max(3, root_arc_steps // 2))
             if root_theta > 1e-7
-            else [list(fillet_solution["root_point"])]
+            else [list(transition_solution["root_point"])]
         )
         right_fillet_segment = list(right_fillet_reverse)
         next_flank = [
@@ -988,7 +876,7 @@ def build_internal_gear_geometry(
     flank_budget = max(8, budget // 2)
     fillet_budget = max(6, budget // 4)
     tip_budget = max(4, budget // 6)
-    if fillet_solution is not None:
+    if transition_solution is not None:
         wheel_period = _dedupe(
             [
                 *_decimate(root_mid_half, 3),
@@ -1164,29 +1052,6 @@ def internal_tooth_fraction(geometry: InternalGearGeometry, radius: float) -> fl
     return max(0.0, min(1.0, (math.pi - geometry.tooth_count * theta_space) / math.pi))
 
 
-def internal_ring_chamfer_volume(
-    geometry: InternalGearGeometry,
-    *,
-    width_mm: float,
-    angle_deg: float,
-) -> float:
-    """Material removed by two full-rotation chamfers on the ring outside edges."""
-    if width_mm <= 0.0:
-        return 0.0
-    depth = width_mm * math.tan(math.radians(angle_deg))
-    radius = geometry.ring_outside_radius
-    if depth <= 0.0 or depth >= radius:
-        return 0.0
-    steps = 64
-    volume = 0.0
-    inner = radius - depth
-    for index in range(steps):
-        rho = inner + (radius - inner) * (index + 0.5) / steps
-        axial = width_mm * (rho - inner) / depth
-        volume += 2.0 * math.pi * rho * axial * ((radius - inner) / steps)
-    return 2.0 * volume
-
-
 def internal_tip_chamfer_volume(
     geometry: InternalGearGeometry,
     *,
@@ -1359,22 +1224,22 @@ def evaluate_internal_gear_checks(geometry: InternalGearGeometry, measurements: 
             "gear_internal_root_envelope",
             "ok",
             (
-                "Nominal envelope: involute flank with a circular root fillet and the root arc; "
+                "Nominal envelope: involute flank with a cubic Bezier root transition and the root arc; "
                 "the exact pinion-cutter tip is a separate generated-exact block."
             ),
-            value=geometry.root_fillet_mode,
+            value=geometry.root_transition_mode,
         )
     )
     checks.append(
         _check(
-            "gear_internal_root_fillet",
+            "gear_internal_root_transition",
             "ok",
             (
-                "Circular root fillet tangent to the flank and internally tangent to the root circle."
-                if geometry.root_fillet_mode.startswith("circular")
+                "Cubic Bezier transition tangent to the involute flank and root circle."
+                if geometry.root_transition_mode == "cubic_bezier_root_transition"
                 else "The tooth space is drawn with a sharp nominal root."
             ),
-            value=geometry.root_fillet_radius_effective_mm,
+            value=geometry.root_transition_size_mm,
             limit=geometry.root_fillet_radius_mm,
             unit="mm",
         )
@@ -1425,17 +1290,6 @@ def evaluate_internal_gear_checks(geometry: InternalGearGeometry, measurements: 
                 value=geometry.axial_overlap,
                 limit=1.0,
                 unit="x",
-            )
-        )
-    if geometry.ring_chamfer_mm > 0.0:
-        checks.append(
-            _check(
-                "gear_internal_ring_chamfer",
-                "ok",
-                "End chamfer on both ring outside edges; the two conical cuts remove the calculated rim volume.",
-                value=geometry.ring_chamfer_mm,
-                limit=geometry.ring_chamfer_angle_deg,
-                unit="mm/deg",
             )
         )
     if geometry.tip_chamfer_mm > 0.0:
@@ -1604,15 +1458,12 @@ def build_internal_gear_preview(
         "space_width_mm": geometry.space_width_mm,
         "tip_thickness_mm": geometry.tip_arc_thickness_mm,
         "root_fillet_radius_mm": geometry.root_fillet_radius_mm,
-        "root_fillet_radius_effective_mm": geometry.root_fillet_radius_effective_mm,
-        "root_fillet_mode": geometry.root_fillet_mode,
-        "ring_chamfer_mm": geometry.ring_chamfer_mm,
-        "ring_chamfer_angle_deg": geometry.ring_chamfer_angle_deg,
-        "ring_chamfer_depth_mm": geometry.ring_chamfer_depth_mm,
+        "root_transition_size_mm": geometry.root_transition_size_mm,
+        "root_transition_mode": geometry.root_transition_mode,
         "tip_chamfer_mm": geometry.tip_chamfer_mm,
         "tip_chamfer_angle_deg": geometry.tip_chamfer_angle_deg,
         "tip_chamfer_depth_mm": geometry.tip_chamfer_depth_mm,
-        "root_envelope": geometry.root_fillet_mode,
+        "root_envelope": geometry.root_transition_mode,
         "span_length_mm": measurements["span"]["span_length_mm"],
         "span_tooth_count": measurements["span"]["span_tooth_count"],
         "constant_chord_mm": measurements["constant_chord"]["constant_chord_mm"],
@@ -1666,10 +1517,10 @@ def build_internal_gear_preview(
             "space_half_angle_rad": geometry.space_half_angle_rad,
             "root_space_half_angle_rad": geometry.root_space_half_angle_rad,
             "tip_space_half_angle_rad": geometry.tip_space_half_angle_rad,
-            "root_fillet_mode": geometry.root_fillet_mode,
-            "root_fillet_radius_effective_mm": geometry.root_fillet_radius_effective_mm,
-            "ring_chamfer_mm": geometry.ring_chamfer_mm,
-            "ring_chamfer_depth_mm": geometry.ring_chamfer_depth_mm,
+            "root_transition_mode": geometry.root_transition_mode,
+            "root_transition_size_mm": geometry.root_transition_size_mm,
+            "right_transition_controls": geometry.right_transition_controls,
+            "left_transition_controls": geometry.left_transition_controls,
             "tip_chamfer_mm": geometry.tip_chamfer_mm,
             "tip_chamfer_depth_mm": geometry.tip_chamfer_depth_mm,
         },
