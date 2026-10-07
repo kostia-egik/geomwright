@@ -7,7 +7,10 @@ projection (G5 first stage of
 MCP tools. Circular (spiral) teeth are the next stage and are not built yet.
 
 This module builds one straight bevel wheel from an explicit pitch cone angle.
-It is not a gear pair, not a housing or hub, and not a strength calculation.
+The functional body is a dish: a flat base plate that rises through two rim
+cone faces normal to the tooth (back and front) into the face cone; the tooth
+ends are formed by those same cone surfaces. It is not a gear pair, not a
+housing or hub, and not a strength calculation.
 The architectural boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); this
 page is the user-facing contract.
 
@@ -23,12 +26,14 @@ page is the user-facing contract.
 | `pitch_cone_angle_deg` | Pitch cone half-angle `δ` | 5–85°; 45° is a 1:1 orthogonal pair |
 | `profile_shift` | Rack shift `x` of the virtual gear | Default 0 |
 | `face_width_mm` | Face width `b` along the pitch cone | Empty selects the ГОСТ 19624-74 recommendation `b = 0.285 R_e`; the report records the source |
+| `rim_back_extension_mm` | Back cone face extension | Axial length of the back conical rim face behind the outer tip plane; empty selects `1.2 b sin δ` (at least 2 mm) |
+| `rim_front_extension_mm` | Front cone face extension | Axial length of the front conical rim face behind the inner tip plane; empty selects `0.3 b sin δ` (at least 1.5 mm) |
 | Derived coefficients | `α`, `h_a*`, `c*`, `ρ_f*` | Editable only for the user-defined modification |
 
 The face width is checked against `K_be = b / R_e <= 0.3`; a value at or above
-the outer cone distance and an inner face that reaches the apex are rejected
-before any CAD work. The virtual tip thickness and the virtual undercut are
-reported, not silently corrected.
+the outer cone distance and a dish blank without positive axial width are
+rejected before any CAD work. The virtual tip thickness and the virtual
+undercut are reported, not silently corrected.
 
 ## Geometry
 
@@ -39,9 +44,18 @@ The macro geometry follows ГОСТ 19624-74, table 2:
 - addendum/dedendum angles `tan θ_a = h_ae / R_e`, `tan θ_f = h_fe / R_e`,
   face cone `δ_a = δ + θ_a`, root cone `δ_f = δ - θ_f`;
 - outer tip diameter `d_ae = d_e + 2 h_ae cos δ`, outer root diameter
-  `d_fe = d_e - 2 h_fe cos δ`;
-- apex-to-back-plane distance `B = R_e cos δ - h_ae sin δ`; the blank spans
-  `x ∈ [-B, -B_i]` with `B_i = B - b cos δ`.
+  `d_fe = d_e - 2 h_fe cos δ`.
+
+The blank is a dish, not a cone frustum. Its flat back face is offset behind
+the outer tip plane by `rim_back_extension_mm` (`1.2 b sin δ` by default), its
+flat front face sits behind the inner tip plane by `rim_front_extension_mm`
+(`0.3 b sin δ` by default), and the rim between them is bounded by two cone
+surfaces **normal to the tooth**: the back cone through the outer pitch point
+and the front cone through the inner pitch point, both with axis-section slope
+`cot δ`. The face cone (tip cone) closes the rim between the two tooth corners.
+No tooth end is cut by an axial plane, so the ends stay square instead of
+tapering to a point; the flat base plate keeps a reference diameter of
+`2 r_back` where the back cone meets the back face.
 
 The tooth profile is the classic Tredgold construction: the tooth space of the
 equivalent (virtual) spur gear on the back cone is projected to the gear apex.
@@ -75,37 +89,40 @@ separate assembly-level module.
 
 `build_bevel_gear_plan` produces a create-only numeric plan:
 
-1. a conical blank: a revolved trapezoid of the face cone from the back plane
-   `x = -B` (tip radius `B tan δ_a`) to the inner plane `x = -B_i`;
-2. two `section_profile_sketch` frontal sections: the exact central projection
-   of the virtual tooth-space contour onto the planes just outside the blank
-   (`x = -(B + margin)` and `x = -(B_i - margin)`), fitted as smooth cubic
-   Bézier-NURBS root/involute flanks plus exact cap segments;
-3. one `loft_cut` between the two closed sections. The sections are true scaled
-   copies of one another, so the loft side surfaces follow the projection rays
-   of the Tredgold cone exactly; the cut opens each tooth space through the
-   face cone and leaves the circular face/root cones of the blank as the
-   functional tip and root surfaces;
+1. a dish blank: one `revolved_profile_blank` sketch with the closed `(x, r)`
+   profile — flat back face, back cone, tip cone, front cone, flat front face —
+   revolved 360° around the global X axis;
+2. two `section_profile_sketch` cone-normal sections: the virtual tooth-space
+   contour scaled about the gear apex onto the planes just outside the blank's
+   back and front cones (`R_e + margin` and `R_i - margin`). The bridge creates
+   the plane perpendicular to the pitch cone generatrix and measures the actual
+   sketch frame from probe points before writing the contour;
+3. one `loft_cut` between the two closed sections. The sections are true
+   homothetic copies, so the loft side surfaces follow the projection rays of
+   the Tredgold cone exactly; because the cut planes are the same cone surfaces
+   as the blank's rim faces, the tooth ends are square and flush with the rim;
 4. a circular pattern of the tooth-space cut, `z` instances over 360°.
 
-The expected volume is the analytic face-cone frustum minus `z` tooth spaces,
-each integrated as a cubic scaling of the clipped back-face section:
-
-`V = π/3 tan²δ_a (B³ - B_i³) - z · A_back · (B³ - B_i³) / (3 B²)`.
+The expected volume is the exact revolution volume of the dish profile minus
+`z` tooth spaces. Each tooth space is integrated over the cone distances
+`R_i..R_e`; every cone-normal station is the scaled tooth-space outline clipped
+by the face cone and by the blank's flat back face. The estimate is compared
+with the native single-cut removal and with the final body to within 1.5 %.
 
 The bridge verifies one positive-volume solid, the axial extents and the radial
-extents, the physical tooth count, and the relative volume error against the
-plan (≤ 1.2 %) before the part variables and the checksummed recipe are
-written. The block owns `GW_GEAR_VERSION=3`, `GW_FAMILY_CODE=10`, the full
-`GEAR_*` readback fingerprint (including `GEAR_DELTA_DEG`, `GEAR_ZA`,
-`GEAR_ZF`), and a recipe that restores the Studio form for a new build.
+envelope, the physical tooth count, and the relative volume error against the
+plan before the part variables and the checksummed recipe are written. The
+block owns `GW_GEAR_VERSION=3`, `GW_FAMILY_CODE=10`, the full `GEAR_*` readback
+fingerprint (including `GEAR_DELTA_DEG`, `GEAR_ZA`, `GEAR_ZF`), and a recipe
+that restores the Studio form for a new build.
 
-Two new bridge primitives support that plan and stay family-neutral:
+The bridge primitives that support this plan stay family-neutral:
 
-- `conical_blank` — a revolved closed trapezoid around the global X axis;
+- `conical_blank` / `revolved_profile_blank` — a closed `(x, r)` profile
+  revolved around the global X axis;
 - `section_profile_sketch` — a closed profile on a plane parallel to a default
-  plane; the host supplies 3D points and the bridge measures the actual sketch
-  frame from probe points before writing the contour;
+  plane or perpendicular to an explicit 3D axis line; the host supplies 3D
+  points and the bridge measures the actual sketch frame first;
 - `loft_cut` — `ILoft` cut (`o3d_cutLoft`) between two or more closed sketches.
 
 ## Verification
@@ -113,11 +130,13 @@ Two new bridge primitives support that plan and stay family-neutral:
 The live acceptance cases are stored under `experiments/spikes/` (local,
 ignored):
 
-- straight bevel gear `m_e = 3`, `z = 20`, `δ = 45°`, default face width:
-  one solid, volume within 0.1 % of the analytic frustum-minus-spaces value,
-  the expected axial span `[-27.879, -19.329]`, `20` pattern instances, and a
-  verified recreatable block after save/reopen;
-- a second case with a different cone angle and positive profile shift.
+- straight bevel gear `m_e = 3`, `z = 20`, `δ = 45°`, default dish parameters:
+  one solid, volume within 0.06 % of the dish-minus-spaces value, the expected
+  axial span `[-38.139, -19.933]`, `20` pattern instances, and a verified
+  recreatable block after save/reopen; the KOMPAS 3D view shows the dish plate
+  with teeth ending squarely on the conical rim faces;
+- `m_e = 4`, `z = 16`, `δ = 26.565°`, `x = 0.2`: one solid, 0.04 % volume
+  error, `16` pattern instances, save/reopen verified.
 
 These checks cover the solid, its bounds, the physical tooth count, and the
 managed-block recipe. They do not certify the exact spherical involute, an
@@ -128,9 +147,9 @@ octoid generated by a real bevel cutter, tooth contact, or strength.
 Studio exposes the module under **Механические передачи → Зубчатые передачи**.
 The end view shows a cropped three-tooth sector of the back face with the
 `d_e`, `d_fₑ`, `d_ae` dimensions and the pitch/root reference circles; the
-axial view shows the face and root cones, the pitch line, the face width, and
-the three cone angles. The persisted block is read-only and recreatable from
-its recipe.
+axial view shows the dish profile (`B`), the back, tip, and front cone lines,
+the pitch and root lines, the outer tip diameter, and the three cone angles.
+The persisted block is read-only and recreatable from its recipe.
 
 MCP tools:
 

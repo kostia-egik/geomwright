@@ -70,6 +70,22 @@ class BevelGearRequest(BaseModel):
             "ГОСТ 19624-74 recommendation b = 0.285 R_e."
         ),
     )
+    rim_back_extension_mm: float | None = Field(
+        default=None, ge=0.0, le=500.0,
+        title="Back cone extension, mm",
+        description=(
+            "Axial extension of the back conical rim face behind the outer tip "
+            "plane. Empty selects 0.3 b sin(delta) (at least 1.5 mm)."
+        ),
+    )
+    rim_front_extension_mm: float | None = Field(
+        default=None, ge=0.0, le=500.0,
+        title="Front cone extension, mm",
+        description=(
+            "Axial extension of the front conical rim face behind the inner tip "
+            "plane. Empty selects 0.3 b sin(delta) (at least 1.5 mm)."
+        ),
+    )
     pressure_angle_deg: float | None = Field(
         default=None, gt=10.0, lt=35.0,
         title="Pressure angle, deg",

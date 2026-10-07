@@ -22314,7 +22314,7 @@ def _normalize_runtime_output_key(scenario, output_key):
         if normalized not in ("body", "feature", "sketch", "axis"):
             raise RuntimeError("Unsupported cylindrical_blank output: %s" % output_key)
         return normalized
-    if scenario_name == "conical_blank":
+    if scenario_name in ("conical_blank", "revolved_profile_blank"):
         aliases = {
             "body": "body",
             "result": "body",
@@ -22325,7 +22325,7 @@ def _normalize_runtime_output_key(scenario, output_key):
         }
         normalized = aliases.get(key, key)
         if normalized not in ("body", "feature", "sketch", "axis"):
-            raise RuntimeError("Unsupported conical_blank output: %s" % output_key)
+            raise RuntimeError("Unsupported %s output: %s" % (scenario_name, output_key))
         return normalized
     if scenario_name in ("section_profile_sketch", "numeric_profile_sketch"):
         if key not in ("sketch", "result", "profile_sketch"):
@@ -23038,7 +23038,7 @@ def _resolve_runtime_workflow_output(runtime_objects, operation_id, output_key):
                 "origin": [safe_get(lcs, "X", 0.0), safe_get(lcs, "Y", 0.0), safe_get(lcs, "Z", 0.0)],
             }
 
-    if scenario == "conical_blank":
+    if scenario in ("conical_blank", "revolved_profile_blank"):
         output_map = {
             "body": ("body", "body"),
             "feature": ("feature", "feature"),
@@ -23272,19 +23272,14 @@ def _read_sketch_vertex_points(sketch):
     return points
 
 
-def _measure_sketch_frame(model_container, part, base_plane, anchor, name):
-    """Create a probe sketch on a plane parallel to `base_plane` through
-    `anchor` and measure the sketch's affine 2D-to-3D frame.
+def _probe_sketch_frame(model_container, part, plane, name):
+    """Measure a plane's affine 2D-to-3D sketch frame from probe vertices.
 
     The probe draws explicit sketch points at (0,0), (1,0), (2,0), (0,1) and
     (1,1); their world coordinates reveal the actual plane frame, so the host
     can hand over geometry as 3D points without assuming plane orientation
-    (CS-004). Returns origin/u/v vectors in world coordinates.
+    (CS-004 / FRAME-001).
     """
-    anchor_point = _create_point3d(model_container, "%s section anchor" % name, anchor)
-    plane = _create_plane_parallel_by_point(
-        part, "%s section plane" % name, base_plane, anchor_point
-    )
     probe_sketch, _target, _entities, _parameterization = _create_sketch_entities(
         model_container,
         part,
@@ -23349,15 +23344,82 @@ def _measure_sketch_frame(model_container, part, base_plane, anchor, name):
             break
     if frame is None:
         raise RuntimeError("Section frame probe could not identify the sketch frame")
+    frame["probe_sketch"] = probe_sketch
+    return frame
+
+
+def _validate_sketch_frame(frame, anchor, plane_normal, label):
+    """Check that a measured sketch frame lies in the expected plane."""
+    normal = [float(value) for value in plane_normal]
+    normal_length = math.sqrt(sum(value * value for value in normal))
+    if normal_length <= 1e-12:
+        raise RuntimeError("Section plane normal is degenerate")
+    normal = [value / normal_length for value in normal]
+    anchor_offset = [float(anchor[index]) - float(frame["origin"][index]) for index in range(3)]
+    anchor_distance = abs(sum(anchor_offset[index] * normal[index] for index in range(3)))
+    origin_tolerance = 1e-6 + 1e-4 * max(1.0, abs(float(anchor[0])))
+    if anchor_distance > origin_tolerance:
+        raise RuntimeError("%s frame origin does not lie on the section plane" % label)
     for axis in ("u", "v"):
-        if abs(frame[axis][0]) > 1e-4 * frame["%s_length" % axis]:
-            raise RuntimeError("Section frame is not parallel to the requested base plane")
-    if abs(frame["origin"][0] - float(anchor[0])) > 1e-6 + 1e-4 * max(1.0, abs(float(anchor[0]))):
-        raise RuntimeError("Section frame origin does not lie on the section plane")
+        projection = abs(sum(frame[axis][index] * normal[index] for index in range(3)))
+        if projection > 1e-4 * frame["%s_length" % axis]:
+            raise RuntimeError("%s frame axis is not parallel to the section plane" % label)
+
+
+def _default_plane_normal(plane_key):
+    key = str(plane_key or "").strip().lower().replace("-", "_")
+    if key in ("xoy", "xoy_plane"):
+        return [0.0, 0.0, 1.0]
+    if key in ("xoz", "xoz_plane"):
+        return [0.0, 1.0, 0.0]
+    if key in ("yoz", "yoz_plane"):
+        return [1.0, 0.0, 0.0]
+    raise RuntimeError("Unsupported default sketch plane for section frame: %s" % plane_key)
+
+
+def _measure_sketch_frame(model_container, part, base_plane, base_plane_key, anchor, name):
+    """Create a plane parallel to `base_plane` through `anchor` and measure it."""
+    anchor_point = _create_point3d(model_container, "%s section anchor" % name, anchor)
+    plane = _create_plane_parallel_by_point(
+        part, "%s section plane" % name, base_plane, anchor_point
+    )
+    frame = _probe_sketch_frame(model_container, part, plane, name)
+    _validate_sketch_frame(frame, anchor, _default_plane_normal(base_plane_key), "Section")
     return {
         "plane": plane,
         "anchor_point": anchor_point,
-        "probe_sketch": probe_sketch,
+        "probe_sketch": frame["probe_sketch"],
+        "origin": frame["origin"],
+        "u": frame["u"],
+        "v": frame["v"],
+        "u_length": frame["u_length"],
+        "v_length": frame["v_length"],
+    }
+
+
+def _measure_axis_perpendicular_sketch_frame(model_container, part, axis_points, anchor, name):
+    """Create a plane perpendicular to an axis line through `anchor` and measure it."""
+    if not isinstance(axis_points, list) or len(axis_points) != 2:
+        raise RuntimeError("section_profile_sketch axis_line must contain two 3D points")
+    axis_start = _create_point3d(model_container, "%s axis start" % name, axis_points[0])
+    axis_end = _create_point3d(model_container, "%s axis end" % name, axis_points[1])
+    axis_object = _create_axis3d_by_2_points(part, "%s axis" % name, axis_start, axis_end)
+    anchor_point = _create_point3d(model_container, "%s section anchor" % name, anchor)
+    plane = _create_plane_perpendicular_by_edge(
+        part, "%s section plane" % name, anchor_point, axis_object
+    )
+    frame = _probe_sketch_frame(model_container, part, plane, name)
+    axis_direction = [
+        float(axis_points[1][index]) - float(axis_points[0][index]) for index in range(3)
+    ]
+    _validate_sketch_frame(frame, anchor, axis_direction, "Section")
+    return {
+        "plane": plane,
+        "anchor_point": anchor_point,
+        "axis_start": axis_start,
+        "axis_end": axis_end,
+        "axis": axis_object,
+        "probe_sketch": frame["probe_sketch"],
         "origin": frame["origin"],
         "u": frame["u"],
         "v": frame["v"],
@@ -23436,6 +23498,149 @@ def _loft_section_array(sketches):
         )
     except Exception:
         return list(sketches), "python_list"
+
+
+def _build_revolved_profile_blank(part, model_container, params, scenario):
+    """Revolve one closed (x, r) profile around the global X axis.
+
+    `conical_blank` supplies its trapezoid through four explicit values;
+    `revolved_profile_blank` accepts the closed profile point list directly.
+    """
+    profile_points = params.get("profile_points")
+    if profile_points is None:
+        x_back = float(params.get("x_back_mm") or 0.0)
+        x_inner = float(params.get("x_inner_mm") or 0.0)
+        outer_radius = float(params.get("outer_radius_mm") or 0.0)
+        inner_radius = float(params.get("inner_radius_mm") or 0.0)
+        if x_back >= -1e-9 or x_inner <= x_back + 1e-9 or outer_radius <= 0.0 or inner_radius <= 0.0:
+            raise RuntimeError(
+                "conical_blank requires x_inner > x_back and x_back < 0 with positive radii"
+            )
+        profile_points = [
+            [x_back, 0.0],
+            [x_back, outer_radius],
+            [x_inner, inner_radius],
+            [x_inner, 0.0],
+        ]
+    if not isinstance(profile_points, list) or len(profile_points) < 4:
+        raise RuntimeError("revolved_profile_blank requires at least four profile points")
+    points = []
+    for index, point in enumerate(profile_points):
+        if not isinstance(point, list) or len(point) != 2:
+            raise RuntimeError("revolved_profile_blank profile_points[%s] must be [x, r]" % index)
+        x_value = float(point[0])
+        r_value = float(point[1])
+        if r_value < -1e-9:
+            raise RuntimeError("revolved_profile_blank requires non-negative profile radii")
+        r_value = max(0.0, r_value)
+        if not points or abs(points[-1][0] - x_value) > 1e-9 or abs(points[-1][1] - r_value) > 1e-9:
+            points.append([x_value, r_value])
+    if len(points) < 4:
+        raise RuntimeError("revolved_profile_blank profile collapsed to fewer than four points")
+    if abs(points[0][1]) > 1e-9 or abs(points[-1][1]) > 1e-9:
+        raise RuntimeError("revolved_profile_blank profile must start and end on the rotation axis")
+    if abs(points[0][0] - points[-1][0]) > 1e-9 or abs(points[0][1] - points[-1][1]) > 1e-9:
+        points.append(list(points[0]))
+    x_values = [point[0] for point in points]
+    r_values = [point[1] for point in points]
+    x_min, x_max = min(x_values), max(x_values)
+    if x_max <= x_min + 1e-9 or max(r_values) <= 0.0:
+        raise RuntimeError("revolved_profile_blank profile has no positive area")
+    name = str(params.get("name") or "Revolved profile blank")
+    axis = {
+        "id": "revolved_blank_axis",
+        "kind": "segment",
+        "start": [x_min, 0.0],
+        "end": [x_max, 0.0],
+        "line_style": 3,
+    }
+    sketch, target, entities_report, parameterization_report = _create_sketch_entities(
+        model_container,
+        part,
+        {
+            "name": params.get("sketch_name") or ("%s sketch" % name),
+            "plane": "XOY",
+            "create_new_sketch": True,
+            "entities": [
+                {
+                    "id": "revolved_blank_profile",
+                    "kind": "polyline",
+                    "points": points,
+                    "closed": False,
+                    "line_style": 1,
+                },
+                axis,
+            ],
+        },
+    )
+    preflight = _audit_sketch_profile_preflight(
+        model_container,
+        sketch,
+        closure_style=1,
+        expected_component_count=1,
+    )
+    if not bool(preflight.get("ok")):
+        raise RuntimeError("Revolved blank profile preflight failed: %s" % preflight)
+    rotateds = safe_get(model_container, "Rotateds")
+    if rotateds is None:
+        get_rotateds = safe_get(model_container, "GetRotateds")
+        if callable(get_rotateds):
+            rotateds = get_rotateds()
+    if rotateds is None or not callable(safe_get(rotateds, "Add")):
+        raise RuntimeError("Part does not expose Rotateds.Add")
+    rotated = rotateds.Add(28)
+    if rotated is None:
+        raise RuntimeError("Rotateds.Add(o3d_bossRotated) returned None")
+    rotated.Name = name
+    rotated.Profile = sketch
+    set_profile = safe_get(rotated, "SetProfile")
+    if callable(set_profile):
+        set_profile(sketch)
+    rotated.Axis = part.DefaultObject(71)
+    rotated.Direction = 0
+    rotated.ToroidShapeType = False
+    rotated.SetAngle(True, 360.0)
+    rotated.SetRotatedType(True, 0)
+    if not rotated.Update():
+        raise RuntimeError("Revolved blank revolution update failed")
+    update_part = safe_get(part, "Update")
+    part_update_result = bool(update_part()) if callable(update_part) else None
+    feature_valid = bool(safe_get(rotated, "Valid", False))
+    if not feature_valid:
+        raise RuntimeError("Revolved blank revolution is invalid after update")
+    body_metrics = _active_api5_primary_body_metrics()
+    if body_metrics["body_count"] != 1 or body_metrics["volume"] <= 0.0 or not body_metrics["solid"]:
+        raise RuntimeError("Revolved blank body verification failed: %s" % body_metrics)
+    axis_start = _create_point3d(model_container, "%s axis start" % name, [x_min, 0.0, 0.0])
+    axis_end = _create_point3d(model_container, "%s axis end" % name, [x_max, 0.0, 0.0])
+    axis_object = _create_axis3d_by_2_points(part, "%s axis" % name, axis_start, axis_end)
+    runtime_entry = {
+        "scenario": scenario,
+        "body": rotated,
+        "feature": rotated,
+        "sketch": sketch,
+        "axis": axis_object,
+        "axis_start": axis_start,
+        "axis_end": axis_end,
+        "interface": {},
+        "params": params,
+    }
+    step_entry = {
+        "operation": "workflow_feature",
+        "scenario": scenario,
+        "name": safe_get(rotated, "Name"),
+        "valid": feature_valid,
+        "part_update_result": part_update_result,
+        "profile_point_count": len(points),
+        "x_min_mm": x_min,
+        "x_max_mm": x_max,
+        "max_radius_mm": max(r_values),
+        "target": target,
+        "entities": entities_report,
+        "profile_preflight": preflight,
+        "body_after": body_metrics,
+    }
+    return runtime_entry, step_entry
 
 
 def _execute_workflow_operation(part, model_container, operation, runtime_objects, steps_report):
@@ -23588,117 +23793,13 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         )
         return
 
-    if scenario == "conical_blank":
-        x_back = float(params.get("x_back_mm") or 0.0)
-        x_inner = float(params.get("x_inner_mm") or 0.0)
-        outer_radius = float(params.get("outer_radius_mm") or 0.0)
-        inner_radius = float(params.get("inner_radius_mm") or 0.0)
-        if x_back >= -1e-9 or x_inner <= x_back + 1e-9 or outer_radius <= 0.0 or inner_radius <= 0.0:
-            raise RuntimeError("conical_blank requires x_inner > x_back and x_back < 0 with positive radii")
-        name = str(params.get("name") or "Conical blank")
-        profile_points = [
-            [x_back, 0.0],
-            [x_back, outer_radius],
-            [x_inner, inner_radius],
-            [x_inner, 0.0],
-            [x_back, 0.0],
-        ]
-        axis = {
-            "id": "conical_blank_axis",
-            "kind": "segment",
-            "start": [x_inner, 0.0],
-            "end": [x_back, 0.0],
-            "line_style": 3,
-        }
-        sketch, target, entities_report, parameterization_report = _create_sketch_entities(
-            model_container,
-            part,
-            {
-                "name": params.get("sketch_name") or ("%s sketch" % name),
-                "plane": "XOY",
-                "create_new_sketch": True,
-                "entities": [
-                    {
-                        "id": "conical_blank_profile",
-                        "kind": "polyline",
-                        "points": profile_points,
-                        "closed": False,
-                        "line_style": 1,
-                    },
-                    axis,
-                ],
-            },
+    if scenario in ("conical_blank", "revolved_profile_blank"):
+        runtime_entry, step_entry = _build_revolved_profile_blank(
+            part, model_container, params, scenario
         )
-        preflight = _audit_sketch_profile_preflight(
-            model_container,
-            sketch,
-            closure_style=1,
-            expected_component_count=1,
-        )
-        if not bool(preflight.get("ok")):
-            raise RuntimeError("Conical blank profile preflight failed: %s" % preflight)
-        rotateds = safe_get(model_container, "Rotateds")
-        if rotateds is None:
-            get_rotateds = safe_get(model_container, "GetRotateds")
-            if callable(get_rotateds):
-                rotateds = get_rotateds()
-        if rotateds is None or not callable(safe_get(rotateds, "Add")):
-            raise RuntimeError("Part does not expose Rotateds.Add")
-        rotated = rotateds.Add(28)
-        if rotated is None:
-            raise RuntimeError("Rotateds.Add(o3d_bossRotated) returned None")
-        rotated.Name = name
-        rotated.Profile = sketch
-        set_profile = safe_get(rotated, "SetProfile")
-        if callable(set_profile):
-            set_profile(sketch)
-        rotated.Axis = part.DefaultObject(71)
-        rotated.Direction = 0
-        rotated.ToroidShapeType = False
-        rotated.SetAngle(True, 360.0)
-        rotated.SetRotatedType(True, 0)
-        if not rotated.Update():
-            raise RuntimeError("Conical blank revolution update failed")
-        update_part = safe_get(part, "Update")
-        part_update_result = bool(update_part()) if callable(update_part) else None
-        feature_valid = bool(safe_get(rotated, "Valid", False))
-        if not feature_valid:
-            raise RuntimeError("Conical blank revolution is invalid after update")
-        body_metrics = _active_api5_primary_body_metrics()
-        if body_metrics["body_count"] != 1 or body_metrics["volume"] <= 0.0 or not body_metrics["solid"]:
-            raise RuntimeError("conical_blank body verification failed: %s" % body_metrics)
-        axis_start = _create_point3d(model_container, "%s axis start" % name, [x_inner, 0.0, 0.0])
-        axis_end = _create_point3d(model_container, "%s axis end" % name, [x_back, 0.0, 0.0])
-        axis_object = _create_axis3d_by_2_points(part, "%s axis" % name, axis_start, axis_end)
-        runtime_objects[operation_id] = {
-            "scenario": scenario,
-            "body": rotated,
-            "feature": rotated,
-            "sketch": sketch,
-            "axis": axis_object,
-            "axis_start": axis_start,
-            "axis_end": axis_end,
-            "interface": operation.get("interface") or {},
-            "params": params,
-        }
-        steps_report.append(
-            {
-                "operation": "workflow_feature",
-                "id": operation_id,
-                "scenario": scenario,
-                "name": safe_get(rotated, "Name"),
-                "valid": feature_valid,
-                "part_update_result": part_update_result,
-                "x_back_mm": x_back,
-                "x_inner_mm": x_inner,
-                "outer_radius_mm": outer_radius,
-                "inner_radius_mm": inner_radius,
-                "target": target,
-                "entities": entities_report,
-                "profile_preflight": preflight,
-                "body_after": body_metrics,
-            }
-        )
+        step_entry["id"] = operation_id
+        runtime_objects[operation_id] = runtime_entry
+        steps_report.append(step_entry)
         return
 
     if scenario == "numeric_profile_sketch":
@@ -23754,17 +23855,27 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         return
 
     if scenario == "section_profile_sketch":
-        base_plane_value = str(params.get("base_plane") or "YOZ")
-        try:
-            base_plane_key = _normalize_sketch_plane(base_plane_value)
-        except Exception:
-            raise RuntimeError("section_profile_sketch base_plane must be a default plane")
-        base_plane = _resolve_default_part_object(part, base_plane_key)
         anchor = params.get("anchor")
         if not isinstance(anchor, list) or len(anchor) != 3:
             raise RuntimeError("section_profile_sketch requires anchor [x, y, z]")
         name = str(params.get("name") or params.get("sketch_name") or "Section profile")
-        frame = _measure_sketch_frame(model_container, part, base_plane, anchor, name)
+        plane_mode = str(params.get("plane_mode") or "parallel_to_base").strip().lower()
+        if plane_mode in ("parallel", "parallel_to_base", "base_parallel"):
+            base_plane_value = str(params.get("base_plane") or "YOZ")
+            try:
+                base_plane_key = _normalize_sketch_plane(base_plane_value)
+            except Exception:
+                raise RuntimeError("section_profile_sketch base_plane must be a default plane")
+            base_plane = _resolve_default_part_object(part, base_plane_key)
+            frame = _measure_sketch_frame(
+                model_container, part, base_plane, base_plane_key, anchor, name
+            )
+        elif plane_mode in ("perpendicular_to_axis", "axis_perpendicular", "normal_to_axis"):
+            frame = _measure_axis_perpendicular_sketch_frame(
+                model_container, part, params.get("axis_line"), anchor, name
+            )
+        else:
+            raise RuntimeError("Unsupported section_profile_sketch plane_mode: %s" % plane_mode)
         sketch_entities = _section_entities_to_sketch_2d(params.get("entities") or [], frame)
         if not sketch_entities:
             raise RuntimeError("section_profile_sketch requires entities")
@@ -23790,7 +23901,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         )
         if bool(params.get("require_closure", True)) and not bool(profile_preflight.get("ok")):
             raise RuntimeError("Section profile sketch preflight failed: %s" % profile_preflight)
-        runtime_objects[operation_id] = {
+        runtime_entry = {
             "scenario": scenario,
             "sketch": sketch,
             "feature": sketch,
@@ -23807,11 +23918,16 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
             "interface": operation.get("interface") or {},
             "params": params,
         }
+        for role in ("axis_start", "axis_end", "axis"):
+            if frame.get(role) is not None:
+                runtime_entry[role] = frame[role]
+        runtime_objects[operation_id] = runtime_entry
         steps_report.append(
             {
                 "operation": "workflow_feature",
                 "id": operation_id,
                 "scenario": scenario,
+                "plane_mode": plane_mode,
                 "sketch": _describe_sketch_entity_for_report(sketch),
                 "target": target,
                 "entities": entities_report,
@@ -23825,6 +23941,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                     "v_length": frame["v_length"],
                 },
                 "probe_sketch_reference": safe_get(frame["probe_sketch"], "Reference"),
+                "axis_reference": safe_get(frame.get("axis"), "Reference"),
             }
         )
         return
@@ -29688,12 +29805,12 @@ def handle_create_gear_bevel(payload):
     operations = list(workflow_params.get("operations") or [])
     scenario_list = [str(item.get("scenario") or "") for item in operations]
     if scenario_list != [
-        "conical_blank", "section_profile_sketch", "section_profile_sketch",
+        "revolved_profile_blank", "section_profile_sketch", "section_profile_sketch",
         "loft_cut", "circular_pattern",
     ]:
         raise ValueError(
-            "Managed bevel gear requires conical blank, two projected sections, "
-            "a loft cut, and a circular pattern"
+            "Managed bevel gear requires a revolved dish blank, two cone-normal "
+            "projected sections, a loft cut, and a circular pattern"
         )
     name = str(plan.get("name") or "").strip()
     if not name:
@@ -29775,7 +29892,10 @@ def handle_create_gear_bevel(payload):
                 auxiliary_objects.append((role, blank_runtime[role]))
         for operation_id in ("tooth_space_outer", "tooth_space_inner"):
             section_runtime = runtime_objects.get(operation_id) or {}
-            for role in ("anchor_point", "probe_sketch", "sketch", "plane"):
+            for role in (
+                "anchor_point", "probe_sketch", "sketch", "plane",
+                "axis", "axis_start", "axis_end",
+            ):
                 if section_runtime.get(role) is not None:
                     auxiliary_objects.append((operation_id + "_" + role, section_runtime[role]))
         auxiliary_objects.extend(
@@ -29860,8 +29980,14 @@ def handle_create_gear_bevel(payload):
             "accuracy": plan.get("accuracy"),
         }
     except Exception as exc:
-        raise RuntimeError("create_gear_bevel failed at %s: %s | partial_document=%s" %
-                           (stage, exc, json.dumps(describe_runtime_document(doc3, app) if doc3 else None)))
+        try:
+            partial_document = describe_runtime_document(doc3, app) if doc3 else None
+        except Exception as describe_exc:
+            partial_document = {"unresolved": True, "describe_error": str(describe_exc)}
+        raise RuntimeError(
+            "create_gear_bevel failed at %s: %s | partial_document=%s"
+            % (stage, exc, json.dumps(partial_document))
+        )
 
 
 def handle_create_cam(payload):

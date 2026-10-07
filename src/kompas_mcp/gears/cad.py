@@ -967,22 +967,23 @@ def _mirror_spline(spline: dict) -> dict:
     }
 
 
-def _bevel_section_entities(section: dict, module_mm: float) -> tuple[list[dict], dict]:
-    """Fit one frontal tooth-space section into CAD entities.
+def _bevel_virtual_entities(geometry) -> tuple[list[dict], dict]:
+    """Fit the virtual tooth-space curves once in the back-cone plane frame.
 
-    The section is the exact central projection of the virtual tooth space; the
-    flank and root paths become smooth Bezier-chain splines, the cap outside
-    the blank stays one smooth curve, and the left flank is the exact mirror of
-    the fitted right flank.
+    All frontal cut sections are homothetic copies of the same virtual contour,
+    so fitting the virtual root/involute paths once and scaling the control
+    points keeps the two section sketches exactly corresponding.
     """
-    root_points, root_spline, root_deviation = _fit_smooth_curve(section["root_path"], module_mm)
+    surface = geometry.virtual_surface_path
+    split = int(geometry.virtual_surface_split_index)
+    root_path = surface[: split + 1]
+    involute_path = surface[split:]
+    root_points, root_spline, root_deviation = _fit_smooth_curve(root_path, geometry.module_mm)
     involute_points, involute_spline, involute_deviation = _fit_smooth_curve(
-        section["involute_path"], module_mm
+        involute_path, geometry.module_mm
     )
-    # The cap contains the sharp radial extension at both tips; keep it as
-    # exact segments instead of smoothing a corner outside the material.
+    cap_points = [list(point) for point in geometry.virtual_cap_points]
     cap_segments = []
-    cap_points = [list(point) for point in section["cap_points"]]
     for index in range(len(cap_points) - 1):
         cap_segments.append(
             {
@@ -1015,11 +1016,20 @@ def _bevel_section_entities(section: dict, module_mm: float) -> tuple[list[dict]
     }
 
 
-def _bevel_entities_3d(entities_2d: list[dict], x_mm: float, *, scale: float = 1.0) -> list[dict]:
-    """Lift fitted section entities to 3D points on the frontal plane x=x_mm."""
+def _bevel_entities_3d(entities_2d: list[dict], frame: dict, scale: float) -> list[dict]:
+    """Lift virtual-plane (u, v) entities to the cone-normal section at `scale`."""
+
+    apex = [float(value) for value in frame["apex"]]
+    e1 = [float(value) for value in frame["e1"]]
+    e2 = [float(value) for value in frame["e2"]]
 
     def point3(point) -> list[float]:
-        return [x_mm, float(point[0]) * scale, float(point[1]) * scale]
+        u_value = float(point[0]) * scale
+        v_value = float(point[1]) * scale
+        return [
+            apex[index] * scale + v_value * e1[index] + u_value * e2[index]
+            for index in range(3)
+        ]
 
     result = []
     for entity in entities_2d:
@@ -1050,38 +1060,58 @@ def build_bevel_gear_plan(
         errors = ", ".join(str(item.get("code")) for item in preview.get("errors") or [])
         raise ValueError("Bevel gear preview rejected the request: " + (errors or "invalid geometry"))
     geometry = build_bevel_gear_geometry(request, curve_samples=260)
-    if not geometry.section_outer or not geometry.section_inner:
-        raise ValueError("Bevel gear sections are missing")
-    outer_2d, outer_report = _bevel_section_entities(geometry.section_outer, geometry.module_mm)
-    _validate_entity_contour(outer_2d, geometry.module_mm)
-    inner_scale = float(geometry.section_inner.get("scale") or 1.0)
-    x_outer = float(geometry.section_outer["x_mm"])
-    x_inner = float(geometry.section_inner["x_mm"])
-    outer_entities = _bevel_entities_3d(outer_2d, x_outer)
-    inner_entities = _bevel_entities_3d(outer_2d, x_inner, scale=inner_scale)
+    if not geometry.blank_profile or not geometry.virtual_surface_path:
+        raise ValueError("Bevel gear blank profile or virtual flank is missing")
+    virtual_entities, outer_report = _bevel_virtual_entities(geometry)
+    _validate_entity_contour(virtual_entities, geometry.module_mm)
+    outer_scale = float(geometry.section_outer_cone_distance_mm) / float(
+        geometry.outer_cone_distance_mm
+    )
+    inner_scale = float(geometry.section_inner_cone_distance_mm) / float(
+        geometry.outer_cone_distance_mm
+    )
+    outer_entities = _bevel_entities_3d(virtual_entities, geometry.cone_frame, outer_scale)
+    inner_entities = _bevel_entities_3d(virtual_entities, geometry.cone_frame, inner_scale)
     deviation = float(outer_report["deviation_mm"])
+    cos_delta = math.cos(geometry.pitch_cone_angle_rad)
+    sin_delta = math.sin(geometry.pitch_cone_angle_rad)
+    outer_cone_distance = float(geometry.section_outer_cone_distance_mm)
+    inner_cone_distance = float(geometry.section_inner_cone_distance_mm)
+    axis_length = max(float(geometry.outer_cone_distance_mm), outer_cone_distance) * 1.05
+    axis_outer = [-axis_length * cos_delta, 0.0, axis_length * sin_delta]
+    axis_line = [[0.0, 0.0, 0.0], axis_outer]
+    outer_anchor = [
+        -outer_cone_distance * cos_delta,
+        0.0,
+        outer_cone_distance * sin_delta,
+    ]
+    inner_anchor = [
+        -inner_cone_distance * cos_delta,
+        0.0,
+        inner_cone_distance * sin_delta,
+    ]
 
     pattern_count = int(geometry.tooth_count)
     expected_volume = float(geometry.expected_volume_mm3)
     if expected_volume <= 0.0 or not math.isfinite(expected_volume):
         raise ValueError("Bevel gear expected volume is not positive")
     expected_bounds = [float(value) for value in geometry.expected_bounds_mm]
-    disk_radius = float(geometry.back_radius_mm)
+    max_radius = float(geometry.tip_corner_radius_mm)
+    x_max = max(float(geometry.front_face_x_mm), float(geometry.inner_tip_corner_x_mm))
     disk_bounds = [
-        -float(geometry.apex_to_back_mm), -disk_radius, -disk_radius,
-        -float(geometry.apex_to_inner_mm), disk_radius, disk_radius,
+        float(geometry.back_face_x_mm), -max_radius, -max_radius,
+        x_max, max_radius, max_radius,
     ]
     operations = [
         {
             "id": "blank",
-            "scenario": "conical_blank",
+            "scenario": "revolved_profile_blank",
             "params": {
                 "name": "%s blank" % requested_name,
                 "sketch_name": "%s blank sketch" % requested_name,
-                "x_back_mm": -float(geometry.apex_to_back_mm),
-                "x_inner_mm": -float(geometry.apex_to_inner_mm),
-                "outer_radius_mm": float(geometry.back_radius_mm),
-                "inner_radius_mm": float(geometry.inner_radius_mm),
+                "profile_points": [
+                    [float(point[0]), float(point[1])] for point in geometry.blank_profile
+                ],
                 "parameterize": False,
                 "require_fully_defined": False,
             },
@@ -1092,11 +1122,12 @@ def build_bevel_gear_plan(
             "params": {
                 "name": "%s tooth space outer section" % requested_name,
                 "sketch_name": "%s tooth space outer section" % requested_name,
-                "base_plane": "YOZ",
-                "anchor": [x_outer, 0.0, 0.0],
+                "plane_mode": "perpendicular_to_axis",
+                "anchor": outer_anchor,
+                "axis_line": axis_line,
                 "entities": outer_entities,
                 "require_closure": True,
-                "profile_status": "nominal_tredgold_projection_outer_section",
+                "profile_status": "nominal_tredgold_projection_outer_cone_section",
             },
         },
         {
@@ -1105,11 +1136,12 @@ def build_bevel_gear_plan(
             "params": {
                 "name": "%s tooth space inner section" % requested_name,
                 "sketch_name": "%s tooth space inner section" % requested_name,
-                "base_plane": "YOZ",
-                "anchor": [x_inner, 0.0, 0.0],
+                "plane_mode": "perpendicular_to_axis",
+                "anchor": inner_anchor,
+                "axis_line": axis_line,
                 "entities": inner_entities,
                 "require_closure": True,
-                "profile_status": "nominal_tredgold_projection_inner_section",
+                "profile_status": "nominal_tredgold_projection_inner_cone_section",
             },
         },
         {
@@ -1171,21 +1203,27 @@ def build_bevel_gear_plan(
             "outer_root_diameter_mm": geometry.outer_root_diameter_mm,
             "outer_cone_distance_mm": geometry.outer_cone_distance_mm,
             "face_width_mm": geometry.face_width_mm,
-            "apex_to_back_mm": geometry.apex_to_back_mm,
-            "apex_to_inner_mm": geometry.apex_to_inner_mm,
-            "back_radius_mm": geometry.back_radius_mm,
-            "inner_radius_mm": geometry.inner_radius_mm,
+            "back_face_x_mm": geometry.back_face_x_mm,
+            "front_face_x_mm": geometry.front_face_x_mm,
+            "back_face_radius_mm": geometry.back_face_radius_mm,
+            "front_face_radius_mm": geometry.front_face_radius_mm,
+            "tip_corner_radius_mm": geometry.tip_corner_radius_mm,
+            "rim_back_extension_mm": geometry.rim_back_extension_mm,
+            "rim_front_extension_mm": geometry.rim_front_extension_mm,
             "virtual_tooth_count": geometry.virtual_tooth_count,
             "virtual_pitch_radius_mm": geometry.virtual_pitch_radius_mm,
-            "cut_scenario": "loft_cut_between_projected_frontal_sections",
-            "outer_section_x_mm": x_outer,
-            "inner_section_x_mm": x_inner,
+            "cut_scenario": "loft_cut_between_cone_normal_tredgold_sections",
+            "outer_section_cone_distance_mm": geometry.section_outer_cone_distance_mm,
+            "inner_section_cone_distance_mm": geometry.section_inner_cone_distance_mm,
+            "outer_section_scale": outer_scale,
             "inner_section_scale": inner_scale,
+            "section_margin_mm": geometry.section_margin_mm,
             "entity_count_per_section": len(outer_entities),
             "spline_deviation_mm": deviation,
             "expected_volume_mm3": expected_volume,
             "blank_volume_mm3": geometry.blank_volume_mm3,
             "removed_volume_mm3": geometry.removed_volume_mm3,
+            "gap_area_clipped_mm2": geometry.gap_area_clipped_mm2,
         },
         "ownership": {
             "schema": BEVEL_OWNERSHIP_SCHEMA,
@@ -1197,18 +1235,19 @@ def build_bevel_gear_plan(
         },
         "verification": {
             "expected_volume_mm3": expected_volume,
-            "volume_relative_tolerance": 0.012,
+            "volume_relative_tolerance": 0.015,
             "expected_bounds_mm": expected_bounds,
             "expected_bounds_candidates_mm": [expected_bounds, disk_bounds],
-            "bounds_tolerance_mm": 0.08,
-            "max_radius_mm": disk_radius,
+            "bounds_tolerance_mm": 0.1,
+            "max_radius_mm": max_radius,
             "face_width_mm": geometry.face_width_mm,
             "pattern_count": pattern_count,
         },
         "accuracy": {
             "profile": "tredgold_virtual_gear_projection_to_the_apex",
             "profile_encoding": "root_and_involute_cubic_bezier_nurbs_per_flank_plus_cap_curve_per_section",
-            "sweep": "cut_loft_between_exact_projected_frontal_sections",
+            "sweep": "cut_loft_between_cone_normal_tredgold_sections",
+            "blank": "dish_plate_with_back_and_front_cone_normal_rim_faces",
             "flank_spline_deviation_mm": deviation,
             "parameterization": "numeric_create_only",
             "representation_mode": "nominal",

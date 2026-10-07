@@ -2617,11 +2617,18 @@ Verified on KOMPAS v23 through API7:
 - `ILoft.Update()` then `part.Update()` and the same body-count / material-
   removal checks used by `cut_extrusion` keep the operation verifiable.
 
-For a bevel tooth space, two frontal sections are enough when both are exact
-central projections of the same contour from the wheel apex: the inner section
-is a uniform 3D scaling of the outer one, so a ruled loft between corresponding
-points reproduces the projected cone surface exactly. Do not fit the two
-sections independently; scale the fitted control points of the outer section.
+For a bevel tooth space, two sections are enough when both are exact central
+projections of the same contour from the wheel apex: the inner section is a
+uniform 3D scaling of the outer one, so a ruled loft between corresponding
+points reproduces the projected cone surface exactly. Prefer the two
+**cone-normal** Tredgold planes (perpendicular to the pitch cone) over axial
+planes: the cut then forms the tooth ends on the same back/front cone surfaces
+as the blank rim, so the teeth stay square instead of being pointed by an
+oblique axial cut. Do not fit the two sections independently; scale the fitted
+control points of the outer section. When the blank is a dish, the expected
+volume must clip each cone-normal station by the face cone and by the blank's
+flat back face as well; the back face cuts the root side of the tooth space and
+accounts for several percent of the removed volume.
 
 ### LOFT-002: A Cut Loft Sees Pattern Copies In Its Own Collection
 
@@ -2650,7 +2657,14 @@ that plane.
 
 Verified live: on a `YOZ`-parallel offset plane KOMPAS mapped sketch U to
 global -Z and sketch V to global -Y; writing untransformed host coordinates
-would have produced a mirrored, axis-swapped section.
+would have produced a mirrored, axis-swapped section. The same probe works on
+a plane created perpendicular to an explicit axis line
+(`IPlane3DPerpendicularByEdge`): create the axis from two 3D points, pass the
+anchor point and the axis, then measure the frame. Keep the anchor on the axis
+segment (extend the segment beyond the outer section); an anchor off the axis
+edge made KOMPAS fail the call and corrupt the session, which then surfaced as
+`RPC_S_CALL_FAILED` and a document that no longer matched the strict runtime
+identifier.
 
 ## Case Studies
 

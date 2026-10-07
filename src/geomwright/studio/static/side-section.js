@@ -362,41 +362,49 @@ function drawGearSideView(rect) {
 }
 
 function drawBevelSideView(rect) {
-  const outline = Array.isArray(data.outline) ? data.outline : [];
+  const outline = (Array.isArray(data.outline) ? data.outline : [])
+    .map(([x, r]) => [Number(x) || 0, Math.max(0, Number(r) || 0)]);
+  if (outline.length < 3) return;
   const pitchLine = Array.isArray(data.pitch_line) ? data.pitch_line : [];
   const rootLine = Array.isArray(data.root_line) ? data.root_line : [];
-  const length = Math.max(1e-6, Math.abs(Number(data.axial_length_mm) || 0));
-  const backRadius = Math.max(1e-6, Number(data.back_radius_mm) || 0);
+  const xValues = outline.map((point) => point[0]);
+  const rValues = outline.map((point) => point[1]);
+  const xMin = Math.min(...xValues);
+  const xMax = Math.max(...xValues);
+  const rMax = Math.max(...rValues);
+  const widthMm = Math.max(1e-6, xMax - xMin);
+  const heightMm = Math.max(1e-6, 2 * rMax);
   const leftMargin = 92;
-  const rightMargin = 56;
-  const topMargin = 70;
-  const bottomMargin = 118;
+  const rightMargin = 66;
+  const topMargin = 66;
+  const bottomMargin = 120;
   const scale = Math.max(0.01, Math.min(
-    (rect.width - leftMargin - rightMargin) / length,
-    (rect.height - topMargin - bottomMargin) / (2 * backRadius),
+    (rect.width - leftMargin - rightMargin) / widthMm,
+    (rect.height - topMargin - bottomMargin) / heightMm,
   ));
-  const width = length * scale;
-  const height = 2 * backRadius * scale;
+  const width = widthMm * scale;
+  const height = heightMm * scale;
   const left = leftMargin + Math.max(0, (rect.width - leftMargin - rightMargin - width) / 2);
   const top = topMargin + Math.max(0, (rect.height - topMargin - bottomMargin - height) / 2);
   const right = left + width;
   const centerY = top + height / 2;
-  const project = ([x, r]) => [right - (Math.abs(x) / length) * width, centerY - r * scale];
+  const projectX = (x) => left + ((x - xMin) / widthMm) * width;
+  const projectY = (r) => centerY - r * scale;
+  const project = ([x, r]) => [projectX(x), projectY(r)];
 
   const topPoints = outline.map(project);
-  const bottomPoints = outline.map(([x, r]) => [right - (Math.abs(x) / length) * width, centerY + r * scale]);
+  const bottomPoints = outline.map(([x, r]) => [projectX(x), projectY(-r)]);
   const silhouette = new Path2D();
-  if (topPoints.length) {
-    silhouette.moveTo(...topPoints[0]);
-    for (const point of topPoints.slice(1)) silhouette.lineTo(...point);
-    for (const point of [...bottomPoints].reverse()) silhouette.lineTo(...point);
-    silhouette.closePath();
-    ctx.fillStyle = "rgba(227,170,79,.05)";
-    ctx.fill(silhouette);
-    ctx.strokeStyle = "#e3aa4f";
-    ctx.lineWidth = 2;
-    ctx.stroke(silhouette);
-  }
+  silhouette.moveTo(...topPoints[0]);
+  for (const point of topPoints.slice(1)) silhouette.lineTo(...point);
+  for (const point of [...bottomPoints].reverse()) silhouette.lineTo(...point);
+  silhouette.closePath();
+  ctx.fillStyle = "rgba(227,170,79,.05)";
+  ctx.fill(silhouette);
+  ctx.strokeStyle = "#e3aa4f";
+  ctx.lineWidth = 2;
+  ctx.stroke(silhouette);
+
   ctx.setLineDash([6, 4]);
   ctx.strokeStyle = "rgba(227,170,79,.72)";
   ctx.lineWidth = 1.2;
@@ -409,27 +417,42 @@ function drawBevelSideView(rect) {
     ctx.moveTo(a[0], centerY + (centerY - a[1])); ctx.lineTo(b[0], centerY + (centerY - b[1]));
     ctx.stroke();
   }
+  ctx.setLineDash([2, 3]);
+  ctx.strokeStyle = "rgba(142,174,196,.75)";
+  for (const key of ["back_cone", "front_cone", "tip_cone"]) {
+    const line = ((data.tooth_lines || {})[key]) || [];
+    if (line.length < 2) continue;
+    const a = project(line[0]);
+    const b = project(line[1]);
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+    ctx.moveTo(a[0], centerY + (centerY - a[1])); ctx.lineTo(b[0], centerY + (centerY - b[1]));
+    ctx.stroke();
+  }
   ctx.setLineDash([]);
   dimension(left, right, top, top - 30,
-    t("gear.bevel_axial_width", "b = {value}", { value: formatNumber(Number(data.face_width_mm) || 0, 2) }));
-  const dimensionX = right + 34;
+    t("gear.bevel_blank_width", "B = {value}", {
+      value: formatNumber(Number(data.blank_width_mm) || 0, 2),
+    }));
+  const tipX = projectX(Number(data.tip_corner_x_mm) || xMin);
+  const tipRadius = Math.max(1e-6, Number(data.tip_corner_radius_mm) || rMax);
+  const dimensionX = tipX + 40;
+  const tipTop = projectY(tipRadius);
+  const tipBottom = projectY(-tipRadius);
   ctx.strokeStyle = "#8eacc0";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(right, top);
-  ctx.lineTo(dimensionX + 5, top);
-  ctx.moveTo(right, top + height);
-  ctx.lineTo(dimensionX + 5, top + height);
-  ctx.moveTo(dimensionX, top);
-  ctx.lineTo(dimensionX, top + height);
-  for (const [y, direction] of [[top, 1], [top + height, -1]]) {
+  ctx.moveTo(tipX, tipTop); ctx.lineTo(dimensionX + 5, tipTop);
+  ctx.moveTo(tipX, tipBottom); ctx.lineTo(dimensionX + 5, tipBottom);
+  ctx.moveTo(dimensionX, tipTop); ctx.lineTo(dimensionX, tipBottom);
+  for (const [y, direction] of [[tipTop, 1], [tipBottom, -1]]) {
     ctx.moveTo(dimensionX - 3, y + direction * 5);
     ctx.lineTo(dimensionX, y);
     ctx.lineTo(dimensionX + 3, y + direction * 5);
   }
   ctx.stroke();
   ctx.save();
-  ctx.translate(dimensionX + 14, centerY);
+  ctx.translate(dimensionX + 14, (tipTop + tipBottom) / 2);
   ctx.rotate(-Math.PI / 2);
   label(t("gear.bevel_axial_tip", "dₐₑ = {value}", {
     value: formatNumber(Number(data.outer_tip_diameter_mm) || 0, 2),
@@ -445,7 +468,7 @@ function drawBevelSideView(rect) {
     "gear.axial_teeth", "z = {count}", { count: data.tooth_count });
   document.querySelector("#axial-preview-note").textContent = t(
     "gear.bevel_axial_note",
-    "Осевое сечение: конусы вершин и впадин, делительная линия и виртуальное колесо Тредголда.",
+    "Осевое сечение: тарелка с задним и передним конусами, перпендикулярными зубу.",
   );
 }
 

@@ -1728,7 +1728,7 @@ def _adapt_gear_internal(preview: dict[str, Any], request: dict[str, Any]) -> di
         [outline] if outline else [],
         [item["points"] for item in reference_paths],
     )
-    dimension_start = max(1.0, 0.72 * tip_radius)
+    dimension_start = max(1.0, 0.88 * tip_radius)
     sector_span = right_angle - left_angle
     dimension_angles = [
         left_angle + 0.18 * sector_span,
@@ -1883,7 +1883,10 @@ def _adapt_gear_bevel(preview: dict[str, Any], request: dict[str, Any]) -> dict[
     tip_radius = float(geometry.get("tip_radius_mm") or 0.0)
     pitch_radius = float(geometry.get("pitch_radius_mm") or 0.0)
     root_radius = float(geometry.get("root_radius_mm") or 0.0)
-    gap_root_radius = float(geometry.get("back_face_root_radius_mm") or root_radius)
+    gap_root_radius = root_radius
+    root_line = (geometry.get("tooth_lines") or {}).get("root_line") or []
+    if len(root_line) >= 1:
+        gap_root_radius = max(1e-6, float(root_line[0][1]))
     step = 2.0 * math.pi / max(1, tooth_count)
     if sector:
         left_angle = math.atan2(sector[0][0], sector[0][1])
@@ -1951,36 +1954,36 @@ def _adapt_gear_bevel(preview: dict[str, Any], request: dict[str, Any]) -> dict[
         },
     ]
     axial = dict((geometry.get("axial_section") or {}))
-    axial_length = float(geometry.get("axial_length_mm") or 0.0)
-    back_x = 0.0
-    inner_x = -axial_length
-    outline_half = [
-        [back_x, 0.0],
-        [back_x, tip_radius],
-        [inner_x, float(geometry.get("inner_tip_radius_mm") or 0.0)],
-        [inner_x, 0.0],
-        [back_x, 0.0],
-    ]
+    outline = [[float(point[0]), float(point[1])] for point in (geometry.get("blank_profile") or [])]
+    tooth_lines = {
+        key: [[float(point[0]), float(point[1])] for point in (value or [])]
+        for key, value in (geometry.get("tooth_lines") or {}).items()
+    }
     secondary_view = {
         "family": "gear_bevel",
         "tooth_type": "straight",
-        "outline": outline_half,
-        "pitch_line": [
-            [back_x, float(axial.get("pitch_radius_back_mm") or 0.0)],
-            [inner_x, float(axial.get("pitch_radius_inner_mm") or 0.0)],
-        ],
-        "root_line": [
-            [back_x, float(axial.get("root_radius_back_mm") or 0.0)],
-            [inner_x, float(axial.get("root_radius_inner_mm") or 0.0)],
-        ],
-        "back_radius_mm": tip_radius,
-        "inner_radius_mm": float(geometry.get("inner_tip_radius_mm") or 0.0),
-        "axial_length_mm": axial_length,
+        "outline": outline,
+        "pitch_line": tooth_lines.get("pitch_line") or [],
+        "root_line": tooth_lines.get("root_line") or [],
+        "tooth_lines": tooth_lines,
+        "back_face_x_mm": float(geometry.get("back_face_x_mm") or 0.0),
+        "front_face_x_mm": float(geometry.get("front_face_x_mm") or 0.0),
+        "back_face_radius_mm": float(geometry.get("back_face_radius_mm") or 0.0),
+        "front_face_radius_mm": float(geometry.get("front_face_radius_mm") or 0.0),
+        "tip_corner_x_mm": float(geometry.get("tip_corner_x_mm") or 0.0),
+        "tip_corner_radius_mm": float(geometry.get("tip_corner_radius_mm") or 0.0),
+        "inner_tip_corner_x_mm": float(geometry.get("inner_tip_corner_x_mm") or 0.0),
+        "inner_tip_corner_radius_mm": float(geometry.get("inner_tip_corner_radius_mm") or 0.0),
+        "blank_width_mm": summary.get("blank_width_mm"),
+        "back_face_diameter_mm": summary.get("back_face_diameter_mm"),
+        "front_face_diameter_mm": summary.get("front_face_diameter_mm"),
         "face_width_mm": summary.get("face_width_mm"),
         "outer_tip_diameter_mm": summary.get("outer_tip_diameter_mm"),
         "outer_pitch_diameter_mm": summary.get("outer_pitch_diameter_mm"),
         "outer_root_diameter_mm": summary.get("outer_root_diameter_mm"),
         "outer_cone_distance_mm": summary.get("outer_cone_distance_mm"),
+        "rim_back_extension_mm": summary.get("rim_back_extension_mm"),
+        "rim_front_extension_mm": summary.get("rim_front_extension_mm"),
         "pitch_cone_angle_deg": summary.get("pitch_cone_angle_deg"),
         "face_cone_angle_deg": summary.get("face_cone_angle_deg"),
         "root_cone_angle_deg": summary.get("root_cone_angle_deg"),

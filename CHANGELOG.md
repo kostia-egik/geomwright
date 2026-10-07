@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Rebuilt the straight bevel gear blank as a dish: a flat base plate with back
+  and front conical rim faces normal to the tooth, with new
+  `rim_back_extension_mm` / `rim_front_extension_mm` inputs. The tooth-space
+  cut now runs between the two cone-normal Tredgold sections, so the tooth ends
+  are square and flush with the rim instead of being pointed by an axial cut.
+  `conical_blank` gained the generic `revolved_profile_blank` scenario and
+  `section_profile_sketch` supports planes perpendicular to an explicit 3D axis
+  line.
 - Added the `gear_bevel` Studio module: a straight bevel gear with ГОСТ
   19624-74 macro geometry and the Tredgold virtual-gear projection, a cropped
   back-face end view with `d_e`/`d_fₑ`/`d_ae` dimensions, and an axial section
