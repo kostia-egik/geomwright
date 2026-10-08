@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Added the straight-sided spline family (ГОСТ 1139-80) for shafts and hubs:
+  Layer 2 `kompas_mcp/connections/` owns the light/medium/heavy catalog,
+  exact straight-sided end profiles with root fillets and executions 2/3,
+  preflight checks, and the ГОСТ 1139-80 fit registry with numeric
+  ГОСТ 25346/ISO 286 limits for its zones; Layer 3 builds create-only shaft
+  and hub plans (blank, optional tip chamfers, one tooth-space cut, circular
+  pattern) with `GW_SPLINE_VERSION=1`, `GW_FAMILY_CODE=11`, `SPL_*` variables
+  and a checksummed recipe. Public MCP tools are `list_spline_sizes`,
+  `preview_spline`, `create_spline`, and `inspect_spline`; Studio gains the
+  `shaft_spline` and `hub_spline` modules with a cropped-sector preview.
+  Live cases: light `8x36x40` shaft section (volume error 8.6e-08, 8 pattern
+  instances, save/reopen recognition) and a Ø55 hub ring (error 1.2e-14,
+  save/reopen). Contract: `docs/spline-straight.md`.
 - Rebuilt the straight bevel gear blank as a dish: a flat base plate with back
   and front conical rim faces normal to the tooth, with new
   `rim_back_extension_mm` / `rim_front_extension_mm` inputs. The tooth-space

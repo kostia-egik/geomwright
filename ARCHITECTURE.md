@@ -509,6 +509,28 @@ axial span, 20/16 pattern instances and save/reopen. Circular (spiral) teeth,
 gear pairs, cutters, chamfers, contact patterns, and strength remain outside
 this slice. The contract is in [docs/gear-bevel.md](docs/gear-bevel.md).
 
+The `shaft_spline` and `hub_spline` Studio modules are the first shaft-connection
+slice. Layer 2 `connections/splines/` owns the ГОСТ 1139-80 catalog (light,
+medium, and heavy series with the table `b`, `d1`, `a`, `c`, `r` values), the
+exact straight-sided end profile for shafts and hubs, preflight checks, and the
+ГОСТ 1139-80 fit registry with numeric ГОСТ 25346/ISO 286 limits for the zones
+that standard lists. `build_spline_geometry` returns exact segments and arcs
+(parallel flanks, root fillets, root/bore arcs) plus a Green's-theorem section
+area; the preview adds a cropped sector for Studio and the fit report. Layer 3
+`connections/cad.py` builds create-only numeric plans: a shaft section with the
+cylinder blank, two optional `c x 45` tip chamfers, one through tooth-space cut
+and a circular pattern, or a hub ring with a rotational bore at `d`, the
+internal space cut and the pattern. The bridge persists `GW_SPLINE_VERSION=1`,
+`GW_FAMILY_CODE=11`, an `SPL_*` fingerprint and a checksummed recipe; reopened
+blocks are read-only and recreatable. `spline_tools.py` exposes
+`list_spline_sizes`, `preview_spline`, `create_spline`, and `inspect_spline`.
+Live acceptance covers a light-series `8x36x40` shaft section (volume error
+8.6e-08, 8 pattern instances, save/reopen) and a Ø55 hub ring (volume error
+1.2e-14, save/reopen). The radius cutter runout, the rolled execution-1 groove,
+the internal runout contract, involute and triangular splines, keyways, and
+face joints remain in the connection plan
+([docs/spline-straight.md](docs/spline-straight.md)).
+
 `silent_chain_sprocket` Studio preview adapts separate host-side GOST, DIN and
 ASME-compatible profile mechanics plus their axial layout metadata into two
 canvas views. Its catalogs cover GOST 13552-81/13576-81, secondary DIN 8190 A/B
@@ -657,6 +679,7 @@ tracking и spring-readback prototypes помещаются в ignored-зону
 | cam profiles | L2–L4 | create-only single cam, shared Studio/MCP plan, actual curve/contact/body verification |
 | diaphragm module | L2–L4 | complete and live-verified |
 | mechanical-transmission platform | L2–L4 | managed V-belt, Poly-V, timing and flat-belt pulley workflows plus live-verified create-only single-row ISO/GOST chain sprockets and external/internal cylindrical gears, and straight bevel gears |
+| shaft connections | L2–L4 | live-verified create-only straight-sided splines (ГОСТ 1139-80) for shafts and hubs with fits; runout and further connection families planned |
 | Geomwright Studio | presentation over L2–L4 | experimental; create-only completed silent-chain rims and gear blocks, managed pulley previews/build, and no arbitrary-body write path |
 | native module inspection/launch | L1–L3 | research, explicit opt-in for registration and launch |
 | universal OperationGraph/Rule Engine/templates | — | not production; quarantined prototype |

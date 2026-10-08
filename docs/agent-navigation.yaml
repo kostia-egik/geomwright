@@ -68,6 +68,17 @@ transmissions:
     focused_test: tests/test_tool_catalog.py -k gear
     docs: docs/gear-bevel.md
 
+connections:
+  straight_spline:
+    owner: src/kompas_mcp/connections/
+    symbols: [build_straight_spline_preview, build_straight_spline_plan, StraightSplineRequest]
+    bridge_symbols: [handle_create_spline, handle_inspect_spline, _inspect_spline_block]
+    studio_symbol: adapt_spline_preview
+    mcp_symbols: [register_spline_tools]
+    focused_test: tests/test_geomwright_studio.py -k spline
+    mcp_test: tests/test_tool_catalog.py
+    docs: docs/spline-straight.md
+
 studio:
   module_registry:
     owner: src/geomwright/studio/registry.py

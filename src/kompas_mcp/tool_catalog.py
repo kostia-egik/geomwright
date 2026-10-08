@@ -85,6 +85,17 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
         ],
     },
     {
+        "name": "spline_design",
+        "stability": "experimental",
+        "purpose": "Select, preview and create straight-sided spline joints per ГОСТ 1139-80.",
+        "tools": [
+            "list_spline_sizes",
+            "preview_spline",
+            "create_spline",
+            "inspect_spline",
+        ],
+    },
+    {
         "name": "session_lifecycle",
         "stability": "stable",
         "purpose": "Check, open, close, save, and smoke-test KOMPAS documents.",

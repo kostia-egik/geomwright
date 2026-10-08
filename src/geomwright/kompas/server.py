@@ -10,6 +10,7 @@ from kompas_mcp.batch_tools import register_batch_tools
 from kompas_mcp.cam_tools import register_cam_tools
 from kompas_mcp.gear_tools import register_gear_tools
 from kompas_mcp.silent_chain_tools import register_silent_chain_tools
+from kompas_mcp.spline_tools import register_spline_tools
 from kompas_mcp.document_tools import register_document_tools
 from kompas_mcp.native_tools import register_native_tools
 from kompas_mcp.part_tools import register_part_tools
@@ -66,6 +67,7 @@ if _research_tools_enabled():
 register_thread_tools(mcp)
 register_transmission_tools(mcp, adapter)
 register_gear_tools(mcp, adapter)
+register_spline_tools(mcp, adapter)
 register_cam_tools(mcp, adapter)
 register_silent_chain_tools(mcp, adapter)
 register_session_tools(mcp, adapter)

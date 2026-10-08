@@ -15,7 +15,7 @@ from kompas_mcp.transmissions import build_chain_sprocket_plan, list_chain_profi
 def test_registry_exposes_schema_driven_transmission_modules() -> None:
     modules = list_modules()
 
-    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket", "silent_chain_sprocket", "gear_spur", "gear_internal", "gear_bevel", "camshaft_lobe"]
+    assert [item["kind"] for item in modules] == ["v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear", "chain_sprocket", "silent_chain_sprocket", "gear_spur", "gear_internal", "gear_bevel", "shaft_spline", "hub_spline", "camshaft_lobe"]
     transmissions = [item for item in modules if item["group"] == "mechanical_transmissions"]
     valvetrain = [item for item in modules if item["group"] == "valvetrain"]
     assert [item["kind"] for item in valvetrain] == ["camshaft_lobe"]
@@ -1789,7 +1789,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert f"styles.css?v={health['static_version']}" in page
     assert f"app.js?v={health['static_version']}" in page
     assert "managed_pulley_create_job" in health["capabilities"]
-    assert client.get("/modules").json()["count"] == 11
+    assert client.get("/modules").json()["count"] == len(list_modules())
     gear_spec = client.get("/modules/gear_spur/spec").json()
     assert gear_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
     gear_preview = client.post("/modules/gear_spur/preview", json=gear_spec["defaults"])

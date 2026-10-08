@@ -29990,6 +29990,367 @@ def handle_create_gear_bevel(payload):
         )
 
 
+SPLINE_RECIPE_CHUNK = 800
+SPLINE_STANDARD_CODES = {"gost_1139_80": 1}
+SPLINE_SERIES_CODES = {"light": 1, "medium": 2, "heavy": 3}
+SPLINE_SERIES_NAMES = {value: key for key, value in SPLINE_SERIES_CODES.items()}
+SPLINE_BODY_CODES = {"shaft": 1, "hub": 2}
+SPLINE_BODY_NAMES = {value: key for key, value in SPLINE_BODY_CODES.items()}
+SPLINE_CENTERING_CODES = {"inner_diameter": 1, "outer_diameter": 2, "side_faces": 3}
+SPLINE_CENTERING_NAMES = {value: key for key, value in SPLINE_CENTERING_CODES.items()}
+SPLINE_EXECUTION_CODES = {"plain": 1, "recessed": 2, "hub": 3}
+SPLINE_EXECUTION_NAMES = {value: key for key, value in SPLINE_EXECUTION_CODES.items()}
+
+
+def _spline_recipe_variables(plan):
+    import hashlib
+    recipe = {
+        "schema": "geomwright.spline.recipe",
+        "version": 1,
+        "studio_profile": dict(plan.get("profile_request") or {}),
+        "name": str(plan.get("name") or ""),
+    }
+    encoded = json.dumps(recipe, ensure_ascii=True, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    chunks = [encoded[index:index + SPLINE_RECIPE_CHUNK] for index in range(0, len(encoded), SPLINE_RECIPE_CHUNK)] or [""]
+    if len(chunks) > 120:
+        raise RuntimeError("Spline recipe exceeds the metadata budget")
+    variables = [{"name": "SPL_RECIPE_COUNT", "value": len(chunks), "note": None}]
+    for index, chunk in enumerate(chunks):
+        variables.append({"name": "SPL_RECIPE_%03d" % index, "value": 0, "note": chunk})
+    variables.append({
+        "name": "SPL_RECIPE_HASH",
+        "value": 0,
+        "note": hashlib.sha256(encoded.encode("ascii")).hexdigest(),
+    })
+    return variables
+
+
+def _read_spline_recipe(items):
+    import hashlib
+    try:
+        count = int(float(safe_get(items.get("SPL_RECIPE_COUNT"), "Value") or 0))
+        if not 1 <= count <= 120:
+            raise ValueError("invalid spline recipe chunk count")
+        encoded = "".join(
+            str(safe_get(items.get("SPL_RECIPE_%03d" % index), "Note") or "")
+            for index in range(count)
+        )
+        digest = str(safe_get(items.get("SPL_RECIPE_HASH"), "Note") or "")
+        if hashlib.sha256(encoded.encode("ascii")).hexdigest() != digest:
+            raise ValueError("spline recipe checksum differs")
+        recipe = json.loads(encoded)
+        if recipe.get("schema") != "geomwright.spline.recipe" or recipe.get("version") != 1:
+            raise ValueError("unsupported spline recipe version")
+        return recipe, None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _inspect_spline_block(doc3):
+    part = safe_get(doc3, "TopPart")
+    if part is None:
+        return None
+    items = {str(safe_get(variable, "Name") or ""): variable for variable in _iter_operation_variables(part)}
+    variables = {name: safe_get(variable, "Value") for name, variable in items.items()}
+    if variables.get("GW_SPLINE_VERSION") != 1:
+        return None
+    required = {
+        "SPL_STANDARD", "SPL_SERIES", "SPL_BODY", "SPL_CENTERING", "SPL_EXECUTION",
+        "SPL_Z", "SPL_D", "SPL_DD", "SPL_B", "SPL_ROOT_D", "SPL_L", "SPL_VERIFIED",
+    }
+    if not required.issubset(variables):
+        return None
+    model = cast_model_container(part)
+    if model is None:
+        return None
+    def object_name(item):
+        return str(safe_get(item, "Name") or "").lower()
+    sketches = list(iter_collection(safe_get(model, "Sketchs")))
+    blank_sketch = [
+        item for item in sketches
+        if object_name(item).endswith(" blank sketch")
+    ]
+    gap_sketch = [
+        item for item in sketches
+        if object_name(item).endswith(" one tooth space")
+    ]
+    extrusions = list(iter_collection(safe_get(model, "Extrusions")))
+    blanks = [item for item in extrusions if object_name(item).endswith(" blank")]
+    cuts = [item for item in extrusions if object_name(item).endswith(" one tooth space cut")]
+    patterns = [
+        item for item in iter_collection(safe_get(model, "FeaturePatterns"))
+        if object_name(item).endswith(" tooth space pattern")
+    ]
+    if len(blank_sketch) != 1 or len(gap_sketch) != 1 or len(blanks) != 1 or not cuts or len(patterns) != 1:
+        return None
+    recipe, recipe_error = _read_spline_recipe(items)
+    body = SPLINE_BODY_NAMES.get(int(round(float(variables.get("SPL_BODY") or 0))), "shaft")
+    profile = {
+        "standard": "gost_1139_80",
+        "series": SPLINE_SERIES_NAMES.get(int(round(float(variables.get("SPL_SERIES") or 0))), "medium"),
+        "tooth_count": int(round(float(variables.get("SPL_Z") or 0))),
+        "inner_diameter_mm": variables.get("SPL_D"),
+        "outer_diameter_mm": variables.get("SPL_DD"),
+        "tooth_width_mm": variables.get("SPL_B"),
+        "body": body,
+        "centering": SPLINE_CENTERING_NAMES.get(int(round(float(variables.get("SPL_CENTERING") or 0))), "inner_diameter"),
+        "execution": SPLINE_EXECUTION_NAMES.get(int(round(float(variables.get("SPL_EXECUTION") or 0))), "plain"),
+        "length_mm": variables.get("SPL_L"),
+    }
+    outside = float(variables.get("SPL_OD") or 0.0)
+    if outside > 0.0:
+        profile["hub_outside_diameter_mm"] = outside
+    if recipe and recipe.get("studio_profile"):
+        profile = dict(recipe["studio_profile"])
+    owned = [
+        safe_get(item, "Reference")
+        for item in [blank_sketch[0], gap_sketch[0], blanks[0]] + list(cuts) + [patterns[0]]
+        if safe_get(item, "Reference")
+    ]
+    verified = bool(variables.get("SPL_VERIFIED") == 1)
+    return {
+        "id": "spline:" + str(owned[0]) if owned else "spline:unknown",
+        "schema": "geomwright.managed_spline_straight",
+        "version": 1,
+        "module": "straight_spline",
+        "name": str(safe_get(part, "Name") or "Geomwright spline"),
+        "body": body,
+        "profile": profile,
+        "editable": False,
+        "verified": verified,
+        "status": "verified" if verified else "partial",
+        "recipe": recipe,
+        "recipe_error": recipe_error,
+        "recreatable": bool(recipe and recipe.get("studio_profile")),
+        "owned_references": owned,
+    }
+
+
+def handle_inspect_spline(payload):
+    document_id = payload.get("document_id")
+    if not document_id:
+        raise ValueError("document_id is required")
+    app = make_app()
+    document = resolve_document(app, document_id)
+    if document is None:
+        raise RuntimeError("Spline document was not found")
+    doc3 = cast_document_3d(document)
+    if doc3 is None:
+        raise RuntimeError("Spline inspection requires a 3D document")
+    block = _inspect_spline_block(doc3)
+    if block is None:
+        raise RuntimeError("The document does not contain a recognized managed spline block")
+    return block
+
+
+def handle_create_spline(payload):
+    if payload.get("execute") is not True or payload.get("confirm_write") is not True:
+        raise ValueError("Spline creation requires execute=true and confirm_write=true")
+    plan = payload.get("plan") or {}
+    if plan.get("stage") != "straight_spline_cad_plan" or int(plan.get("plan_version") or 0) != 1:
+        raise ValueError("A straight_spline_cad_plan version 1 is required")
+    if plan.get("family") != "straight_spline":
+        raise ValueError("Managed spline plan family must be straight_spline")
+    if (plan.get("ownership") or {}).get("schema") != "geomwright.managed_spline_straight":
+        raise ValueError("Managed spline ownership schema is missing")
+    body = str((plan.get("geometry") or {}).get("body") or "")
+    if body not in ("shaft", "hub"):
+        raise ValueError("Managed spline plan body must be shaft or hub")
+    workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
+    operations = list(workflow_params.get("operations") or [])
+    scenario_list = [str(item.get("scenario") or "") for item in operations]
+    core_scenarios = ["numeric_profile_sketch", "cut_extrusion", "circular_pattern"]
+    if body == "shaft":
+        index = 1
+        chamfer_count = 0
+        while index < len(scenario_list) and scenario_list[index] == "rotational_cut":
+            chamfer_count += 1
+            index += 1
+        valid = (
+            scenario_list[:1] == ["cylindrical_blank"]
+            and chamfer_count <= 2
+            and scenario_list[index:] == core_scenarios
+        )
+    else:
+        valid = scenario_list == ["cylindrical_blank", "rotational_cut"] + core_scenarios
+    if not valid:
+        raise ValueError(
+            "Managed spline requires a blank, optional shaft chamfers, one numeric tooth-space "
+            "sketch, a through cut, and a circular pattern"
+        )
+    name = str(plan.get("name") or "").strip()
+    if not name:
+        raise ValueError("Spline plan name must not be empty")
+    app = make_app()
+    doc3 = None
+    steps_report = []
+    stage = "create_document"
+    try:
+        doc3, part, model = _create_part_document(app, bool(payload.get("visible", True)))
+        part = safe_get(cast_document_3d(doc3), "TopPart")
+        model = cast_model_container(part)
+        if part is None or model is None:
+            raise RuntimeError("Managed spline document has no top part or model container")
+        part.Name = name
+        if not part.Update():
+            raise RuntimeError("Spline part name update failed")
+        runtime_objects = {}
+        for index, operation in enumerate(operations):
+            stage = str(operation.get("id") or "operation_%d" % index)
+            report_progress(
+                10 + int(70.0 * index / max(1, len(operations))),
+                str(operation.get("scenario") or "workflow_operation"),
+                name=str((operation.get("params") or {}).get("name") or ""),
+            )
+            _execute_workflow_operation(part, model, operation, runtime_objects, steps_report)
+        stage = "rebuild_and_body_verification"
+        if not cast_document_3d(doc3).RebuildDocument():
+            raise RuntimeError("Spline final rebuild failed")
+        import win32com.client
+        bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
+        body_metrics = _active_api5_primary_body_metrics()
+        if len(bodies) != 1 or not body_metrics["solid"] or not 0.0 < float(body_metrics["volume"]):
+            raise RuntimeError("Spline result must be one positive-volume solid")
+        box = win32com.client.CastTo(bodies[0], "IBody7").GetGabarit()
+        if not box or not box[0] or len(box) != 7:
+            raise RuntimeError("Spline body bounds unavailable")
+        body_metrics["bounds_mm"] = [float(value) for value in box[1:]]
+        verify = plan.get("verification") or {}
+        expected_volume = float(verify.get("expected_volume_mm3") or 0.0)
+        if expected_volume <= 0.0:
+            raise RuntimeError("Spline plan expected volume is missing")
+        error = abs(float(body_metrics["volume"]) * 1000.0 / expected_volume - 1.0)
+        if error > float(verify.get("volume_relative_tolerance") or 0.005):
+            raise RuntimeError("Spline body volume disagrees with the plan: " + str(error))
+        expected_bounds = [float(value) for value in (verify.get("expected_bounds_mm") or [])]
+        bound_candidates = [
+            [float(value) for value in candidate]
+            for candidate in (verify.get("expected_bounds_candidates_mm") or [expected_bounds])
+            if len(candidate) == 6
+        ]
+        bounds_tolerance = float(verify.get("bounds_tolerance_mm") or 0.05)
+        max_radius = float(verify.get("max_radius_mm") or 0.0)
+        actual = [float(value) for value in body_metrics["bounds_mm"]]
+        extent_ok = (
+            max_radius > 0.0
+            and abs(actual[0] + float(verify.get("length_mm") or 0.0)) <= bounds_tolerance
+            and abs(actual[3]) <= bounds_tolerance
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) <= max_radius + bounds_tolerance
+            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) >= 0.5 * max_radius
+        )
+        if not extent_ok and not any(
+            all(abs(actual_value - expected) <= bounds_tolerance for actual_value, expected in zip(actual, candidate))
+            for candidate in bound_candidates
+        ):
+            raise RuntimeError("Spline body bounds disagree with the plan: " + str(body_metrics["bounds_mm"]))
+        pattern_step = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
+        if pattern_step is None or int(pattern_step.get("count") or 0) != int(verify.get("pattern_count") or 0):
+            raise RuntimeError("Spline physical tooth count readback failed")
+        stage = "hide_auxiliary_geometry"
+        auxiliary_objects = []
+        blank_runtime = runtime_objects.get("blank") or {}
+        for role in ("axis_start", "axis_end", "axis"):
+            if blank_runtime.get(role) is not None:
+                auxiliary_objects.append((role, blank_runtime[role]))
+        for operation_id in ("bore_cut", "tip_chamfer_face_a", "tip_chamfer_face_b"):
+            operation_runtime = runtime_objects.get(operation_id) or {}
+            if operation_runtime.get("sketch") is not None:
+                auxiliary_objects.append((operation_id + "_sketch", operation_runtime["sketch"]))
+        auxiliary_objects.extend(
+            ("sketch", sketch)
+            for sketch in iter_collection(safe_get(model, "Sketchs"))
+        )
+        default_object = safe_get(part, "DefaultObject")
+        if callable(default_object):
+            for plane_id in (1, 2, 3, 71, 72, 73):
+                try:
+                    plane_object = default_object(plane_id)
+                except Exception:
+                    plane_object = None
+                if plane_object is not None:
+                    auxiliary_objects.append(("default_%d" % plane_id, plane_object))
+        visibility_report = _hide_auxiliary_model_objects(auxiliary_objects, hidden=True)
+        visibility_failures = [
+            item for item in (visibility_report.get("objects") or [])
+            if not item.get("ok") and not str(item.get("role") or "").startswith("default_")
+        ]
+        steps_report.append(
+            {
+                "step": "hide_auxiliary_geometry",
+                "ok": bool(visibility_report.get("ok")),
+                "hidden_count": len(auxiliary_objects),
+                "failures": visibility_failures,
+            }
+        )
+        if visibility_failures:
+            raise RuntimeError("Spline auxiliary geometry could not be hidden: %s" % visibility_failures)
+        stage = "persist_ownership"
+        profile_request = dict(plan.get("profile_request") or {})
+        geometry = plan.get("geometry") or {}
+        hub_outside = float(geometry.get("hub_outside_radius_mm") or 0.0) * 2.0
+        metadata = _apply_part_variables(part, [
+            {"name": "GW_SPLINE_VERSION", "value": 1, "expression": None, "note": "Create-only straight-sided spline"},
+            {"name": "GW_FAMILY_CODE", "value": 11, "expression": None, "note": "Geomwright spline family code"},
+            {"name": "SPL_STANDARD", "value": SPLINE_STANDARD_CODES.get(str(profile_request.get("standard")), 1), "expression": None},
+            {"name": "SPL_SERIES", "value": SPLINE_SERIES_CODES.get(str(profile_request.get("series")), 2), "expression": None},
+            {"name": "SPL_BODY", "value": SPLINE_BODY_CODES.get(str(profile_request.get("body")), 1), "expression": None},
+            {"name": "SPL_CENTERING", "value": SPLINE_CENTERING_CODES.get(str(profile_request.get("centering")), 1), "expression": None},
+            {"name": "SPL_EXECUTION", "value": SPLINE_EXECUTION_CODES.get(str(geometry.get("execution")), 1), "expression": None},
+            {"name": "SPL_Z", "value": int(geometry.get("tooth_count") or 0), "expression": None},
+            {"name": "SPL_D", "value": float(geometry.get("inner_diameter_mm") or 0.0), "expression": None},
+            {"name": "SPL_DD", "value": float(geometry.get("outer_diameter_mm") or 0.0), "expression": None},
+            {"name": "SPL_B", "value": float(geometry.get("tooth_width_mm") or 0.0), "expression": None},
+            {"name": "SPL_D1", "value": float(geometry.get("relief_diameter_mm") or 0.0), "expression": None},
+            {"name": "SPL_A", "value": float(geometry.get("relief_width_mm") or 0.0), "expression": None},
+            {"name": "SPL_C", "value": float(geometry.get("chamfer_mm") or 0.0), "expression": None},
+            {"name": "SPL_R", "value": float(geometry.get("fillet_mm") or 0.0), "expression": None},
+            {"name": "SPL_ROOT_D", "value": 2.0 * float(geometry.get("root_radius_mm") or 0.0), "expression": None},
+            {"name": "SPL_L", "value": float(geometry.get("length_mm") or 0.0), "expression": None},
+            {"name": "SPL_OD", "value": hub_outside, "expression": None},
+            {"name": "SPL_VERIFIED", "value": 1, "expression": None, "note": "Host and native checks passed"},
+        ] + _spline_recipe_variables(plan))
+        if not metadata.get("ok"):
+            raise RuntimeError("Spline metadata variables could not be created")
+        block = _inspect_spline_block(cast_document_3d(doc3))
+        if not block or block.get("module") != "straight_spline" or block.get("profile") != profile_request:
+            raise RuntimeError("Spline ownership/recipe readback failed")
+        report_progress(100, "completed", name=name)
+        return {
+            "ok": True,
+            "success": True,
+            "executed": True,
+            "stage": "verified",
+            "saved": False,
+            "closed": False,
+            "document": describe_runtime_document(doc3, app),
+            "block": block,
+            "body": body_metrics,
+            "steps": steps_report,
+            "exports": {
+                step["id"]: step.get("feature") or step.get("sketch")
+                for step in steps_report
+                if step.get("id")
+            },
+            "verification": {
+                "ok": True,
+                "final_rebuild_ok": True,
+                "pattern_count": pattern_step["count"],
+                "relative_volume_error": error,
+                "bounds_verified": True,
+            },
+            "accuracy": plan.get("accuracy"),
+        }
+    except Exception as exc:
+        try:
+            partial_document = describe_runtime_document(doc3, app) if doc3 else None
+        except Exception as describe_exc:
+            partial_document = {"unresolved": True, "describe_error": str(describe_exc)}
+        raise RuntimeError(
+            "create_spline failed at %s: %s | partial_document=%s"
+            % (stage, exc, json.dumps(partial_document))
+        )
+
+
 def handle_create_cam(payload):
     if payload.get("execute") is not True or payload.get("confirm_write") is not True:
         raise ValueError("Cam creation requires execute=true and confirm_write=true")
@@ -31488,6 +31849,10 @@ def _dispatch_action(request):
         return handle_create_gear_bevel(payload)
     if action == "inspect_gear_bevel":
         return handle_inspect_gear_bevel(payload)
+    if action == "create_spline":
+        return handle_create_spline(payload)
+    if action == "inspect_spline":
+        return handle_inspect_spline(payload)
     if action == "update_managed_pulley":
         return handle_update_managed_pulley(payload)
     if action == "inspect_managed_pulley":

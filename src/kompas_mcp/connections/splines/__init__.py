@@ -1,0 +1,58 @@
+"""Прямобочные шлицы (ГОСТ 1139-80): каталог, геометрия и посадки."""
+from __future__ import annotations
+
+from .fits import build_fit_report, deviation_limits, fits_selection
+from .spec import StraightSplineCreateRequest, StraightSplineRequest, spline_selection
+from .straight import (
+    CENTERING_META,
+    EXECUTION_META,
+    SERIES_META,
+    SERIES_ORDER,
+    STANDARD_CODE,
+    STANDARD_EDITION,
+    STANDARD_TITLE,
+    SplineGeometry,
+    SplineSize,
+    build_hub_space_entities,
+    build_period_outline,
+    build_shaft_space_entities,
+    build_spline_geometry,
+    build_straight_spline_preview,
+    contour_points,
+    contour_signed_area,
+    iter_catalog_sizes,
+    list_straight_spline_sizes,
+    normalize_designation,
+    resolve_spline_size,
+    straight_spline_selection,
+)
+
+__all__ = [
+    "CENTERING_META",
+    "EXECUTION_META",
+    "SERIES_META",
+    "SERIES_ORDER",
+    "STANDARD_CODE",
+    "STANDARD_EDITION",
+    "STANDARD_TITLE",
+    "SplineGeometry",
+    "SplineSize",
+    "build_fit_report",
+    "build_hub_space_entities",
+    "build_period_outline",
+    "build_shaft_space_entities",
+    "build_spline_geometry",
+    "build_straight_spline_preview",
+    "contour_points",
+    "contour_signed_area",
+    "deviation_limits",
+    "fits_selection",
+    "iter_catalog_sizes",
+    "list_straight_spline_sizes",
+    "normalize_designation",
+    "resolve_spline_size",
+    "spline_selection",
+    "straight_spline_selection",
+    "StraightSplineCreateRequest",
+    "StraightSplineRequest",
+]

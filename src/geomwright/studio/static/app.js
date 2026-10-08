@@ -2002,12 +2002,14 @@ function selectorLabel(kind, value) {
 const selectorIcons = {
   group: {
     mechanical_transmissions: "/static/icons/transmission.svg",
+    connections: "/static/icons/shaft-spline.svg",
     valvetrain: "/static/icons/valvetrain.svg",
   },
   subgroup: {
     belt_drives: "/static/icons/frictional.svg",
     chain_drives: "/static/icons/chain-drive.svg",
     gear_drives: "/static/icons/transmission.svg",
+    splines: "/static/icons/hub-spline.svg",
     valvetrain: "/static/icons/cam.svg",
   },
 };

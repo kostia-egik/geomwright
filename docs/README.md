@@ -54,6 +54,7 @@ specific task, not a changelog or a dump of live CAD experiments.
 
 | Document | Status | Scope |
 | --- | --- | --- |
+| [Straight-sided splines](spline-straight.md) | Implemented, live-verified | ГОСТ 1139-80 light/medium/heavy catalog, exact end profile, ГОСТ 25346 fits, create-only shaft and hub managed parts, Studio modules and MCP tools |
 | [Connection systems plan](connection-systems-concept.md) | Planned, research-backed | Splines incl. radiused runout, keyways, face joints, and motorcycle dog clutches; native baseline, CAD/Studio split, phases |
 | [Connection standards register](connection-standards.md) | Reference | GOST/ISO/DIN/ANSI designations, applicability, acquisition status, and non-standard face joints |
 

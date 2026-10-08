@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from kompas_mcp.transmission_tools import ChainSprocketPreviewRequest, FlatBeltPulleyPreviewRequest, PolyVGroovePreviewRequest, TimingCurvilinearPulleyPreviewRequest, TimingTrapezoidalPulleyPreviewRequest, VGroovePreviewRequest
 from kompas_mcp.transmissions import build_chain_sprocket_plan, chain_profile_selection, preview_chain_sprocket, preview_flat_belt_pulley, preview_poly_v_groove, preview_timing_belt_pulley, preview_v_belt_groove
 from kompas_mcp.transmissions import build_managed_pulley_plan
+from kompas_mcp.connections import StraightSplineRequest, spline_selection
+from .spline_preview import adapt_spline_preview, build_spline_preview
 from kompas_mcp.gears import (
     BevelGearRequest,
     InternalGearRequest,
@@ -2184,6 +2186,57 @@ _MODULES: dict[str, PreviewModule] = {
         icon="/static/icons/gear-bevel.svg",
         selection=bevel_gear_selection(),
     ),
+    "shaft_spline": PreviewModule(
+        kind="shaft_spline",
+        name="Вал со шлицами (прямобочные)",
+        description="Прямобочные шлицы ГОСТ 1139-80 на валу: торцевой профиль, посадки, фаски c x 45.",
+        standard="ГОСТ 1139-80",
+        request_model=StraightSplineRequest,
+        defaults={
+            "standard": "gost_1139_80",
+            "series": "light",
+            "designation": "8x36x40",
+            "body": "shaft",
+            "centering": "inner_diameter",
+            "execution": "auto",
+            "length_mm": 30.0,
+            "include_tip_chamfer": True,
+        },
+        builder=build_spline_preview,
+        adapter=adapt_spline_preview,
+        group="connections",
+        subgroup="splines",
+        family="spline_joints",
+        build=True,
+        preview_available=True,
+        icon="/static/icons/shaft-spline.svg",
+        selection=spline_selection(),
+    ),
+    "hub_spline": PreviewModule(
+        kind="hub_spline",
+        name="Втулка со шлицами (прямобочные)",
+        description="Внутренние прямобочные шлицы ГОСТ 1139-80: кольцевая заготовка, пазы d/D, посадки.",
+        standard="ГОСТ 1139-80",
+        request_model=StraightSplineRequest,
+        defaults={
+            "standard": "gost_1139_80",
+            "series": "light",
+            "designation": "8x36x40",
+            "body": "hub",
+            "centering": "inner_diameter",
+            "length_mm": 30.0,
+            "hub_outside_diameter_mm": 55.0,
+        },
+        builder=build_spline_preview,
+        adapter=adapt_spline_preview,
+        group="connections",
+        subgroup="splines",
+        family="spline_joints",
+        build=True,
+        preview_available=True,
+        icon="/static/icons/hub-spline.svg",
+        selection=spline_selection(),
+    ),
     "camshaft_lobe": PreviewModule(
         kind="camshaft_lobe",
         name="Кулачок ГРМ",
@@ -2250,6 +2303,9 @@ def managed_pulley_plan(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     if module.kind == "gear_bevel":
         from kompas_mcp.gears.cad import build_bevel_gear_plan
         return build_bevel_gear_plan(normalized_request)
+    if module.kind in ("shaft_spline", "hub_spline"):
+        from kompas_mcp.connections.cad import build_straight_spline_plan
+        return build_straight_spline_plan(normalized_request)
     if module.kind == "silent_chain_sprocket":
         preview = build_silent_chain_preview(normalized_request)
         missing = preview["completion"]["missing_fields"]
