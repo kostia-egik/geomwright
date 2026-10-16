@@ -15,6 +15,185 @@ The layer answers three questions before and after every small live operation:
 Most helpers are pure Python and are tested with fake adapters. The live COM
 contract still needs manual confirmation in KOMPAS.
 
+## CAD Work Modes
+
+The work mode is a shared session policy, not a per-tool `visible` flag:
+
+- `interactive` (default): attach to one selected visible KOMPAS window. Bind its
+  HWND, PID and process creation time across calls. No implicit application
+  creation, showing a hidden instance, or substitute-instance fallback. If
+  several visible instances exist, explicitly select the target HWND; a window
+  not exposed through ROT cannot be selected by guessing a PID.
+- `hidden` (explicit): create a separate automation-owned process. Before hiding
+  it, prove that its PID was absent from the pre-create process snapshot. Reuse
+  only that bound identity. If isolation cannot be proven or ROT cannot reattach
+  the owned object, stop; do not use the user's instance or create a replacement.
+
+`get_cad_work_mode()` reads the selected mode/binding without COM.
+`set_cad_work_mode(mode="hidden", confirm_switch=true)` explicitly selects a
+hidden session; it does not start KOMPAS. Selecting interactive can additionally
+use `target_window_handle=<HWND>`. Selection/rebinding is refused while quarantined
+or in flight, and while a previously owned hidden process remains alive. A host
+pins the context token: another client's mode switch between workflow steps
+causes `CAD_SESSION_CHANGED`, not an automatic transition.
+
+Mode state is stored as runtime `cad-session.json` beside the durable guard.
+`KOMPAS_CAD_MODE` can explicitly request a mode for an unconfigured host; it must
+not silently replace an existing selection. The legacy visible-session flag
+never authorizes implicit/hidden creation. Studio is interactive-only and refuses
+an incompatible shared hidden selection.
+
+Documents.Add/Open enforce visibility for the selected mode, including legacy
+tools whose `visible` arguments/defaults differ. In interactive mode, save keeps
+the same document open. Automatic probe/workflow cleanup must not close it.
+`close_document` remains an explicit user command; save tools now default to
+`close_after_save=false`, with explicit `true` permitting user-requested closure.
+Interactive shutdown may close explicitly requested documents but does not quit
+the user's application. Hidden shutdown may Quit only its proven-owned process;
+Quit acceptance is not proof of process exit, so ownership is retained until an
+explicit new selection after exit.
+
+Interactive save uses direct SaveAs plus target-file/path checks, without the
+hidden staging Close/replace/reopen lifecycle. A retained document is not freshly
+reopened: legacy module verification reports `recipe_reopened=false`,
+`save_reopen_deferred=true`, scope `creation_and_visible_saved_readback`. Hidden
+staged workflows may report actual save/reopen. The smoke lifecycle and legacy
+SPW row creation require hidden mode; hosted native UI commands require
+interactive mode. Unsupported combinations fail before CAD, never switch modes.
+
+Visible API work does not guarantee per-entity animation or an interactive sketch
+editor on screen. It guarantees the selected instance/document policy, not a
+paint event after each constraint. For joint inspection, use explicit document
+IDs and completed stages; do not ask the user to inspect an unconfirmed hidden
+or closed result.
+
+Evidence boundary: host and fake-COM tests protect this policy. Native separate
+process creation, ROT reattachment, visible-window matching and retained direct
+save (including Unicode paths) require live verification before claiming this
+behavior is live-verified. Do not reset an existing quarantine to run these checks.
+
+## Timeout And Session Recovery
+
+MCP and Studio default to a finite 300-second budget per bridge call. Terminating
+the bridge does **not** cancel work already submitted to KOMPAS. A durable marker
+is written before launch. While it remains, subsequent ordinary bridge calls,
+including `list_documents`, readback and `close_document`, are refused with
+`CAD_DIAGNOSTICS_REQUIRED` for a settled failure or `CAD_SESSION_BLOCKED` for an
+uncertain outcome. Normal successful completion removes the marker; a known
+prelaunch failure does not quarantine CAD.
+
+The production bridge publishes a token/action-bound completion receipt only
+after the handler and mutex have completed. Recovery distinguishes these outcomes:
+
+- A trusted `no_cad` receipt releases the guard when no CAD operation was submitted.
+  This includes validation and read-only session-selection refusals before any
+  controller activation, instance creation or model access.
+- A trusted `settled` receipt for a finished handler failure retains the marker
+  as `settled_failure`; this permits only the dedicated recovery audit below.
+- Timeout, cancellation, malformed response, crash (including an outer watchdog
+  killing the host), or a failed custom script without a trusted receipt remains strict
+  `unknown_outcome`. Process exit or a progress checkpoint is not a substitute
+  for a trusted completion receipt.
+
+Successful custom scripts retain their existing response contract. They cannot
+authorize automatic recovery of failures; production successes require a valid
+terminal receipt too.
+
+Call `get_cad_session_guard` first: it reads host state without COM and returns
+the current token, operation, process IDs and last checkpoint. A missing marker
+does not prove CAD readiness. `recover_cad_session(token, reason,
+confirm_idle=False)` requires the fresh token and refuses recovery while the
+bridge or its launching/in-flight host is still running. Use the branch matching
+the guard state:
+
+### Completed Handler Failure: `settled_failure`
+
+Call `recover_cad_session(token=..., reason=...)`; explicit user idle confirmation
+is not a prerequisite for this branch. It runs an exclusive, bounded 15-second
+audit against the already bound **same instance**. It cannot create or substitute
+an instance, activate a controller or document, edit, rebuild, save, or close.
+The audit checks:
+
+- the native application frame is responsive and enabled, and whether a visible
+  standard dialog blocks it;
+- COM document listing, returned as a bounded document summary;
+- API5 graphical-process state, possible sketch-editor state, and in-place
+  component-edit blockers.
+
+The result reports `model_verified=False`. A passing audit removes the marker
+with basis `completed_handler_and_session_audit` and
+`cad_readiness_verified=False`. Before any further write, the agent must inspect
+the affected document and partial changes and decide what is safe. Never blindly
+retry the failed operation: completed handler execution does not imply rollback
+or a correct model.
+
+A blocker retains the `settled_failure` marker. Ask the user to handle unresolved
+UI state when needed, then use a fresh guard token for another recovery attempt;
+do not treat every settled failure as requiring manual idle confirmation.
+
+If the previously bound KOMPAS process has exited, recovery can remove the settled
+marker without COM, with basis `bound_session_exited`. It does not attach another
+instance. Explicitly select the intended session before another CAD call.
+
+### Uncertain Completion: `unknown_outcome`
+
+Wait for KOMPAS and obtain a fresh, explicit user confirmation that its visible
+UI is idle and partial documents have been reviewed/resolved. Do not infer this
+from process exit or an API document count of zero; do not send more COM probes.
+Only then call `recover_cad_session(token=..., reason=..., confirm_idle=True)`
+with the fresh token. This branch removes only the marker, without COM, rollback,
+closing tabs or restarting KOMPAS. Inspect session/document state before deciding
+whether another write is appropriate; do not blindly retry.
+
+Neither branch is a general asynchronous cancellation solution or a guarantee
+that the UI is idle. A session audit is not model verification or CAD readiness
+certification.
+
+The marker lives under `KOMPAS_MCP_SESSION_GUARD_DIR`, or otherwise
+`KOMPAS_MCP_TEMP_DIR/geomwright-session-guard` (default temp root:
+`C:\Windows\Temp`). MCP and Studio controlling the same KOMPAS must share this
+directory. Direct COM scripts and manual UI actions are outside this boundary.
+Do not delete markers automatically or use another directory to bypass quarantine.
+
+Failed part scenarios retain the owned partial document by default and report
+`cleanup.attempted=false`, `cleanup.verified_closed=false` in progress. The intended
+output path is not a verified document ID. Legacy explicit `save_partial_on_error`
+remains an opt-in salvage policy; it may itself call CAD and is not a recovery
+mechanism. Full diagnostic transport artifacts are retained only in diagnostic
+mode; the durable guard retains bounded checkpoints in either mode.
+
+For live probes, an outer `scripts/run_bounded.py` deadline must exceed the total
+sequential bridge-call budgets plus overhead. A short outer deadline cannot be
+used as evidence that KOMPAS stopped or that the next probe is safe.
+
+## Model PNG Export
+
+`export_model_png(document_id, output_path=None, view="current",
+resolution_dpi=150, fit=true)` exports the exact opened model through native
+KOMPAS raster export, without a save dialog, model rebuild or geometry operations.
+This is a file-writing/view-state operation, not a read-only diagnostic or a
+geometry-verification tool.
+
+Views are `current|front|rear|top|bottom|left|right|isometric`; DPI must be an
+integer from 72 to 600. Presets follow native KOMPAS orientation: `left` may show
+the side of a global-X part rather than its end. Example tool arguments:
+
+```json
+{"document_id":"<exact opened document ID>","view":"left","resolution_dpi":150,"fit":true}
+```
+
+Omitting `output_path` creates a UUID-named PNG in the export directory. An explicit
+destination must be an absolute new `.png` path with an existing parent; existing
+files are refused, never overwritten. The result returns artifact path, dimensions
+and restoration status. PNG header validation is not visual acceptance: open the
+actual raster to check smooth faces, holes and grooves.
+
+Standard-view selection and fitting are temporary. The runtime restores and checks
+`Matrix3D`, `Scale` and the previously active document; exact screen pan is not
+certified. No arbitrary Euler-angle interface is exposed until native units are
+verified. Live Stage D gear-chain PNG review confirms the native raster and checked
+restoration; export success alone does not certify geometry.
+
 ## MCP Tools
 
 Call `get_mcp_tool_catalog` with `category="low_level_runtime"` when you need a
@@ -85,8 +264,10 @@ These helpers are intended for future small primitive operations:
 
 ## BridgeRunner Modes And Progress
 
-`BridgeRunner` is the Layer 1 process boundary around the KOMPAS-bundled Python
-runtime. Its default `normal` mode uses a bounded 300-second timeout and removes
+`BridgeRunner` is the Layer 1 process boundary around the modern Windows Python
+configured through `KOMPAS_PYTHON`, with `pywin32` installed. The legacy bundled
+Python 3.2 cannot run the current bridge; see [setup](en/setup.md).
+Its default `normal` mode uses a bounded 300-second timeout and removes
 the temporary request/response files after each call. A caller can still set a
 different timeout on the runner or one call.
 
@@ -229,6 +410,6 @@ used around write operations.
 
 Keep the adapter/bridge request and response keys aligned, compile the modified
 host modules with the project Python, and compile both bridge copies with the
-KOMPAS-bundled Python. The two bridge files must remain byte-identical. For CAD
+configured CAD interpreter. The two bridge files must remain byte-identical. For CAD
 behavior, use the read-only audit above and a saved-document reopen check rather
 than treating a synthetic response as live evidence.

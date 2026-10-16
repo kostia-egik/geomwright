@@ -111,75 +111,19 @@ class _FakeFailingOperationObject(_FakeOperationObject):
 
 
 class BridgeVisibilityTests(unittest.TestCase):
-    def test_make_app_attaches_to_visible_running_instance_when_required(self) -> None:
-        app7 = object()
-        app5 = types.SimpleNamespace(
-            Visible=True,
-            ActivateControllerAPI=lambda: True,
-            ksGetApplication7=lambda: app7,
-        )
+    def test_make_app_requires_policy_before_any_com_fallback(self) -> None:
+        from unittest.mock import Mock, patch
         client = sys.modules["win32com.client"]
-        original = getattr(client, "GetActiveObject", None)
-        client.GetActiveObject = lambda _progid: app5
-        BRIDGE._REQUIRE_VISIBLE_KOMPAS = True
-        try:
-            self.assertIs(BRIDGE.make_app(), app7)
-            self.assertIs(BRIDGE._APP5, app5)
-        finally:
-            BRIDGE._REQUIRE_VISIBLE_KOMPAS = False
-            if original is None:
-                del client.GetActiveObject
-            else:
-                client.GetActiveObject = original
-
-    def test_make_app_promotes_running_hidden_instance_to_visible(self) -> None:
-        client = sys.modules["win32com.client"]
-        original = getattr(client, "GetActiveObject", None)
-        app7 = object()
-        app5 = types.SimpleNamespace(
-            Visible=False,
-            ActivateControllerAPI=lambda: True,
-            ksGetApplication7=lambda: app7,
-        )
-        client.GetActiveObject = lambda _progid: app5
-        BRIDGE._REQUIRE_VISIBLE_KOMPAS = True
-        try:
-            self.assertIs(BRIDGE.make_app(), app7)
-            self.assertTrue(app5.Visible)
-        finally:
-            BRIDGE._REQUIRE_VISIBLE_KOMPAS = False
-            if original is None:
-                del client.GetActiveObject
-            else:
-                client.GetActiveObject = original
-
-    def test_make_app_falls_back_to_active_api7_without_dispatching_api5(self) -> None:
-        client = sys.modules["win32com.client"]
-        original = getattr(client, "GetActiveObject", None)
-        app7 = types.SimpleNamespace(Visible=True)
-        requested_progids: list[str] = []
-
-        def get_active_object(progid: str):
-            requested_progids.append(progid)
-            if progid == "KOMPAS.Application.5":
-                raise RuntimeError("API5 running object is not registered")
-            return app7
-
-        client.GetActiveObject = get_active_object
-        BRIDGE._REQUIRE_VISIBLE_KOMPAS = True
-        try:
-            self.assertIs(BRIDGE.make_app(), app7)
-            self.assertIs(BRIDGE._APP5, app7)
-            self.assertEqual(
-                requested_progids,
-                ["KOMPAS.Application.5", "KOMPAS.Application.7"],
-            )
-        finally:
-            BRIDGE._REQUIRE_VISIBLE_KOMPAS = False
-            if original is None:
-                del client.GetActiveObject
-            else:
-                client.GetActiveObject = original
+        # Session attach/isolation lives in cad_session_runtime and is covered
+        # in test_bridge_save. Legacy silent promotion/fallback is not supported.
+        active, dispatch = Mock(), Mock()
+        with patch.object(BRIDGE, "_CAD_SESSION", None), \
+                patch.object(client, "GetActiveObject", active, create=True), \
+                patch.object(client, "Dispatch", dispatch, create=True):
+            with self.assertRaisesRegex(RuntimeError, "CAD_SESSION_POLICY_REQUIRED"):
+                BRIDGE.make_app()
+        active.assert_not_called()
+        dispatch.assert_not_called()
 
     def test_set_model_object_hidden_updates_hidden_flag(self) -> None:
         obj = _FakeHiddenObject(hidden=False)
@@ -192,6 +136,10 @@ class BridgeVisibilityTests(unittest.TestCase):
         self.assertTrue(report["hidden_after"])
         self.assertTrue(report["update_available"])
         self.assertTrue(report["update_ok"])
+        self.assertEqual(obj.update_count, 1)
+        repeated = BRIDGE._set_model_object_hidden(obj, True, role="spiral_path")
+        self.assertTrue(repeated["ok"])
+        self.assertEqual(repeated["reason"], "already_requested_state")
         self.assertEqual(obj.update_count, 1)
 
     def test_set_model_object_hidden_reports_missing_hidden_property(self) -> None:

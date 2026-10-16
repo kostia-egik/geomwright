@@ -47,6 +47,78 @@ def test_registry_exposes_schema_driven_transmission_modules() -> None:
         assert validated.model_dump(exclude_none=True) == spec["defaults"]
 
 
+def test_spline_catalog_and_section_contours() -> None:
+    for kind in ("shaft_spline", "hub_spline"):
+        module = get_module(kind)
+        selection = module.spec()["module"]["selection"]
+        assert [item["value"] for item in selection["series"]] == ["light", "medium", "heavy"]
+        assert all(item["sizes"] for item in selection["series"])
+        for series in selection["series"]:
+            # Studio resolves D and b from series, z and d.
+            assert len({(size["tooth_count"], size["inner_diameter_mm"]) for size in series["sizes"]}) == len(series["sizes"])
+        for fits in selection["fits"]["centering"].values():
+            assert fits["default_centering_pair"] in fits["centering_pairs"]
+            assert not fits["side_pairs"] or fits["default_side_pair"] in fits["side_pairs"]
+
+        preview = preview_module(kind, module.defaults)
+        assert preview["ok"]
+        contour = preview["closed_points"][0]
+        # A reversed sector seam used to draw a chord across the entire part.
+        diameter = preview["summary"]["outer_diameter_mm"]
+        assert max(math.dist(a, b) for a, b in zip(contour, contour[1:] + contour[:1])) < diameter * .1
+        assert preview["tone_paths"][0]["stroke"] is False
+        physical_edges = preview["tone_paths"][1]
+        assert physical_edges["closed"] is False
+        # Both complete central flanks must survive sampling and period joining.
+        # Dropping the final flank endpoint used to replace it with an arc sample.
+        half_width = preview["summary"]["tooth_width_mm"] / 2
+        for x in (-half_width, half_width):
+            assert any(
+                abs(a[0] - x) < 1e-8 and abs(b[0] - x) < 1e-8 and abs(a[1] - b[1]) > .2
+                for a, b in zip(physical_edges["points"], physical_edges["points"][1:])
+            )
+        assert any(item.get("width", 0) < physical_edges["width"] for item in preview["tone_paths"][2:])
+        assert all(math.isfinite(value) for point in contour for value in point)
+        for dimension in preview["dimensions"]:
+            if dimension["orientation"] == "radial":
+                assert math.hypot(*dimension["end"]) == pytest.approx(dimension["value"] / 2)
+        if kind == "shaft_spline":
+            crop = preview["tone_paths"][-1]["points"]
+            assert crop[0] == physical_edges["points"][-1]
+            assert crop[-1] == physical_edges["points"][0]
+            edges = physical_edges["points"]
+            for a, b, c, d in ((crop[0], crop[1], edges[-2], edges[-1]),
+                               (crop[-2], crop[-1], edges[0], edges[1])):
+                cut_direction = [b[k] - a[k] for k in (0, 1)]
+                edge_direction = [d[k] - c[k] for k in (0, 1)]
+                dot = sum(cut_direction[k] * edge_direction[k] for k in (0, 1))
+                # Sampled segments approximate a normal join, not a sharp cusp.
+                assert abs(dot) / (math.hypot(*cut_direction) * math.hypot(*edge_direction)) < .05
+            bends = [
+                (b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0]) > 0
+                for a, b, c in zip(crop, crop[1:], crop[2:])
+            ]
+            for quarter in range(4):
+                signs = bends[quarter*len(bends)//4:(quarter+1)*len(bends)//4]
+                assert sum(a != b for a, b in zip(signs, signs[1:])) >= 6
+            # Keep enough core visible beneath shallow teeth, not just a rim.
+            root_radius = preview["summary"]["root_diameter_mm"] / 2
+            assert math.hypot(*crop[len(crop) // 2]) < root_radius * .6
+        else:
+            outside_dimension = next(item for item in preview["dimensions"] if item["key"] == "hub_outside_diameter")
+            assert outside_dimension["start"][0] != 0
+            assert outside_dimension["end"][0] != 0
+
+        base_plan = managed_pulley_plan(kind, module.defaults)
+        fit_plan = managed_pulley_plan(kind, {**module.defaults, "fit_centering": "H7/h7"})
+        assert fit_plan["geometry"] == base_plan["geometry"]
+        assert fit_plan["workflow"] == base_plan["workflow"]
+        assert fit_plan["profile_request"]["fit_centering"] == "H7/h7"
+        base_fit = base_plan["profile_preview"]["fits"]["selected"]["centering"]
+        selected_fit = fit_plan["profile_preview"]["fits"]["selected"]["centering"]
+        assert selected_fit["clearance_min_um"] != base_fit["clearance_min_um"]
+
+
 def test_silent_chain_catalog_selection_is_distinct_from_roller_chain_and_requires_completion() -> None:
     module = get_module("silent_chain_sprocket")
     descriptor = module.descriptor()
@@ -1093,6 +1165,132 @@ def test_chain_sprocket_recipe_roundtrip_restores_studio_profile() -> None:
     assert recipe is None
     assert "checksum" in error
 
+    # Pulley creation recipes retain finishing options, not only inferred dimensions.
+    import hashlib
+    import json
+    payload = {"schema": "geomwright.pulley.recipe", "version": 1, "family": "v_belt",
+               "name": "Шкив", "parameters": {"designation": "A", "datum_diameter": 160,
+               "groove_count": 2, "standard_system": "din_iso",
+               "include_standard_top_edge_fillet": False, "top_edge_fillet_radius": 1.2}}
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    chunks = [encoded[i:i+200] for i in range(0, len(encoded), 200)]
+    stored = [{"name": "GWP_RECIPE_COUNT", "value": len(chunks)},
+              {"name": "GWP_RECIPE_HASH", "value": 1, "note": hashlib.sha256(encoded.encode("ascii")).hexdigest()}]
+    stored.extend({"name": "GWP_RECIPE_%03d" % i, "value": 1, "note": chunk} for i, chunk in enumerate(chunks))
+    assert bridge._read_shared_pulley_recipe(stored) == (payload, None)
+    stored[-1]["note"] += "x"
+    decoded, error = bridge._read_shared_pulley_recipe(stored)
+    assert decoded is None and "checksum" in error
+    from types import SimpleNamespace
+    compression = {"schema": "geomwright.compression.recipe", "version": 1,
+                   "parameters": {"wire_diameter": 4, "mean_diameter": 30}, "name": "Spring"}
+    encoded = json.dumps(compression, ensure_ascii=True, separators=(",", ":"))
+    chunked = [encoded[i:i+200] for i in range(0, len(encoded), 200)]
+    variables = [SimpleNamespace(Name="CSPR_RECIPE_COUNT", Value=len(chunked)),
+                 SimpleNamespace(Name="CSPR_RECIPE_HASH", Note=hashlib.sha256(encoded.encode("ascii")).hexdigest())]
+    variables.extend(SimpleNamespace(Name="CSPR_RECIPE_%03d" % i, Note=c) for i, c in enumerate(chunked))
+    bridge._iter_operation_variables = lambda _part: variables
+    assert bridge._compression_module_recipe(object()) == (compression, None)
+    variables[-1].Note += "x"
+    decoded, error = bridge._compression_module_recipe(object())
+    assert decoded is None and "checksum" in error
+    extension = {**compression, "schema": "geomwright.extension.recipe"}
+    encoded = json.dumps(extension, ensure_ascii=True, separators=(",", ":"))
+    chunked = [encoded[i:i+200] for i in range(0, len(encoded), 200)]
+    variables[:] = [SimpleNamespace(Name="ESPR_RECIPE_COUNT", Value=len(chunked)),
+                    SimpleNamespace(Name="ESPR_RECIPE_HASH", Note=hashlib.sha256(encoded.encode("ascii")).hexdigest())]
+    variables.extend(SimpleNamespace(Name="ESPR_RECIPE_%03d" % i, Note=c) for i, c in enumerate(chunked))
+    assert bridge._compression_module_recipe(object(), "extension") == (extension, None)
+    assert bridge._compression_module_recipe(object()) == (None, None)
+    variables[-1].Note += "x"
+    decoded, error = bridge._compression_module_recipe(object(), "extension")
+    assert decoded is None and "checksum" in error
+    torsion = {**compression, "schema": "geomwright.torsion.recipe"}
+    encoded = json.dumps(torsion, ensure_ascii=True, separators=(",", ":"))
+    chunked = [encoded[i:i+200] for i in range(0, len(encoded), 200)]
+    variables[:] = [SimpleNamespace(Name="TSPR_RECIPE_COUNT", Value=len(chunked)),
+                    SimpleNamespace(Name="TSPR_RECIPE_HASH", Note=hashlib.sha256(encoded.encode("ascii")).hexdigest())]
+    variables.extend(SimpleNamespace(Name="TSPR_RECIPE_%03d" % i, Note=c) for i, c in enumerate(chunked))
+    assert bridge._compression_module_recipe(object(), "torsion") == (torsion, None)
+    assert bridge._compression_module_recipe(object(), "extension") == (None, None)
+    variables[-1].Note += "x"
+    decoded, error = bridge._compression_module_recipe(object(), "torsion")
+    assert decoded is None and "checksum" in error
+    disc = {**compression, "schema": "geomwright.disc.recipe"}
+    encoded = json.dumps(disc, ensure_ascii=True, separators=(",", ":"))
+    chunked = [encoded[i:i+200] for i in range(0, len(encoded), 200)]
+    variables[:] = [SimpleNamespace(Name="DSPR_RECIPE_COUNT", Value=len(chunked)),
+                    SimpleNamespace(Name="DSPR_RECIPE_HASH", Note=hashlib.sha256(encoded.encode("ascii")).hexdigest())]
+    variables.extend(SimpleNamespace(Name="DSPR_RECIPE_%03d" % i, Note=c) for i, c in enumerate(chunked))
+    assert bridge._compression_module_recipe(object(), "disc") == (disc, None)
+    assert bridge._compression_module_recipe(object(), "torsion") == (None, None)
+    variables[-1].Note += "x"
+    decoded, error = bridge._compression_module_recipe(object(), "disc")
+    assert decoded is None and "checksum" in error
+    diaphragm = {**compression, "schema": "geomwright.diaphragm.recipe"}
+    encoded = json.dumps(diaphragm, ensure_ascii=True, separators=(",", ":"))
+    chunked = [encoded[i:i+200] for i in range(0, len(encoded), 200)]
+    variables[:] = [SimpleNamespace(Name="DIAPR_RECIPE_COUNT", Value=len(chunked)),
+                    SimpleNamespace(Name="DIAPR_RECIPE_HASH", Note=hashlib.sha256(encoded.encode("ascii")).hexdigest())]
+    variables.extend(SimpleNamespace(Name="DIAPR_RECIPE_%03d" % i, Note=c) for i, c in enumerate(chunked))
+    assert bridge._compression_module_recipe(object(), "diaphragm") == (diaphragm, None)
+    assert bridge._compression_module_recipe(object(), "disc") == (None, None)
+    variables[-1].Note += "x"
+    decoded, error = bridge._compression_module_recipe(object(), "diaphragm")
+    assert decoded is None and "checksum" in error
+    shaft = {"schema":"geomwright.stepped_shaft.recipe","version":1,"parameters":{"steps":[{"length":10,"diameter":20}]}}
+    encoded = json.dumps(shaft,ensure_ascii=True,separators=(",",":"))
+    chunks = [encoded[i:i+200] for i in range(0,len(encoded),200)]
+    variables[:] = [SimpleNamespace(Name="SHFT_RECIPE_COUNT",Value=len(chunks)),
+                   SimpleNamespace(Name="SHFT_RECIPE_HASH",Note=hashlib.sha256(encoded.encode("ascii")).hexdigest())]
+    variables.extend(SimpleNamespace(Name="SHFT_RECIPE_%03d" % i,Note=chunk) for i,chunk in enumerate(chunks))
+    assert bridge._creation_module_recipe(object(),"stepped_shaft") == (shaft,None)
+    assert bridge._compression_module_recipe(object(),"diaphragm") == (None,None)
+    variables[-1].Note += "x"
+    decoded,error = bridge._creation_module_recipe(object(),"stepped_shaft")
+    assert decoded is None and "checksum" in error
+    cone = {"schema":"geomwright.external_conical_step.recipe","version":1,"parameters":{"definition_mode":"diameters_length","start_diameter":40,"end_diameter":20,"length":30}}
+    encoded = json.dumps(cone,ensure_ascii=True,separators=(",",":"))
+    chunks = [encoded[i:i+200] for i in range(0,len(encoded),200)]
+    variables[:] = [SimpleNamespace(Name="ECON_RECIPE_COUNT",Value=len(chunks)),
+                   SimpleNamespace(Name="ECON_RECIPE_HASH",Note=hashlib.sha256(encoded.encode("ascii")).hexdigest())]
+    variables.extend(SimpleNamespace(Name="ECON_RECIPE_%03d" % i,Note=chunk) for i,chunk in enumerate(chunks))
+    assert bridge._creation_module_recipe(object(),"external_conical_step") == (cone,None)
+    assert bridge._creation_module_recipe(object(),"stepped_shaft") == (None,None)
+    variables[-1].Note += "x"
+    decoded,error = bridge._creation_module_recipe(object(),"external_conical_step")
+    assert decoded is None and "checksum" in error
+    flat = {"schema":"geomwright.external_flat_step.recipe","version":1,"name":"Flat",
+        "parameters":{"diameter":30,"length":25,"flat_depth":4,"flats_count":1,"axial_direction":"forward"},
+        "profile_name":"External flat profile","body_name":"External flat body"}
+    def store_flat(_part, rows):
+        variables[:] = [SimpleNamespace(Name=row["name"],Value=row["value"],Note=row.get("note","")) for row in rows]
+        return {"ok":True}
+    bridge._apply_part_variables = store_flat
+    bridge._store_creation_module_recipe(object(),flat,"external_flat_step")
+    assert bridge._creation_module_recipe(object(),"external_flat_step") == (flat,None)
+    assert bridge._creation_module_recipe(object(),"external_conical_step") == (None,None)
+    variables[-1].Note += "x"
+    decoded,error = bridge._creation_module_recipe(object(),"external_flat_step")
+    assert decoded is None and "checksum" in error
+
+    # Append rewrites existing metadata slots: AddVariable alone neither replaces
+    # their Note nor guarantees that reused count values reflect the new recipe.
+    variables.clear()
+    def reuse_metadata(_part, rows):
+        existing = {v.Name: v for v in variables}
+        for row in rows:
+            if row["name"] not in existing:
+                variables.append(SimpleNamespace(Name=row["name"],Value=row["value"],Note=row.get("note", "")))
+        return {"ok": True}
+    bridge._apply_part_variables = reuse_metadata
+    chain = {"schema": "geomwright.construction_chain.recipe", "version": 1,
+             "recipe": {"steps": [{"id": "base"}]}}
+    bridge._store_creation_module_recipe(object(),chain,"construction_chain")
+    appended = {**chain,"recipe":{"steps":[{"id":"base"},{"id":"groove","note":"x"*450}]}}
+    bridge._store_creation_module_recipe(object(),appended,"construction_chain")
+    assert bridge._creation_module_recipe(object(),"construction_chain") == (appended,None)
+
 
 def test_chain_sprocket_multirow_representatives_cover_every_standard_in_mcp_and_studio() -> None:
     catalog = {item["designation"]: item for item in list_chain_profiles()["profiles"]}
@@ -1122,6 +1320,8 @@ def test_chain_sprocket_execute_routes_the_managed_plan_to_its_bridge_action() -
     class RecordingRunner:
         def __init__(self) -> None:
             self.calls: list[tuple[str, dict]] = []
+            self.fail_inspection = False
+            self.sketch_code = 1
 
         def call(self, action: str, payload: dict, **_: object) -> dict:
             self.calls.append((action, payload))
@@ -1143,12 +1343,16 @@ def test_chain_sprocket_execute_routes_the_managed_plan_to_its_bridge_action() -
             if action == "apply_existing_sketch_constraint":
                 raise BridgeError("Bridge call timed out after 15 seconds")
             if action == "inspect_sketch_full":
+                assert payload["update_before_state"] is True
+                if self.fail_inspection:
+                    raise BridgeError("Constraint readback unavailable")
                 return {
                     "entities": [
                         {"kind": "segment", "index": 2, "reference": 201},
                         {"kind": "circle", "index": 1, "reference": 301},
                     ],
-                    "constraints_state": {"code": 2, "label": "fully_defined"},
+                    "constraints_state": {"code": self.sketch_code,
+                        "label": "fully_defined" if self.sketch_code == 1 else "has_degrees_of_freedom"},
                     "summary": {
                         "closure_primary_closed": True,
                         "closure_primary_gap_count": 0,
@@ -1187,6 +1391,26 @@ def test_chain_sprocket_execute_routes_the_managed_plan_to_its_bridge_action() -
         "apply_existing_sketch_constraint",
         "inspect_sketch_full",
     ]
+    runner.sketch_code = 2
+    underdefined = KompasAdapter(runner=runner).create_managed_pulley(
+        family="chain_sprocket", profile_request={
+            key: value for key, value in result["plan"]["ownership"]["source_profile"].items()
+            if key != "tooth_profile_variant"
+        }, execute=True, confirm_write=True,
+    )
+    assert underdefined["transition_constraint"]["constraints_state_requires_ui_confirmation"] is True
+    runner.fail_inspection = True
+    with pytest.raises(BridgeError, match="Constraint readback unavailable") as failed:
+        KompasAdapter(runner=runner).create_managed_pulley(
+            family="chain_sprocket", profile_request={
+                key: value for key, value in result["plan"]["ownership"]["source_profile"].items()
+                if key != "tooth_profile_variant"
+            },
+            execute=True, confirm_write=True,
+        )
+    assert failed.value.partial_result["document"]["runtime_id"] == "@document:1"
+    assert failed.value.partial_result["verified"] is False
+    assert failed.value.partial_result["rollback_performed"] is False
 
 
 def test_registry_adapts_both_belt_previews_to_one_canvas_contract() -> None:
@@ -1303,8 +1527,8 @@ def test_timing_trapezoidal_managed_plan_owns_parameterized_workflow() -> None:
         "axis": "global_x",
         "body_count": 1,
         "outer_diameter": pytest.approx(plan["profile_preview"]["derived"]["outside_diameter"]),
-        "axial_min": 0.0,
-        "axial_max": 20.0,
+        "axial_min": -20.0,
+        "axial_max": 0.0,
         "parameter_base": {
             "outer_radius_variable": "TB_OR",
             "face_width_variable": "TB_B",
@@ -1483,8 +1707,9 @@ def test_timing_belt_custom_profile_requires_complete_geometry() -> None:
         preview_module("timing_trapezoidal", {"designation": "CUSTOM", "tooth_count": 30, "face_width": 18.0})
 
 
-def test_flat_belt_studio_russian_copy_covers_fields_help_summary_warning_and_progress() -> None:
+def test_studio_localized_copy_covers_pulley_and_bevel_diagnostics() -> None:
     from pathlib import Path
+    import ast
 
     root = Path(__file__).resolve().parents[1]
     source = (root / "src" / "geomwright" / "studio" / "static" / "i18n.js").read_text(encoding="utf-8")
@@ -1502,6 +1727,26 @@ def test_flat_belt_studio_russian_copy_covers_fields_help_summary_warning_and_pr
         '"cad.operation.create_flat_pulley_rotation": "Операция вращения обода',
     ]
     assert all(text in source for text in expected)
+    ru, en = source.split("  en: {", 1)
+    bevel_tree = ast.parse((root / "src/kompas_mcp/gears/bevel.py").read_text(encoding="utf-8"))
+    flank_tree = ast.parse((root / "src/kompas_mcp/gears/involute.py").read_text(encoding="utf-8"))
+    flank = next(node for node in flank_tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name == "build_tooth_space_flank")
+    codes = {node.args[0].value for tree in (bevel_tree, flank) for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id in {"warning_item", "error_item", "check"}
+             and node.args and isinstance(node.args[0], ast.Constant)
+             and isinstance(node.args[0].value, str)}
+    for code in codes:
+        assert f'"warning.{code}":' in ru, f"Missing RU diagnostic: {code}"
+        assert f'"warning.{code}":' in en, f"Missing EN diagnostic: {code}"
+    for kind in ("shaft_spline", "hub_spline"):
+        values = preview_module(kind, get_module(kind).defaults)["summary"]
+        for key, value in values.items():
+            if value is None or key in ("series_title", "centering_title", "execution_title"):
+                continue
+            for locale, dictionary in (("RU", ru), ("EN", en)):
+                assert f'"spline.summary.{key}":' in dictionary, f"Missing {locale} spline summary: {key}"
 
 
 def test_canvas_renders_neutral_bodies_and_unfilled_feature_contours() -> None:
@@ -1514,9 +1759,13 @@ def test_canvas_renders_neutral_bodies_and_unfilled_feature_contours() -> None:
     assert "(state.data.feature_paths || []).forEach" in source
     assert "drawPath(path, view, { stroke, lineWidth: 2.5 });" in source
     assert "drawPath(path, view, { fill, stroke });" not in source
+    assert "closed: false," in source
 
 
 def test_studio_cad_plan_status_reads_family_specific_dimensions_without_a_target() -> None:
+    import json
+    import shutil
+    import subprocess
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
@@ -1541,6 +1790,29 @@ def test_studio_cad_plan_status_reads_family_specific_dimensions_without_a_targe
     assert 'standard?.startsWith("gost_")' not in source
     assert 'moduleSelect.value' in source
 
+    # Exercise the actual status helper against host-generated spline plans.
+    # Node is optional for Python-only installations.
+    node = shutil.which("node")
+    if node:
+        start = source.index("function cadPlanDisplayDimensions(")
+        helper = source[start:source.index("\nfunction formatElapsed(", start)]
+        plans = [managed_pulley_plan(kind, get_module(kind).defaults) for kind in ("shaft_spline", "hub_spline")]
+        script = helper + """
+function t(key) { return key; }
+const plans = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const dimensions = plans.map(cadPlanDisplayDimensions);
+let rejected = false;
+try { cadPlanDisplayDimensions({family: 'straight_spline', geometry: {}}); }
+catch (_) { rejected = true; }
+console.log(JSON.stringify({dimensions, rejected}));
+"""
+        result = subprocess.run([node, "-e", script], input=json.dumps([
+            {"family": plan["family"], "geometry": plan["geometry"]} for plan in plans
+        ]), text=True, capture_output=True, check=True, timeout=10)
+        assert json.loads(result.stdout) == {"dimensions": [
+            {"outerDiameter": 40, "faceWidth": 30}, {"outerDiameter": 55, "faceWidth": 30},
+        ], "rejected": True}
+
 
 def test_studio_exposes_a_cancel_control_for_running_cad_jobs() -> None:
     from pathlib import Path
@@ -1561,11 +1833,9 @@ def test_bundled_bridge_contains_managed_pulley_create_and_ownership_paths() -> 
     packaged = (root / "src" / "kompas_mcp" / "assets" / "bridge" / "kompas_bridge.py").read_text(encoding="utf-8")
 
     assert source == packaged
-    # BRIDGE-001: the bundled KOMPAS runtime is Python 3.2. f-strings and
-    # starred display expressions are 3.5+ syntax; an ast feature_version check
-    # does not catch the starred form reliably, so guard the source directly.
-    assert not re.search(r"(^|[^A-Za-z0-9_])f[\"']", source)
-    assert not re.search(r"^\s+\*\s*[A-Za-z_]", source, re.M)
+    # BRIDGE-001: KOMPAS_PYTHON uses a modern runtime. Syntax compilation and
+    # packaged/source equality protect the actual supported contract.
+    compile(source, "kompas_bridge.py", "exec")
     assert "def _build_managed_flat_pulley(" in source
     assert 'family not in ("v_belt", "poly_v", "flat_belt", "timing_trapezoidal", "timing_curvilinear")' in source
     assert '{"FP_OR", "FP_T"}.intersection(variable_names)' in source
@@ -1609,6 +1879,8 @@ def test_managed_pulley_update_cannot_be_interrupted_mid_transaction() -> None:
     source = (root / "src" / "geomwright" / "studio" / "app.py").read_text(encoding="utf-8")
 
     assert "studio_adapter(cancel_event, interruptible=False).update_managed_pulley(" in source
+    assert "runner.timeout_seconds = DEFAULT_NORMAL_TIMEOUT_SECONDS" in source
+    assert "runner.timeout_seconds = 180.0 if interruptible else None" not in source
 
 
 def test_flat_belt_preview_is_registered_in_the_public_tool_catalog() -> None:
@@ -1770,7 +2042,7 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
             type(self).calls.append(kwargs)
             return {"ok": True, "host_test_double": True}
 
-    client = TestClient(create_app(adapter_factory=HostOnlyAdapter))
+    client = TestClient(create_app(adapter_factory=HostOnlyAdapter), base_url="http://127.0.0.1")
 
     root = client.get("/")
     assert root.status_code == 200
@@ -1806,6 +2078,13 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert gear_plan.json()["stage"] == "gear_spur_cad_plan"
     assert gear_plan.json()["verification"]["pattern_count"] == 20
     assert gear_plan.json()["geometry"]["entity_count"] < 200
+    spur_entities = gear_plan.json()["workflow"]["params"]["operations"][1]["params"]["entities"]
+    for entity in (item for item in spur_entities if item["kind"] == "nurbs"):
+        assert entity["order"] == entity["degree"] + 1 == 4
+        assert len(entity["knots"]) == len(entity["points"]) + entity["order"]
+        # Cubic single internal knots keep the external flank C2.
+        internal_knots = entity["knots"][entity["order"]:-entity["order"]]
+        assert len(internal_knots) == len(set(internal_knots))
     invalid_gear = client.post("/modules/gear_spur/preview", json={"tooth_count": 3})
     assert invalid_gear.status_code == 422
     helical_request = {**gear_spec["defaults"], "helix_angle_deg": 20.0, "hand": "left"}
@@ -1922,6 +2201,10 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
         entity["kind"] for entity in tooth_entities
         if "root_transition" in entity["id"]
     ] == ["nurbs", "nurbs"]
+    for entity in (item for item in tooth_entities if item["kind"] == "nurbs"):
+        # Internal profiles retain the Bezier chain, but native order is degree+1.
+        assert entity["order"] == entity["degree"] + 1 == 4
+        assert len(entity["knots"]) == len(entity["points"]) + entity["order"]
     internal_chamfer = client.post(
         "/modules/gear_internal/preview",
         json={**internal_spec["defaults"], "tip_chamfer_mm": 0.5},
@@ -1960,6 +2243,76 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
         item["code"] == "gear_internal_ring_outside_below_root"
         for item in internal_bad_ring.json()["report"]["errors"]
     )
+
+    import math
+    bevel = client.post("/modules/gear_bevel/preview", json={}).json()
+    assert bevel["ok"] is True
+    assert len(bevel["closed_points"]) == 1
+    assert bevel["secondary_view"]["blank_width_mm"] != bevel["secondary_view"]["face_width_mm"]
+    assert bevel["preview_window"]["section_style"] == "projected_rim_sector"
+    assert bevel["preview_window"]["cut_style"] == "wavy"
+    rim = bevel["rim_outline"]
+    material = bevel["closed_points"][0]
+    assert [0., 0.] in material  # the blank fills the interior, not an annular hole
+    count = (len(rim) - 1) // 2
+    ratio = bevel["summary"]["inner_cone_distance_mm"] / bevel["summary"]["outer_cone_distance_mm"]
+    crop = bevel["crop_outline"]
+    cut = bevel["break_paths"][0]
+    assert crop[0] == crop[-1]
+    top_count = len(crop) - len(cut) - 1
+    assert crop[top_count:-1] == cut
+    assert min(math.hypot(*p) for p in crop[:top_count]) > bevel["summary"]["outer_tip_diameter_mm"] / 2
+    assert cut[0] == rim[count - 1]
+    assert cut[-1] == rim[0]
+    for outer, inner in zip(rim[:count], reversed(rim[count:-1])):
+        assert inner == pytest.approx([coordinate * ratio for coordinate in outer])
+    assert len(bevel["tone_paths"]) == 5  # solid foundation, rim edges, three tooth-tip surfaces
+    assert bevel["tone_paths"][0]["points"] == material
+    assert bevel["tone_paths"][0]["stroke"] is False
+    assert all(item["tone"] == "exhaust" for item in bevel["tone_paths"])
+    assert len(bevel["guide_paths"]) == 6  # two lines in each complete gap, one at each cropped edge
+    for outer, inner in bevel["guide_paths"]:
+        assert inner == pytest.approx([coordinate * ratio for coordinate in outer])
+    detail = bevel["tooth_end_view"]
+    assert detail["projection"] == "orthographic_back_cone"
+    assert detail["outline"][:len(detail["profile"])] == detail["profile"]
+    assert detail["break_path"][0] == detail["profile"][-1]
+    assert detail["break_path"][-1] == detail["profile"][0]
+    assert detail["outline"][0] == detail["outline"][-1]
+    assert {ref["key"] for ref in detail["references"]} == {"pitch", "root"}
+    assert detail["bounds"]["x_min"] == pytest.approx(-detail["bounds"]["x_max"])
+    pitch_chord = detail["dimensions"][0]
+    assert pitch_chord["symbol"] == "sₑ,proj"
+    assert pitch_chord["value"] == pytest.approx(pitch_chord["end"][0] - pitch_chord["start"][0])
+    assert pitch_chord["start"][1] == pytest.approx(pitch_chord["end"][1])
+    # Projection normal and local profile remain valid away from a 45° cone.
+    angled = client.post("/modules/gear_bevel/preview", json={
+        "module_mm": 4, "tooth_count": 16, "pitch_cone_angle_deg": 26.565, "profile_shift": .2,
+    }).json()
+    assert angled["ok"] is True
+    side_angles = [math.atan2(*p) for p in cut[:41]]
+    bottom_radii = [math.hypot(*p) for p in cut[40:137]]
+    for samples in (side_angles, bottom_radii):
+        extrema = sum((b - a) * (c - b) < 0 for a, b, c in zip(samples, samples[1:], samples[2:]))
+        assert extrema >= 4  # actual waves, not another straight side or circular base
+    inner_root = min(math.hypot(*p) for p in rim[count:-1])
+    assert max(bottom_radii) < inner_root  # crop through the foundation BELOW all small-end teeth
+    # Tooth-tip arcs must remain within a single pitch, never join tips over
+    # an intervening gap in either the front or local end view.
+    for surface in bevel["tone_paths"][2:]:
+        cap = surface["points"][:(len(surface["points"]) - 1) // 2]
+        angles = [math.atan2(p[0], p[1]) for p in cap]
+        assert max(angles) - min(angles) < 2 * math.pi / bevel["summary"]["tooth_count"]
+    direction = angled["tooth_end_view"]["view_direction"]
+    assert math.hypot(*direction) == pytest.approx(1)
+    assert direction[0] == pytest.approx(math.cos(math.radians(26.565)))
+    assert all(math.isfinite(coordinate) for point in angled["tooth_end_view"]["outline"] for coordinate in point)
+    rejected_bevel = client.post("/modules/gear_bevel/preview", json={"face_width_mm": 1000}).json()
+    assert rejected_bevel["ok"] is False
+    assert rejected_bevel["closed_points"] == []
+    assert rejected_bevel["secondary_view"] is None
+    assert rejected_bevel.get("tooth_end_view") is None
+    assert rejected_bevel["errors"][0]["code"] == "gear_bevel_face_width_exceeds_cone"
 
     cam_spec = client.get("/modules/camshaft_lobe/spec").json()
     assert cam_spec["module"]["capabilities"] == {"preview": True, "build": True, "inspect": False}
@@ -2028,7 +2381,8 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     )
     assert timing_plan.status_code == 200
     assert timing_plan.json()["target"]["outer_diameter"] > 0
-    assert timing_plan.json()["target"]["axial_max"] == 20.0
+    assert timing_plan.json()["target"]["axial_min"] == -20.0
+    assert timing_plan.json()["target"]["axial_max"] == 0.0
 
     chain_spec = client.get("/modules/chain_sprocket/spec").json()
     chain_plan = client.post("/modules/chain_sprocket/cad/plan", json=chain_spec["defaults"])
@@ -2065,6 +2419,140 @@ def test_http_api_serves_ui_catalog_preview_and_structured_errors() -> None:
     assert client.get("/modules/missing/spec").status_code == 404
     assert client.post("/modules/poly_v/build", json={}).status_code == 404
     client.close()
+
+
+def test_studio_http_boundary_blocks_foreign_hosts_and_browser_writes_before_side_effects() -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from geomwright.studio.app import create_app
+
+    calls = []
+
+    def adapter():
+        calls.append("adapter")
+        raise AssertionError("Rejected requests must not reach CAD")
+
+    def picker():
+        calls.append("picker")
+        return None
+
+    client = TestClient(create_app(adapter_factory=adapter, file_picker=picker),
+                        base_url="http://127.0.0.1:8765")
+    for host in ("foreign.example:8765", "127.0.0.1.foreign.example", "localhost@foreign.example",
+                 "localhost:bad", "localhost:0", "localhost:", "localhost?", "localhost/path"):
+        assert client.get("/health", headers={"Host": host}).status_code == 400
+        assert client.post("/workspace/pick-file", headers={"Host": host}).status_code == 400
+    assert client.post("/workspace/pick-file", headers=[("Host", "localhost"),
+                                                            ("Host", "127.0.0.1")]).status_code == 400
+    for headers in (
+        {"Origin": "https://foreign.example"}, {"Origin": "null"},
+        {"Origin": "http://localhost:8765"}, {"Origin": "https://127.0.0.1:8765"},
+        {"Origin": "http://127.0.0.1:8766"}, {"Origin": "http://127.0.0.1:8765/"},
+        {"Origin": "http://127.0.0.1:8765?"}, {"Origin": "http://user@127.0.0.1:8765"},
+        {"Sec-Fetch-Site": "cross-site"}, {"Sec-Fetch-Site": "same-site"},
+        {"Sec-Fetch-Site": "same-origin"},
+        {"Sec-Fetch-Site": "none"}, {"Sec-Fetch-Mode": "navigate"},
+        {"Origin": "http://127.0.0.1:8765", "Sec-Fetch-Site": "cross-site"},
+        [("Origin", "http://127.0.0.1:8765"), ("Origin", "http://127.0.0.1:8765")],
+    ):
+        # A simple HTML form POST can reach a server regardless of its CORS policy.
+        assert client.post("/workspace/pick-file", headers=headers,
+                           data={"path": "ignored"}).status_code == 403
+        assert client.post("/modules/poly_v/cad/jobs", headers=headers,
+                           json={"profile": get_module("poly_v").defaults,
+                                 "confirm_write": True}).status_code == 403
+    assert calls == []
+    for headers in ({}, {"Origin": "http://127.0.0.1:8765"},
+                    {"Origin": "http://127.0.0.1:8765", "Sec-Fetch-Site": "same-origin"}):
+        assert client.post("/workspace/pick-file", headers=headers).status_code == 200
+    assert calls == ["picker"] * 3
+    for base_url in ("http://localhost", "http://127.0.0.1:80"):
+        local = TestClient(create_app(file_picker=picker), base_url=base_url)
+        assert local.post("/workspace/pick-file", headers={"Origin": base_url}).status_code == 200
+    assert client.post("/workspace/pick-file", headers={"Host": "[::1]:8765",
+                       "Origin": "http://[::1]:8765"}).status_code == 200
+    assert client.options("/workspace/pick-file", headers={"Origin": "https://foreign.example",
+                         "Access-Control-Request-Method": "POST"}).status_code == 405
+
+
+def test_studio_cad_jobs_share_admission_pruning_and_worker_start_recovery(monkeypatch) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from geomwright.studio import app as studio_app
+
+    workers = []
+    calls = []
+
+    class Worker:
+        fail_start = False
+
+        def __init__(self, *, target, args, **kwargs):
+            self.target, self.args = target, args
+            workers.append(self)
+
+        def start(self):
+            if self.fail_start:
+                raise RuntimeError("Cannot start thread")
+
+        def run(self):
+            self.target(*self.args)
+
+    class Adapter:
+        def create_managed_pulley(self, **kwargs):
+            calls.append("create")
+            reject_extra_jobs()
+            return {"ok": True}
+
+        def update_managed_pulley(self, **kwargs):
+            calls.append("update")
+            reject_extra_jobs()
+            return {"ok": True}
+
+    # Park workers before execution to deterministically exercise queued admission.
+    monkeypatch.setattr(studio_app.threading, "Thread", Worker)
+    client = TestClient(studio_app.create_app(adapter_factory=Adapter), base_url="http://127.0.0.1")
+    profile = get_module("timing_curvilinear").defaults
+    payload = {"profile": profile, "previous_profile": profile, "confirm_write": True,
+               "document_id": "@document:0", "block_id": "managed-pulley:1"}
+    paths = ["/modules/timing_curvilinear/cad/jobs", "/modules/timing_curvilinear/cad/update-jobs"]
+
+    def reject_extra_jobs():
+        count = len(workers)
+        for path in paths:
+            assert client.post(path, json=payload).status_code == 409
+        assert len(workers) == count
+
+    Worker.fail_start = True
+    assert client.post(paths[0], json=payload).status_code == 503
+    Worker.fail_start = False
+    for path in paths:
+        started = client.post(path, json=payload)
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        count = len(workers)
+        for other in paths:
+            assert client.post(other, json=payload).status_code == 409
+        assert len(workers) == count
+        assert client.post(f"/cad/jobs/{job_id}/cancel").json()["stage"] == "cancelling"
+        assert client.post(path, json=payload).status_code == 409
+        workers[-1].run()
+        assert client.get(f"/cad/jobs/{job_id}").json()["status"] == "cancelled"
+    assert calls == []
+
+    ids = []
+    # Both entry points retain the same bounded history; no CAD/COM is involved.
+    for index in range(102):
+        response = client.post(paths[index % 2], json=payload)
+        assert response.status_code == 202
+        ids.append(response.json()["id"])
+        workers[-1].run()
+        assert client.get(f"/cad/jobs/{ids[-1]}").json()["status"] == "completed"
+    assert calls == ["create", "update"] * 51
+    for job_id in ids[:2]:
+        assert client.get(f"/cad/jobs/{job_id}").status_code == 404
+        assert client.post(f"/cad/jobs/{job_id}/cancel").status_code == 404
+    for job_id in ids[2:]:
+        assert client.get(f"/cad/jobs/{job_id}").status_code == 200
 
 
 def test_workspace_api_routes_snapshot_activation_and_file_opening() -> None:
@@ -2115,7 +2603,8 @@ def test_workspace_api_routes_snapshot_activation_and_file_opening() -> None:
             adapter_factory=WorkspaceAdapter,
             file_picker=lambda: r"C:\models\picked.m3d",
             save_file_picker=lambda suggested_name: rf"C:\models\{suggested_name}",
-        )
+        ),
+        base_url="http://127.0.0.1",
     )
     workspace = client.get("/workspace")
     assert workspace.status_code == 200
@@ -2153,7 +2642,7 @@ def test_workspace_api_routes_snapshot_activation_and_file_opening() -> None:
     assert WorkspaceAdapter.calls[-1] == (
         "close",
         "@document:1",
-        {"save": False, "close_mode": 0, "strict": True},
+        {"save": False, "close_mode": 0, "strict": True, "user_requested": True},
     )
     saved_as = client.post(
         "/workspace/close",
@@ -2165,7 +2654,9 @@ def test_workspace_api_routes_snapshot_activation_and_file_opening() -> None:
     )
     assert saved_as.status_code == 200
     assert WorkspaceAdapter.calls[-1][0] == "save_as"
-    assert WorkspaceAdapter.calls[-1][-1] == {"close_after_save": True, "strict": True}
+    assert WorkspaceAdapter.calls[-1][-1] == {
+        "close_after_save": True, "strict": True, "user_requested_close": True,
+    }
     saved_copy = client.post(
         "/workspace/save-as",
         json={"document_id": "@document:1", "save_path": r"C:\models\copy.m3d"},
@@ -2195,7 +2686,7 @@ def test_workspace_reports_disconnected_state_without_failing_initialization() -
         def studio_workspace_snapshot(self) -> dict:
             raise RuntimeError("No running visible KOMPAS-3D instance. Start KOMPAS-3D.")
 
-    response = TestClient(create_app(adapter_factory=DisconnectedAdapter)).get("/workspace")
+    response = TestClient(create_app(adapter_factory=DisconnectedAdapter), base_url="http://127.0.0.1").get("/workspace")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -2222,10 +2713,12 @@ def test_studio_marks_bridge_runner_as_visible_session_only() -> None:
         def studio_workspace_snapshot(self) -> dict:
             return {"ok": True, "connected": True, "documents": [], "active_runtime_id": None}
 
-    response = TestClient(create_app(adapter_factory=VisibleAdapter)).get("/workspace")
+    response = TestClient(create_app(adapter_factory=VisibleAdapter), base_url="http://127.0.0.1").get("/workspace")
 
     assert response.status_code == 200
     assert VisibleAdapter.runner.require_visible_kompas is True
+    assert VisibleAdapter.runner.timeout_seconds == 300.0
+    assert VisibleAdapter.runner.cad_mode == "interactive"
 
 
 def test_workspace_save_keeps_document_open_and_refreshes_snapshot() -> None:
@@ -2248,7 +2741,7 @@ def test_workspace_save_keeps_document_open_and_refreshes_snapshot() -> None:
             type(self).calls.append((path, document_id, kwargs))
             return {"document": {"runtime_id": path, "path": path}, "closed": False}
 
-    client = TestClient(create_app(adapter_factory=SaveAdapter))
+    client = TestClient(create_app(adapter_factory=SaveAdapter), base_url="http://127.0.0.1")
     response = client.post(
         "/workspace/save",
         json={"document_id": "@document:0", "save_path": r"C:\models\pulley.m3d"},
@@ -2290,7 +2783,7 @@ def test_workspace_close_saved_document_uses_strict_save_and_close() -> None:
             type(self).calls.append((document_id, kwargs))
             return {"closed": True}
 
-    client = TestClient(create_app(adapter_factory=SavedWorkspaceAdapter))
+    client = TestClient(create_app(adapter_factory=SavedWorkspaceAdapter), base_url="http://127.0.0.1")
     response = client.post(
         "/workspace/close",
         json={"document_id": r"C:\models\pulley.m3d", "action": "save"},
@@ -2298,7 +2791,7 @@ def test_workspace_close_saved_document_uses_strict_save_and_close() -> None:
 
     assert response.status_code == 200
     assert SavedWorkspaceAdapter.calls == [
-        (r"C:\models\pulley.m3d", {"close_after_save": True, "strict": True})
+        (r"C:\models\pulley.m3d", {"close_after_save": True, "strict": True, "user_requested_close": True})
     ]
 
 
@@ -2325,7 +2818,7 @@ def test_curvilinear_timing_cad_create_job_reports_real_lifecycle_without_blocki
             time.sleep(0.03)
             return {"ok": True, "stage": "executed", "verification": {"ok": True}}
 
-    client = TestClient(create_app(adapter_factory=FakeAdapter))
+    client = TestClient(create_app(adapter_factory=FakeAdapter), base_url="http://127.0.0.1")
     profile = get_module("timing_curvilinear").defaults
     started = client.post(
         "/modules/timing_curvilinear/cad/jobs",
@@ -2367,7 +2860,7 @@ def test_cam_job_preserves_recipe_partial_result_and_releases_lock() -> None:
                                     "document":{"runtime_id":"@document:7"}})
             return {"ok":True,"verification":{"ok":True}}
 
-    client = TestClient(create_app(adapter_factory=FakeCamAdapter))
+    client = TestClient(create_app(adapter_factory=FakeCamAdapter), base_url="http://127.0.0.1")
     for expected_status in ("failed","completed"):
         job = client.post("/modules/camshaft_lobe/cad/jobs",json={
             "profile":{"step":"cam"},"confirm_write":True}).json()
@@ -2397,7 +2890,7 @@ def test_curvilinear_timing_cad_update_job_targets_existing_managed_block() -> N
             progress_callback({"percent": 70, "operation": "rebuild_updated_model", "name": "Pulley"})
             return {"ok": True, "success": True, "stage": "updated"}
 
-    client = TestClient(create_app(adapter_factory=UpdateAdapter))
+    client = TestClient(create_app(adapter_factory=UpdateAdapter), base_url="http://127.0.0.1")
     profile = get_module("timing_curvilinear").defaults
     started = client.post(
         "/modules/timing_curvilinear/cad/update-jobs",
@@ -2517,17 +3010,70 @@ def test_cli_starts_or_reopens_ui_and_reports_foreign_port_conflict(
 
 def test_cli_reuses_current_studio_instead_of_stale_same_count_instance(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from geomwright.studio import __main__ as ui_main
     from geomwright.studio.app import _studio_content_version
+    from kompas_mcp import gears
 
+    gear_source = tmp_path / "cad.py"
+    gear_source.write_text("old gear fitter\n", encoding="utf-8")
+    monkeypatch.setattr(gears, "__file__", str(tmp_path / "__init__.py"))
+    stale_version = _studio_content_version()
+    gear_source.write_text("C2 gear fitter\n", encoding="utf-8")
     current_version = _studio_content_version()
+    assert current_version != stale_version
+    from kompas_mcp import adapter as adapter_runtime
+    adapter_source = tmp_path / "host_adapter.py"
+    adapter_source.write_text("old creation finalizer\n", encoding="utf-8")
+    monkeypatch.setattr(adapter_runtime, "__file__", str(adapter_source))
+    before_adapter_change = _studio_content_version()
+    adapter_source.write_text("editor-backed verification\n", encoding="utf-8")
+    current_version = _studio_content_version()
+    assert current_version != before_adapter_change
+    from kompas_mcp import bridge_runner as runner_runtime
+    runner_source = tmp_path / "bridge_runner.py"
+    runner_source.write_text("old runtime selection\n",encoding="utf-8")
+    monkeypatch.setattr(runner_runtime,"__file__",str(runner_source))
+    before_runtime_change = _studio_content_version()
+    runner_source.write_text("owned CAD runtime with preflight\n",encoding="utf-8")
+    current_version = _studio_content_version()
+    assert current_version != before_runtime_change
+    from kompas_mcp import session_guard as guard_runtime
+    guard_source = tmp_path / "session_guard.py"
+    guard_source.write_text("manual recovery\n", encoding="utf-8")
+    monkeypatch.setattr(guard_runtime, "__file__", str(guard_source))
+    before_guard_change = _studio_content_version()
+    guard_source.write_text("settled failure audit\n", encoding="utf-8")
+    current_version = _studio_content_version()
+    assert current_version != before_guard_change
+    monkeypatch.setenv("KOMPAS_PYTHON",str(tmp_path / "old-native.exe"))
+    before_selection_change = _studio_content_version()
+    monkeypatch.setenv("KOMPAS_PYTHON",str(tmp_path / "new-native.exe"))
+    current_version = _studio_content_version()
+    assert current_version != before_selection_change
+    from kompas_mcp.connections import splines
+
+    # Keep these outside the mocked gear package: that fingerprint must not
+    # accidentally make the spline dependency assertions pass.
+    spline_root = tmp_path / "splines"
+    spline_root.mkdir()
+    monkeypatch.setattr(splines, "__file__", str(spline_root / "__init__.py"))
+    for name in ("straight.py", "spec.py"):
+        (spline_root / name).write_text("old spline source\n", encoding="utf-8")
+    for name in ("straight.py", "spec.py"):
+        stale_version = _studio_content_version()
+        (spline_root / name).write_text("new spline source\n", encoding="utf-8")
+        current_version = _studio_content_version()
+        assert current_version != stale_version, f"Spline dependency omitted: {name}"
+        assert _studio_content_version() == current_version
+    # The instance on 8765 now differs only in its spline request schema.
     monkeypatch.setattr(ui_main, "_port_is_available", lambda port: port not in (8765, 8766))
     monkeypatch.setattr(ui_main, "_ui_is_running", lambda url: url.endswith(("8765/", "8766/")))
     monkeypatch.setattr(
         ui_main,
         "_ui_health",
-        lambda url: {"module_count": 8, "studio_version": "outdated" if url.endswith("8765/") else current_version},
+        lambda url: {"module_count": 8, "studio_version": stale_version if url.endswith("8765/") else current_version},
     )
     opened: list[str] = []
     monkeypatch.setattr(ui_main.webbrowser, "open", lambda url, new: opened.append(url))

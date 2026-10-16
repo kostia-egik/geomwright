@@ -31,7 +31,7 @@ def main() -> int:
         summary["failed_tests"].append({
             "node": "::".join(filter(None, (case.attrib.get("classname"), case.attrib.get("name")))),
             "kind": "failure" if failure is not None else "error",
-            "message": (issue.attrib.get("message") or "").splitlines()[0][:300],
+            "message": ((issue.attrib.get("message") or issue.text or "").splitlines() or [""])[0][:300],
         })
     summary["ok"] = summary["failures"] == 0 and summary["errors"] == 0
     text = json.dumps(summary, ensure_ascii=False, indent=2)

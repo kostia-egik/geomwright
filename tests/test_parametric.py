@@ -17,6 +17,1468 @@ from kompas_mcp.thread_profile_geometry import build_pipe_tapered_thread_geometr
 from kompas_mcp.transmissions.timing_belt import build_curvilinear_timing_pulley_plan, build_trapezoidal_timing_pulley_plan
 
 
+class ConstructionChainTests(unittest.TestCase):
+    def test_native_mass_readback_is_pinned_before_and_after_api5_call(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from kompas_mcp.assets.bridge import construction_chain_runtime as runtime
+        from kompas_mcp.assets.bridge import chain_thread_runtime as thread, chain_spline_runtime as spline
+
+        other = SimpleNamespace(runtime_id="other")
+        app = SimpleNamespace(ActiveDocument=other)
+
+        class Document:
+            runtime_id = "target"
+            accept_activation = True
+
+            @property
+            def Active(self):
+                return app.ActiveDocument is self
+
+            @Active.setter
+            def Active(self, value):
+                if value and self.accept_activation:
+                    app.ActiveDocument = self
+
+        doc = Document()
+        metrics = {"volume": 1, "body_count": 1, "solid": True}
+        bridge = SimpleNamespace(
+            describe_runtime_document=lambda obj, _app: {"runtime_id": obj.runtime_id},
+            safe_get=lambda obj, key: getattr(obj, key, None),
+            _cast_to_com_interface=lambda obj, _kind: obj,
+            _active_api5_primary_body_metrics=Mock(return_value=metrics))
+        self.assertIs(runtime._exact_document_body_metrics(bridge, app, doc), metrics)
+        self.assertIs(app.ActiveDocument, doc)
+        bridge._active_api5_primary_body_metrics.assert_called_once_with()
+
+        # Exercise both snapshot entry points: rejected activation must fail
+        # before body/face access, and before any active-document API5 read.
+        doc.accept_activation = False
+        app.ActiveDocument = other
+        bridge._active_api5_primary_body_metrics.reset_mock()
+        for snapshot, args in ((thread.snapshot, (bridge, runtime, app, doc, {}, {})),
+                               (spline.snapshot, (bridge, runtime, app, doc, {}, {}))):
+            with self.subTest(snapshot=snapshot.__module__):
+                with self.assertRaisesRegex(RuntimeError, "exact active chain document"):
+                    snapshot(*args)
+                bridge._active_api5_primary_body_metrics.assert_not_called()
+
+        doc.accept_activation = True
+        app.ActiveDocument = doc
+        def switch_tabs():
+            app.ActiveDocument = other
+            return metrics
+        bridge._active_api5_primary_body_metrics.side_effect = switch_tabs
+        with self.assertRaisesRegex(RuntimeError, "changed during mass readback"):
+            runtime._exact_document_body_metrics(bridge, app, doc)
+        doc.runtime_id = None
+        bridge._active_api5_primary_body_metrics.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "exact chain document identity"):
+            runtime._exact_document_body_metrics(bridge, app, doc)
+        bridge._active_api5_primary_body_metrics.assert_not_called()
+
+    def test_public_internal_thread_plan_is_terminal_and_keeps_bore_prefix(self):
+        import copy
+        from kompas_mcp.construction_chains import plan_construction_chain, ConstructionChain
+        from kompas_mcp.assets.bridge import construction_chain_runtime as native, chain_thread_runtime as thread
+        bore = build_metric_thread_geometry(20, 2.5)["internal_minor_diameter"]
+        raw = {"steps": [
+            {"id": "blank", "module": "stepped_shaft", "basis": "own", "material": "create",
+             "parameters": {"steps": [{"diameter": 36, "length": 20}]}},
+            {"id": "bore", "module": "internal_cylindrical_step", "basis": "input", "material": "remove",
+             "target": "blank", "placement": {"reference": {"step": "blank", "anchor": "start"}},
+             "parameters": {"steps": [{"diameter": bore, "length": 20}]}},
+            {"id": "thread", "module": "internal_helical_thread", "basis": "input", "material": "remove",
+             "target": "bore", "placement": {"reference": {"step": "bore", "anchor": "start"}},
+             "parameters": {"diameter": 20, "pitch": 2.5, "length": 20}}]}
+        plan = plan_construction_chain(raw)
+        self.assertEqual(plan["thread_prefix_plan"], plan_construction_chain({"steps": raw["steps"][:-1]}))
+        self.assertIsNone(plan["expected_total_volume_cm3"])
+        self.assertEqual(thread.validate_plan(native, plan), plan["steps"])
+        self.assertEqual(native._validate(plan), plan["steps"])
+        self.assertEqual(plan["recipe"]["steps"][-1]["parameters"]["method_version"], 1)
+        self.assertEqual(plan["steps"][-1]["preview"]["params"]["profile_variables"][0]["value"], 20)
+        for updates in ({"length": 19}, {"diameter": 36}, {"exit_mode": "blind"}, {"method_version": 2}):
+            with self.subTest(request=updates), self.assertRaises(ValueError):
+                bad = copy.deepcopy(raw); bad["steps"][-1]["parameters"].update(updates)
+                plan_construction_chain(bad)
+        bad = copy.deepcopy(raw)
+        bad["steps"].append({"id": "later", "module": "internal_cylindrical_step", "basis": "input", "material": "remove",
+            "target": "blank", "placement": {"reference": {"step": "blank", "anchor": "start"}},
+            "parameters": {"steps": [{"diameter": 1, "length": 1}]}})
+        with self.assertRaises(ValueError): plan_construction_chain(bad)
+        for key in ("method_version", "entry_mode", "exit_mode"):
+            bad = copy.deepcopy(plan); bad["recipe"]["steps"][-1]["parameters"].pop(key)
+            # Preserve prefix binding so the precise native input guard is exercised.
+            bad["thread_prefix_plan"]["recipe"] = {**bad["recipe"], "steps": bad["recipe"]["steps"][:-1]}
+            with self.subTest(native_missing=key), self.assertRaises(ValueError): thread.validate_plan(native, bad)
+        self.assertIn("InternalMetricThreadChainStep", ConstructionChain.model_json_schema()["$defs"])
+        blind = copy.deepcopy(raw)
+        blind["steps"][-1]["parameters"].update(length=18,exit_mode="blind")
+        blind["steps"][0]["parameters"]["steps"][0]["length"] = 24
+        bp = plan_construction_chain(blind)
+        self.assertEqual(native._validate(bp),bp["steps"])
+        guard = bp["steps"][-1]["thread_guard"]
+        self.assertEqual(guard["end_plan"]["smooth_bore_tail_mm"],2)
+        self.assertEqual(guard["end_plan"]["bottom_stock_thickness_mm"],4)
+        params = bp["steps"][-1]["preview"]["params"]
+        self.assertEqual(params["length"],18)
+        self.assertEqual(next(v for v in params["profile_variables"] if v["name"]==params["public_length_variable_name"])["value"],18)
+        self.assertAlmostEqual(params["spiral_length"],20.36458333333333)
+        self.assertEqual(bp["thread_prefix_plan"],plan_construction_chain({"steps":blind["steps"][:-1]}))
+        bad = copy.deepcopy(bp);bad["recipe"]["steps"][-1]["parameters"]["exit_mode"]="through"
+        with self.assertRaises(ValueError):native._validate(bad)
+        blind["steps"][0]["parameters"]["steps"][0]["length"] = 20
+        self.assertFalse(plan_construction_chain(blind)["steps"][-1]["thread_guard"]["end_plan"]["bore_has_bottom"])
+
+    def test_through_exit_requires_full_contour_and_root_clear_neighbors(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import plan_construction_chain
+        from kompas_mcp.assets.bridge import construction_chain_runtime as runtime, chain_thread_runtime as thread
+        raw = {"steps": [
+            {"id": "neck", "module": "stepped_shaft", "basis": "own", "material": "create", "parameters": {"steps": [{"length": 12, "diameter": 12}]}},
+            {"id": "carrier", "module": "stepped_shaft", "basis": "own", "material": "add", "placement": {"reference": {"step": "neck", "anchor": "end"}}, "parameters": {"steps": [{"length": 20, "diameter": 20}]}},
+            {"id": "exitneck", "module": "stepped_shaft", "basis": "own", "material": "add", "placement": {"reference": {"step": "carrier", "anchor": "end"}}, "parameters": {"steps": [{"length": 12, "diameter": 12}]}},
+            {"id": "thread", "module": "external_helical_thread", "basis": "input", "material": "remove", "target": "carrier",
+             "placement": {"reference": {"step": "carrier", "anchor": "start"}}, "parameters": {"diameter": 20, "pitch": 2.5, "length": 20, "entry_mode": "through", "exit_mode": "through"}}]}
+        plan = plan_construction_chain(raw)
+        runtime._validate(plan)
+        guard = plan["steps"][-1]["thread_guard"]
+        self.assertEqual(guard["end_plan"]["terminal_section_projection_mm"], [32, 34.1875])
+        self.assertEqual(guard["end_plan"]["spiral_length_mm"], 24.34375)
+        self.assertEqual(guard["end_plan"]["height_binding"]["expression"], "CH_THREAD_L1 + 1.7375 * CH_THREAD_P1")
+        before = {"body_count": 1, "volume_cm3": guard["expected_blank_volume_cm3"],
+                  "bounds_mm": [0, -10, -10, 44, 10, 10], "protected_faces": [{"kind": "cylinder", "x_span_mm": [32, 44], "area_mm2": 1}]}
+        edges = [{"axial_min_mm": 12, "axial_max_mm": 32, "radius_mm": radius}
+                 for radius in (10, 10, guard["root_tangent_radius_mm"], guard["root_tangent_radius_mm"])]
+        after = {**deepcopy(before), "volume_cm3": before["volume_cm3"]-0.9,
+                 "minimum_working_radius_mm": guard["root_radius_mm"], "helix_edges": edges, "terminal_sections": []}
+        verified = thread.verify(runtime, before, after, guard)
+        ending = verified["end_characteristics"]
+        self.assertTrue(ending["full_contour_boundary_coverage_verified"])
+        self.assertEqual(ending["partial_terminal_projection_width_mm"], 0)
+        self.assertTrue(ending["cutter_projection_is_planned"])
+        self.assertFalse(ending["functional_thread_length_verified"])
+        thread._validate_end_characteristics(runtime, guard, ending)
+        bad = deepcopy(after)
+        bad["helix_edges"][1]["axial_max_mm"] = 31
+        with self.assertRaisesRegex(RuntimeError, "two full-span top"):
+            thread.verify(runtime, before, bad, guard)
+        bad = deepcopy(after)
+        bad["terminal_sections"] = [{"x_span_mm": [30, 32]}]
+        with self.assertRaisesRegex(RuntimeError, "material terminal section"):
+            thread.verify(runtime, before, bad, guard)
+        bad = deepcopy(ending)
+        bad["full_root_tangent_boundary_count"] = 1
+        with self.assertRaisesRegex(ValueError, "full-contour evidence"):
+            thread._validate_end_characteristics(runtime, guard, bad)
+        for updates, message in (({"length": 19}, "actual carrier face"),
+                                 ({"exit_mode": None}, "exposed")):
+            bad = deepcopy(raw)
+            bad["steps"][-1]["parameters"].update(updates)
+            with self.assertRaisesRegex(ValueError, message):
+                plan_construction_chain(bad)
+        bad = deepcopy(raw)
+        bad["steps"][2]["parameters"]["steps"][0]["diameter"] = 30
+        with self.assertRaisesRegex(ValueError, "root core"):
+            plan_construction_chain(bad)
+        # Free end: same mode without exit stock, not a different profile path.
+        free = {"steps": deepcopy(raw["steps"][:2])+[deepcopy(raw["steps"][-1])]}
+        runtime._validate(plan_construction_chain(free))
+
+    def test_blind_end_projection_plan_preserves_inputs_and_legacy_terminal_contract(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import _adapt_preview, _plan_metric_thread_blind_end, ConstructionChain
+        prepared = _adapt_preview(preview_part_scenario("external_helical_thread", {
+            "diameter": 20, "pitch": 2.5, "length": 18, "direction": "left",
+            "source_scenario": "stepped_shaft", "source_params": {"steps": [{"length": 20, "diameter": 20}]}}),
+            "CH_THREAD", "Physical thread [thread]", 12, 1)
+        params = prepared["params"]
+        before = deepcopy(prepared)
+        end = _plan_metric_thread_blind_end(params)
+        self.assertEqual(prepared, before)
+        self.assertEqual(end["requested_span_mm"], [12, 30])
+        self.assertEqual(end["terminal_section_projection_mm"], [27.8125, 30])
+        self.assertEqual(end["partial_terminal_projection_width_mm"], 2.1875)
+        self.assertEqual(end["kernel_length_mm"], 17.53125)
+        self.assertEqual(end["spiral_length_mm"], 20.15625)
+        self.assertEqual(end["height_binding"]["expression"], "CH_THREAD_L1 + 0.8625 * CH_THREAD_P1")
+        self.assertEqual(end["height_binding"]["parameter_note_aliases"], params["operation_variable_bindings"][1]["parameter_note_aliases"])
+        self.assertFalse(end["verified"])
+        self.assertFalse(end["functional_thread_length_verified"])
+        self.assertFalse(end["controlled_runout"])
+        self.assertTrue(end["native_end_section_audit_required"])
+        right = deepcopy(params)
+        right["left_thread"] = False
+        self.assertEqual(_plan_metric_thread_blind_end(right), end)
+        changed = _adapt_preview(preview_part_scenario("external_helical_thread", {
+            "diameter": 20, "pitch": 2, "length": 18,
+            "source_scenario": "stepped_shaft", "source_params": {"steps": [{"length": 20, "diameter": 20}]}}),
+            "CH_THREAD", "Physical thread [thread]", 12, 1)["params"]
+        changed_end = _plan_metric_thread_blind_end(changed)
+        self.assertEqual(changed_end["terminal_section_projection_mm"], [28.25, 30])
+        self.assertAlmostEqual(changed_end["spiral_length_mm"], 19.725)
+        self.assertEqual(changed_end["height_binding"]["expression"], end["height_binding"]["expression"])
+        for updates, message in (({"pitch": float("nan")}, "finite"),
+                                 ({"length": 1}, "2..64"),
+                                 ({"end_origin": [29, 0, 0]}, "consistent global"),
+                                 ({"profile_entry_offset": 3}, "modified"),
+                                 ({"profile_root_shape": "flat"}, "automatic external"),
+                                 ({"profile_points": [[0, 10]]}, "closed metric"),
+                                 ({"public_length_variable_name": "CH_THREAD_P1"}, "height binding"),
+                                 ({"operation_variable_bindings": []}, "height binding")):
+            with self.subTest(updates=updates), self.assertRaisesRegex(ValueError, message):
+                _plan_metric_thread_blind_end({**params, **updates})
+        corrupt = deepcopy(params)
+        corrupt["profile_points"][3][0] += 0.1
+        with self.assertRaisesRegex(ValueError, "cutter envelope"):
+            _plan_metric_thread_blind_end(corrupt)
+        # Optional endpoint semantics do not add defaults to legacy recipe bytes.
+        schema = ConstructionChain.model_json_schema()
+        self.assertIsNone(schema["$defs"]["MetricThreadParameters"]["properties"]["exit_mode"]["default"])
+        self.assertEqual(params["length"], 18)
+        self.assertEqual(params["spiral_length"], 20.625)
+        from kompas_mcp.construction_chains import _metric_thread_carrier_guard, plan_construction_chain
+        from kompas_mcp.assets.bridge import construction_chain_runtime as runtime, chain_thread_runtime as thread
+        blank = {"steps": [
+            {"id": "neck", "module": "stepped_shaft", "basis": "own", "material": "create",
+             "parameters": {"steps": [{"length": 12, "diameter": 12}]}},
+            {"id": "carrier", "module": "stepped_shaft", "basis": "own", "material": "add",
+             "placement": {"reference": {"step": "neck", "anchor": "end"}},
+             "parameters": {"steps": [{"length": 20, "diameter": 20}]}},
+            {"id": "shoulder", "module": "stepped_shaft", "basis": "own", "material": "add",
+             "placement": {"reference": {"step": "carrier", "anchor": "end"}},
+             "parameters": {"steps": [{"length": 12, "diameter": 30}]}}]}
+        stock = plan_construction_chain(blank)
+        public = {**deepcopy(blank), "steps": deepcopy(blank["steps"])+[{
+            "id": "thread", "module": "external_helical_thread", "basis": "input", "material": "remove",
+            "target": "carrier", "placement": {"reference": {"step": "carrier", "anchor": "start"}},
+            "parameters": {"diameter": 20, "pitch": 2.5, "length": 18, "direction": "left",
+                           "entry_mode": "through", "exit_mode": "blind"}}]}
+        public_plan = plan_construction_chain(public)
+        runtime._validate(public_plan)
+        self.assertEqual(public_plan["thread_prefix_plan"], stock)
+        self.assertEqual(public_plan["steps"][-1]["preview"]["params"]["spiral_length"], 20.15625)
+        self.assertEqual(public_plan["recipe"]["steps"][-1]["parameters"]["entry_mode"], "through")
+        invalid = deepcopy(public_plan)
+        invalid["recipe"]["steps"][-1]["parameters"].pop("exit_mode")
+        with self.assertRaisesRegex(ValueError, "scope selected by exit_mode"):
+            runtime._validate(invalid)
+        invalid = deepcopy(public)
+        invalid["steps"][-1]["parameters"]["length"] = 20
+        with self.assertRaisesRegex(ValueError, "positive smooth tail"):
+            plan_construction_chain(invalid)
+        invalid = deepcopy(public)
+        invalid["steps"][-1]["parameters"]["exit_mode"] = "through"
+        with self.assertRaises(ValueError):
+            plan_construction_chain(invalid)
+        with self.assertRaisesRegex(ValueError, "complete selected carrier"):
+            _metric_thread_carrier_guard(stock, "carrier", params)
+        guard = _metric_thread_carrier_guard(stock, "carrier", params, blind_end_plan=end)
+        self.assertEqual(guard["carrier_span_mm"], [12, 32])
+        self.assertEqual(guard["working_span_mm"], [12, 30])
+        self.assertEqual([p["step_id"] for p in guard["protected_stock"]], ["neck", "shoulder"])
+        applied = deepcopy(params)
+        applied["spiral_length"] = end["spiral_length_mm"]
+        applied["operation_variable_bindings"][1] = deepcopy(end["height_binding"])
+        self.assertEqual(runtime._thread_carrier_guard(stock, guard, applied), stock["steps"])
+        with self.assertRaisesRegex(RuntimeError, "readback differs"):
+            runtime._thread_carrier_guard(stock, guard, params)
+        bad_guard = deepcopy(guard)
+        bad_guard["stock_envelope_segments"][-1]["start_radius_mm"] = 10
+        with self.assertRaisesRegex(ValueError, "envelope differs"):
+            runtime._thread_carrier_guard(stock, bad_guard, applied)
+        root = guard["root_radius_mm"]
+        before_body = {"body_count": 1, "bounds_mm": [0, -15, -15, 44, 15, 15],
+                       "volume_cm3": stock["expected_total_volume_cm3"],
+                       "protected_faces": [{"kind": "cylinder", "x_span_mm": [32, 44], "area_mm2": 1}]}
+        after_body = {**deepcopy(before_body), "volume_cm3": before_body["volume_cm3"]-0.5,
+                      "minimum_working_radius_mm": root,
+                      "helix_edges": [{"axial_min_mm": 12, "axial_max_mm": 28}, {"axial_min_mm": 12, "axial_max_mm": 29}],
+                      "terminal_sections": [{"x_span_mm": [27.8125, 30], "radius_bounds_mm": [root, 10], "area_mm2": 1}]}
+        audited = thread.verify(runtime, before_body, after_body, guard)
+        self.assertEqual(audited["end_characteristics"]["smooth_tail_mm"], 2)
+        thread._validate_end_characteristics(runtime, guard, audited["end_characteristics"])
+        bad = deepcopy(after_body)
+        bad["terminal_sections"][0]["x_span_mm"][1] += 0.1
+        with self.assertRaisesRegex(RuntimeError, "readback differs"):
+            thread.verify(runtime, before_body, bad, guard)
+        bad = deepcopy(after_body)
+        bad["protected_faces"][0]["area_mm2"] = 2
+        with self.assertRaisesRegex(RuntimeError, "protected stock"):
+            thread.verify(runtime, before_body, bad, guard)
+        bad = deepcopy(after_body)
+        bad["terminal_sections"] = []
+        with self.assertRaisesRegex(RuntimeError, "one native terminal section"):
+            thread.verify(runtime, before_body, bad, guard)
+        prefix = [{"id": step["id"], "namespace": step["namespace"],
+                   **{key: {"object_id": step["id"]+"-"+key, "name": key} for key in ("sketch", "feature", "macro")}}
+                  for step in stock["steps"]]
+        roles = [("Sketchs", applied["profile_display_name"]), ("Evolutions", applied["feature_display_name"]),
+                 ("Points3D", applied["start_center_name"]), ("Points3D", applied["profile_origin_name"]),
+                 ("Axes3D", applied["axis_display_name"]), ("Spirals3D", applied["path_display_name"]),
+                 ("LocalCoordinateSystems", applied["profile_display_name"]+"_LCS")]
+        owned = [{"collection": kind, "name": name, "object_id": "thread-"+str(i), "require_fully_defined": True}
+                 for i, (kind, name) in enumerate(roles)]
+        output = {"id": "thread", "namespace": "CH_THREAD", "owned_objects": owned,
+                  "sketch": owned[0], "feature": owned[1], "macro": {"object_id": "thread-macro", "name": "macro"}}
+        native_preview = {**deepcopy(prepared), "params": applied}
+        result = {"ok": True, "thread_executed": True, "verification": audited, "drivers": {"verified": True},
+                  "body_before": before_body, "body_after": after_body, "prefix_outputs": prefix, "output": output}
+        checkpoint = thread.make_checkpoint(runtime, stock, guard, native_preview, result)
+        self.assertEqual(checkpoint["end_characteristics"], audited["end_characteristics"])
+        invalid = deepcopy(checkpoint)
+        invalid.pop("end_characteristics")
+        with self.assertRaisesRegex(ValueError, "checkpoint end characteristics"):
+            thread._validate_checkpoint(runtime, stock, guard, native_preview, invalid)
+
+    def test_terminal_metric_thread_plan_uses_native_volume_and_preserves_analytic_prefix(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import plan_construction_chain, ConstructionChain, get_construction_chain_contract
+        from kompas_mcp.assets.bridge.construction_chain_runtime import _validate
+        raw = {"steps": [
+            {"id": "neck", "module": "stepped_shaft", "basis": "own", "material": "create",
+             "parameters": {"steps": [{"length": 12, "diameter": 12}]}},
+            {"id": "carrier", "module": "stepped_shaft", "basis": "own", "material": "add",
+             "placement": {"reference": {"step": "neck", "anchor": "end"}},
+             "parameters": {"steps": [{"length": 20, "diameter": 20}]}},
+            {"id": "thread", "module": "external_helical_thread", "basis": "input", "material": "remove",
+             "target": "carrier", "placement": {"reference": {"step": "carrier", "anchor": "start"}},
+             "parameters": {"diameter": 20, "pitch": 2.5, "length": 20, "direction": "left"}}]}
+        plan = plan_construction_chain(raw)
+        capability = get_construction_chain_contract()["modules"]["external_helical_thread"]
+        self.assertTrue(capability["terminal_only"])
+        self.assertEqual(capability["turn_count_bounds"], [2, 64])
+        ConstructionChain.model_validate(raw)
+        _validate(plan)
+        self.assertEqual(plan["thread_prefix_plan"], plan_construction_chain({"steps": raw["steps"][:-1]}))
+        self.assertIsNone(plan["expected_total_volume_cm3"])
+        self.assertIsNone(plan["steps"][-1]["expected_delta_cm3"])
+        self.assertEqual(plan["steps"][-1]["preview"]["params"]["public_pitch_variable_name"], "CH_THREAD_P1")
+        self.assertNotIn("source_preview", plan["steps"][-1]["preview"]["params"])
+        self.assertEqual(set(plan["recipe"]["steps"][-1]["parameters"]), {"diameter", "pitch", "length", "direction"})
+        invalid = deepcopy(plan)
+        invalid["steps"][-1]["thread_guard"]["scope"] = "blind_external_metric_cylinder_positive_x"
+        with self.assertRaisesRegex(ValueError, "Public thread chain still requires"):
+            _validate(invalid)
+        invalid = deepcopy(plan)
+        invalid["expected_total_volume_cm3"] = 6.7
+        with self.assertRaisesRegex(ValueError, "audited natively"):
+            _validate(invalid)
+        invalid = deepcopy(plan)
+        invalid["steps"][-1]["preview"]["params"]["left_thread"] = False
+        with self.assertRaisesRegex(ValueError, "hand differs"):
+            _validate(invalid)
+        invalid = deepcopy(raw)
+        invalid["steps"].append(deepcopy(raw["steps"][1]))
+        with self.assertRaisesRegex(ValueError, "terminal"):
+            plan_construction_chain(invalid)
+        invalid = deepcopy(raw)
+        invalid["steps"][-1]["parameters"]["length"] = 19
+        with self.assertRaisesRegex(ValueError, "complete selected carrier span"):
+            plan_construction_chain(invalid)
+        invalid = deepcopy(raw)
+        invalid["steps"][-1]["placement"]["offset_mm"] = 1
+        with self.assertRaisesRegex(ValueError, "target start"):
+            plan_construction_chain(invalid)
+
+    def test_metric_thread_carrier_protects_prior_stock_and_requires_complete_explicit_target(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import _metric_thread_carrier_guard, plan_construction_chain
+        raw = {"steps": [
+            {"id": "neck", "module": "stepped_shaft", "basis": "own", "material": "create",
+             "parameters": {"steps": [{"length": 12, "diameter": 12}]}},
+            {"id": "carrier", "module": "stepped_shaft", "basis": "own", "material": "add",
+             "placement": {"reference": {"step": "neck", "anchor": "end"}},
+             "parameters": {"steps": [{"length": 20, "diameter": 20}]}}
+        ]}
+        plan = plan_construction_chain(raw)
+        params = preview_part_scenario("external_helical_thread", {
+            "diameter": 20, "pitch": 2.5, "length": 20, "source_scenario": "stepped_shaft",
+            "source_params": {"steps": [{"length": 20, "diameter": 20}]}})["params"]
+        params.update(start_origin=[12, 0, 0], end_origin=[32, 0, 0])
+        saved = deepcopy((plan, params))
+        guard = _metric_thread_carrier_guard(plan, "carrier", params)
+        self.assertEqual(guard["working_span_mm"], [12, 32])
+        self.assertEqual(guard["protected_stock"][0]["step_id"], "neck")
+        self.assertAlmostEqual(guard["expected_blank_volume_cm3"], math.pi*(6**2*12+10**2*20)/1000)
+        self.assertFalse(guard["native_carrier_verified"])
+        self.assertEqual((plan, params), saved)
+        from kompas_mcp.construction_chains import _adapt_preview
+        from kompas_mcp.assets.bridge.chain_thread_runtime import execute as apply_thread
+        family = preview_part_scenario("external_helical_thread", {
+            "diameter": 20, "pitch": 2.5, "length": 20, "direction": "left",
+            "source_scenario": "stepped_shaft", "source_params": {"steps": [{"length": 20, "diameter": 20}]}})
+        prepared = _adapt_preview(family, "CH_THREAD", "Physical thread [thread]", 12, 1)
+        p = prepared["params"]
+        self.assertEqual(p["start_origin"], [12, 0, 0])
+        self.assertEqual(p["end_origin"], [32, 0, 0])
+        self.assertEqual(p["public_profile_variables"], ["CH_THREAD_D1", "CH_THREAD_P1", "CH_THREAD_L1"])
+        self.assertNotIn("source_variable_bindings", p)
+        self.assertNotIn("source_preview", p)
+        self.assertFalse(any(op["operation"] == "create_source_body" for op in prepared["operations"]))
+        self.assertEqual(p["profile_points"], family["params"]["profile_points"])
+        self.assertIn("CH_THREAD_P1", next(d["expression"] for d in p["profile_dimensions"] if d["variable"].endswith("_SKR1")))
+        prepared_guard = _metric_thread_carrier_guard(plan, "carrier", p)
+        with self.assertRaisesRegex(ValueError, "write confirmation"):
+            apply_thread(object(), object(), object(), object(), plan, prepared_guard, prepared, "thread")
+        from kompas_mcp.assets.bridge.construction_chain_runtime import _thread_carrier_context
+        # Native semantic checks must reject incompatible family dimensions
+        # before touching even the selected document or bridge.
+        with self.assertRaisesRegex(RuntimeError, "readback differs"):
+            _thread_carrier_context(object(), object(), object(), plan, guard, {**params, "diameter": 19})
+        from kompas_mcp.assets.bridge import construction_chain_runtime as runtime, chain_thread_runtime as thread
+        prefix = [{"id": step["id"], "namespace": step["namespace"],
+                   "sketch": {"object_id": step["id"]+"-sketch", "name": "sketch"},
+                   "feature": {"object_id": step["id"]+"-feature", "name": "feature"},
+                   "macro": {"object_id": step["id"]+"-macro", "name": "macro"}}
+                  for step in plan["steps"]]
+        roots = [("Sketchs", p["profile_display_name"]), ("Evolutions", p["feature_display_name"]),
+                 ("Points3D", p["start_center_name"]), ("Points3D", p["profile_origin_name"]),
+                 ("Axes3D", p["axis_display_name"]), ("Spirals3D", p["path_display_name"]),
+                 ("LocalCoordinateSystems", p["profile_display_name"]+"_LCS")]
+        owned = [{"collection": collection, "name": name, "object_id": "thread-"+str(i),
+                  "require_fully_defined": True, "current_name": name} for i, (collection, name) in enumerate(roots)]
+        out = {"id": "thread", "namespace": "CH_THREAD", "owned_objects": owned,
+               "sketch": deepcopy(owned[0]), "feature": deepcopy(owned[1]),
+               "macro": {"object_id": "thread-macro", "name": "macro"}}
+        before = {"body_count": 1, "volume_cm3": prepared_guard["expected_blank_volume_cm3"],
+                  "bounds_mm": [0, -10, -10, 32, 10, 10], "protected_faces": []}
+        after = {**before, "volume_cm3": before["volume_cm3"]-0.9,
+                 "helix_edges": [{"axial_min_mm": 12, "axial_max_mm": 32}]*2,
+                 "minimum_working_radius_mm": prepared_guard["root_radius_mm"]}
+        result = {"ok": True, "thread_executed": True, "verification": {"verified": True}, "drivers": {"verified": True},
+                  "body_before": before, "body_after": after, "prefix_outputs": prefix, "output": out}
+        checkpoint = thread.make_checkpoint(runtime, plan, prepared_guard, prepared, result)
+        self.assertAlmostEqual(checkpoint["removed_cm3"], 0.9)
+        self.assertNotIn("end_characteristics", checkpoint)  # legacy v1 shape remains unchanged
+        self.assertNotIn("helix_edges", checkpoint["baseline"])
+        self.assertNotIn("current_name", checkpoint["outputs"][-1]["owned_objects"][0])
+        self.assertIn("current_name", out["owned_objects"][0])  # no mutation of caller evidence
+        thread._validate_checkpoint(runtime, plan, prepared_guard, prepared, checkpoint)
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        live = deepcopy(checkpoint["outputs"])
+        inventory = {key: {} for key in thread.COLLECTIONS}
+        for i, row in enumerate(live):
+            row["macro"]["grouped"] = False  # supported ungrouping keeps roots
+            roots = row.get("owned_objects") or [dict(row[key], collection=collection)
+                for key, collection in (("sketch", "Sketchs"), ("feature", "Rotateds"))]
+            for j, root in enumerate(roots):
+                root["reference"] = 100*i+j+1
+                inventory[root["collection"]][root["reference"]] = object()
+            if not row.get("owned_objects"):
+                row["sketch"]["reference"], row["feature"]["reference"] = roots[0]["reference"], roots[1]["reference"]
+        inventory["Rotateds"][999] = object()  # unowned downstream root
+        bridge = SimpleNamespace(describe_runtime_document=lambda *args: {"type": 10024}, cast_model_container=lambda part: part)
+        with patch.object(runtime, "_ownership", return_value=live), patch.object(thread, "_inventory", return_value=inventory), patch.object(thread, "snapshot") as sample:
+            with self.assertRaisesRegex(RuntimeError, "extra or missing construction roots"):
+                thread.audit_checkpoint(bridge, runtime, object(), SimpleNamespace(TopPart=object()), plan, prepared_guard, prepared, checkpoint)
+            sample.assert_not_called()
+        invalid = deepcopy(checkpoint)
+        invalid["preview_hash"] = "wrong"
+        with self.assertRaisesRegex(ValueError, "differs from prefix"):
+            thread.audit_checkpoint(object(), runtime, object(), object(), plan, prepared_guard, prepared, invalid)
+        invalid = deepcopy(checkpoint)
+        invalid["outputs"][-1]["owned_objects"][0]["object_id"] = prefix[0]["sketch"]["object_id"]
+        with self.assertRaisesRegex(ValueError, "share persistent identities"):
+            thread._validate_checkpoint(runtime, plan, prepared_guard, prepared, invalid)
+        invalid = deepcopy(checkpoint)
+        invalid["outputs"][-1]["owned_objects"].pop()
+        with self.assertRaisesRegex(ValueError, "seven verified owned roots"):
+            thread._validate_checkpoint(runtime, plan, prepared_guard, prepared, invalid)
+        with self.assertRaisesRegex(ValueError, "six finite bounds"):
+            thread.verify(runtime, {**before, "bounds_mm": []}, after, prepared_guard)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            thread.verify(runtime, before, {**after, "volume_cm3": float("nan")}, prepared_guard)
+        invalid = deepcopy(checkpoint)
+        invalid["audited_volume_cm3"] += 0.1
+        with self.assertRaisesRegex(RuntimeError, "readback differs"):
+            thread._validate_checkpoint(runtime, plan, prepared_guard, prepared, invalid)
+        unsafe = deepcopy(raw)
+        unsafe["steps"][0]["parameters"]["steps"][0]["diameter"] = 2*guard["root_radius_mm"]
+        with self.assertRaisesRegex(ValueError, "root core"):
+            _metric_thread_carrier_guard(plan_construction_chain(unsafe), "carrier", params)
+        with self.assertRaisesRegex(ValueError, "complete selected carrier span"):
+            _metric_thread_carrier_guard(plan, "carrier", {**params, "length": 19, "end_origin": [31, 0, 0]})
+        with self.assertRaisesRegex(ValueError, "implicit resizing"):
+            _metric_thread_carrier_guard(plan, "carrier", {**params, "diameter": 19})
+        with self.assertRaisesRegex(ValueError, "explicit constructor target"):
+            _metric_thread_carrier_guard(plan, "absent", params)
+        neck_params = preview_part_scenario("external_helical_thread", {
+            "diameter": 12, "pitch": 1, "length": 12, "source_scenario": "stepped_shaft",
+            "source_params": {"steps": [{"length": 12, "diameter": 12}]}})["params"]
+        with self.assertRaisesRegex(ValueError, "exposed"):
+            _metric_thread_carrier_guard(plan, "neck", neck_params)
+        cut = deepcopy(raw)
+        cut["steps"].append({"id": "bore", "module": "internal_cylindrical_step", "basis": "input",
+            "material": "remove", "target": "carrier",
+            "placement": {"reference": {"step": "carrier", "anchor": "start"}},
+            "parameters": {"steps": [{"length": 20, "diameter": 4}]}})
+        with self.assertRaisesRegex(ValueError, "prior cuts"):
+            _metric_thread_carrier_guard(plan_construction_chain(cut), "carrier", params)
+
+    def test_flat_and_bolt_circle_native_guard_and_carrier_exclusions(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import plan_construction_chain
+        from kompas_mcp.assets.bridge.construction_chain_runtime import _validate
+        from kompas_mcp.assets.bridge.chain_holes_runtime import verify
+        raw = {"steps": [{"id": "flat", "module": "external_flat_step", "basis": "own", "material": "create",
+            "parameters": {"diameter": 60, "length": 12, "flat_depth": 4, "flats_count": 2}},
+            {"id": "holes", "module": "bolt_circle_holes", "basis": "input", "material": "remove", "target": "flat",
+             "parameters": {"hole_diameter": 5, "depth": 12, "bolt_circle_diameter": 40, "count": 4, "start_angle_degrees": 17},
+             "placement": {"reference": {"step": "flat", "anchor": "start"}}},
+            {"id": "bore", "module": "internal_cylindrical_step", "basis": "input", "material": "remove", "target": "flat",
+             "parameters": {"steps": [{"diameter": 8, "length": 12}]},
+             "placement": {"reference": {"step": "flat", "anchor": "start"}}}]}
+        plan = plan_construction_chain(raw)
+        _validate(plan)
+        self.assertEqual(plan["steps"][0]["section"]["flat_levels_y_mm"], [-26, 26])
+        self.assertAlmostEqual(plan["steps"][1]["expected_delta_cm3"], -4*math.pi*2.5**2*12/1000)
+        section = plan["steps"][1]["section"]
+        body = {"hole_faces": [dict(center_yz_mm=p, radius_mm=2.5, axial_min=0, axial_max=12) for p in section["hole_centers_yz_mm"]]}
+        verify(body, plan["steps"], 1e-5)
+        with self.assertRaisesRegex(RuntimeError, "centre/radius"):
+            verify({"hole_faces": body["hole_faces"][:-1]}, plan["steps"], 1e-5)
+        altered = deepcopy(plan)
+        altered["steps"][1]["section"]["hole_centers_yz_mm"][0][0] += 1
+        with self.assertRaises(RuntimeError):
+            _validate(altered)
+        raw["steps"][1]["parameters"]["bolt_circle_diameter"] = 52
+        with self.assertRaisesRegex(ValueError, "smaller than carrier"):
+            plan_construction_chain(raw)
+        raw["steps"][1]["parameters"].update(bolt_circle_diameter=6, hole_diameter=5)
+        with self.assertRaisesRegex(ValueError, "intersect or touch"):
+            plan_construction_chain(raw)
+
+    def test_polygon_chain_core_planes_direction_and_native_guard(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import plan_construction_chain
+        from kompas_mcp.assets.bridge.construction_chain_runtime import _validate, _verify
+        from kompas_mcp.assets.bridge.chain_prism_runtime import planes, bounds
+        raw = {"steps": [{"id": "poly", "module": "external_polygonal_step", "basis": "own",
+            "material": "create", "parameters": {"diameter": 30, "length": 10, "side_count": 6,
+            "rotation_angle_degrees": 17}, "placement": {"offset_mm": 7, "direction": -1}}]}
+        plan = plan_construction_chain(raw)
+        _validate(plan)
+        step = plan["steps"][0]
+        self.assertEqual(step["section"]["axial_interval_mm"], [-3, 7])
+        self.assertEqual(step["preview"]["params"]["axial_direction"], "forward")
+        self.assertAlmostEqual(step["section"]["segments"][0]["start_radius_mm"], 15)
+        self.assertAlmostEqual(plan["expected_total_volume_cm3"], 7.794228634059945)
+        footprint = bounds(plan["steps"])
+        y0, z0, y1, z1 = footprint
+        body = {"faces": [], "lateral_planes": [dict(p, axial_min=-3, axial_max=7)
+            for p in planes(step["section"]["polygon_vertices_yz_mm"])],
+            "bounds_mm": [-3, y0, z0, 7, y1, z1], "volume_cm3": plan["expected_total_volume_cm3"]}
+        self.assertEqual(plan["expected_bounds_mm"], body["bounds_mm"])
+        self.assertTrue(_verify(body, plan["steps"])["sections_verified"])
+        # Hash quantization is not suitable for analytical plane normals.
+        broken = deepcopy(body)
+        broken["lateral_planes"][0]["normal_yz"] = [round(n, 6) for n in broken["lateral_planes"][0]["normal_yz"]]
+        with self.assertRaisesRegex(RuntimeError, "plane/span"):
+            _verify(broken, plan["steps"])
+        altered = deepcopy(plan)
+        altered["steps"][0]["section"]["polygon_vertices_yz_mm"][0][0] += 1
+        with self.assertRaises((ValueError, RuntimeError)):
+            _validate(altered)
+        raw["steps"].append({"id": "bore", "module": "internal_cylindrical_step", "basis": "input",
+            "material": "remove", "target": "poly", "parameters": {"steps": [{"diameter": 30, "length": 10}]},
+            "placement": {"reference": {"step": "poly", "anchor": "start"}, "direction": -1}})
+        with self.assertRaisesRegex(ValueError, "smaller than carrier"):
+            plan_construction_chain(raw)
+
+    def recipe(self):
+        return {"name": "Shaft chain", "steps": [
+            {"id": "base", "module": "stepped_shaft", "basis": "own", "material": "create",
+             "parameters": {"steps": [{"length": 20, "diameter": 30}]}},
+            {"id": "cone", "module": "external_conical_step", "basis": "own", "material": "add",
+             "parameters": {"definition_mode": "diameters_length", "start_diameter": 30,
+                            "end_diameter": 20, "length": 10},
+             "placement": {"reference": {"step": "base", "anchor": "end"}}},
+            {"id": "bore", "module": "internal_cylindrical_step", "basis": "input", "material": "remove",
+             "target": "base", "parameters": {"steps": [{"length": 20, "diameter": 8}]},
+             "placement": {"reference": {"step": "base", "anchor": "start"}}},
+            {"id": "groove", "module": "face_ring_groove", "basis": "input", "material": "remove",
+             "target": "base", "parameters": {"inner_diameter": 12, "outer_diameter": 24,
+                 "depth": 3, "inner_wall_angle_degrees": 5, "outer_wall_angle_degrees": 7},
+             "placement": {"reference": {"step": "base", "anchor": "start"}}}]}
+
+    def test_chain_volume_recipe_and_preview_contract(self):
+        from kompas_mcp.construction_chains import plan_construction_chain, get_construction_chain_contract
+        raw = self.recipe()
+        plan = plan_construction_chain(raw)
+        self.assertEqual(plan, plan_construction_chain(plan["recipe"]))
+        self.assertNotIn("schema", raw)  # normalization does not mutate input
+        self.assertEqual(plan["schema"], "geomwright.construction_chain.plan")
+        expected = math.pi * 15**2 * 20 / 1000 + math.pi * 10 * (15**2 + 15*10 + 10**2) / 3000
+        expected -= math.pi * 4**2 * 20 / 1000
+        ri, ro = 6 + 3*math.tan(math.radians(5)), 12 - 3*math.tan(math.radians(7))
+        groove_volume = math.pi * 3 * ((12**2 + 12*ro + ro**2) - (6**2 + 6*ri + ri**2)) / 3000
+        self.assertAlmostEqual(plan["steps"][-1]["expected_delta_cm3"], -groove_volume)
+        self.assertAlmostEqual(plan["expected_total_volume_cm3"], expected-groove_volume)
+        contract = get_construction_chain_contract()
+        self.assertEqual(contract["limits"]["max_steps"], 32)
+        self.assertEqual(contract["placement"]["editing"], "recreate_only")
+        self.assertTrue(all(module["cad_chain_verified"] for module in contract["modules"].values()))
+        self.assertTrue(contract["continuation"]["cad_verified"])
+        self.assertTrue(any("zero wall angles only" in text for text in contract["limitations"]))
+        self.assertEqual(contract["modules"]["face_ring_groove"]["supported_modes"],
+                         [{"basis": "input", "material": "remove"}])
+        for step in plan["steps"]:
+            p = step["preview"]
+            self.assertTrue(p["params"]["require_fully_defined"])
+            self.assertTrue(p["params"]["fix_sketch_placement"])
+            self.assertNotIn("source_preview", p["params"])
+            constraints = next(op["constraints"] for op in p["operations"] if op["operation"] == "apply_constraints")
+            self.assertTrue(any(c["kind"] == "fixed_point" and c["target"] in ("axis", "origin") for c in constraints))
+            dimensions = next(op["dimensions"] for op in p["operations"] if op["operation"] == "add_dimensions")
+            self.assertFalse(any(d["kind"] == "point_coordinate" for d in dimensions))
+            variables = next(op["variables"] for op in p["operations"] if op["operation"] == "add_variables")
+            self.assertNotIn(step["namespace"] + "_OX", [v["name"] for v in variables])
+            self.assertFalse(any(op["operation"] in ("create_part_document", "create_source_body") for op in p["operations"]))
+        for step in (plan["steps"][1], plan["steps"][3]):
+            dimensions = next(op["dimensions"] for op in step["preview"]["operations"] if op["operation"] == "add_dimensions")
+            self.assertEqual(dimensions[0]["kind"], "line_length")
+            self.assertEqual(dimensions[0]["target"], "axis")
+
+    def test_chain_reversal_global_profile_and_anchors(self):
+        from kompas_mcp.construction_chains import plan_construction_chain
+        raw = self.recipe()
+        raw["steps"] = raw["steps"][:2]
+        raw["steps"][0]["placement"] = {"offset_mm": 7, "direction": -1}
+        raw["steps"][1]["placement"]["direction"] = -1
+        plan = plan_construction_chain(raw)
+        cone = plan["steps"][1]
+        self.assertEqual(cone["section"]["axial_interval_mm"], [-23, -13])
+        self.assertEqual(cone["section"]["segments"][0]["start_radius_mm"], 10)
+        profile = next(op for op in cone["preview"]["operations"] if op["operation"] == "draw_profile")
+        self.assertEqual(profile["profile_points"][1], [-13, 15])
+        dims = next(op["dimensions"] for op in cone["preview"]["operations"] if op["operation"] == "add_dimensions")
+        self.assertEqual(dims[0]["expression"], "CH_CONE_L1")
+        self.assertEqual(len(dims), 3)
+        constraints = next(op["constraints"] for op in cone["preview"]["operations"] if op["operation"] == "apply_constraints")
+        self.assertIn({"kind": "fixed_point", "target": "axis", "index": 0, "name": "axis_origin_fixed"}, constraints)
+        axis = next(op for op in cone["preview"]["operations"] if op["operation"] == "draw_axis")
+        self.assertEqual(axis["start"], [-13, 0])
+        variables = next(op["variables"] for op in cone["preview"]["operations"] if op["operation"] == "add_variables")
+        self.assertTrue(all(v["name"].startswith("CH_CONE_") for v in variables))
+        self.assertNotIn("CH_CONE_OX", [v["name"] for v in variables])
+
+        # Existing horizontal coordinate drivers, if supplied by a family,
+        # retain their expression with numeric translation and signed X only.
+        from kompas_mcp.construction_chains import _adapt_preview
+        from kompas_mcp.cad_shaft_bindings import shaft_plan
+        preview = shaft_plan({"steps": [{"length": 10, "diameter": 20}]}, name="shaft")["preview"]
+        dimensions = next(op for op in preview["operations"] if op["operation"] == "add_dimensions")
+        dimensions["dimensions"].append({"kind": "point_coordinate", "orientation": "horizontal",
+            "target": "axis", "point_index": 1, "value": 10, "expression": "SHAFT_L1", "driving": True})
+        dimensions["dimension_count"] += 1
+        adapted = _adapt_preview(preview, "CH_SAMPLE", "Stepped shaft [sample]", 7.0, -1)
+        dim = next(op["dimensions"] for op in adapted["operations"] if op["operation"] == "add_dimensions")[-1]
+        self.assertEqual(dim["value"], -3)
+        self.assertEqual(dim["expression"], "(7.0) + (-1) * (CH_SAMPLE_L1)")
+
+    def gear_recipe(self):
+        return {"name": "Gear with hub and continuous bore", "steps": [
+            {"id": "rim", "module": "gear_spur", "basis": "own", "material": "create",
+             "parameters": {"module_mm": 2, "tooth_count": 20, "face_width_mm": 20}},
+            {"id": "hub", "module": "stepped_shaft", "basis": "own", "material": "add",
+             "parameters": {"steps": [{"length": 12, "diameter": 24}]},
+             "placement": {"reference": {"step": "rim", "anchor": "end"}}},
+            {"id": "rim_bore", "module": "internal_cylindrical_step", "basis": "input",
+             "material": "remove", "target": "rim",
+             "parameters": {"steps": [{"length": 20, "diameter": 10}]},
+             "placement": {"reference": {"step": "rim", "anchor": "start"}}},
+            {"id": "hub_bore", "module": "internal_cylindrical_step", "basis": "input",
+             "material": "remove", "target": "hub",
+             "parameters": {"steps": [{"length": 12, "diameter": 10}]},
+             "placement": {"reference": {"step": "hub", "anchor": "start"}}}]}
+
+    def test_chain_gear_family_plan_core_and_continuous_bore(self):
+        from copy import deepcopy
+        from dataclasses import replace
+        from unittest.mock import Mock, patch
+        from kompas_mcp.cad_modules import CAD_MODULES
+        from kompas_mcp.construction_chains import plan_construction_chain, get_construction_chain_contract
+        raw = self.gear_recipe()
+        original = deepcopy(raw)
+        family = CAD_MODULES["gear_spur"]
+        family_plan = family.plan(raw["steps"][0]["parameters"], name="External cylindrical gear [rim]")
+        # Dispatch is the registered family callback, never the standalone creator.
+        callback = Mock(wraps=family.plan)
+        with patch.dict(CAD_MODULES, {"gear_spur": replace(family, plan=callback)}):
+            plan = plan_construction_chain(raw)
+            callback.assert_called_once()
+        self.assertEqual(raw, original)
+        self.assertEqual(plan, plan_construction_chain(plan["recipe"]))
+        rim, hub, rim_bore, hub_bore = plan["steps"]
+        self.assertNotIn("preview", rim)
+        self.assertEqual(rim["gear_plan"]["geometry"], family_plan["geometry"])
+        self.assertEqual(rim["gear_plan"]["workflow"], family_plan["workflow"])
+        self.assertEqual(rim["gear_plan"]["parameter_prefix"], "CH_RIM")
+        self.assertEqual(rim["section"]["axial_interval_mm"], [-20, 0])
+        self.assertEqual(rim["section"]["start_mm"], -20)
+        self.assertEqual(rim["section"]["end_mm"], 0)
+        self.assertEqual(rim["placement"], {"origin_mm": 0, "direction": 1})
+        self.assertEqual(hub["section"]["axial_interval_mm"], [0, 12])
+        self.assertEqual(rim_bore["section"]["axial_interval_mm"], [-20, 0])
+        self.assertEqual(hub_bore["section"]["axial_interval_mm"], [0, 12])
+        self.assertEqual(rim["section"]["segments"][0]["start_radius_mm"], family_plan["geometry"]["root_radius"])
+        self.assertEqual(rim["section"]["bounding_radius_mm"], family_plan["geometry"]["outside_radius"])
+        foundation = family_plan["verification"]["expected_volume_mm3"] / 1000
+        self.assertAlmostEqual(rim["expected_delta_cm3"], foundation)
+        self.assertAlmostEqual(plan["expected_total_volume_cm3"],
+            foundation + math.pi * 12**2 * 12 / 1000 - math.pi * 5**2 * 32 / 1000)
+        self.assertEqual(plan["expected_bounds_mm"], [-20, -22, -22, 12, 22, 22])
+        self.assertFalse(rim["verification"]["require_fully_defined"])
+        self.assertTrue(rim["verification"]["family_audit_required"])
+        self.assertEqual(len(rim["verification"]["profile_entities_sha256"]), 64)
+        self.assertEqual(rim["verification"]["family_verification"], family_plan["verification"])
+        capability = get_construction_chain_contract()["modules"]["gear_spur"]
+        self.assertEqual(capability["supported_modes"], [{"basis": "own", "material": "create"}])
+        self.assertTrue(capability["cad_chain_verified"])
+        # Keep the existing family's helical/chamfer contract and volume calculation.
+        variant = deepcopy(raw)
+        variant["steps"][0]["parameters"].update(helix_angle_deg=20, hand="left", tip_chamfer_mm=0.5)
+        altered = plan_construction_chain(variant)["steps"][0]
+        self.assertEqual(altered["gear_plan"]["geometry"]["cut_scenario"], "helical_cut_evolution")
+        self.assertAlmostEqual(altered["expected_delta_cm3"],
+            altered["gear_plan"]["verification"]["expected_volume_mm3"] / 1000)
+        self.assertNotEqual(altered["verification"]["profile_entities_sha256"],
+                            rim["verification"]["profile_entities_sha256"])
+
+    def test_chain_gear_preflight_preserves_target_and_placement_limits(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import plan_construction_chain
+        raw = self.gear_recipe()
+        cases = []
+        for placement in ({"offset_mm": 1}, {"direction": -1}, {"phase_degrees": 1}):
+            recipe = deepcopy(raw); recipe["steps"][0]["placement"] = placement; cases.append(recipe)
+        for changes in ({"material": "add"}, {"basis": "input"}, {"target": "rim"}):
+            recipe = deepcopy(raw); recipe["steps"][0].update(changes); cases.append(recipe)
+        recipe = deepcopy(raw)
+        recipe["steps"][1].update(module="gear_spur", parameters=raw["steps"][0]["parameters"])
+        cases.append(recipe)
+        # Diameter below OD but above the root core must not reach the teeth.
+        recipe = deepcopy(raw); recipe["steps"][2]["parameters"]["steps"][0]["diameter"] = 38
+        cases.append(recipe)
+        recipe = deepcopy(raw); recipe["steps"][2]["parameters"]["steps"][0]["length"] = 32
+        cases.append(recipe)  # gear target cannot implicitly absorb the hub span
+        recipe = deepcopy(raw); recipe["steps"][3]["parameters"]["steps"][0]["length"] = 32
+        cases.append(recipe)  # hub target remains limited to its own span
+        recipe = deepcopy(raw); recipe["steps"][1]["placement"]["offset_mm"] = 1
+        cases.append(recipe)
+        recipe = deepcopy(raw)
+        recipe["steps"][1]["placement"] = {"reference": {"step": "rim", "anchor": "start"}, "direction": -1}
+        cases.append(recipe)
+        recipe = deepcopy(raw)
+        recipe["steps"][1].update(module="external_conical_step", parameters={
+            "definition_mode": "diameters_length", "start_diameter": 24, "end_diameter": 20, "length": 12})
+        cases.append(recipe)
+        recipe = deepcopy(raw); recipe["steps"][0]["parameters"]["unknown"] = 1
+        cases.append(recipe)
+        for index, recipe in enumerate(cases):
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                plan_construction_chain(recipe)
+
+    def test_spline_chain_existing_family_core_and_native_guard(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import plan_construction_chain
+        from kompas_mcp.connections.cad import build_straight_spline_plan
+        from kompas_mcp.assets.bridge.construction_chain_runtime import _validate, _verify
+
+        raw = self.gear_recipe()
+        raw["steps"][0].update(module="straight_spline", parameters={
+            "series": "light", "designation": "8x36x40", "length_mm": 20})
+        plan = plan_construction_chain(raw)
+        self.assertEqual(plan, plan_construction_chain(plan["recipe"]))
+        family = build_straight_spline_plan(raw["steps"][0]["parameters"], name="Straight spline shaft [rim]")
+        foundation = plan["steps"][0]
+        self.assertEqual(foundation["family_plan"]["workflow"], family["workflow"])
+        self.assertEqual(foundation["section"]["segments"][0]["start_radius_mm"], 18)
+        self.assertEqual(foundation["section"]["axial_interval_mm"], [-20, 0])
+        self.assertEqual(foundation["expected_delta_cm3"], family["verification"]["expected_volume_mm3"]/1000)
+        self.assertEqual(_validate(plan), plan["steps"])
+        self.assertFalse(foundation["verification"]["require_fully_defined"])
+        changed = deepcopy(raw)
+        changed["steps"][0]["parameters"].update(include_tip_chamfer=False, centering="outer_diameter")
+        self.assertEqual(_validate(plan_construction_chain(changed)), plan_construction_chain(changed)["steps"])
+        changed["steps"][0]["parameters"] = {"tooth_count": 8, "inner_diameter_mm": 35,
+            "outer_diameter_mm": 40, "tooth_width_mm": 6, "root_fillet_mm": .3,
+            "length_mm": 20, "include_tip_chamfer": False}
+        custom = plan_construction_chain(changed)
+        self.assertEqual(_validate(custom), custom["steps"])
+        for mutation in ("body", "placement", "joining_core", "chamfer_core", "profile", "volume", "foreign_axis"):
+            bad = deepcopy(raw)
+            if mutation == "body": bad["steps"][0]["parameters"]["body"] = "hub"
+            if mutation == "placement": bad["steps"][0]["placement"] = {"direction": -1}
+            if mutation == "joining_core": bad["steps"][1]["parameters"]["steps"][0]["diameter"] = 38
+            if mutation == "chamfer_core": bad["steps"][0]["parameters"]["tip_chamfer_mm"] = 2.0
+            if mutation in ("body", "placement", "joining_core", "chamfer_core"):
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    plan_construction_chain(bad)
+            else:
+                bad = deepcopy(plan)
+                fp = bad["steps"][0]["family_plan"]
+                if mutation == "profile": fp["workflow"]["params"]["operations"][-3]["params"]["entities"][0]["end"][0] += 1
+                if mutation == "volume": fp["verification"]["expected_volume_mm3"] *= .99
+                if mutation == "foreign_axis": fp["workflow"]["params"]["operations"][-1]["params"]["axis"] = "foreign.axis"
+                with self.subTest(mutation=mutation), self.assertRaises((ValueError, RuntimeError)): _validate(bad)
+        # Foundation recognition alone never authorizes a composite geometry pass.
+        with self.assertRaisesRegex(RuntimeError, "foundation audit"):
+            _verify({}, plan["steps"])
+        # Private input-body preflight never selects the foundation's through-all cut.
+        from kompas_mcp.connections.cad import _plan_straight_spline_input_shaft
+        from kompas_mcp.construction_chains import _straight_spline_input_carrier_guard
+        request = {"series":"light","designation":"8x36x40","length_mm":20,"include_tip_chamfer":False}
+        original = deepcopy(request)
+        application = _plan_straight_spline_input_shaft(request,carrier_diameter_mm=40,axial_start_mm=10)
+        stock = plan_construction_chain({"steps":[
+            {"id":"carrier","module":"stepped_shaft","basis":"own","material":"create",
+             "parameters":{"steps":[{"diameter":40,"length":50}]}},
+            {"id":"shoulder","module":"stepped_shaft","basis":"own","material":"add",
+             "placement":{"reference":{"step":"carrier","anchor":"end"}},
+             "parameters":{"steps":[{"diameter":30,"length":10}]}}]})
+        guard = _straight_spline_input_carrier_guard(stock,"carrier",application)
+        from kompas_mcp.assets.bridge import construction_chain_runtime as native_spline
+        self.assertEqual(native_spline._straight_spline_input_carrier_guard(stock,guard,application),stock["steps"])
+        self.assertEqual(request,original)
+        self.assertEqual(application["working_span_mm"],[10,30])
+        self.assertEqual([o["scenario"] for o in application["operations"]],
+                         ["numeric_profile_sketch","cut_extrusion","circular_pattern"])
+        self.assertEqual(application["operations"][1]["params"]["end_condition"],"length")
+        self.assertEqual(application["operations"][1]["params"]["depth"],20)
+        self.assertEqual(application["operations"][1]["params"]["direction"],"normal")
+        self.assertEqual(application["operations"][2]["params"]["axis"],"input.axis")
+        self.assertFalse(application["capabilities"]["native_execution_implemented"])
+        self.assertNotIn("bounds_candidates_mm",application["geometry"])
+        self.assertNotIn("expected_volume_mm3",application["geometry"])
+        expected = build_straight_spline_plan(request)["geometry"]
+        self.assertAlmostEqual(application["expected_removal_cm3"],math.pi*20**2*20/1000-expected["expected_volume_mm3"]/1000)
+        self.assertEqual([(r["segment"]["axial_min"],r["segment"]["axial_max"]) for r in guard["protected_stock"]],
+                         [(0,10),(30,50),(50,60)])
+        self.assertFalse(guard["native_carrier_verified"])
+        custom_application = _plan_straight_spline_input_shaft(
+            changed["steps"][0]["parameters"],carrier_diameter_mm=40,axial_start_mm=10)
+        self.assertEqual(custom_application["geometry"]["tooth_count"],8)
+        custom_guard = _straight_spline_input_carrier_guard(stock,"carrier",custom_application)
+        self.assertEqual(native_spline._straight_spline_input_carrier_guard(stock,custom_guard,custom_application),stock["steps"])
+        for updates in ({"body":"hub"},{"include_tip_chamfer":True}):
+            with self.subTest(input_spline=updates),self.assertRaises(ValueError):
+                _plan_straight_spline_input_shaft({**request,**updates},carrier_diameter_mm=40,axial_start_mm=10)
+        with self.assertRaises(ValueError):
+            _plan_straight_spline_input_shaft(request,carrier_diameter_mm=41,axial_start_mm=10)
+        with self.assertRaises(ValueError):
+            _plan_straight_spline_input_shaft(request,carrier_diameter_mm=40,axial_start_mm=float("nan"))
+        bad_stock = deepcopy(stock);bad_stock["steps"][0]["section"]["end_mm"] = 49
+        with self.assertRaises(ValueError):_straight_spline_input_carrier_guard(bad_stock,"carrier",application)
+        with self.assertRaises(ValueError):_straight_spline_input_carrier_guard(stock,"missing",application)
+        for field in ("depth","axis","working_span"):
+            bad = deepcopy(application)
+            if field=="depth":bad["operations"][1]["params"]["depth"] = 50
+            elif field=="axis":bad["operations"][2]["params"]["axis"] = "blank.axis"
+            else:bad["working_span_mm"] = [40,60]
+            with self.subTest(input_guard=field),self.assertRaises(ValueError):
+                _straight_spline_input_carrier_guard(stock,"carrier",bad)
+            with self.subTest(native_input_guard=field),self.assertRaises((ValueError,RuntimeError)):
+                native_spline._straight_spline_input_carrier_guard(stock,guard,bad)
+        for update in ({"target":"shoulder"},{"native_carrier_verified":True},{"expected_removed_cm3":0}):
+            with self.subTest(native_carrier=update),self.assertRaises(ValueError):
+                native_spline._straight_spline_input_carrier_guard(stock,{**guard,**update},application)
+        from unittest.mock import Mock
+        bridge = Mock()
+        with self.assertRaises(ValueError):
+            native_spline._straight_spline_input_carrier_context(bridge,object(),object(),stock,
+                {**guard,"native_carrier_verified":True},application)
+        bridge.describe_runtime_document.assert_not_called()
+        from kompas_mcp.assets.bridge import chain_spline_runtime as input_spline
+        baseline = {"body_count":1,"solid":True,"bounds_mm":[0,-20,-20,60,20,20],
+            "volume_cm3":guard["expected_blank_volume_cm3"],"protected_faces":[{"kind":"plane","x_span_mm":[0,0]}]}
+        after = {**deepcopy(baseline),"volume_cm3":baseline["volume_cm3"]-application["expected_removal_cm3"],
+            "inner_boundary_span_mm":[10,30],"minimum_working_radius_mm":18}
+        self.assertTrue(input_spline.verify(native_spline,baseline,after,guard,application)["verified"])
+        for update in ({"inner_boundary_span_mm":[0,10]},{"protected_faces":[]},
+                       {"volume_cm3":after["volume_cm3"]+application["expected_single_space_removal_cm3"]}):
+            with self.subTest(spline_material=update),self.assertRaises((ValueError,RuntimeError)):
+                input_spline.verify(native_spline,baseline,{**after,**update},guard,application)
+        with self.assertRaises(ValueError):
+            input_spline.execute(bridge,native_spline,object(),object(),stock,guard,application,"spline",confirm_write=False)
+        named = _plan_straight_spline_input_shaft(request,carrier_diameter_mm=40,axial_start_mm=10,
+            name="Straight spline input [spline]")
+        baseline["protected_faces"] = input_spline._protected_baseline(stock,guard)
+        after.update(protected_faces=deepcopy(baseline["protected_faces"]),working_geometry_hash="0"*64)
+        prefixes = [{"id":s["id"],"namespace":s["namespace"],"macro":{"object_id":"macro"+str(i),"grouped":True},
+            "sketch":{"object_id":"prefix-sketch"+str(i)},"feature":{"object_id":"prefix-feature"+str(i)}}
+            for i,s in enumerate(stock["steps"])]
+        role_collections = {"origin":"Points3D","plane":"Planes3D","profile":"Sketchs","axis_end":"Points3D",
+            "axis":"Axes3D","source_cut":"Extrusions","pattern":"FeaturePatterns"}
+        suffixes = {"origin":" origin","plane":" profile plane","profile":" one tooth space","axis_end":" axis end",
+            "axis":" axis","source_cut":" one tooth space cut","pattern":" tooth space pattern"}
+        roots = [{"role":role,"collection":collection,"object_id":"owned-"+role,"name":named["name"]+suffixes[role]}
+            for role,collection in role_collections.items()]
+        out = {"id":"spline","namespace":"CH_SPLINE","owned_objects":roots,"sketch":roots[2],"feature":roots[6],
+            "macro":{"object_id":"spline-macro","grouped":True}}
+        counts = input_spline._root_counts(native_spline,prefixes+[out]);counts["Extrusions"]+=7;counts["Points3D"]+=7
+        inventory = {"counts":counts,"copies":[{"index":i,"object_id":"copy-"+str(i)} for i in range(2,9)],
+            "ephemeral_points":{"count":7,"policy":"empty_id_zero_coordinate_self_owned_top_part_records_v1"}}
+        cp = input_spline.make_checkpoint(native_spline,stock,guard,named,
+            {"ok":True,"spline_executed":True,"verification":{"verified":True},"drivers":{"verified":True},
+             "whole_inventory_verified":True,"body_before":baseline,"body_after":after,"profile":input_spline._profile_stamp(native_spline,named),
+             "prefix_outputs":prefixes,"output":out,"inventory":inventory})
+        self.assertEqual(input_spline._validate_checkpoint(native_spline,stock,guard,named,cp)[-1]["id"],"spline")
+        self.assertFalse(input_spline.ARRAY_POLICY["SaveInitialOrientation"])
+        for mutation in ("counts","copies","baseline","inputs"):
+            corrupt = deepcopy(cp)
+            if mutation=="counts":corrupt["inventory"]["counts"]["Points3D"]+=1
+            elif mutation=="copies":corrupt["inventory"]["copies"][-1]["object_id"]="copy-2"
+            elif mutation=="baseline":corrupt["baseline"]["protected_faces"]=[]
+            else:corrupt["application_hash"]="1"*64
+            with self.subTest(spline_checkpoint=mutation),self.assertRaises((ValueError,RuntimeError)):
+                input_spline.audit_checkpoint(bridge,native_spline,object(),object(),stock,guard,named,corrupt)
+        bridge.describe_runtime_document.assert_not_called()
+        with self.assertRaises(ValueError):_straight_spline_input_carrier_guard(plan,"rim",application)
+        public = deepcopy(stock["recipe"])
+        public["steps"].append({"id":"spline","module":"straight_spline","basis":"input","material":"remove",
+            "target":"carrier","placement":{"reference":{"step":"carrier","anchor":"start"},"offset_mm":10},
+            "parameters":request})
+        public_plan = plan_construction_chain(public)
+        self.assertEqual(public_plan,plan_construction_chain(public_plan["recipe"]))
+        self.assertEqual(_validate(public_plan),public_plan["steps"])
+        self.assertEqual(public_plan["steps"][-1]["spline_application"],named)
+        supported_cp = deepcopy(cp)
+        for row in supported_cp["outputs"]:
+            for key in ("sketch","feature","macro"):
+                row[key].setdefault("name",row["id"]+" "+key)
+        saved_outputs = deepcopy(supported_cp["outputs"])
+        for row,step in zip(saved_outputs,public_plan["steps"]):
+            row["section"] = deepcopy(step["section"])
+        envelope = {"recipe":public_plan["recipe"],"expectations":native_spline._expectations(public_plan["steps"]),
+            "outputs":saved_outputs,"spline_audit":supported_cp}
+        self.assertEqual(input_spline.validate_envelope(native_spline,public_plan,envelope),supported_cp)
+        corrupt = deepcopy(envelope);corrupt["outputs"][-1]["feature"]["object_id"]="foreign"
+        with self.assertRaisesRegex(ValueError,"ownership"):
+            input_spline.validate_envelope(native_spline,public_plan,corrupt)
+        custom_public = deepcopy(public)
+        custom_public["steps"][-1]["parameters"] = changed["steps"][0]["parameters"]
+        self.assertEqual(_validate(plan_construction_chain(custom_public)),plan_construction_chain(custom_public)["steps"])
+        for mutation in ("end","chamfer","mode","later","request","section"):
+            bad = deepcopy(public)
+            if mutation=="end":bad["steps"][-1]["placement"]["offset_mm"]=0
+            elif mutation=="chamfer":bad["steps"][-1]["parameters"]["include_tip_chamfer"]=True
+            elif mutation=="mode":bad["steps"][-1]["material"]="create"
+            elif mutation=="later":bad["steps"].append({**bad["steps"][1],"id":"later"})
+            if mutation in ("request","section"):
+                bad = deepcopy(public_plan)
+                if mutation=="request":bad["recipe"]["steps"][-1]["parameters"]["length_mm"]=21
+                else:bad["steps"][-1]["section"]["start_mm"]=9
+                with self.subTest(public_spline=mutation),self.assertRaises((ValueError,RuntimeError)):_validate(bad)
+            else:
+                with self.subTest(public_spline=mutation),self.assertRaises(ValueError):plan_construction_chain(bad)
+
+    def test_spline_hub_is_nominal_negative_of_retained_shaft_teeth(self):
+        from kompas_mcp.connections.splines.straight import build_spline_geometry
+        from kompas_mcp.connections.cad import build_straight_spline_plan, _full_outline
+        for request in ({"series":"light","designation":"8x36x40"},
+                        {"tooth_count":8,"inner_diameter_mm":35,"outer_diameter_mm":40,
+                         "tooth_width_mm":6,"root_fillet_mm":.3}):
+            request = {**request,"length_mm":20,"include_tip_chamfer":False,"execution":"plain"}
+            shaft = build_spline_geometry(request)
+            hub_request = {**request,"body":"hub","hub_outside_diameter_mm":55}
+            hub = build_spline_geometry(hub_request)
+            self.assertTrue(shaft.success and hub.success)
+            # Exact Green-integral complement, including the root-corner regions.
+            self.assertAlmostEqual(shaft.section_area_mm2+hub.section_area_mm2,math.pi*27.5**2,places=9)
+            entities = {e["id"]:e for e in hub.space_entities}
+            flank = entities["spline_space_flank_left"]
+            for key in ("start","end"):
+                for a,c in zip(flank[key],shaft.space_entities[0][key]):
+                    self.assertAlmostEqual(a,c,places=12)
+            fillet = entities["spline_space_fillet_left"]
+            for key in ("start","end","center"):
+                for a,c in zip(fillet[key],shaft.space_entities[1][key]):
+                    self.assertAlmostEqual(a,c,places=12)
+            for key in ("radius","direction"):
+                self.assertEqual(fillet[key],shaft.space_entities[1][key])
+            # The full periodic outline must include both flanks and close by one pitch.
+            for geometry in (shaft,hub):
+                first,last = geometry.period_outline[0],geometry.period_outline[-1]
+                angle = -2*math.pi/geometry.size.tooth_count
+                expected = [first[0]*math.cos(angle)+first[1]*math.sin(angle),
+                            first[1]*math.cos(angle)-first[0]*math.sin(angle)]
+                self.assertAlmostEqual(last[0],expected[0],places=9)
+                self.assertAlmostEqual(last[1],expected[1],places=9)
+                outline = _full_outline(geometry.period_outline,geometry.size.tooth_count)
+                self.assertLess(max(math.dist(a,c) for a,c in zip(outline,outline[1:]+outline[:1])),3)
+            self.assertEqual(build_straight_spline_plan(hub_request)["profile_geometry_revision"],2)
+        from kompas_mcp.construction_chains import plan_construction_chain
+        from kompas_mcp.assets.bridge import construction_chain_runtime as native
+        hub_chain = {"steps":[{"id":"stock","module":"stepped_shaft","basis":"own","material":"create",
+            "parameters":{"steps":[{"diameter":55,"length":20}]}},
+            {"id":"bore","module":"internal_cylindrical_step","basis":"input","material":"remove","target":"stock",
+             "placement":{"reference":{"step":"stock","anchor":"start"}},"parameters":{"steps":[{"diameter":36,"length":20}]}},
+            {"id":"spline","module":"straight_spline","basis":"input","material":"remove","target":"bore",
+             "placement":{"reference":{"step":"bore","anchor":"start"}},"parameters":{"body":"hub","series":"light",
+                 "designation":"8x36x40","length_mm":20,"include_tip_chamfer":False}}]}
+        plan = plan_construction_chain(hub_chain)
+        self.assertEqual(plan,plan_construction_chain(plan["recipe"]))
+        self.assertEqual(native._validate(plan),plan["steps"])
+        self.assertEqual(plan["recipe"]["steps"][-1]["parameters"]["hub_outside_diameter_mm"],55)
+        self.assertAlmostEqual(plan["expected_total_volume_cm3"],24.90240226858847)
+        from kompas_mcp.assets.bridge import chain_spline_runtime as spline_runtime
+        terminal = plan["steps"][-1]
+        guard,application = terminal["spline_guard"],terminal["spline_application"]
+        before = {"body_count":1,"solid":True,"volume_cm3":guard["expected_blank_volume_cm3"],
+            "bounds_mm":[0,-27.5,-27.5,20,27.5,27.5],"protected_faces":spline_runtime._protected_baseline(plan["spline_prefix_plan"],guard)}
+        after = {**before,"volume_cm3":guard["expected_final_volume_cm3"],"inner_boundary_span_mm":[0,20],
+            "minimum_working_radius_mm":18,"maximum_working_radius_mm":20}
+        self.assertTrue(spline_runtime.verify(native,before,after,guard,application)["verified"])
+        with self.assertRaises(RuntimeError):
+            spline_runtime.verify(native,before,{**after,"maximum_working_radius_mm":19},guard,application)
+        with self.assertRaises(RuntimeError):
+            spline_runtime.verify(native,before,{**after,"protected_faces":[]},guard,application)
+        from copy import deepcopy
+        for mutation in ("partial","offset","diameter","blind","shape"):
+            bad = deepcopy(hub_chain)
+            if mutation=="partial":bad["steps"][-1]["parameters"]["length_mm"]=19
+            elif mutation=="offset":bad["steps"][-1]["placement"]["offset_mm"]=1
+            elif mutation=="diameter":bad["steps"][-1]["parameters"]["hub_outside_diameter_mm"]=56
+            elif mutation=="blind":bad["steps"][1]["parameters"]["steps"][0]["length"]=19
+            else:
+                bad = deepcopy(plan)
+                bad["steps"][-1]["spline_application"]["operations"][0]["params"]["entities"][1]["end"][0]+=1
+                with self.subTest(hub_chain=mutation),self.assertRaises((ValueError,RuntimeError)):native._validate(bad)
+                continue
+            with self.subTest(hub_chain=mutation),self.assertRaises(ValueError):plan_construction_chain(bad)
+        blind = deepcopy(hub_chain)
+        blind["steps"][0]["parameters"]["steps"][0]["length"]=30
+        blind["steps"][1]["parameters"]["steps"][0]["length"]=25
+        blind["steps"][-1]["parameters"]["exit_mode"]="blind"
+        blind_plan = plan_construction_chain(blind)
+        self.assertEqual(blind_plan,plan_construction_chain(blind_plan["recipe"]))
+        self.assertEqual(native._validate(blind_plan),blind_plan["steps"])
+        guard,application = [blind_plan["steps"][-1][key] for key in ("spline_guard","spline_application")]
+        self.assertEqual(guard["smooth_tail_span_mm"],[20,25])
+        self.assertEqual(guard["bottom_stock_mm"],5)
+        self.assertNotIn("bore_length_expression",guard)
+        for expression in ("", "20", "20.0", "2e1", "20,0"):
+            spline_runtime._independent_length_expression(native,expression,20)
+        for expression in ("CH_BORE_L1", "CH_BORE_L1-5", "25", "nan"):
+            with self.assertRaises(RuntimeError):spline_runtime._independent_length_expression(native,expression,20)
+        before = {"body_count":1,"solid":True,"volume_cm3":guard["expected_blank_volume_cm3"],
+            "bounds_mm":[0,-27.5,-27.5,30,27.5,27.5],
+            "protected_faces":spline_runtime._protected_baseline(blind_plan["spline_prefix_plan"],guard)}
+        self.assertEqual(len(before["protected_faces"]),3)
+        after = {**before,"volume_cm3":guard["expected_final_volume_cm3"],"inner_boundary_span_mm":[0,20],
+            "minimum_working_radius_mm":18,"maximum_working_radius_mm":20,"smooth_bore_tail_span_mm":[20,25],
+            "terminal_faces":[{"x_span_mm":[20,20],"radius_bounds_mm":[18,20],
+                "area_mm2":application["geometry"]["space_area_mm2"]} for _ in range(8)]}
+        self.assertTrue(spline_runtime.verify(native,before,after,guard,application)["flat_terminal_faces_verified"])
+        for update in ({"smooth_bore_tail_span_mm":[21,25]},{"terminal_faces":[]}):
+            with self.assertRaises(RuntimeError):spline_runtime.verify(native,before,{**after,**update},guard,application)
+        for working in (25,26):
+            bad = deepcopy(blind);bad["steps"][-1]["parameters"]["length_mm"]=working
+            with self.assertRaises(ValueError):plan_construction_chain(bad)
+        bad = deepcopy(blind);bad["steps"][0]["parameters"]["steps"][0]["length"]=25
+        with self.assertRaises(ValueError):plan_construction_chain(bad)
+
+    def test_chain_gear_persistence_excludes_full_numeric_plan(self):
+        import json
+        from unittest.mock import patch
+        from kompas_mcp.construction_chains import plan_construction_chain, _check_persistence_budget, _ascii_size
+        with patch("kompas_mcp.construction_chains._check_persistence_budget",
+                   wraps=_check_persistence_budget) as budget:
+            plan = plan_construction_chain(self.gear_recipe())
+            budget.assert_called_once()
+        self.assertGreater(len(json.dumps(plan["steps"][0]["gear_plan"])), 24000)
+        with patch("kompas_mcp.construction_chains._ascii_size", wraps=_ascii_size) as size:
+            _check_persistence_budget(plan["recipe"], plan["steps"])
+        envelope = size.call_args_list[0].args[0]
+        self.assertNotIn("gear_plan", envelope["expectations"][0])
+        self.assertNotIn("preview", envelope["expectations"][0])
+        self.assertIn("profile_entities_sha256", envelope["expectations"][0]["verification"])
+        self.assertEqual(len(envelope["outputs"][0]["object_ids"]), 11)
+        self.assertTrue(all(len(identity) == 64 for output in envelope["outputs"]
+                            for identity in output["object_ids"]))
+        self.assertEqual(len(envelope["outputs"][1]["object_ids"]), 3)
+
+    def test_chain_deterministic_preflight_rejections(self):
+        from copy import deepcopy
+        from kompas_mcp.construction_chains import plan_construction_chain
+        original = self.recipe()
+        cases = []
+        for field, value in (("target", "bore"), ("basis", "own")):
+            raw = deepcopy(original); raw["steps"][3][field] = value; cases.append(raw)
+        for parameters in ({"inner_diameter": 6}, {"outer_diameter": 30}, {"depth": 21}, {"source_scenario": "stepped_shaft"}):
+            raw = deepcopy(original); raw["steps"][3]["parameters"].update(parameters); cases.append(raw)
+        raw = deepcopy(original); raw["steps"][1]["placement"]["offset_mm"] = 1; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][1]["placement"]["reference"]["step"] = "groove"; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][2]["target"] = "missing"; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][2]["target"] = "BASE"; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][1]["placement"]["reference"]["anchor"] = "middle"; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][1]["id"] = "BASE"; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][0]["id"] = "не_ASCII"; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][0]["placement"] = {"phase_degrees": 30}; cases.append(raw)
+        raw = deepcopy(original); raw["steps"][2]["parameters"]["steps"][0]["diameter"] = 30; cases.append(raw)
+        raw = deepcopy(original); raw["steps"] = raw["steps"][:3]
+        raw["steps"][2].update(target="cone", parameters={"steps": [{"length": 10, "diameter": 22}]},
+            placement={"reference": {"step": "cone", "anchor": "start"}}); cases.append(raw)
+        raw = deepcopy(original); raw["steps"][3]["placement"]["offset_mm"] = 1; cases.append(raw)
+        raw = deepcopy(original); raw["steps"] *= 9; cases.append(raw)
+        raw = deepcopy(original); raw["name"] = "x"*24000; cases.append(raw)
+        for raw in cases:
+            with self.subTest(raw=raw["steps"][0]["id"]), self.assertRaises(ValueError):
+                plan_construction_chain(raw)
+
+    def test_chain_persistence_preflight_includes_expectations_and_native_headroom(self):
+        import json
+        from kompas_mcp.construction_chains import plan_construction_chain
+        # Valid recipe comfortably below the recipe limit; the repeated section
+        # data and ownership output cannot fit into the native persistence envelope.
+        raw = self.recipe(); raw["steps"] = raw["steps"][:1]
+        raw["steps"][0]["parameters"]["steps"] = [
+            {"length": 20, "diameter": 30 + index % 2} for index in range(100)]
+        self.assertLess(len(json.dumps(raw).encode("utf-8")), 24000)
+        with self.assertRaisesRegex(ValueError, "persistence"):
+            plan_construction_chain(raw)
+        # JSON escaping is native's budget, not UTF-8; escaped text remains valid
+        # for an ordinary small chain and is retained without lossy truncation.
+        raw = self.recipe(); raw["name"] = '\\"\n漢' * 30
+        planned = plan_construction_chain(raw)
+        self.assertEqual(planned["recipe"]["name"], raw["name"])
+        raw = self.recipe(); raw["steps"] = raw["steps"][:1]
+        for index in range(1, 9):
+            raw["steps"].append({**raw["steps"][0], "id": f"part{index}", "material": "add",
+                "placement": {"reference": {"step": raw["steps"][-1]["id"], "anchor": "end"}}})
+        with self.assertRaisesRegex(ValueError, "native-output reserve"):
+            plan_construction_chain(raw)
+
+    def test_chain_repeated_blocks_have_independent_names(self):
+        from kompas_mcp.construction_chains import plan_construction_chain
+        raw = self.recipe(); raw["steps"] = raw["steps"][:1]
+        raw["steps"].append({**raw["steps"][0], "id": "next", "material": "add",
+            "placement": {"reference": {"step": "base", "anchor": "end"}}})
+        plan = plan_construction_chain(raw)
+        names = [op["name"] for step in plan["steps"] for op in step["preview"]["operations"] if "name" in op]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn("Stepped shaft [next] rotation", names)
+        self.assertEqual([s["namespace"] for s in plan["steps"]], ["CH_BASE", "CH_NEXT"])
+        for collection in ("variables", "dimensions"):
+            names = [item["name"] for step in plan["steps"] for op in step["preview"]["operations"]
+                     for item in op.get(collection, []) if item.get("name")]
+            self.assertEqual(len(names), len(set(names)))
+            for step in plan["steps"]:
+                self.assertTrue(all(item["name"].startswith(step["namespace"] + "_")
+                    for op in step["preview"]["operations"] for item in op.get(collection, []) if item.get("name")))
+
+        # Reverse cutters from the selected end; radial coordinates stay positive.
+        raw = self.recipe()
+        for step in raw["steps"][2:]:
+            step["placement"] = {"reference": {"step": "base", "anchor": "end"}, "direction": -1}
+        reverse = plan_construction_chain(raw)
+        self.assertEqual(reverse["steps"][3]["section"]["axial_interval_mm"], [17, 20])
+        self.assertAlmostEqual(reverse["expected_total_volume_cm3"],
+                               plan_construction_chain(self.recipe())["expected_total_volume_cm3"])
+
+    def test_chain_runner_single_write_rebuild_and_partial_failure(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from kompas_mcp.construction_chains import run_construction_chain, plan_construction_chain
+        runner = Mock()
+        adapter = SimpleNamespace(runner=runner, _export_dir=lambda: Path("exports"),
+                                  _normalize_target_path_for_kompas=lambda p: p.replace("\\", "/"))
+        with self.assertRaises(ValueError):
+            run_construction_chain(adapter, "create", self.recipe())
+        runner.call.assert_not_called()
+        for action, kwargs in (("invalid", {}), ("plan", {}), ("create", {"confirm": True}),
+                               ("inspect", {}), ("rebuild", {"confirm": True}),
+                               ("rebuild", {"confirm": True, "chain": self.recipe(), "document_id": "exact-document"})):
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                run_construction_chain(adapter, action, **kwargs)
+        runner.call.assert_not_called()
+        run_construction_chain(adapter, "plan", self.recipe())
+        runner.call.assert_not_called()
+        runner.call.return_value = {"ok": True, "recognized": True}
+        self.assertEqual(run_construction_chain(adapter, "inspect", document_id="exact-document"),
+                         {"ok": True, "recognized": True})
+        runner.call.assert_called_once_with("inspect_construction_chain", {"document_id": "exact-document"})
+        runner.reset_mock()
+        runner.call.return_value = {"ok": True}
+        run_construction_chain(adapter, "create", self.recipe(), confirm=True)
+        action, payload = runner.call.call_args.args
+        self.assertEqual(action, "create_construction_chain")
+        self.assertEqual(set(payload), {"plan", "visible", "output_path"})
+        self.assertTrue(all(step["preview"]["operations"] for step in payload["plan"]["steps"]))
+        self.assertTrue(payload["output_path"].startswith("exports/construction-chain-"))
+        first_path = payload["output_path"]
+        runner.reset_mock()
+        runner.call.side_effect = [{"ok": True, "recipe": plan_construction_chain(self.recipe())["recipe"]}, {"ok": True}]
+        run_construction_chain(adapter, "rebuild", document_id="exact-document", confirm=True)
+        self.assertEqual(runner.call.call_args_list[0].args, ("inspect_construction_chain", {"document_id": "exact-document"}))
+        self.assertEqual(runner.call.call_count, 2)
+        self.assertNotEqual(first_path, runner.call.call_args.args[1]["output_path"])
+        self.assertEqual(runner.call.call_args.args[1]["plan"]["recipe"],
+                         plan_construction_chain(self.recipe())["recipe"])
+        runner.reset_mock(); runner.call.side_effect = None; runner.call.return_value = {"ok": True}
+        changed = self.recipe(); changed["steps"][0]["parameters"]["steps"][0]["diameter"] = 32
+        run_construction_chain(adapter, "create", changed, confirm=True)
+        self.assertEqual(runner.call.call_args.args[1]["plan"]["recipe"]["steps"][0]["parameters"]["steps"][0]["diameter"], 32)
+        runner.reset_mock()
+        runner.call.return_value = {"ok": True, "recipe": self.recipe(), "recipe_error": "checksum mismatch"}
+        with self.assertRaisesRegex(ValueError, "No recoverable"):
+            run_construction_chain(adapter, "rebuild", document_id="exact-document", confirm=True)
+        runner.call.assert_called_once_with("inspect_construction_chain", {"document_id": "exact-document"})
+        runner.reset_mock()
+        runner.call.side_effect = None
+        runner.call.return_value = {"ok": False, "error": "native failure", "partial_result":
+            {"document_id": "partial", "last_verified_step": "base"}}
+        with self.assertRaises(RuntimeError) as caught:
+            run_construction_chain(adapter, "create", self.recipe(), confirm=True)
+        self.assertEqual(runner.call.call_count, 1)
+        self.assertEqual(caught.exception.partial_result["document_id"], "partial")
+        self.assertFalse(caught.exception.partial_result["rollback_performed"])
+
+
+    def test_chain_continue_host_exact_target_append_and_unknown_outcome(self):
+        from copy import deepcopy
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from kompas_mcp.construction_chains import run_construction_chain, plan_construction_chain
+        old = plan_construction_chain({"name": "Saved shaft", "steps": self.recipe()["steps"][:1]})
+        append = {"steps": [self.recipe()["steps"][1]]}
+        original_append = deepcopy(append)
+        original_recipe = deepcopy(old["recipe"])
+        inspected = {"ok": True, "recipe": old["recipe"], "runtime_version": 1,
+                     "recipe_checksum": "a"*64, "document": {"path": "C:/saved/shaft.m3d"}}
+        runner = Mock()
+        adapter = SimpleNamespace(runner=runner, _export_dir=Mock(), _normalize_target_path_for_kompas=Mock())
+        for kwargs in ({}, {"confirm": True}, {"confirm": True, "document_id": "exact"}):
+            with self.assertRaises(ValueError):
+                run_construction_chain(adapter, "continue", **kwargs)
+        runner.call.assert_not_called()
+        runner.call.side_effect = [inspected, {"ok": True}]
+        run_construction_chain(adapter, "continue", append, "exact", True)
+        self.assertEqual(runner.call.call_count, 2)
+        action, payload = runner.call.call_args.args
+        self.assertEqual(action, "continue_construction_chain")
+        self.assertEqual(payload["document_id"], "exact")
+        self.assertEqual(payload["output_path"], "C:/saved/shaft.m3d")
+        self.assertEqual(payload["expected_recipe"], old["recipe"])
+        self.assertEqual(payload["expected_recipe_checksum"], "a"*64)
+        self.assertTrue(payload["confirm_write"])
+        self.assertEqual(payload["plan"]["recipe"]["name"], "Saved shaft")
+        self.assertEqual(payload["plan"]["steps"][0], old["steps"][0])
+        self.assertEqual(payload["plan"]["steps"][1]["namespace"], "CH_CONE")
+        adapter._export_dir.assert_not_called()
+        adapter._normalize_target_path_for_kompas.assert_not_called()
+        runner.reset_mock(); runner.call.side_effect = [inspected, {"ok": True}]
+        run_construction_chain(adapter, "continue", dict(append, name="Appended shaft"), "exact", True)
+        self.assertEqual(runner.call.call_args.args[1]["plan"]["recipe"]["name"], "Appended shaft")
+        for unsupported in (dict(inspected, recipe=None), dict(inspected, runtime_version=2),
+                            dict(inspected, recipe_checksum="not-a-checksum"),
+                            dict(inspected, document={"path": "relative/shaft.m3d"}),
+                            dict(inspected, document={"path": "C:/saved/shaft.m3d.json"}),
+                            dict(inspected, document={"path": ""})):
+            runner.reset_mock(); runner.call.side_effect = [unsupported]
+            with self.assertRaises(ValueError):
+                run_construction_chain(adapter, "continue", append, "exact", True)
+            self.assertEqual(runner.call.call_count, 1)
+        # Invalid recognition, duplicate IDs and unknown write results never retry.
+        runner.reset_mock(); runner.call.side_effect = [dict(inspected, recipe_error="checksum mismatch")]
+        with self.assertRaisesRegex(ValueError, "No recoverable"):
+            run_construction_chain(adapter, "continue", append, "exact", True)
+        self.assertEqual(runner.call.call_count, 1)
+        runner.reset_mock(); runner.call.side_effect = [inspected]
+        with self.assertRaisesRegex(ValueError, "unique"):
+            run_construction_chain(adapter, "continue", {"steps": [old["recipe"]["steps"][0]]}, "exact", True)
+        self.assertEqual(runner.call.call_count, 1)
+        runner.reset_mock(); runner.call.side_effect = [inspected, TimeoutError("write completion unknown")]
+        with self.assertRaises(RuntimeError) as caught:
+            run_construction_chain(adapter, "continue", append, "exact", True)
+        self.assertIsNone(caught.exception.partial_result["executed"])
+        self.assertFalse(caught.exception.partial_result["rollback_performed"])
+        self.assertEqual(runner.call.call_count, 2)
+        self.assertEqual(inspected["recipe"], original_recipe)
+        self.assertEqual(append, original_append)
+        gear_old = plan_construction_chain({"steps": self.gear_recipe()["steps"][:1]})
+        audit = {"verified": True, "volume_cm3": gear_old["expected_total_volume_cm3"] + .0001}
+        gear_inspected = dict(inspected, recipe=gear_old["recipe"],
+            expectations=[{"verification": {"foundation_audit": audit}}])
+        runner.reset_mock(); runner.call.side_effect = [gear_inspected, {"ok": True}]
+        run_construction_chain(adapter, "continue", {"steps": [self.gear_recipe()["steps"][1]]}, "exact", True)
+        merged = runner.call.call_args.args[1]["plan"]
+        self.assertEqual(merged["steps"][0]["verification"]["foundation_audit"], audit)
+        self.assertEqual(gear_inspected["expectations"][0]["verification"]["foundation_audit"], audit)
+        self.assertNotIn("foundation_audit", gear_old["steps"][0]["verification"])
+        self.assertAlmostEqual(merged["verification"]["expected_total_volume_cm3"],
+                               audit["volume_cm3"] + merged["steps"][1]["expected_delta_cm3"])
+
+    def test_chain_continue_native_preflight_and_single_existing_document_execution(self):
+        import importlib.util
+        from contextlib import ExitStack
+        from copy import deepcopy
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from kompas_mcp.construction_chains import plan_construction_chain
+        source = Path(__file__).parents[1] / "src/kompas_mcp/assets/bridge/construction_chain_runtime.py"
+        spec = importlib.util.spec_from_file_location("test_chain_continuation_runtime", source)
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        old = plan_construction_chain({"name": "Saved", "steps": self.recipe()["steps"][:1]})
+        combined = plan_construction_chain({"name": "Saved", "steps": self.recipe()["steps"][:2]})
+        out = {"id": "base", "namespace": "CH_BASE", "section": old["steps"][0]["section"],
+               "sketch": {"name": "Stepped shaft [base] profile", "reference": "s0"},
+               "feature": {"name": "Stepped shaft [base] rotation", "reference": "f0"},
+               "verification": {"scope": "creation_step"}}
+        envelope = {"schema": native.SCHEMA, "version": 1, "recipe": old["recipe"],
+                    "expectations": native._expectations(old["steps"]), "outputs": [out]}
+        path = str(Path(tempfile.gettempdir()) / "saved-chain.m3d")
+        part = SimpleNamespace()
+        doc = SimpleNamespace(TopPart=part, Save=Mock(return_value=True), SaveAs=Mock(),
+                              RebuildDocument=Mock(return_value=True))
+        app = SimpleNamespace(ActiveDocument=doc)
+        doc.Activate = Mock(side_effect=lambda: setattr(app, "ActiveDocument", doc))
+        model = SimpleNamespace(Sketchs=[])
+        part.DefaultObject = Mock(return_value=None)
+        bridge = SimpleNamespace(make_app=lambda: app, resolve_document_strict=lambda a, i: doc if i == "exact" else None,
+            cast_document_3d=lambda d: d, cast_model_container=lambda p: model,
+            describe_runtime_document=lambda d, a: {"runtime_id": "exact" if d is doc else "other", "path": path},
+            normalize_fs_path=lambda p: str(p).replace("\\", "/").lower(),
+            safe_get=lambda obj, key, default=None: getattr(obj, key, default), report_progress=Mock(),
+            iter_collection=lambda items: iter(items), _create_part_document=Mock(),
+            _creation_module_recipe=Mock(return_value=(envelope, None)), _store_creation_module_recipe=Mock(),
+            _require_document_save_success=Mock(), _hide_auxiliary_model_objects=Mock(return_value={"objects": []}),
+            _build_stepped_shaft_feature=Mock(return_value={"sketch": SimpleNamespace(Reference="s1"),
+                "rotated": SimpleNamespace(Reference="f1", Update=Mock(return_value=True))}))
+        bridge._store_creation_module_recipe.side_effect = lambda p, value, family: setattr(
+            bridge._creation_module_recipe, "return_value", (value, None))
+        payload = {"document_id": "exact", "plan": combined, "expected_recipe": old["recipe"],
+                   "expected_recipe_checksum": native._hash(envelope), "output_path": path, "confirm_write": True}
+        def body(count):
+            steps = combined["steps"][:count]
+            radius = 15
+            return {"faces": [s for step in steps for s in step["section"]["segments"]],
+                    "volume_cm3": steps[-1]["expected_total_volume_cm3"],
+                    "bounds_mm": [0, -radius, -radius, steps[-1]["section"]["end_mm"], radius, radius]}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(native.os.path, "isfile", return_value=True))
+            ownership = stack.enter_context(patch.object(native, "_ownership", side_effect=lambda b, m, o, **k: deepcopy(o)))
+            read = stack.enter_context(patch.object(native, "_read_body", return_value=body(1)))
+            stack.enter_context(patch.object(native, "_group_step"))
+            # Same handler rejects stale recipe, changed prefix and manual geometry before any builder/save.
+            stale = deepcopy(payload); stale["expected_recipe_checksum"] = "0"*64
+            changed = deepcopy(payload); changed["expected_recipe"]["name"] = "stale"
+            edited = deepcopy(payload)
+            changed_recipe = deepcopy(combined["recipe"])
+            changed_recipe["steps"][0]["parameters"]["steps"][0]["diameter"] = 32
+            edited["plan"] = plan_construction_chain(changed_recipe)
+            for request in (stale, changed, edited, dict(payload, document_id="missing"), dict(payload, confirm_write=False),
+                            dict(payload, output_path=path + ".other.m3d")):
+                result = native.handle("continue_construction_chain", request, bridge)
+                self.assertFalse(result["ok"])
+                self.assertFalse(result["executed"])
+                self.assertEqual(result["partial_result"]["stage"], "preflight")
+            read.return_value = dict(body(1), volume_cm3=1)
+            result = native.handle("continue_construction_chain", payload, bridge)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["partial_result"]["stage"], "preflight")
+            ownership.side_effect = RuntimeError("owned root missing")
+            result = native.handle("continue_construction_chain", payload, bridge)
+            self.assertFalse(result["executed"])
+            ownership.side_effect = lambda b, m, o, **k: deepcopy(o)
+            bridge._build_stepped_shaft_feature.assert_not_called()
+            bridge._store_creation_module_recipe.assert_not_called()
+            doc.Save.assert_not_called(); doc.SaveAs.assert_not_called()
+            doc.RebuildDocument.assert_not_called()
+            # Explicit inactive-target activation; fresh preflight/input then actual final readbacks.
+            app.ActiveDocument = SimpleNamespace()
+            read.side_effect = [body(1), body(1)] + [body(2)]*4
+            result = native.handle("continue_construction_chain", payload, bridge)
+            self.assertTrue(result["ok"], result.get("error"))
+            self.assertTrue(result["continued"])
+            self.assertEqual(result["preserved_step_count"], 1)
+            self.assertEqual(result["appended_step_count"], 1)
+            doc.Activate.assert_called_once()
+            bridge._create_part_document.assert_not_called()
+            bridge._build_stepped_shaft_feature.assert_called_once()
+            doc.Save.assert_called_once_with(); doc.SaveAs.assert_not_called()
+            stored = bridge._store_creation_module_recipe.call_args.args[1]
+            self.assertEqual(stored["outputs"][0], out)
+            self.assertEqual(stored["expectations"][:1], envelope["expectations"])
+            self.assertEqual(stored["outputs"][1]["verification"]["scope"], "continuation_step")
+            self.assertEqual(result["output_path"], path)
+            self.assertTrue(result["verification"]["fresh_geometry_audit"])
+            # A known write failure retains the prefix checkpoint, not a rollback/retry.
+            bridge._creation_module_recipe.return_value = (envelope, None)
+            bridge._build_stepped_shaft_feature.reset_mock()
+            bridge._build_stepped_shaft_feature.side_effect = RuntimeError("native build failure")
+            read.side_effect = [body(1), body(1)]
+            result = native.handle("continue_construction_chain", payload, bridge)
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["executed"])
+            self.assertEqual(result["partial_result"]["last_verified_step"], "base")
+            self.assertEqual(result["partial_result"]["stage"], "build_step")
+            self.assertFalse(result["partial_result"]["rollback_performed"])
+            bridge._build_stepped_shaft_feature.assert_called_once()
+            # Reopened gear prefixes use the ORIGINAL audited native foundation,
+            # not a freshly guessed analytic gear volume; tooth edits stop preflight.
+            gear_plan = plan_construction_chain(self.gear_recipe())
+            gear_old = plan_construction_chain({"steps": self.gear_recipe()["steps"][:2]})
+            foundation = gear_old["steps"][0]["expected_delta_cm3"] + .0001
+            audit = {"verified": True, "volume_cm3": foundation,
+                     "bounds_mm": [-20, -22, -22, 0, 22, 22],
+                     "tooth_zone": {"sha256": "original", "face_count": 80}}
+            gear_outputs = []
+            for step in gear_old["steps"]:
+                gear_outputs.append({"id": step["id"], "namespace": step["namespace"], "section": step["section"],
+                    "sketch": {"name": step["id"], "reference": step["id"]+"s"},
+                    "feature": {"name": step["id"], "reference": step["id"]+"f"}})
+            gear_old["steps"][0]["verification"]["foundation_audit"] = audit
+            gear_outputs[0]["foundation_audit"] = audit
+            gear_envelope = {"schema": native.SCHEMA, "version": 1, "recipe": gear_old["recipe"],
+                "expectations": native._expectations(gear_old["steps"]), "outputs": gear_outputs}
+            bridge._creation_module_recipe.return_value = (gear_envelope, None)
+            gear_payload = dict(payload, plan=gear_plan, expected_recipe=gear_old["recipe"],
+                                expected_recipe_checksum=native._hash(gear_envelope))
+            gear_body = {"faces": gear_old["steps"][1]["section"]["segments"],
+                "bounds_mm": [-20, -22, -22, 12, 22, 22], "tooth_zone": audit["tooth_zone"],
+                "volume_cm3": foundation + gear_old["steps"][1]["expected_delta_cm3"]}
+            read.side_effect = None; read.return_value = gear_body
+            recovered_steps = native._validate(deepcopy(gear_plan))
+            recovered = native._continuation_preflight(gear_payload, bridge, gear_plan, recovered_steps)
+            self.assertEqual(recovered[5], 2)
+            self.assertEqual(recovered_steps[0]["verification"]["foundation_audit"], audit)
+            self.assertEqual(recovered[4][0]["foundation_audit"], audit)
+            read.return_value = dict(gear_body, tooth_zone={"sha256": "manual tooth edit", "face_count": 80})
+            result = native.handle("continue_construction_chain", gear_payload, bridge)
+            self.assertFalse(result["executed"])
+            self.assertEqual(result["partial_result"]["stage"], "preflight")
+            self.assertIn("tooth zone changed", result["error"])
+
+        # KOMPAS Reference is session-local. Reopened roots must resolve through
+        # native persistent IDs without falling back to their display names.
+        objects = {
+            "stable-sketch": SimpleNamespace(Reference=101, Name="Renamed profile", Valid=True, ConstraintsState=1),
+            "stable-feature": SimpleNamespace(Reference=102, Name="Renamed rotation", Valid=True),
+        }
+        identity = SimpleNamespace(
+            FindObjectById=lambda ident, parent: objects.get(ident),
+            GetObjectId=lambda obj, parent: next(key for key, value in objects.items() if value is obj))
+        pinned = SimpleNamespace(
+            _cast_to_com_interface=lambda obj, kind: obj,
+            safe_get=lambda obj, key, default=None: getattr(obj, key, default),
+            iter_collection=lambda items: iter(items or []),
+            _describe_constraints_state=lambda code: {"code": code}, KS_SKETCH_STATE_WELL_CONSTRAINED=1)
+        saved = {"id":"base", "sketch":{"reference":1,"name":"Original profile","object_id":"stable-sketch"},
+                 "feature":{"reference":2,"name":"Original rotation","object_id":"stable-feature"}}
+        rebound = native._ownership(pinned, SimpleNamespace(), [saved], document=identity)[0]
+        self.assertEqual((rebound["sketch"]["reference"], rebound["feature"]["reference"]), (101, 102))
+        self.assertEqual(saved["sketch"]["reference"], 1)
+        del objects["stable-feature"]
+        with self.assertRaisesRegex(RuntimeError, "missing/ambiguous"):
+            native._ownership(pinned, SimpleNamespace(), [saved], document=identity)
+
+
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
@@ -882,6 +2344,21 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(preview["interface"]["outputs"]["start_face"]["selector"], "step_1_start_face")
         self.assertEqual(preview["interface"]["outputs"]["end_face"]["selector"], "step_1_end_face")
 
+        # Re-evaluate a saved automatic radius formula after a pitch-driver
+        # change; it must match a fresh family plan, not the original number.
+        raw = {"diameter": 20, "pitch": 2.5, "length": 20,
+               "source_scenario": "stepped_shaft",
+               "source_params": {"steps": [{"length": 20, "diameter": 20}]}}
+        initial = preview_part_scenario("external_helical_thread", raw)["params"]
+        changed = preview_part_scenario("external_helical_thread", {**raw, "pitch": 2})["params"]
+        radius_dimension = next(d for d in initial["profile_dimensions"] if d["variable"].endswith("_SKR1"))
+        radius_after_change = eval(radius_dimension["expression"], {"__builtins__": {}},
+                                   {initial["public_pitch_variable_name"]: 2})
+        self.assertAlmostEqual(radius_after_change, changed["root_radius"], places=9)
+        explicit = preview_part_scenario("external_helical_thread", {**raw, "root_round_radius": 0.3})["params"]
+        explicit_dimension = next(d for d in explicit["profile_dimensions"] if d["variable"].endswith("_SKR1"))
+        self.assertEqual(float(explicit_dimension["expression"]), 0.3)
+
     def test_preview_external_helical_thread_accepts_unified_inch_designation(self) -> None:
         preview = preview_part_scenario(
             "external_helical_thread",
@@ -1350,6 +2827,230 @@ class ParametricPartTests(unittest.TestCase):
         self.assertAlmostEqual(right_root_ref["start"][1], right_root_ref["end"][1], places=9)
         self.assertAlmostEqual(right_root_projection["start"][0], right_root_projection["end"][0], places=9)
 
+    def test_internal_metric_through_plan_has_consistent_round_profile_and_nominal_drivers(self) -> None:
+        import copy
+        from kompas_mcp.parametric import _prepare_internal_metric_through_preview, _plan_internal_metric_end
+        bore = build_metric_thread_geometry(20, 2.5)["internal_minor_diameter"]
+        raw = {"diameter": 20, "pitch": 2.5, "length": 20,
+               "source_scenario": "internal_cylindrical_step",
+               "source_params": {"steps": [{"diameter": bore, "length": 20}],
+                   "source_scenario": "stepped_shaft", "source_params": {"steps": [{"diameter": 36, "length": 20}]}}}
+        legacy = preview_part_scenario("internal_helical_thread", raw)
+        before = copy.deepcopy(legacy)
+        prepared = _prepare_internal_metric_through_preview(legacy)
+        p = prepared["params"]
+        unchanged = copy.deepcopy(p)
+        through_end = _plan_internal_metric_end(p, exit_mode="through", thread_length=20, bore_span=[0,20], stock_span=[0,20])
+        self.assertEqual(through_end["spiral_length_mm"], p["spiral_length"])
+        self.assertEqual(through_end["height_binding"], next(b for b in p["operation_variable_bindings"] if b["role"]=="spiral_height"))
+        blind_end = _plan_internal_metric_end(p, exit_mode="blind", thread_length=18, bore_span=[0,20], stock_span=[0,24])
+        self.assertAlmostEqual(blind_end["spiral_length_mm"], 20.36458333333333)
+        self.assertAlmostEqual(blind_end["terminal_section_projection_mm"][0], 16.229166666666668)
+        self.assertEqual(blind_end["last_cut_trace_mm"], 18)
+        self.assertEqual(blind_end["smooth_bore_tail_mm"], 2)
+        self.assertEqual(blind_end["bottom_stock_thickness_mm"], 4)
+        self.assertFalse(blind_end["verified"])
+        self.assertFalse(blind_end["functional_thread_length_verified"])
+        self.assertEqual(p, unchanged)
+        variables = {p["public_diameter_variable_name"]:20, p["public_pitch_variable_name"]:2.5,p["public_length_variable_name"]:18}
+        self.assertAlmostEqual(eval(blind_end["height_binding"]["expression"], {"__builtins__":{}},variables),blind_end["spiral_length_mm"],places=9)
+        for kwargs in ({"exit_mode":"blind","thread_length":20,"stock_span":[0,24]},
+                       {"exit_mode":"through","thread_length":20,"stock_span":[0,24]},
+                       {"exit_mode":"blind","thread_length":float("nan"),"stock_span":[0,24]},
+                       {"exit_mode":"blind","thread_length":18,"stock_span":[1,24]}):
+            with self.subTest(internal_ending=kwargs),self.assertRaises(ValueError):
+                _plan_internal_metric_end(p,bore_span=[0,20],**kwargs)
+        bad = copy.deepcopy(p);bad["profile_arcs"][0]["yc"]+=.1
+        with self.assertRaises(ValueError):
+            _plan_internal_metric_end(bad,exit_mode="blind",thread_length=18,bore_span=[0,20],stock_span=[0,24])
+        for update in ({"spiral_phase_degrees": 0}, {"profile_surface_offset": float("nan")}):
+            with self.subTest(ending_frame=update),self.assertRaises(ValueError):
+                _plan_internal_metric_end({**p,**update},exit_mode="blind",thread_length=18,bore_span=[0,20],stock_span=[0,24])
+        self.assertEqual(legacy, before)
+        self.assertEqual(preview_part_scenario("internal_helical_thread", raw), before)
+        self.assertNotIn("internal_metric_method", legacy["params"])
+        self.assertFalse({"source_scenario", "source_preview", "source_params", "source_variable_bindings"} & p.keys())
+        self.assertFalse({"create_part_document", "create_source_body"} & {o["operation"] for o in prepared["operations"]})
+        self.assertEqual(p["internal_metric_method"]["version"], 1)
+        self.assertEqual(p["spiral_phase_degrees"], 180)
+        self.assertEqual(p["profile_variables"][0]["value"], 20)
+        self.assertAlmostEqual(p["carrier_diameter"], bore)
+        from kompas_mcp.construction_chains import plan_construction_chain, _internal_metric_carrier_guard
+        stock_recipe = {"steps": [
+            {"id": "blank", "module": "stepped_shaft", "basis": "own", "material": "create",
+             "parameters": {"steps": [{"diameter": 36, "length": 20}]}},
+            {"id": "bore", "module": "internal_cylindrical_step", "basis": "input", "material": "remove",
+             "target": "blank", "placement": {"reference": {"step": "blank", "anchor": "start"}},
+             "parameters": {"steps": [{"diameter": bore, "length": 20}]}}]}
+        stock = plan_construction_chain(stock_recipe)
+        guard = _internal_metric_carrier_guard(stock, "bore", p)
+        from kompas_mcp.construction_chains import _adapt_preview
+        from kompas_mcp.assets.bridge import chain_thread_runtime as thread_runtime
+        placed = _adapt_preview(prepared, "CH_THREAD", "Internal thread [thread]", 0, 1)
+        pp = placed["params"]
+        self.assertEqual(pp["profile_variables"][0]["name"], "CH_THREAD_D1")
+        self.assertEqual(pp["profile_arcs"], p["profile_arcs"])
+        protected = [{"kind": "cylinder", "x_span_mm": [0, 20], "radius_bounds_mm": [18, 18],
+                      "area_mm2": round(2*math.pi*18*20, 5)}]
+        base = {"body_count": 1, "bounds_mm": [0, -18, -18, 20, 18, 18],
+                "volume_cm3": guard["expected_blank_volume_cm3"], "protected_faces": protected}
+        after = {**base, "volume_cm3": base["volume_cm3"]-.6,
+                 "minimum_working_radius_mm": bore/2, "maximum_working_radius_mm": 10,
+                 "terminal_sections": [], "helix_edges": [
+                     {"reference": i+1, "axial_min_mm": 0, "axial_max_mm": 20,
+                      "radius_mm": radius, "signed_lead_mm": 2.5}
+                     for i, radius in enumerate((bore/2, bore/2, guard["root_tangent_radius_mm"], guard["root_tangent_radius_mm"]))]}
+        from kompas_mcp.assets.bridge import construction_chain_runtime as native
+        self.assertTrue(thread_runtime.verify(native, base, after, guard)["verified"])
+        for key, value in (("maximum_working_radius_mm", 9.8), ("terminal_sections", [{"x_span_mm": [19, 20]}]),
+                           ("helix_edges", after["helix_edges"][:-1]), ("protected_faces", [])):
+            with self.subTest(internal_geometry=key), self.assertRaises((ValueError, RuntimeError)):
+                thread_runtime.verify(native, base, {**after, key: value}, guard)
+        owned = [{"collection": collection, "name": name, "object_id": "internal-"+str(i), "require_fully_defined": True}
+            for i, (collection, name) in enumerate((("Sketchs", pp["profile_display_name"]),
+                ("Evolutions", pp["feature_display_name"]), ("Points3D", pp["start_center_name"]),
+                ("Points3D", pp["profile_origin_name"]), ("Axes3D", pp["axis_display_name"]),
+                ("Spirals3D", pp["path_display_name"]), ("LocalCoordinateSystems", pp["profile_display_name"]+"_LCS")))]
+        output = {"id": "thread", "namespace": "CH_THREAD", "owned_objects": owned,
+                  "sketch": owned[0], "feature": owned[1], "macro": {"name": "thread macro", "object_id": "internal-macro"}}
+        prefixes = [{"id": s["id"], "namespace": s["namespace"],
+                     **{k: {"name": s["id"]+k, "object_id": s["id"]+k} for k in ("sketch", "feature", "macro")}} for s in stock["steps"]]
+        checkpoint = thread_runtime.make_checkpoint(native, stock, guard, placed,
+            {"ok": True, "thread_executed": True, "verification": {"verified": True}, "drivers": {"verified": True},
+             "body_before": base, "body_after": after, "output": output, "prefix_outputs": prefixes})
+        self.assertEqual(thread_runtime._validate_checkpoint(native, stock, guard, placed, checkpoint)[-1]["id"], "thread")
+        corrupt_checkpoint = copy.deepcopy(checkpoint)
+        corrupt_checkpoint["baseline"]["protected_faces"] = []
+        with self.assertRaises(ValueError):
+            thread_runtime._validate_checkpoint(native, stock, guard, placed, corrupt_checkpoint)
+        blind_plan = _plan_internal_metric_end(pp,exit_mode="blind",thread_length=18,bore_span=[0,20],stock_span=[0,20])
+        blind_preview = copy.deepcopy(placed)
+        bp = blind_preview["params"]
+        bp.update(length=18,end_origin=[18,0,0],spiral_length=blind_plan["spiral_length_mm"])
+        bp["operation_variable_bindings"] = [blind_plan["height_binding"] if b["role"]=="spiral_height" else b for b in bp["operation_variable_bindings"]]
+        blind_guard = _internal_metric_carrier_guard(stock,"bore",bp,end_plan=blind_plan)
+        self.assertEqual(native._internal_metric_carrier_guard(stock,blind_guard,bp),stock["steps"])
+        baseline = copy.deepcopy(base)
+        baseline["protected_faces"].append({"kind":"plane","x_span_mm":[20,20],"radius_bounds_mm":[round(bore/2,6),18],
+            "area_mm2":round(math.pi*(18**2-(bore/2)**2),5)})
+        blind_after = copy.deepcopy(after)
+        blind_after["protected_faces"] = baseline["protected_faces"]
+        for h in blind_after["helix_edges"]: h["axial_max_mm"] = 18
+        blind_after["terminal_sections"] = [{"x_span_mm":blind_plan["terminal_section_projection_mm"],
+            "radius_bounds_mm":[bore/2,10],"area_mm2":1.33557}]
+        blind_result = thread_runtime.verify(native,baseline,blind_after,blind_guard)
+        self.assertEqual(blind_result["end_characteristics"]["smooth_tail_mm"],2)
+        native_checkpoint = thread_runtime.make_checkpoint(native,stock,blind_guard,blind_preview,
+            {"ok":True,"thread_executed":True,"verification":blind_result,"drivers":{"verified":True},
+             "body_before":baseline,"body_after":blind_after,"output":output,"prefix_outputs":prefixes})
+        self.assertEqual(native_checkpoint["end_characteristics"]["last_cut_trace_mm"],18)
+        for mutation in ("end_characteristics","protected_faces"):
+            corrupt = copy.deepcopy(native_checkpoint)
+            if mutation=="end_characteristics": corrupt[mutation]["last_cut_trace_mm"] = 19
+            else: corrupt["baseline"][mutation] = [baseline["protected_faces"][0]]
+            with self.subTest(blind_checkpoint=mutation),self.assertRaises((ValueError,RuntimeError)):
+                thread_runtime._validate_checkpoint(native,stock,blind_guard,blind_preview,corrupt)
+        bad = copy.deepcopy(blind_guard);bad["end_plan"]["smooth_bore_tail_mm"] = 0
+        with self.assertRaises(ValueError):native._internal_metric_carrier_guard(stock,bad,bp)
+        with self.assertRaises(RuntimeError):thread_runtime.verify(native,baseline,{**blind_after,"terminal_sections":[]},blind_guard)
+        bottom_recipe = copy.deepcopy(stock_recipe)
+        bottom_recipe["steps"][0]["parameters"]["steps"][0]["length"] = 24
+        bottom_stock = plan_construction_chain(bottom_recipe)
+        bottom_end = _plan_internal_metric_end(pp,exit_mode="blind",thread_length=18,bore_span=[0,20],stock_span=[0,24])
+        bottom_guard = _internal_metric_carrier_guard(bottom_stock,"bore",bp,end_plan=bottom_end)
+        self.assertEqual(native._internal_metric_carrier_guard(bottom_stock,bottom_guard,bp),bottom_stock["steps"])
+        with self.assertRaises(ValueError):_internal_metric_carrier_guard(bottom_stock,"bore",pp)
+        with self.assertRaises(ValueError):native._internal_metric_carrier_guard(bottom_stock,guard,pp)
+        bottom_base = copy.deepcopy(baseline)
+        bottom_base.update(bounds_mm=[0,-18,-18,24,18,18],volume_cm3=bottom_guard["expected_blank_volume_cm3"])
+        bottom_base["protected_faces"] = [{"kind":"cylinder","x_span_mm":[0,24],"radius_bounds_mm":[18,18],
+            "area_mm2":round(2*math.pi*18*24,5)}]+[
+            {"kind":"plane","x_span_mm":[x,x],"radius_bounds_mm":[round(r,6)]*2,"area_mm2":round(math.pi*r*r,5)}
+            for x,r in ((20,bore/2),(24,18))]
+        bottom_after = {**copy.deepcopy(blind_after),**bottom_base,"volume_cm3":bottom_base["volume_cm3"]-.5}
+        bottom_result = thread_runtime.verify(native,bottom_base,bottom_after,bottom_guard)
+        self.assertEqual(bottom_result["end_characteristics"]["gap_to_bottom_mm"],2)
+        self.assertEqual(bottom_result["end_characteristics"]["bottom_stock_thickness_mm"],4)
+        bottom_checkpoint = thread_runtime.make_checkpoint(native,bottom_stock,bottom_guard,blind_preview,
+            {"ok":True,"thread_executed":True,"verification":bottom_result,"drivers":{"verified":True},
+             "body_before":bottom_base,"body_after":bottom_after,"output":output,"prefix_outputs":prefixes})
+        for field in ("gap_to_bottom_mm","bottom_stock_thickness_mm","bore_has_bottom"):
+            corrupt = copy.deepcopy(bottom_checkpoint)
+            corrupt["end_characteristics"][field] = 0
+            with self.subTest(bottom_checkpoint=field),self.assertRaises((ValueError,RuntimeError)):
+                thread_runtime._validate_checkpoint(native,bottom_stock,bottom_guard,blind_preview,corrupt)
+        for index in (1,2):
+            corrupt = copy.deepcopy(bottom_checkpoint)
+            corrupt["baseline"]["protected_faces"][index]["area_mm2"] -= 1
+            with self.subTest(bottom_disk=index),self.assertRaises((ValueError,RuntimeError)):
+                thread_runtime._validate_checkpoint(native,bottom_stock,bottom_guard,blind_preview,corrupt)
+        corrupt = copy.deepcopy(bottom_guard);corrupt["end_plan"]["bottom_stock_thickness_mm"] = 3
+        with self.assertRaises(ValueError):native._internal_metric_carrier_guard(bottom_stock,corrupt,bp)
+        self.assertEqual(native._internal_metric_carrier_guard(stock, guard, p), stock["steps"])
+        from unittest.mock import Mock
+        bridge = Mock()
+        invalid_guard = {**guard, "bore_radius_mm": guard["bore_radius_mm"]+.1}
+        with self.assertRaises(ValueError):
+            native._internal_metric_carrier_context(bridge, object(), object(), stock, invalid_guard, p)
+        bridge.describe_runtime_document.assert_not_called()
+        for patch_guard in ({"target": "blank"}, {"native_carrier_verified": True}, {"expected_blank_volume_cm3": 0}):
+            with self.subTest(native_guard=patch_guard), self.assertRaises(ValueError):
+                native._internal_metric_carrier_guard(stock, {**guard, **patch_guard}, p)
+        self.assertFalse(guard["native_carrier_verified"])
+        self.assertFalse(guard["material_preservation_verified"])
+        self.assertAlmostEqual(guard["expected_blank_volume_cm3"], math.pi*(18**2-(bore/2)**2)*20/1000)
+        with self.assertRaises(ValueError):
+            _internal_metric_carrier_guard(stock, "blank", p)
+        corrupt = copy.deepcopy(stock)
+        corrupt["steps"][0]["section"]["end_mm"] = 19
+        with self.assertRaises(ValueError):
+            _internal_metric_carrier_guard(corrupt, "bore", p)
+        short = copy.deepcopy(stock_recipe)
+        short["steps"][1]["parameters"]["steps"][0]["length"] = 19
+        with self.assertRaises(ValueError):
+            _internal_metric_carrier_guard(plan_construction_chain(short), "bore", p)
+        with self.assertRaises(ValueError):
+            native._internal_metric_carrier_guard(plan_construction_chain(short), guard, p)
+        for updates in ({"diameter": 36}, {"carrier_diameter": bore+.1}, {"radial_cut_depth": 1},
+                        {"internal_metric_method": None}, {"start_origin": [1, 0, 0]}):
+            with self.subTest(carrier=updates), self.assertRaises(ValueError):
+                _internal_metric_carrier_guard(stock, "bore", {**p, **updates})
+        arc = p["profile_arcs"][0]
+        for x, y in ((arc["x1"], arc["y1"]), (arc["x2"], arc["y2"])):
+            self.assertAlmostEqual(math.hypot(x-arc["xc"], y-arc["yc"]), arc["radius"], places=9)
+        line = p["profile_lines"][0]
+        self.assertAlmostEqual((line["end"][0]-line["start"][0])*(arc["x2"]-arc["xc"])
+            +(line["end"][1]-line["start"][1])*(arc["y2"]-arc["yc"]), 0, places=9)
+        self.assertAlmostEqual(-arc["yc"]+arc["radius"], 10)
+        for pitch in (2.5, 2):
+            with self.subTest(pitch=pitch):
+                values = {p["public_diameter_variable_name"]: 20, p["public_pitch_variable_name"]: pitch,
+                          p["public_length_variable_name"]: 20}
+                evaluate = lambda expr: eval(expr, {"__builtins__": {}}, values)
+                radius = pitch/(16*math.cos(math.pi/6))
+                depth = (20-bore)/2
+                half = pitch/16+(depth-radius/2)*math.tan(math.pi/6)
+                expressions = p["profile_dimension_expressions"]
+                self.assertAlmostEqual(evaluate(expressions["sketch_reference_radius"]), bore/2, places=9)
+                self.assertAlmostEqual(evaluate(expressions["sketch_depth"]), depth+radius, places=9)
+                self.assertAlmostEqual(evaluate(expressions["sketch_outer_half"]), half, places=9)
+                self.assertAlmostEqual(evaluate(expressions["sketch_crest_drop"]), math.sqrt(3)*pitch/2-depth-radius, places=9)
+                binding = next(b for b in p["operation_variable_bindings"] if b["role"] == "spiral_height")
+                self.assertAlmostEqual(evaluate(binding["expression"]), 20+1.3*pitch+half, places=9)
+        left = _prepare_internal_metric_through_preview(preview_part_scenario("internal_helical_thread", {**raw, "direction": "left"}))
+        self.assertEqual(left["params"]["spiral_phase_degrees"], 0)
+        for patch_params in ({"clearance": .1}, {"profile_angle_degrees": 55}, {"root_width_mode": "explicit"},
+                             {"diameter": float("nan")}, {"profile_angle_degrees": float("nan")},
+                             {"profile_surface_offset": float("nan")}, {"diameter": bore}, {"pitch": .5}, {"length": 19},
+                             {"profile_dimensions": []}):
+            with self.subTest(invalid=patch_params):
+                bad = copy.deepcopy(legacy)
+                bad["params"].update(patch_params)
+                with self.assertRaises(ValueError):
+                    _prepare_internal_metric_through_preview(bad)
+        with self.assertRaises(ValueError):
+            _prepare_internal_metric_through_preview(prepared)
+
     def test_preview_internal_helical_thread_builds_cut_contract(self) -> None:
         geometry = build_metric_thread_geometry(16.0, 2.0)
         preview = preview_part_scenario(
@@ -1560,18 +3261,57 @@ class ParametricPartTests(unittest.TestCase):
         self.assertEqual(profile[2][0], -8.0)
         self.assertEqual(profile[-1], [0.0, 15.0])
 
+    def test_face_ring_groove_straight_walls_preview_and_chain(self) -> None:
+        from kompas_mcp.construction_chains import plan_construction_chain
+
+        parameters = {"inner_diameter": 20, "outer_diameter": 30, "depth": 2}
+        preview = preview_part_scenario("face_ring_groove", {**parameters, "parameter_prefix": "groove01"})
+        profile = next(op["profile_points"] for op in preview["operations"] if op["operation"] == "draw_profile")
+        self.assertEqual(profile, [[0, 15], [0, 10], [2, 10], [2, 15], [0, 15]])
+        self.assertEqual(preview["summary"]["inner_wall_angle_degrees"], 0)
+        self.assertEqual(preview["summary"]["outer_wall_angle_degrees"], 0)
+        dimensions = next(op["dimensions"] for op in preview["operations"] if op["operation"] == "add_dimensions")
+        self.assertEqual((dimensions[0]["kind"], dimensions[0]["target"], dimensions[0]["expression"]),
+                         ("line_length", "axis", "GROOVE01_DEP1"))
+        self.assertEqual([d["value"] for d in dimensions], [2, 15, 10, 10, 15])
+        self.assertTrue(all(d["driving"] for d in dimensions))
+        constraints = next(op["constraints"] for op in preview["operations"] if op["operation"] == "apply_constraints")
+        self.assertEqual([(c["target"], c["partner"]) for c in constraints if c["kind"] == "merge_points"],
+                         [(f"profile_line_{i}", f"profile_line_{i % 4 + 1}") for i in range(1, 5)])
+        recipe = {"steps": [
+            {"id": "base", "module": "stepped_shaft", "basis": "own", "material": "create",
+             "parameters": {"steps": [{"length": 20, "diameter": 40}]}},
+            {"id": "groove", "module": "face_ring_groove", "basis": "input", "material": "remove",
+             "target": "base", "parameters": parameters,
+             "placement": {"reference": {"step": "base", "anchor": "start"}}},
+        ]}
+        plan = plan_construction_chain(recipe)
+        self.assertEqual(plan, plan_construction_chain(plan["recipe"]))
+        groove = plan["steps"][-1]
+        self.assertAlmostEqual(groove["expected_delta_cm3"], -math.pi * (15**2 - 10**2) * 2 / 1000)
+        self.assertAlmostEqual(plan["expected_total_volume_cm3"], math.pi * (20**2 * 20 - (15**2 - 10**2) * 2) / 1000)
+        dims = next(op["dimensions"] for op in groove["preview"]["operations"] if op["operation"] == "add_dimensions")
+        self.assertEqual((dims[0]["kind"], dims[0]["target"], dims[0]["expression"]),
+                         ("line_length", "axis", "CH_GROOVE_DEP1"))
+        self.assertTrue(groove["preview"]["params"]["require_fully_defined"])
+        # Either wall may be straight independently; neither may disappear.
+        for inner_angle, outer_angle in ((0, 12), (5, 0)):
+            with self.subTest(inner_angle=inner_angle, outer_angle=outer_angle):
+                mixed = preview_part_scenario("face_ring_groove", {**parameters,
+                    "inner_wall_angle_degrees": inner_angle, "outer_wall_angle_degrees": outer_angle})
+                self.assertEqual(mixed["summary"]["planned_dimension_count"], 5)
+                self.assertEqual(mixed["summary"]["planned_constraint_count"], 10)
+
     def test_preview_face_ring_groove_rejects_invalid_bottom_profile(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"bottom_outer_diameter must stay greater than bottom_inner_diameter"):
-            preview_part_scenario(
-                "face_ring_groove",
-                {
-                    "inner_diameter": 18,
-                    "outer_diameter": 20,
-                    "depth": 8,
-                    "inner_wall_angle_degrees": 30,
-                    "outer_wall_angle_degrees": 30,
-                },
-            )
+        # Crossing walls, meeting walls, and a crossing with one straight wall.
+        for inner_angle, outer_angle, depth in ((30, 30, 8), (45, 45, 0.5), (0, 45, 2)):
+            with self.subTest(inner_angle=inner_angle, outer_angle=outer_angle), self.assertRaisesRegex(
+                ValueError, r"bottom_outer_diameter must stay greater than bottom_inner_diameter"
+            ):
+                preview_part_scenario("face_ring_groove", {
+                    "inner_diameter": 18, "outer_diameter": 20, "depth": depth,
+                    "inner_wall_angle_degrees": inner_angle, "outer_wall_angle_degrees": outer_angle,
+                })
 
     def test_preview_point_builds_reference_contract(self) -> None:
         preview = preview_part_scenario(
@@ -3509,6 +5249,26 @@ class ParametricPartTests(unittest.TestCase):
             length_model["centerline_height_expression"],
             "L1 - WD1 + ((N31 + N32) * WD1)",
         )
+        with_gap = preview_part_scenario("compression_spring", {
+            "mean_diameter": 30, "wire_diameter": 4, "standard_length": 50,
+            "working_turns": 5.5, "start_end_turns": .75, "finish_end_turns": .75,
+            "start_ground_turns": .5, "finish_ground_turns": .25, "end_pitch_gap": .01,
+        })["params"]
+        self.assertEqual(with_gap["wire_diameter"], 4)
+        self.assertAlmostEqual(with_gap["height"], 49.0075)
+        self.assertAlmostEqual(with_gap["start_end_turn_height"], 3.0075)
+        self.assertAlmostEqual(with_gap["end_pitch"], 4.01)
+        variables = {v["name"]: v for v in with_gap["variable_plan"]}
+        self.assertEqual(variables["EG1"]["value"], .01)
+        self.assertTrue(variables["EG1"]["external"])
+        self.assertEqual(variables["EP1"]["expression"], "WD1 + EG1")
+        self.assertIn("EP1", variables["H1"]["expression"])
+        for segment in (with_gap["segment_plan"][0], with_gap["segment_plan"][-1]):
+            self.assertEqual(segment["pitch_expression"], "EP1")
+            self.assertAlmostEqual(segment["pitch"], 4.01)
+        for trim in with_gap["ground_trim_plan"]["operations"]:
+            self.assertIn("EP1", trim["offset_expression"])
+            self.assertIn("WD1", trim["offset_expression"])
 
     def test_preview_compression_spring_accepts_L_alias_for_standard_length(self) -> None:
         preview = preview_part_scenario(
@@ -4426,7 +6186,8 @@ class ParametricPartTests(unittest.TestCase):
             [operation["orientation_angle_degrees"] for operation in spiral_operations],
             [0.0, 0.0, 0.0],
         )
-        self.assertIn("(0.0) - (360 * (N21))", str(spiral_operations[1]["anchor_rotation_expression"]))
+        self.assertEqual(float(spiral_operations[0]["anchor_rotation_expression"]), 270.0)
+        self.assertIn("(-90.0) - (360 * (N21))", str(spiral_operations[1]["anchor_rotation_expression"]))
         self.assertNotIn("+ (360 * (N21))", str(spiral_operations[1]["anchor_rotation_expression"]))
         self.assertIn("- (360 * (", str(spiral_operations[2]["anchor_rotation_expression"]))
         self.assertIn("N21", str(spiral_operations[2]["anchor_rotation_expression"]))
@@ -4434,6 +6195,13 @@ class ParametricPartTests(unittest.TestCase):
         self.assertIn("WD1", str(spiral_operations[2]["anchor_rotation_expression"]))
         self.assertIn("P1", str(spiral_operations[2]["anchor_rotation_expression"]))
         self.assertNotIn("N1", str(spiral_operations[2]["anchor_rotation_expression"]))
+        zero_phase = preview_part_scenario("compression_spring", {
+            "mean_diameter": 30, "wire_diameter": 4, "height": 48, "working_turns": 5,
+            "end_turns_per_side": 1, "start_phase_degrees": 0, "turn_direction": "left",
+        })
+        segments = zero_phase["params"]["segment_plan"]
+        self.assertIsNone(segments[0]["anchor_rotation_expression"])
+        self.assertIn("(0.0) - (360 * (N21))", segments[1]["anchor_rotation_expression"])
 
     def test_preview_compression_spring_rejects_ground_turns_above_end_turns(self) -> None:
         with self.assertRaisesRegex(

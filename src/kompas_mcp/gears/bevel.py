@@ -22,6 +22,7 @@ import math
 from dataclasses import dataclass, field
 
 from .basic_racks import resolve_rack
+from .bevel_spec import BevelGearRequest
 from .involute import build_tooth_space_flank, error_item, warning_item
 from .measure import chordal_tooth, constant_chord
 from .modules import describe_module
@@ -175,9 +176,21 @@ def _revolution_volume(profile: list[list[float]]) -> float:
     return abs(math.pi / 3.0 * total)
 
 
-def _project_to_end_view(point: list[float], cos_delta: float) -> list[float]:
-    """Orthographic end view of a virtual-plane point: drop the gear-axis part."""
-    return [-float(point[0]), float(point[1]) * cos_delta]
+def _project_to_end_view(
+    point: list[float], cos_delta: float, sin_delta: float,
+    cone_apex_x: float, outer_cone_distance: float,
+) -> list[float]:
+    """Project the apex ray's intersection with the revolved back cone.
+
+    The virtual frontal plane is tangent to this cone only at the pitch
+    generator. Dropping X from that plane distorts the tooth-end contour.
+    """
+    u, v = float(point[0]), float(point[1])
+    radius = math.hypot(u, v * cos_delta)
+    x = cone_apex_x + v * sin_delta
+    distance = sin_delta * radius - cos_delta * x
+    scale = outer_cone_distance / distance
+    return [-u * scale, v * cos_delta * scale]
 
 
 def _ray_polygon_intervals(
@@ -200,7 +213,11 @@ def _ray_polygon_intervals(
         if t >= -1e-12 and -1e-9 <= u <= 1.0 + 1e-9:
             hits.append(max(0.0, t))
     hits.sort()
-    return hits
+    unique = []
+    for hit in hits:
+        if not unique or hit - unique[-1] > 1e-12 * max(1.0, abs(hit)):
+            unique.append(hit)
+    return unique
 
 
 def _clipped_gap_area(
@@ -210,12 +227,13 @@ def _clipped_gap_area(
     sin_delta: float,
     cos_delta: float,
     tan_face_cone: float,
+    ray_arrays=None,
 ) -> float:
     """Area of the tooth-space region clipped by the blank's face cone.
 
     Kept as a single-station diagnostic at the back-cone plane.
     """
-    arrays = _clipped_gap_ray_arrays(
+    arrays = ray_arrays if ray_arrays is not None else _clipped_gap_ray_arrays(
         gap_outline,
         cone_apex_x=cone_apex_x,
         sin_delta=sin_delta,
@@ -262,7 +280,7 @@ def _clipped_gap_ray_arrays(
     if end - start <= 1e-9:
         return None
     steps = AREA_INTEGRATION_STEPS
-    angles = [start + (end - start) * (index + 0.5) / steps for index in range(steps + 1)]
+    angles = [start + (end - start) * (index + 0.5) / steps for index in range(steps)]
     apex_distance = -cone_apex_x
     t_inner: list[float] = []
     t_outer: list[float] = []
@@ -270,6 +288,11 @@ def _clipped_gap_ray_arrays(
     for angle in angles:
         direction = [math.cos(angle), math.sin(angle)]
         hits = _ray_polygon_intervals([0.0, 0.0], direction, gap_outline)
+        if len(hits) > 2:
+            raise ValueError(
+                "Tooth-space polygon has multiple intervals on an apex ray; "
+                "the volume estimate requires a single interval"
+            )
         if len(hits) >= 2:
             t_inner.append(hits[0])
             t_outer.append(hits[1])
@@ -286,14 +309,14 @@ def _clipped_gap_ray_arrays(
             2.0 * tan_face_cone * tan_face_cone * apex_distance * sin_delta * sin_phi
         )
         quadratic_c = tan_face_cone * tan_face_cone * apex_distance * apex_distance
-        if abs(quadratic_a) <= 1e-12:
-            t_cone.append(0.0)
-            continue
         discriminant = quadratic_b * quadratic_b + 4.0 * quadratic_a * quadratic_c
         if discriminant < 0.0:
-            t_cone.append(0.0)
-            continue
-        t_cone.append((-quadratic_b + math.sqrt(discriminant)) / (2.0 * quadratic_a))
+            raise ValueError("Face-cone intersection has no real radius")
+        # Rationalized positive root remains stable as a approaches zero.
+        denominator = quadratic_b + math.sqrt(discriminant)
+        if denominator <= 0.0:
+            raise ValueError("Face-cone intersection has no positive radius")
+        t_cone.append(2.0 * quadratic_c / denominator)
     return angles, t_inner, t_outer, t_cone
 
 
@@ -308,17 +331,19 @@ def _removed_volume(
     front_face_x: float,
     outer_cone_distance: float,
     inner_cone_distance: float,
-    stations: int = 240,
+    section_outer_cone_distance: float | None = None,
+    section_inner_cone_distance: float | None = None,
+    stations: int = 96,
+    ray_arrays=None,
 ) -> float:
     """Volume of one tooth space inside the dish blank.
 
-    The tooth space is the cone over the virtual gap between the two cone
-    planes. Each cone-normal station is clipped by the blank's face cone and by
-    the flat back face (``x >= back_face_x``); the front cone plane bounds the
-    station range, and the blank's rim overhang keeps the material on the
-    ``R >= R_i`` side.
+    Integrate scale analytically along each apex ray, then use midpoint
+    quadrature in the virtual plane. Clip by both revolved end cones, both flat
+    faces, the tip cone, and the actual loft section planes (including margins).
+    This is a sampled polygon estimate, not an exact BREP volume.
     """
-    arrays = _clipped_gap_ray_arrays(
+    arrays = ray_arrays if ray_arrays is not None else _clipped_gap_ray_arrays(
         gap_outline,
         cone_apex_x=cone_apex_x,
         sin_delta=sin_delta,
@@ -329,29 +354,34 @@ def _removed_volume(
         return 0.0
     angles, t_inner, t_outer, t_cone = arrays
     delta_angle = (angles[-1] - angles[0]) / max(1, len(angles) - 1)
-    delta_r = (outer_cone_distance - inner_cone_distance) / max(1, stations)
+    scale_min = (section_inner_cone_distance if section_inner_cone_distance is not None
+                 else inner_cone_distance) / outer_cone_distance
+    scale_max = (section_outer_cone_distance if section_outer_cone_distance is not None
+                 else outer_cone_distance) / outer_cone_distance
     volume = 0.0
-    for station in range(stations):
-        cone_distance = inner_cone_distance + delta_r * (station + 0.5)
-        scale = cone_distance / outer_cone_distance
-        back_limit = (back_face_x / scale - cone_apex_x) / sin_delta
-        area = 0.0
-        for index in range(len(angles)):
-            sin_phi = math.sin(angles[index])
-            lower = t_inner[index]
-            upper = t_outer[index]
-            if upper <= lower:
+    for index, angle in enumerate(angles):
+        sin_phi, cos_phi = math.sin(angle), math.cos(angle)
+        lower = t_inner[index]
+        upper = min(t_outer[index], t_cone[index])
+        if upper <= lower:
+            continue
+        delta_t = (upper - lower) / stations
+        for station in range(stations):
+            t = lower + delta_t * (station + 0.5)
+            x = cone_apex_x + t * sin_delta * sin_phi
+            radius = t * math.hypot(cos_phi, cos_delta * sin_phi)
+            end_cone_distance = sin_delta * radius - cos_delta * x
+            if x >= 0.0 or end_cone_distance <= 0.0:
                 continue
-            if sin_phi > 1e-9:
-                lower = max(lower, back_limit / sin_phi)
-                if upper <= lower:
-                    continue
-            if t_cone[index] > 0.0:
-                upper = min(upper, t_cone[index])
-                if upper <= lower:
-                    continue
-            area += 0.5 * (upper * upper - lower * lower) * delta_angle
-        volume += scale * scale * area * delta_r
+            # The front flat face and front cone bound a union: material
+            # survives on either the plate side or the rim side.
+            low = max(scale_min, min(front_face_x / x,
+                                     inner_cone_distance / end_cone_distance))
+            high = min(scale_max, back_face_x / x,
+                       outer_cone_distance / end_cone_distance)
+            if high > low:
+                volume += (high ** 3 - low ** 3) * t * delta_t * delta_angle
+    volume *= outer_cone_distance / 3.0
     return volume
 
 
@@ -361,6 +391,9 @@ def build_bevel_gear_geometry(
     curve_samples: int = 260,
 ) -> BevelGearGeometry:
     """Build the complete nominal geometry for one straight bevel gear."""
+    request = BevelGearRequest.model_validate(request).model_dump(exclude_none=True)
+    if isinstance(curve_samples, bool) or not isinstance(curve_samples, int) or not 16 <= curve_samples <= 4096:
+        raise ValueError("curve_samples must be an integer in 16..4096")
     rack = resolve_rack(
         str(request.get("standard") or "gost_13754_68"),
         str(request.get("modification") or "standard"),
@@ -393,7 +426,7 @@ def build_bevel_gear_geometry(
     outer_root_diameter = outer_pitch_diameter - 2.0 * outer_dedendum * cos_delta
 
     requested_width = request.get("face_width_mm")
-    if requested_width is None or float(requested_width) <= 0.0:
+    if requested_width is None:
         face_width = K_BE_DEFAULT * outer_cone_distance
         face_width_source = "gost_19624_recommendation_0.285_Re"
     else:
@@ -508,6 +541,12 @@ def build_bevel_gear_geometry(
             ),
         )
     )
+    if outer_addendum <= 0.0 or outer_dedendum <= 0.0:
+        errors.append(error_item(
+            "gear_bevel_invalid_tooth_heights",
+            "Addendum and dedendum must both be positive for this macro geometry.",
+            outer_addendum_mm=outer_addendum, outer_dedendum_mm=outer_dedendum,
+        ))
     if outer_tip_diameter <= 0.0 or outer_root_diameter <= 0.0:
         errors.append(
             error_item(
@@ -718,6 +757,8 @@ def build_bevel_gear_geometry(
         rack_depth_mm=(ha + clearance) * module,
         corner_depth_mm=(ha + clearance - shift) * module,
         curve_samples=curve_samples,
+        analytic_root_join=True,
+        rack_corner_radius_mm=(rack.fillet_coefficient or 0.0) * module,
     )
     if flank.get("errors"):
         geometry.errors = list(flank["errors"])
@@ -747,8 +788,13 @@ def build_bevel_gear_geometry(
 
     # End view: orthographic projection of the tooth-space directions onto the
     # YZ plane, clipped by the outer tip circle of the dish.
-    surface_view = [_project_to_end_view(point, cos_delta) for point in surface]
-    cap_view = [_project_to_end_view(point, cos_delta) for point in cap_arc]
+    # The frame maps virtual +U to global -Y: the supplied flank projects to
+    # the LEFT side of the gap. Build a positive-angle tooth period from its
+    # symmetric right side, otherwise the tip arc crosses neighboring gaps.
+    surface_view = [_mirror(_project_to_end_view(point, cos_delta, sin_delta, cone_apex_x,
+                                                outer_cone_distance)) for point in surface]
+    cap_view = [_mirror(_project_to_end_view(point, cos_delta, sin_delta, cone_apex_x,
+                                            outer_cone_distance)) for point in cap_arc]
     right_boundary = [*surface_view, *cap_view]
     right_crossing = None
     for index in range(len(right_boundary) - 1):
@@ -757,8 +803,13 @@ def build_bevel_gear_geometry(
         current_radius = _radius(current)
         following_radius = _radius(following)
         if current_radius <= tip_corner_radius < following_radius:
-            span = following_radius - current_radius
-            factor = (tip_corner_radius - current_radius) / span if span > 1e-15 else 0.0
+            # Exact segment/circle crossing; interpolating radii places the
+            # resulting point inside the circle and introduces a small seam.
+            dx, dy = following[0] - current[0], following[1] - current[1]
+            a = dx * dx + dy * dy
+            b = 2.0 * (current[0] * dx + current[1] * dy)
+            c = current_radius * current_radius - tip_corner_radius * tip_corner_radius
+            factor = (-b + math.sqrt(max(0.0, b * b - 4.0 * a * c))) / (2.0 * a)
             right_crossing = (
                 index,
                 [
@@ -781,6 +832,13 @@ def build_bevel_gear_geometry(
     pitch_angle_step = 2.0 * math.pi / tooth_count
     inner_surface = [*right_boundary[: crossing_index + 1], crossing]
     tip_arc_span = pitch_angle_step - 2.0 * crossing_angle
+    if tip_arc_span <= 0.0:
+        geometry.errors.append(error_item(
+            "gear_bevel_projected_tip_overlap",
+            "Adjacent projected tooth spaces overlap at the outer tip circle.",
+            tip_arc_span_rad=tip_arc_span,
+        ))
+        return geometry
     tip_arc_steps = max(4, int(16 * max(abs(tip_arc_span), 1e-3) / 0.1))
     tip_arc = [
         _polar(tip_corner_radius, crossing_angle + tip_arc_span * step / tip_arc_steps)
@@ -789,13 +847,14 @@ def build_bevel_gear_geometry(
     mirrored_tooth = [
         _rotate(_mirror(point), pitch_angle_step) for point in reversed(inner_surface)
     ]
-    period = _dedupe([*inner_surface, *tip_arc[1:-1], *mirrored_tooth[1:]])
+    period = _dedupe([*inner_surface, *tip_arc[1:], *mirrored_tooth[1:]])
     if math.dist(period[0], period[-1]) > 1e-9:
         period.append(period[0])
     geometry.end_view_period = period
     wheel: list[list[float]] = []
     for index in range(tooth_count):
-        rotated = [_rotate(point, index * pitch_angle_step) for point in period]
+        # The closing segment belongs to a cropped period, not to the wheel.
+        rotated = [_rotate(point, index * pitch_angle_step) for point in period[:-1]]
         if wheel:
             rotated = rotated[1:]
         wheel.extend(rotated)
@@ -823,16 +882,19 @@ def build_bevel_gear_geometry(
         "root_line": [[back_root_x, -back_root_x * tan_root_cone], [front_root_x, -front_root_x * tan_root_cone]],
     }
 
-    # Expected volume: dish blank minus z clipped tooth-space cones. The tooth
-    # space is self-similar between the two cone planes, so its integral has a
-    # closed cubic form once the clipped back-cone area is known.
+    # Expected volume: dish blank minus z clipped tooth-space cones.
     geometry.blank_volume_mm3 = _revolution_volume(blank_profile)
+    ray_arrays = _clipped_gap_ray_arrays(
+        virtual_gap, cone_apex_x=cone_apex_x, sin_delta=sin_delta,
+        cos_delta=cos_delta, tan_face_cone=math.tan(face_cone_angle),
+    )
     gap_area = _clipped_gap_area(
         virtual_gap,
         cone_apex_x=cone_apex_x,
         sin_delta=sin_delta,
         cos_delta=cos_delta,
         tan_face_cone=math.tan(face_cone_angle),
+        ray_arrays=ray_arrays,
     )
     geometry.gap_area_clipped_mm2 = gap_area
     removed_one = _removed_volume(
@@ -845,6 +907,9 @@ def build_bevel_gear_geometry(
         front_face_x=front_face_x,
         outer_cone_distance=outer_cone_distance,
         inner_cone_distance=inner_cone_distance,
+        section_outer_cone_distance=section_outer_cone_distance,
+        section_inner_cone_distance=section_inner_cone_distance,
+        ray_arrays=ray_arrays,
     )
     geometry.removed_volume_mm3 = tooth_count * removed_one
     geometry.expected_volume_mm3 = geometry.blank_volume_mm3 - tooth_count * removed_one
@@ -860,12 +925,14 @@ def build_bevel_gear_geometry(
         "removed_volume_one_mm3": removed_one,
         "rim_back_extension_source": rim_back_source,
         "rim_front_extension_source": rim_front_source,
+        "volume_integration": "sampled_virtual_polygon_with_analytic_apex_ray_clipping",
     }
-    if geometry.expected_volume_mm3 <= 0.0 or not math.isfinite(geometry.expected_volume_mm3):
+    if (geometry.expected_volume_mm3 <= 0.0 or geometry.removed_volume_mm3 <= 0.0
+            or not math.isfinite(geometry.expected_volume_mm3)):
         geometry.errors.append(
             error_item(
                 "gear_bevel_expected_volume_not_positive",
-                "The expected bevel-gear volume is not positive.",
+                "The expected remaining volume and removed volume must both be positive.",
                 expected_volume_mm3=geometry.expected_volume_mm3,
             )
         )
@@ -891,7 +958,7 @@ def evaluate_bevel_gear_checks(geometry: BevelGearGeometry, measurements: dict) 
     check(
         "gear_bevel_cone_angles",
         "ok" if 5.0 <= math.degrees(geometry.pitch_cone_angle_rad) <= 85.0 else "error",
-        "Pitch cone angle against the ГОСТ 19624-74 range 5..85 degrees.",
+        "Pitch cone angle against the supported range 5..85 degrees.",
         value=math.degrees(geometry.pitch_cone_angle_rad),
         limit=[5.0, 85.0],
         unit="deg",
@@ -1015,6 +1082,12 @@ def build_bevel_gear_preview(
 ) -> dict:
     """Validate the request and return the complete nominal analysis."""
     geometry = build_bevel_gear_geometry(request)
+    return _bevel_gear_preview_from_geometry(geometry)
+
+
+def _bevel_gear_preview_from_geometry(geometry: BevelGearGeometry) -> dict:
+    """Share one calculation between the preview and CAD plan."""
+    request = geometry.request
     warning_items = list(geometry.warnings)
     warnings = [str(item["message"]) for item in warning_items]
     if geometry.errors:
@@ -1058,6 +1131,7 @@ def build_bevel_gear_preview(
         "chordal_height_mm": chordal["chordal_height_mm"],
         "tip_thickness_mm": geometry.tip_arc_thickness_mm,
         "base_pitch_mm": math.pi * module * math.cos(geometry.pressure_angle_rad),
+        "basis": "outer_back_cone_virtual_gear_approximation",
     }
     report = evaluate_bevel_gear_checks(geometry, measurements)
     summary = {
@@ -1087,7 +1161,8 @@ def build_bevel_gear_preview(
         "outer_dedendum_mm": geometry.outer_dedendum_mm,
         "rim_back_extension_mm": geometry.rim_back_extension_mm,
         "rim_front_extension_mm": geometry.rim_front_extension_mm,
-        "blank_width_mm": geometry.front_face_x_mm - geometry.back_face_x_mm,
+        "blank_width_mm": max(geometry.front_face_x_mm, geometry.inner_tip_corner_x_mm)
+            - geometry.back_face_x_mm,
         "back_face_diameter_mm": 2.0 * geometry.back_face_radius_mm,
         "front_face_diameter_mm": 2.0 * geometry.front_face_radius_mm,
         "section_margin_mm": geometry.section_margin_mm,
@@ -1113,8 +1188,13 @@ def build_bevel_gear_preview(
         "module_status": geometry.module_info.get("status"),
         "checks": report["checks"],
     }
+    root_edge = _project_to_end_view(
+        geometry.diagnostics["curves"]["root_arc_path"][-1],
+        math.cos(geometry.pitch_cone_angle_rad), math.sin(geometry.pitch_cone_angle_rad),
+        geometry.cone_frame["apex"][0], geometry.outer_cone_distance_mm,
+    )
     return {
-        "success": True,
+        "success": report["status"] != "error",
         "family": "gear_bevel",
         "request": dict(request),
         "representation_mode": report["representation_mode"],
@@ -1122,6 +1202,7 @@ def build_bevel_gear_preview(
             "coordinate_system": "end_view_polar_yz",
             "end_view_period": geometry.end_view_period,
             "end_view_wheel": geometry.end_view_wheel,
+            "gap_root_edges": [root_edge, _mirror(root_edge)],
             "virtual_surface_path": geometry.virtual_surface_path,
             "virtual_gap_outline": geometry.virtual_gap_outline,
             "cone_frame": geometry.cone_frame,
@@ -1158,4 +1239,5 @@ def build_bevel_gear_preview(
         "report": report,
         "warnings": warnings,
         "warning_items": warning_items,
+        "errors": report["errors"],
     }

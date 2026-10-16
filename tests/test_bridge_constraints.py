@@ -36,6 +36,172 @@ BRIDGE = _load_bridge_module()
 
 
 class BridgeConstraintTests(unittest.TestCase):
+    def test_metric_thread_edge_audit_verifies_native_lead_hand_and_constant_radius(self) -> None:
+        import math
+        from copy import deepcopy
+
+        pitch, turns, count = 2.5, 8, 129
+        points = [[pitch*turns*i/(count-1), 10*math.cos(2*math.pi*turns*i/(count-1)),
+                   10*math.sin(2*math.pi*turns*i/(count-1))] for i in range(count)]
+        result = BRIDGE._metric_helix_edge_evidence(points, pitch)
+        self.assertAlmostEqual(result["signed_lead_mm"], pitch)
+        self.assertAlmostEqual(result["axial_max_mm"], 20)
+        self.assertAlmostEqual(result["turns"], 8)
+        # Reversing the native edge parameter must not reverse thread handedness.
+        reversed_result = BRIDGE._metric_helix_edge_evidence(list(reversed(points)), pitch)
+        self.assertAlmostEqual(reversed_result["signed_lead_mm"], pitch)
+        left = [[x,y,-z] for x,y,z in points]
+        self.assertAlmostEqual(BRIDGE._metric_helix_edge_evidence(left,pitch,True)["signed_lead_mm"], -pitch)
+        with self.assertRaisesRegex(RuntimeError, "lead/hand"):
+            BRIDGE._metric_helix_edge_evidence(left,pitch)
+        warped = deepcopy(points); warped[31][0] += .01
+        with self.assertRaisesRegex(RuntimeError, "constant-lead"):
+            BRIDGE._metric_helix_edge_evidence(warped,pitch)
+        warped = deepcopy(points); warped[31][1] *= 1.01
+        with self.assertRaises(RuntimeError):
+            BRIDGE._metric_helix_edge_evidence(warped,pitch)
+        self.assertIsNone(BRIDGE._metric_helix_edge_evidence([[0,10,0],[20,10,0]],pitch))
+
+    def test_readonly_fragment_preserves_source_and_cleans_up_after_read_failure(self) -> None:
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        active = SimpleNamespace(Active=True)
+        document = SimpleNamespace(Changed=False)
+        app = SimpleNamespace(ActiveDocument=active)
+        fragment = SimpleNamespace(Close=Mock())
+        paths = []
+        def write(path):
+            paths.append(path)
+            Path(path).write_bytes(b"fragment")
+            return True
+        sketch = SimpleNamespace(Application=app, ConstraintsState=1,
+            Part=SimpleNamespace(Parent=document), WriteToFragment=write,
+            BeginEditEx=Mock(side_effect=AssertionError("Source definition must not open")),
+            EndEdit=Mock(side_effect=AssertionError("Source definition must not commit")))
+        with patch.object(BRIDGE, "_open_document_in_app", return_value=(fragment, [])), \
+                patch.object(BRIDGE, "_cast_to_com_interface", side_effect=lambda obj, name: obj):
+            with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                with BRIDGE._readonly_sketch_fragment(sketch) as read:
+                    self.assertIs(read, fragment)
+                    raise RuntimeError("probe failed")
+        fragment.Close.assert_called_once_with(0)
+        self.assertEqual(sketch.ConstraintsState, 1)
+        self.assertFalse(document.Changed)
+        self.assertFalse(Path(paths[0]).exists())
+        self.assertTrue(active.Active)
+
+    def test_physical_thread_wrapper_delegates_resolved_faces_without_changing_source_contract(self) -> None:
+        from unittest.mock import patch
+
+        carrier = {"rotated": object()}
+        faces = [object(), object(), object()]
+        reports = []
+        params = {"source_scenario": "stepped_shaft", "source_preview": {
+            "params": {"steps": [{"length": 20, "diameter": 20}]}},
+            "source_selector": "base", "start_selector": "start", "end_selector": "end"}
+        result = {"thread": object()}
+        with patch.object(BRIDGE, "_apply_part_variables", return_value={"ok": True}), \
+                patch.object(BRIDGE, "_build_revolved_source_feature", return_value=carrier) as build, \
+                patch.object(BRIDGE, "_get_source_feature_reference_object", return_value=carrier["rotated"]), \
+                patch.object(BRIDGE, "_select_revolved_feature_face", side_effect=[(face, {"selector": key})
+                    for face,key in zip(faces, ("base", "start", "end"))]), \
+                patch.object(BRIDGE, "_apply_helical_thread_feature", return_value=result) as apply:
+            actual = BRIDGE._build_external_helical_thread_feature("part", "model", params, {}, reports)
+            build.assert_called_once()
+            apply.assert_called_once_with("part", "model", params, {}, reports,
+                scenario="external_helical_thread", base_face=faces[0], start_face=faces[1], end_face=faces[2],
+                face_reports={"base_face": {"selector": "base"}, "start_face": {"selector": "start"}, "end_face": {"selector": "end"}})
+            self.assertIs(actual["source_feature"], carrier)
+            self.assertIs(actual["thread"], result["thread"])
+        # An incomplete input must fail before entering any geometry operation.
+        with patch.object(BRIDGE, "_build_revolved_source_feature", side_effect=AssertionError("No source recreation")):
+            with self.assertRaisesRegex(ValueError, "carrier faces"):
+                BRIDGE._apply_helical_thread_feature("part", "model", {}, {}, [],
+                    scenario="external_helical_thread", base_face=faces[0], start_face=None,
+                    end_face=faces[2], face_reports={})
+
+    def test_spline_acceptance_requires_bounds_and_every_patterned_cut(self) -> None:
+        from copy import deepcopy
+        from kompas_mcp.connections.cad import build_straight_spline_plan
+
+        hub = build_straight_spline_plan({"series":"light","designation":"8x36x40","body":"hub"})
+        recipe_variables = BRIDGE._spline_recipe_variables(hub)
+        recipe, error = BRIDGE._read_spline_recipe({row["name"]:types.SimpleNamespace(Value=row["value"],Note=row.get("note")) for row in recipe_variables})
+        self.assertIsNone(error)
+        self.assertEqual(recipe["profile_geometry_revision"],2)
+        old = deepcopy(hub);old.pop("profile_geometry_revision")
+        with self.assertRaisesRegex(ValueError,"revision 2"):
+            BRIDGE.handle_create_spline({"plan":old,"execute":True,"confirm_write":True})
+        from unittest.mock import patch
+        obj = lambda name,ref:types.SimpleNamespace(Name=name,Reference=ref)
+        model = types.SimpleNamespace(Sketchs=[obj("Hub blank sketch",1),obj("Hub one tooth space",2)],
+            Extrusions=[obj("Hub blank",3),obj("Hub one tooth space cut",4)],
+            FeaturePatterns=[obj("Hub tooth space pattern",5)])
+        values = {name:1 for name in ("GW_SPLINE_VERSION","SPL_STANDARD","SPL_SERIES","SPL_BODY",
+            "SPL_CENTERING","SPL_EXECUTION","SPL_Z","SPL_D","SPL_DD","SPL_B","SPL_ROOT_D","SPL_L","SPL_VERIFIED")}
+        values["SPL_BODY"]=2
+        variables = [types.SimpleNamespace(Name=name,Value=value) for name,value in values.items()]
+        with patch.object(BRIDGE,"_iter_operation_variables",return_value=variables), \
+                patch.object(BRIDGE,"cast_model_container",return_value=model), \
+                patch.object(BRIDGE,"iter_collection",side_effect=lambda rows:rows), \
+                patch.object(BRIDGE,"_read_spline_recipe",return_value=({"studio_profile":{"body":"hub"}},None)):
+            legacy=BRIDGE._inspect_spline_block(types.SimpleNamespace(TopPart=types.SimpleNamespace(Name="Hub")))
+        self.assertFalse(legacy["verified"])
+        self.assertEqual(legacy["status"],"legacy_hub_profile")
+        self.assertTrue(legacy["recreatable"])
+        plan = build_straight_spline_plan({"series": "light", "designation": "8x36x40"})
+        verify = plan["verification"]
+        body = {"solid": True, "volume": verify["expected_volume_mm3"] / 1000,
+                "bounds_mm": verify["expected_bounds_mm"]}
+        reports = [{"id": "tooth_space_cut", "volume_removed": 0.2},
+            {"id": "tooth_space_pattern", "valid": True, "count": 8,
+             "angle_step": 45.0, "additional_volume_removed": 1.4}]
+        accepted = BRIDGE._verify_straight_spline_metrics(plan, body, reports)
+        self.assertTrue(accepted["pattern_material_verified"])
+        # A readable counter and nominal total volume cannot conceal one missing
+        # instance, and a body inside the old radial envelope is not correct bounds.
+        wrong_reports = deepcopy(reports)
+        wrong_reports[1]["additional_volume_removed"] = 1.2
+        with self.assertRaisesRegex(RuntimeError, "material removal"):
+            BRIDGE._verify_straight_spline_metrics(plan, body, wrong_reports)
+        wrong_body = deepcopy(body)
+        wrong_body["bounds_mm"][1] += 2.0
+        with self.assertRaisesRegex(RuntimeError, "bounds"):
+            BRIDGE._verify_straight_spline_metrics(plan, wrong_body, reports)
+        wrong_reports[1]["additional_volume_removed"] = float("nan")
+        with self.assertRaisesRegex(RuntimeError, "finite"):
+            BRIDGE._verify_straight_spline_metrics(plan, body, wrong_reports)
+        finite = {"direction":"normal","end_condition":"length","depth":20}
+        self.assertEqual(BRIDGE._cut_extrusion_extent(finite,20),
+                         {"direction":"normal","types":(0,0),"depth":20})
+        self.assertEqual(BRIDGE._cut_extrusion_extent({"direction":"both"})["types"],(1,1))
+        self.assertEqual(BRIDGE._cut_extrusion_extent({"direction":"reverse"})["types"],(0,1))
+        with self.assertRaises(ValueError):BRIDGE._cut_extrusion_extent(finite)
+        for update in ({"depth":float("nan")},{"depth":21},{"direction":"reverse"},{"end_condition":"through_all"}):
+            with self.subTest(bounded_extent=update),self.assertRaises(ValueError):
+                BRIDGE._cut_extrusion_extent({**finite,**update},20)
+
+    def test_bevel_section_mapping_preserves_cubic_order_and_knots(self) -> None:
+        from kompas_mcp.gears.cad import build_bevel_gear_plan
+
+        plan = build_bevel_gear_plan({})
+        section = next(operation for operation in plan["workflow"]["params"]["operations"]
+                       if operation["scenario"] == "section_profile_sketch")
+        source = section["params"]["entities"]
+        frame = {"origin": [0, 0, 0], "u": [1, 0, 0], "v": [0, 1, 0],
+                 "u_length": 1, "v_length": 1}
+        converted = BRIDGE._section_entities_to_sketch_2d(source, frame)
+        curves = [(before, after) for before, after in zip(source, converted)
+                  if before["kind"] == "nurbs"]
+        self.assertEqual(len(curves), 4)
+        for before, after in curves:
+            self.assertEqual(after["degree"], 3)
+            self.assertEqual(after["order"], 4)
+            self.assertEqual(after["knots"], before["knots"])
+            self.assertEqual(len(after["knots"]), len(after["points"]) + after["order"])
+
     def test_bind_extrusion_operation_variables_matches_distance_alias(self) -> None:
         class FakeVariable:
             Name = "var_1"
@@ -81,6 +247,18 @@ class BridgeConstraintTests(unittest.TestCase):
         self.assertEqual(report["applied_count"], 1)
         self.assertEqual(extrusion.Owner.variable.Expression, "FLAT01_L1")
         self.assertTrue(extrusion.updated)
+
+        # A successful value/Update readback does not make an output a driver.
+        # Reject before writing the expression (native screenshot regression).
+        extrusion.updated = False
+        extrusion.Owner.variable.Information = True
+        refused = BRIDGE._bind_extrusion_operation_variables(extrusion,
+            {"operation_variable_bindings": [{"parameter_note": "Расстояние", "expression": "OTHER_L1"}]},
+            "external_flat_step")
+        self.assertFalse(refused["ok"])
+        self.assertEqual(extrusion.Owner.variable.Expression, "FLAT01_L1")
+        self.assertFalse(extrusion.updated)
+        self.assertIn("informational_output_variable", refused["failed"][0]["error"])
 
     def test_bind_extrusion_operation_variables_reports_missing_distance_alias(self) -> None:
         class FakeVariable:

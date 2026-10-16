@@ -119,7 +119,13 @@ function setStatus(key, state = "idle", variables = {}) {
 }
 
 function refreshStatusLanguage() {
-  setStatus(statusDescriptor.key, statusDescriptor.state, statusDescriptor.variables);
+  let variables = statusDescriptor.variables;
+  if (statusDescriptor.key === "status.preview_rejected") {
+    const message = localizeWarning(variables.diagnostic) || t("error.preview_rejected");
+    variables = { ...variables, message };
+    cadResult.textContent = message;
+  }
+  setStatus(statusDescriptor.key, statusDescriptor.state, variables);
 }
 
 async function requestJson(url, options = {}) {
@@ -229,6 +235,10 @@ function fieldValue(name, schema) {
 }
 
 function localizedFieldName(name, schema) {
+  if (["shaft_spline", "hub_spline"].includes(currentModule?.kind)
+      && ["tooth_count", "inner_diameter_mm", "outer_diameter_mm", "tooth_width_mm"].includes(name)) {
+    return t(`spline.field.${name}`);
+  }
   return t(`field.${name}`, schema.title || humanize(name));
 }
 
@@ -1448,10 +1458,213 @@ function createGearFields() {
 }
 
 
+let refreshSplineText = null;
+
+function createSplineFields() {
+  const properties = currentSpec.schema.properties;
+  const selection = currentModule.selection;
+  const isHub = currentModule.kind === "hub_spline";
+  const explicitNames = ["tooth_count", "inner_diameter_mm", "outer_diameter_mm", "tooth_width_mm"];
+  const groups = {
+    size: createGearFieldGroup("spline_size", "spline.group.size", "Типоразмер"),
+    fits: createGearFieldGroup("spline_fits", "spline.group.fits", "Центрирование и посадки"),
+    detail: createGearFieldGroup("spline_detail", "spline.group.detail", "Размеры и исполнение"),
+  };
+  const fields = {};
+  const add = (group, name, schema = properties[name]) => {
+    const field = createField(name, schema, false);
+    // The request's generic API descriptions do not describe this catalog UI.
+    field.querySelector("[data-field-help]")?.remove();
+    groups[group].body.append(field);
+    fields[name] = field;
+    return field.querySelector("input, select");
+  };
+  add("size", "standard", { ...properties.standard, enum: ["gost_1139_80"] });
+  add("size", "body", { ...properties.body, enum: [isHub ? "hub" : "shaft"] });
+  const modeField = document.createElement("label");
+  modeField.className = "field";
+  const modeTitle = document.createElement("span");
+  modeTitle.dataset.i18n = "spline.size_mode";
+  modeTitle.textContent = t("spline.size_mode");
+  const mode = document.createElement("select");
+  mode.dataset.splineMode = "";
+  for (const value of ["catalog", "custom"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.dataset.i18n = `spline.mode.${value}`;
+    option.textContent = t(option.dataset.i18n);
+    mode.append(option);
+  }
+  // Workspace restoration merges module defaults into the saved recipe. Explicit
+  // dimensions must take precedence over an inherited default designation.
+  mode.value = explicitNames.every(name => baselinePayload[name] != null)
+    || !baselinePayload.designation ? "custom" : "catalog";
+  modeField.append(modeTitle, mode);
+  groups.size.body.append(modeField);
+  const series = add("size", "series");
+  // Catalog filters are UI-only; the request keeps one resolved designation.
+  const catalogChoice = name => {
+    const field = document.createElement("label");
+    field.className = "field spline-catalog-field";
+    const title = document.createElement("span");
+    title.className = "field-title";
+    title.dataset.i18n = `spline.field.${name}`;
+    title.textContent = t(title.dataset.i18n);
+    const select = document.createElement("select");
+    select.dataset.splineCatalog = name;
+    field.append(title, select);
+    groups.size.body.append(field);
+    return select;
+  };
+  const catalogCount = catalogChoice("tooth_count");
+  const catalogDiameter = catalogChoice("inner_diameter_mm");
+  const designation = add("size", "designation");
+  fields.designation.hidden = true;
+  const explicitInputs = explicitNames.map(name => add("size", name));
+  const sizeNote = document.createElement("small");
+  sizeNote.className = "chain-selection-hint";
+  groups.size.body.append(sizeNote);
+
+  const centering = add("fits", "centering");
+  const fitDetails = createGearFieldGroup("spline_fit_details", "spline.fit_details", "Посадки и допуски", {
+    collapsible: true, open: Boolean(baselinePayload.fit_centering || baselinePayload.fit_side),
+  });
+  fitDetails.root.style.gridColumn = "1 / -1";
+  groups.fits.body.append(fitDetails.root);
+  const fitCenter = add("fits", "fit_centering", { type: "string", enum: [] });
+  const fitSide = add("fits", "fit_side", { type: "string", enum: [] });
+  fitDetails.body.append(fields.fit_centering, fields.fit_side);
+  const fitNote = document.createElement("small");
+  fitNote.className = "chain-selection-hint";
+  fitNote.dataset.i18n = "spline.fit_note";
+  fitNote.textContent = t(fitNote.dataset.i18n);
+  fitDetails.body.append(fitNote);
+  add("detail", "length_mm");
+  if (isHub) add("detail", "hub_outside_diameter_mm");
+  add("detail", "execution");
+  const fillet = add("detail", "root_fillet_mm");
+  fillet.placeholder = t("spline.tabulated");
+  fillet.dataset.i18nPlaceholder = "spline.tabulated";
+  if (!isHub) {
+    const chamferEnabled = add("detail", "include_tip_chamfer");
+    const chamfer = add("detail", "tip_chamfer_mm");
+    chamfer.placeholder = t("spline.tabulated");
+    chamfer.dataset.i18nPlaceholder = "spline.tabulated";
+    const syncChamfer = () => {
+      chamfer.disabled = !chamferEnabled.checked;
+      fields.tip_chamfer_mm.hidden = !chamferEnabled.checked;
+    };
+    chamferEnabled.addEventListener("change", syncChamfer);
+    syncChamfer();
+  }
+
+  const setOptions = (select, values, previous, defaultValue = "") => {
+    select.replaceChildren();
+    for (const { value, title } of values) select.add(new Option(title, value));
+    select.value = values.some(item => item.value === previous) ? previous : defaultValue;
+  };
+  const designationKey = value => String(value || "").toLowerCase().replaceAll(" ", "")
+    .replace(/[х×*]/g, "x").split("x").filter(Boolean)
+    .map(part => String(Number(part.replace(",", ".")))).join("x");
+  const initialSizes = selection.series.find(item => item.value === series.value)?.sizes || [];
+  const initialSize = initialSizes.find(size => designationKey(size.designation) === designationKey(baselinePayload.designation));
+  let unresolvedSize = mode.value === "catalog" && !initialSize ? baselinePayload.designation : null;
+  let customDraft = Object.fromEntries(explicitNames
+    .filter(name => baselinePayload[name] != null).map(name => [name, baselinePayload[name]]));
+  let wasCustom = null;
+  const syncSize = (reason = "mode") => {
+    const custom = mode.value === "custom";
+    const sizes = selection.series.find(item => item.value === series.value)?.sizes || [];
+    if (["series", "count", "diameter"].includes(reason)) unresolvedSize = null;
+    const countValues = [...new Set(sizes.map(size => size.tooth_count))]
+      .map(value => ({value: String(value), title: String(value)}));
+    if (unresolvedSize) countValues.unshift({value: "", title: t("spline.choose")});
+    setOptions(catalogCount, countValues,
+      reason === "initial" ? String(initialSize?.tooth_count ?? "") : catalogCount.value,
+      countValues[0]?.value);
+    const matchingSizes = sizes.filter(size => size.tooth_count === Number(catalogCount.value));
+    const diameterValues = matchingSizes.map(size => ({
+      value: String(size.inner_diameter_mm), title: formatNumber(size.inner_diameter_mm, 3),
+    }));
+    if (unresolvedSize) diameterValues.unshift({value: "", title: t("spline.choose")});
+    setOptions(catalogDiameter, diameterValues,
+      reason === "initial" ? String(initialSize?.inner_diameter_mm ?? "") : catalogDiameter.value,
+      diameterValues[0]?.value);
+    const size = matchingSizes.find(size => size.inner_diameter_mm === Number(catalogDiameter.value));
+    designation.value = unresolvedSize || size?.designation || "";
+    if (wasCustom && !custom) {
+      customDraft = Object.fromEntries(explicitInputs.map(input => [input.name, input.value]));
+    }
+    designation.disabled = custom;
+    fields.series.hidden = custom;
+    for (const select of [catalogCount, catalogDiameter]) {
+      select.disabled = custom;
+      select.required = !custom;
+      select.parentElement.hidden = custom;
+    }
+    for (const [index, input] of explicitInputs.entries()) {
+      const name = explicitNames[index];
+      input.disabled = !custom;
+      input.required = custom;
+      fields[name].hidden = !custom;
+      if (custom && wasCustom !== true) input.value = customDraft[name] ?? size?.[name] ?? "";
+      if (!custom) input.value = size?.[name] ?? "";
+    }
+    wasCustom = custom;
+    sizeNote.textContent = custom ? t("spline.custom_note") : (size
+      ? t("spline.catalog_summary", "", {
+        z: size.tooth_count, d: formatNumber(size.inner_diameter_mm, 3),
+        D: formatNumber(size.outer_diameter_mm, 3), b: formatNumber(size.tooth_width_mm, 3),
+      })
+      : t("spline.unresolved_size", "", {value: unresolvedSize || ""}));
+  };
+  const syncFits = (reason = "change") => {
+    const fits = selection.fits.centering[centering.value];
+    for (const [select, pairs, defaultPair] of [
+      [fitCenter, fits.centering_pairs, fits.default_centering_pair],
+      [fitSide, fits.side_pairs, fits.default_side_pair],
+    ]) {
+      const previous = reason === "initial" ? baselinePayload[select.name] : select.value;
+      const values = [{ value: "", title: `${t("spline.fit_auto")}${defaultPair ? ` · ${defaultPair}` : ""}` },
+        ...pairs.map(pair => ({ value: pair, title: pair }))];
+      // Keep an imported explicit fit visible; never silently rewrite a recipe.
+      if (reason !== "change" && previous && !pairs.includes(previous)) {
+        values.push({ value: previous, title: `${previous} · ${t("spline.saved_fit")}` });
+      }
+      setOptions(select, values, previous);
+      select.disabled = pairs.length === 0;
+      fields[select.name].hidden = select.disabled;
+    }
+  };
+  series.addEventListener("change", () => syncSize("series"));
+  catalogCount.addEventListener("change", () => syncSize("count"));
+  catalogDiameter.addEventListener("change", () => syncSize("diameter"));
+  mode.addEventListener("change", () => syncSize());
+  centering.addEventListener("change", () => syncFits());
+  const layout = document.createElement("div");
+  layout.className = "gear-groups spline-groups";
+  for (const { root } of Object.values(groups)) layout.append(root);
+  fieldsContainer.append(layout);
+  syncSize("initial");
+  syncFits("initial");
+  refreshSplineText = () => {
+    syncSize();
+    syncFits("locale");
+    for (const input of layout.querySelectorAll("[data-i18n-placeholder]")) {
+      input.placeholder = t(input.dataset.i18nPlaceholder);
+    }
+  };
+}
+
 function renderFields() {
+  refreshSplineText = null;
   fieldsContainer.replaceChildren();
   const properties = currentSpec.schema.properties || {};
   const required = new Set(currentSpec.schema.required || []);
+  if (["shaft_spline", "hub_spline"].includes(currentModule?.kind)) {
+    createSplineFields();
+    return;
+  }
   if (currentModule?.kind === "camshaft_lobe") {
     if (camshaftModuleKind !== currentModule.kind) {
       camshaftStep = "phases";
@@ -1627,7 +1840,9 @@ function localizeFields() {
       textarea.placeholder = localizedFieldPlaceholder(name, schema);
     }
     const help = wrapper.querySelector("[data-field-help]");
-    if (help) help.textContent = localizedFieldHelp(name, schema);
+    if (help) help.textContent = help.dataset.i18n
+      ? t(help.dataset.i18n, localizedFieldHelp(name, schema))
+      : localizedFieldHelp(name, schema);
   }
   const selector = fieldsContainer.querySelector("[data-chain-profile-selector]");
   if (selector) {
@@ -1647,6 +1862,7 @@ function localizeFields() {
   }
   if (currentModule?.kind === "silent_chain_sprocket") { syncConditionalFields(); syncSilentCompletion(); }
   if (["gear_spur", "gear_internal", "gear_bevel"].includes(currentModule?.kind)) refreshGearDynamicText();
+  refreshSplineText?.();
   updateChainSelectionDetails();
 }
 
@@ -1773,6 +1989,9 @@ function renderReadableSubscripts(element, value) {
 }
 
 function summaryLabelKey(key) {
+  if (["shaft_spline", "hub_spline"].includes(currentModule?.kind)) {
+    return `spline.summary.${key}`;
+  }
   if (["gear_spur", "gear_internal"].includes(currentModule?.kind)) {
     const gearKeys = {
       pitch_diameter_mm: "gear_pitch_diameter_mm",
@@ -1802,6 +2021,9 @@ function renderSummary(values) {
   summary.replaceChildren();
   for (const [key, value] of Object.entries(values || {})) {
     if (value === null || value === undefined) continue;
+    const isSpline = ["shaft_spline", "hub_spline"].includes(currentModule?.kind);
+    // The localized enum rows already describe these duplicate backend titles.
+    if (isSpline && ["series_title", "centering_title", "execution_title"].includes(key)) continue;
     if (key === "tooth_tip_shape" && currentModule?.kind === "silent_chain_sprocket"
       && fieldsContainer.querySelector("[data-field-name='tooth_tip_shape']")?.hidden) continue;
     const dt = document.createElement("dt");
@@ -1809,7 +2031,26 @@ function renderSummary(values) {
     const dd = document.createElement("dd");
     if (typeof value === "number") dd.textContent = formatNumber(value, key === "chain_pitch_mm" ? 4 : 2);
     else if (typeof value === "boolean") dd.textContent = t(value ? "value.yes" : "value.no");
+    else if (isSpline && ["series", "body", "centering", "execution"].includes(key)) {
+      dd.textContent = localizedEnumValue(key, value);
+    }
+    else if (isSpline && key === "source") {
+      const table = currentModule.selection.series.find(item => item.value === values.series)?.table;
+      dd.textContent = values.catalog && table
+        ? t("spline.source.catalog", "", {table}) : t("spline.source.custom");
+    }
     else if (key === "selected_law") dd.textContent = localizedEnumValue("law", value);
+    else if (key === "fits" && value.centering) {
+      const element = {inner_diameter: "d", outer_diameter: "D", side_faces: "b"}[value.centering_kind];
+      for (const [symbol, fit] of [[element, value.centering], ["b", value.side]]) {
+        if (!fit) continue;
+        const line = document.createElement("div");
+        line.textContent = `${symbol}: ` + (Number.isFinite(fit.clearance_min_um) && Number.isFinite(fit.clearance_max_um)
+          ? t("spline.fit_range", "", {pair: fit.pair, min: formatNumber(fit.clearance_min_um), max: formatNumber(fit.clearance_max_um)})
+          : fit.pair);
+        dd.append(line);
+      }
+    }
     else if (["standard_system", "standard", "profile", "designation", "profile_shape", "chain_type", "family", "gost_profile_variant", "profile_construction", "profile_mechanics", "tooth_tip_shape", "profile_status", "axial_status", "construction_status", "hand", "over_pin_source", "tooth_type", "face_width_source"].includes(key)) dd.textContent = localizedEnumValue(key, value);
     else dd.textContent = String(value);
     summary.append(dt, dd);
@@ -1869,7 +2110,8 @@ function invalidatePreviewRequest() {
 }
 
 function previewResultWarnings(result) {
-  return result.warning_items?.length ? result.warning_items : (result.warnings || []);
+  return [...(result.errors || []),
+    ...(result.warning_items?.length ? result.warning_items : (result.warnings || []))];
 }
 
 async function runPreview({ force = false } = {}) {
@@ -1937,6 +2179,20 @@ async function runPreview({ force = false } = {}) {
     });
     if (revision !== previewRevision) return;
 
+    if (result.ok === false) {
+      lastSuccessfulPayloadKey = null;
+      lastPreviewResult = null;
+      lastCadPlanReady = null;
+      renderSummary(result.summary);
+      renderWarnings(previewResultWarnings(result));
+      window.dispatchEvent(new CustomEvent("geomwright-preview", { detail: result }));
+      window.dispatchEvent(new CustomEvent("geomwright-preview-state", { detail: { state: "stale" } }));
+      const message = localizeWarning(result.errors?.[0]) || t("error.preview_rejected");
+      setStatus("status.preview_rejected", "error", { message, diagnostic: result.errors?.[0] });
+      cadResult.dataset.state = "error";
+      cadResult.textContent = message;
+      return;
+    }
     lastSuccessfulPayloadKey = key;
     lastPreviewResult = result;
     silentCompletionStale = false;
@@ -2145,6 +2401,8 @@ function managedBlockName(block) {
     gear_spur: "block.gear_spur",
     gear_internal: "block.gear_internal",
     gear_bevel: "block.gear_bevel",
+    shaft_spline: "block.shaft_spline",
+    hub_spline: "block.hub_spline",
     silent_chain_sprocket: "block.silent_chain_sprocket",
     camshaft_lobe: "block.camshaft_lobe",
   }[block.module] || "block.generic";
@@ -2496,6 +2754,7 @@ async function openSelectedBlockEditor() {
   if (block.recreatable && block.module === "camshaft_lobe") camshaftStep = "cam";
   baselinePayloadKey = payloadKey(baselinePayload);
   renderFields();
+  if (["shaft_spline", "hub_spline"].includes(currentModule.kind)) baselinePayloadKey = payloadKey(collectPayload());
   showEditor({ locked: !block.recreatable });
   await runPreview({ force: true });
 }
@@ -2546,7 +2805,9 @@ async function selectModule(kind, autoPreview = true) {
       || (module.kind === "camshaft_lobe" && camshaftStep !== "cam");
     updateEditorPresentation();
     renderFields();
-    if (!module.capabilities.preview) baselinePayloadKey = payloadKey(collectPayload());
+    if (!module.capabilities.preview || ["shaft_spline", "hub_spline"].includes(module.kind)) {
+      baselinePayloadKey = payloadKey(collectPayload());
+    }
     renderSummary({});
     renderWarnings([]);
     updateDirtyState();
@@ -2613,14 +2874,16 @@ async function prepareCadPlan(payload, key = payloadKey(payload)) {
       signal: controller.signal,
     });
     if (controller !== cadPlanController) return;
+    const elapsed = performance.now() - planStartedAt;
+    renderCadPlanReady(plan, elapsed);
     cadPlanKey = key;
+    lastCadPlanReady = { plan, elapsed };
     cadCreateButton.disabled = cadBuildActive || (Boolean(editorContext) && !currentDirtyState());
-    lastCadPlanReady = { plan, elapsed: performance.now() - planStartedAt };
-    renderCadPlanReady(plan, lastCadPlanReady.elapsed);
   } catch (error) {
     if (error.name === "AbortError" || controller !== cadPlanController) return;
     cadPlanKey = null;
     lastCadPlanReady = null;
+    cadCreateButton.disabled = true;
     cadResult.dataset.state = "error";
     cadResult.textContent = currentModule.kind === "camshaft_lobe" && error.message.includes("cam build rejected:")
       ? t("camshaft.cad.rejected")
@@ -2647,6 +2910,20 @@ function cadPlanDisplayDimensions(plan) {
     };
   }
   const geometry = plan?.geometry || {};
+  if (plan?.family === "straight_spline") {
+    const diameter = geometry.body === "hub" ? 2 * geometry.hub_outside_radius_mm : geometry.outer_diameter_mm;
+    if (Number.isFinite(diameter) && diameter > 0 && Number.isFinite(geometry.length_mm) && geometry.length_mm > 0) {
+      return { outerDiameter: diameter, faceWidth: geometry.length_mm };
+    }
+  }
+  if (Number.isFinite(geometry.outer_tip_diameter_mm)
+      && Number.isFinite(geometry.back_face_x_mm) && Number.isFinite(geometry.front_face_x_mm)) {
+    return {
+      outerDiameter: geometry.outer_tip_diameter_mm,
+      faceWidth: Math.max(geometry.front_face_x_mm, geometry.inner_tip_corner_x_mm ?? -Infinity)
+        - geometry.back_face_x_mm,
+    };
+  }
   if (Number.isFinite(geometry.outer_tip_diameter_mm) && Number.isFinite(geometry.face_width_mm)) {
     return {
       outerDiameter: geometry.outer_tip_diameter_mm,
@@ -2758,7 +3035,8 @@ async function createManagedPulley() {
   const isSilent = buildModule.kind === "silent_chain_sprocket";
   const isGear = ["gear_spur", "gear_internal", "gear_bevel"].includes(buildModule.kind);
   const isBevel = buildModule.kind === "gear_bevel";
-  const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : isSilent ? "Geomwright silent sprocket" : isGear ? "Geomwright gear" : "Geomwright pulley");
+  const isSpline = ["shaft_spline", "hub_spline"].includes(buildModule.kind);
+  const modelName = editorContext?.block?.name || (isCam ? "Geomwright cam" : isSilent ? "Geomwright silent sprocket" : isGear ? "Geomwright gear" : isSpline ? (buildModule.kind === "shaft_spline" ? "Geomwright spline shaft" : "Geomwright spline hub") : "Geomwright pulley");
   if (!window.confirm(t(isCam ? "camshaft.cad.confirm" : isSilent ? "silent.cad.confirm" : isBevel ? "gear.cad.confirm_bevel" : isGear ? "gear.cad.confirm" : updating ? "cad.update_confirm" : "cad.confirm", undefined, { name: modelName }))) return;
   cadBuildActive = true;
   cadCancelButton.hidden = false;

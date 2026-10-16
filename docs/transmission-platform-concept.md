@@ -97,6 +97,13 @@ canonical live artifacts.
 
 Transmission families must not duplicate hubs, bores, or other generic details.
 
+The agreed cross-family [construction-chain plan](en/construction-chains.md)
+([Русский](ru/construction-chains.md)) defines the MCP-only integration stages,
+input-region suitability, placement, instance ownership and verification gates.
+The fields below remain conceptual, not an implemented shared apply API. In
+particular, choosing an owned blank versus an input region is separate from the
+material combine mode; existing create-only pulley contracts remain unchanged.
+
 ### Input
 
 ```text

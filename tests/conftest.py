@@ -10,14 +10,14 @@ import pytest
 
 from kompas_mcp.bridge_runner import (
     BridgeError, BridgeRunner, CHECKOUT_BRIDGE_SCRIPT,
-    DEFAULT_KOMPAS_PYTHON, PACKAGED_BRIDGE_SCRIPT,
+    DEFAULT_KOMPAS_PYTHON, PACKAGED_BRIDGE_SCRIPT, default_kompas_python_path,
 )
 
 
 @pytest.fixture(scope="session", autouse=True)
 def block_live_kompas_bridge():
     protected_scripts = {CHECKOUT_BRIDGE_SCRIPT.resolve(), PACKAGED_BRIDGE_SCRIPT.resolve()}
-    protected_python = {DEFAULT_KOMPAS_PYTHON.resolve()}
+    protected_python = {DEFAULT_KOMPAS_PYTHON.resolve(), default_kompas_python_path().resolve()}
     if os.environ.get("KOMPAS_BRIDGE_SCRIPT"):
         protected_scripts.add(Path(os.environ["KOMPAS_BRIDGE_SCRIPT"]).resolve())
     if os.environ.get("KOMPAS_PYTHON"):

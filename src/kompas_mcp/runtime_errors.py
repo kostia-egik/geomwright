@@ -40,6 +40,71 @@ def classify_runtime_error(
     type_name = exception_type or (type(error).__name__ if isinstance(error, BaseException) else None)
     lowered = text.casefold()
 
+    if "cad_diagnostics_required:" in lowered:
+        return RuntimeErrorClassification(
+            code="CAD_DIAGNOSTICS_REQUIRED", category="session", message=text,
+            exception_type=type_name, stage=stage,
+            hint="The handler finished. Read get_cad_session_guard, then call recover_cad_session with its token, a reason and confirm_idle=false for automatic audit. No user confirmation is needed unless the audit reports a blocker. Inspect the affected model before writing; never replay blindly.",
+        ).to_dict()
+
+    for code in ("CAD_SESSION_POLICY_REQUIRED", "CAD_SESSION_POLICY_ERROR", "CAD_SESSION_CHANGED",
+                 "CAD_SESSION_NOT_VISIBLE", "CAD_SESSION_AMBIGUOUS", "CAD_SESSION_IDENTITY_UNAVAILABLE",
+                 "CAD_MODE_MISMATCH", "CAD_MODE_UNSUPPORTED_ACTION", "CAD_HIDDEN_SESSION_ACTIVE",
+                 "CAD_HIDDEN_SESSION_NOT_OWNED", "CAD_HIDDEN_SESSION_NOT_ISOLATED"):
+        if "cad_session_blocked:" not in lowered and code.casefold() + ":" in lowered:
+            return RuntimeErrorClassification(
+                code=code, category="session", message=text, exception_type=type_name, stage=stage,
+                hint="Read get_cad_work_mode and get_cad_session_guard without COM. Resolve the selected mode/window explicitly; never substitute another instance. A settled_failure permits automatic recover_cad_session; unknown outcomes require user idle confirmation.",
+            ).to_dict()
+
+    if "cad_session_blocked:" in lowered:
+        return RuntimeErrorClassification(
+            code="CAD_SESSION_BLOCKED",
+            category="session",
+            message=text,
+            exception_type=type_name,
+            stage=stage,
+            hint="Read get_cad_session_guard without COM. Wait for KOMPAS and obtain the user's explicit idle UI/partial-document confirmation before recover_cad_session. Do not retry, inspect or close through COM while blocked.",
+        ).to_dict()
+
+    if "cad_runtime_invalid:" in lowered:
+        return RuntimeErrorClassification(
+            code="CAD_RUNTIME_INVALID", category="environment", message=text,
+            exception_type=type_name, stage=stage,
+            hint="Configure KOMPAS_PYTHON with a compatible modern Python and pywin32, then repeat host-only preflight. The failed call did not launch CAD, but earlier workflow steps may have written a partial document. Check the guard; do not recover an independently blocked session without user confirmation.",
+        ).to_dict()
+
+    if "cad_self_intersection:" in lowered:
+        return RuntimeErrorClassification(
+            code="CAD_SELF_INTERSECTION",
+            category="geometry",
+            message=text,
+            exception_type=type_name,
+            stage=stage,
+            hint="Review the spring geometry and transition dimensions; do not retry the same inputs or silently change them.",
+        ).to_dict()
+
+    if "cad_busy:" in lowered:
+        return RuntimeErrorClassification(
+            code="CAD_BUSY",
+            category="session",
+            message=text,
+            exception_type=type_name,
+            stage=stage,
+            retryable=True,
+            hint="Wait for the owning MCP/Studio request to finish, then retry sequentially. Do not start another CAD worker.",
+        ).to_dict()
+
+    if "selector is stale" in lowered or "body geometry changed" in lowered:
+        return RuntimeErrorClassification(
+            code="STALE_GEOMETRY_SELECTOR",
+            category="target_resolution",
+            message=text,
+            exception_type=type_name,
+            stage=stage,
+            hint="Run list_model_bodies and list_body_faces/list_body_edges again; do not reuse topology selectors after rebuild or reopen.",
+        ).to_dict()
+
     if _contains_any(lowered, ("no active document", "active document missing", "активн")):
         return RuntimeErrorClassification(
             code="NO_ACTIVE_DOCUMENT",

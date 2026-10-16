@@ -1814,7 +1814,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
         sketch = _FakeSketch("SPRING_PROFILE", 100, sketch_doc)
-        sketch.ConstraintsState = 2
+        sketch.ConstraintsState = 1
         captured: dict[str, Any] = {}
 
         original_apply = bridge._apply_sketch_parameterization
@@ -1889,6 +1889,8 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         self.assertEqual(captured["options"]["parameterization_order"], "staged")
         self.assertEqual(report["sketch_state"]["label"], "fully_defined")
+        self.assertEqual(report["sketch_state"]["code"], 1)
+        self.assertEqual(bridge._describe_object_constraints_state(2)["name"], "over_constrained")
         self.assertEqual(report["target_state"], "fully_defined")
         self.assertTrue(sketch.ended)
         self.assertTrue(sketch.updated)
@@ -1906,7 +1908,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         )
         sketch_doc = types.SimpleNamespace(ViewsAndLayersManager=_FakeViewsManager(view))
         sketch = _FakeSketch("SPRING_PROFILE", 101, sketch_doc)
-        sketch.ConstraintsState = 1
+        sketch.ConstraintsState = 2
 
         original_apply = bridge._apply_sketch_parameterization
         self.addCleanup(setattr, bridge, "_apply_sketch_parameterization", original_apply)
@@ -1941,6 +1943,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertFalse(report["state_ok"])
         self.assertEqual(report["sketch_state"]["name"], "under_constrained")
+        self.assertEqual(report["sketch_state"]["code"], 2)
 
     def test_bridge_resolve_compression_spring_profile_sketch_frame_defaults_to_xoy_with_half_turn(self) -> None:
         bridge = _load_bridge_module()
@@ -2518,6 +2521,8 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(applied_items[2]["summary"]["deleted_count"], 1)
 
     def test_bridge_list_sketches_returns_references_and_counts(self) -> None:
+        from contextlib import nullcontext
+        from unittest.mock import patch
         bridge = _load_bridge_module()
         line = types.SimpleNamespace(Name="", X1=0.0, Y1=0.0, X2=10.0, Y2=0.0, Style=1, Reference=201)
         circle = types.SimpleNamespace(Name="", Xc=5.0, Yc=5.0, Radius=2.0, Style=1, Reference=202)
@@ -2526,10 +2531,12 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         sketch = _FakeSketch("BASE_SKETCH", 100, sketch_doc)
         part = types.SimpleNamespace(Sketchs=_FakeCollection([sketch]))
 
-        items, summary = bridge._list_existing_sketches(
-            part,
-            {"name_contains": "base", "max_items": 10, "include_entity_counts": True},
-        )
+        with patch.object(bridge, "_readonly_sketch_fragment", return_value=nullcontext(sketch_doc)) as export:
+            items, summary = bridge._list_existing_sketches(
+                part,
+                {"name_contains": "base", "max_items": 10, "include_entity_counts": True},
+            )
+            export.assert_called_once()
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["name"], "BASE_SKETCH")
@@ -2539,7 +2546,7 @@ class PrimitiveWriteOperationTests(unittest.TestCase):
         self.assertEqual(items[0]["entity_counts"]["circles"], 1)
         self.assertEqual(summary["sketch_count"], 1)
         self.assertFalse(summary["truncated"])
-        self.assertTrue(sketch.ended)
+        self.assertFalse(sketch.ended)
 
     def test_bridge_rename_sketch_updates_name(self) -> None:
         bridge = _load_bridge_module()
@@ -3076,6 +3083,10 @@ class _FakeSketch:
         self.updated = False
 
     def BeginEdit(self) -> Any:
+        return self._sketch_doc
+
+    def BeginEditEx(self, read_only: bool) -> Any:
+        assert read_only is True
         return self._sketch_doc
 
     def EndEdit(self) -> None:

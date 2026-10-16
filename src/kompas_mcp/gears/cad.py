@@ -13,9 +13,9 @@ numeric-profile path. High-level code builds these plans; only
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Callable
 
-from .bevel import build_bevel_gear_geometry, build_bevel_gear_preview
+from .bevel import _bevel_gear_preview_from_geometry, build_bevel_gear_geometry
 from .bevel_spec import BevelGearRequest
 from .internal import (
     build_internal_gear_geometry,
@@ -24,7 +24,7 @@ from .internal import (
 )
 from .internal_spec import InternalGearRequest
 from .involute import build_spur_gear_geometry
-from .nurbs import bezier_chain, spline_max_deviation
+from .nurbs import bezier_chain, interpolating_spline, spline_max_deviation
 from .preview import build_spur_gear_preview
 from .spec import SpurGearRequest
 
@@ -37,8 +37,15 @@ INTERNAL_PLAN_STAGE = "internal_gear_cad_plan"
 BEVEL_FAMILY_CODE = 10
 BEVEL_OWNERSHIP_SCHEMA = "geomwright.managed_gear_bevel"
 BEVEL_PLAN_STAGE = "bevel_gear_cad_plan"
-STANDARD_CODES = {"gost_13755_2015": 1}
-MODIFICATION_CODES = {"a": 1, "b": 2, "c": 3, "d": 4, "custom": 0}
+STANDARD_CODES = {
+    "gost_13755_2015": 1, "gost_9587_81": 2, "gost_r_50531_93": 3,
+    "iso_53_1998": 4, "gost_13754_68": 5,
+}
+MODIFICATION_CODES = {
+    "a": 1, "b": 2, "c": 3, "d": 4, "custom": 0, "standard": 5,
+    "h1_c25": 6, "h1_c30": 7, "h11_c40": 8, "h11_c25": 9,
+    "type_1": 10, "type_2": 11,
+}
 
 
 def _simplify_open(points: list[list[float]], tolerance: float) -> list[list[float]]:
@@ -224,6 +231,7 @@ def _nurbs_entity(spline: dict, entity_id: str) -> dict:
         "weights": spline["weights"],
         "knots": spline["knots"],
         "degree": spline["degree"],
+        "order": int(spline["degree"]) + 1,
         "closed": False,
         "style": 1,
     }
@@ -232,15 +240,17 @@ def _nurbs_entity(spline: dict, entity_id: str) -> dict:
 def _fit_smooth_curve(
     points: list[list[float]],
     module_mm: float,
+    *,
+    spline_builder: Callable[[list[list[float]]], dict] = bezier_chain,
 ) -> tuple[list[list[float]], dict, float]:
-    """Fit one smooth Bezier chain within a bounded deviation."""
+    """Fit the selected cubic representation within the existing deviation bound."""
     deviation_cap = max(0.03, module_mm * 0.01)
     best = None
     for tolerance in (0.01, 0.005, 0.002, 0.001, 0.0005):
         candidate_points = _simplify_open(points, tolerance)
         if len(candidate_points) < 4:
             continue
-        candidate_spline = bezier_chain(candidate_points)
+        candidate_spline = spline_builder(candidate_points)
         candidate_deviation = spline_max_deviation(candidate_spline, points)
         if best is None or candidate_deviation < best[2]:
             best = (candidate_points, candidate_spline, candidate_deviation)
@@ -276,15 +286,16 @@ def build_gear_spur_plan(
         split_index = max(1, len(surface) // 2)
     root_surface = surface[:split_index + 1]
     involute_surface = surface[split_index:]
-    root_points, root_spline, root_deviation = _fit_smooth_curve(root_surface, geometry.module_mm)
+    root_points, root_spline, root_deviation = _fit_smooth_curve(
+        root_surface, geometry.module_mm, spline_builder=interpolating_spline)
     involute_points, involute_spline, involute_deviation = _fit_smooth_curve(
-        involute_surface, geometry.module_mm
+        involute_surface, geometry.module_mm, spline_builder=interpolating_spline
     )
     deviation = max(root_deviation, involute_deviation)
     left_involute_points = [[-point[0], point[1]] for point in reversed(involute_points)]
     left_root_points = [[-point[0], point[1]] for point in reversed(root_points)]
-    left_involute_spline = bezier_chain(left_involute_points)
-    left_root_spline = bezier_chain(left_root_points)
+    left_involute_spline = interpolating_spline(left_involute_points)
+    left_root_spline = interpolating_spline(left_root_points)
 
     tip = surface[-1]
     tip_angle = math.atan2(tip[0], tip[1])
@@ -978,9 +989,13 @@ def _bevel_virtual_entities(geometry) -> tuple[list[dict], dict]:
     split = int(geometry.virtual_surface_split_index)
     root_path = surface[: split + 1]
     involute_path = surface[split:]
-    root_points, root_spline, root_deviation = _fit_smooth_curve(root_path, geometry.module_mm)
+    # Simple interior knots keep each flank C2 and avoid a separate loft face
+    # for every C1 Bezier span. Keep the real root/involute junction separate.
+    root_points, root_spline, root_deviation = _fit_smooth_curve(
+        root_path, geometry.module_mm, spline_builder=interpolating_spline,
+    )
     involute_points, involute_spline, involute_deviation = _fit_smooth_curve(
-        involute_path, geometry.module_mm
+        involute_path, geometry.module_mm, spline_builder=interpolating_spline,
     )
     cap_points = [list(point) for point in geometry.virtual_cap_points]
     cap_segments = []
@@ -1054,12 +1069,14 @@ def build_bevel_gear_plan(
     requested_name = str(name or "").strip()
     if not requested_name:
         raise ValueError("name must not be empty")
+    if len(requested_name) > 120:
+        raise ValueError("name must contain at most 120 characters")
     request = BevelGearRequest.model_validate(request).model_dump(exclude_none=True)
-    preview = build_bevel_gear_preview(request)
+    geometry = build_bevel_gear_geometry(request, curve_samples=260)
+    preview = _bevel_gear_preview_from_geometry(geometry)
     if not preview.get("success"):
         errors = ", ".join(str(item.get("code")) for item in preview.get("errors") or [])
         raise ValueError("Bevel gear preview rejected the request: " + (errors or "invalid geometry"))
-    geometry = build_bevel_gear_geometry(request, curve_samples=260)
     if not geometry.blank_profile or not geometry.virtual_surface_path:
         raise ValueError("Bevel gear blank profile or virtual flank is missing")
     virtual_entities, outer_report = _bevel_virtual_entities(geometry)
@@ -1072,7 +1089,7 @@ def build_bevel_gear_plan(
     )
     outer_entities = _bevel_entities_3d(virtual_entities, geometry.cone_frame, outer_scale)
     inner_entities = _bevel_entities_3d(virtual_entities, geometry.cone_frame, inner_scale)
-    deviation = float(outer_report["deviation_mm"])
+    deviation = float(outer_report["deviation_mm"]) * max(outer_scale, inner_scale)
     cos_delta = math.cos(geometry.pitch_cone_angle_rad)
     sin_delta = math.sin(geometry.pitch_cone_angle_rad)
     outer_cone_distance = float(geometry.section_outer_cone_distance_mm)
@@ -1204,6 +1221,7 @@ def build_bevel_gear_plan(
             "outer_cone_distance_mm": geometry.outer_cone_distance_mm,
             "face_width_mm": geometry.face_width_mm,
             "back_face_x_mm": geometry.back_face_x_mm,
+            "inner_tip_corner_x_mm": geometry.inner_tip_corner_x_mm,
             "front_face_x_mm": geometry.front_face_x_mm,
             "back_face_radius_mm": geometry.back_face_radius_mm,
             "front_face_radius_mm": geometry.front_face_radius_mm,
@@ -1238,19 +1256,20 @@ def build_bevel_gear_plan(
             "volume_relative_tolerance": 0.015,
             "expected_bounds_mm": expected_bounds,
             "expected_bounds_candidates_mm": [expected_bounds, disk_bounds],
-            "bounds_tolerance_mm": 0.1,
+            "bounds_tolerance_mm": max(0.1, 2.0 * deviation),
             "max_radius_mm": max_radius,
             "face_width_mm": geometry.face_width_mm,
             "pattern_count": pattern_count,
         },
         "accuracy": {
             "profile": "tredgold_virtual_gear_projection_to_the_apex",
-            "profile_encoding": "root_and_involute_cubic_bezier_nurbs_per_flank_plus_cap_curve_per_section",
+            "profile_encoding": "root_and_involute_c2_cubic_bspline_per_flank_plus_cap_curve_per_section",
             "sweep": "cut_loft_between_cone_normal_tredgold_sections",
             "blank": "dish_plate_with_back_and_front_cone_normal_rim_faces",
             "flank_spline_deviation_mm": deviation,
             "parameterization": "numeric_create_only",
             "representation_mode": "nominal",
             "conformity_claim": False,
+            "volume_integration": geometry.diagnostics["volume_integration"],
         },
     }

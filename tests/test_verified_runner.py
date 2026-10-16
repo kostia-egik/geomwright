@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 from kompas_mcp.operation_runtime import (
     DocumentReadbackContractSpec,
@@ -98,11 +99,14 @@ class VerifiedRunnerTests(unittest.TestCase):
 
     def test_run_verified_kompas_task_handles_malformed_preflight_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
+            create_part = Mock(side_effect=_fake_create_part)
+            readback = Mock(side_effect=_fake_document_readback)
             run = run_verified_kompas_task(
                 payload=_payload(),
                 preflight={"report": []},
                 output_base_dir=Path(temp_dir) / "real_task",
-                create_part=_fake_create_part,
+                create_part=create_part,
+                document_readback=readback,
                 invariant_spec=_invariant_spec(),
                 contract_spec=_contract_spec(),
                 thread_geometry_spec=_thread_spec(),
@@ -115,6 +119,27 @@ class VerifiedRunnerTests(unittest.TestCase):
                 (Path(run["output_dir"]) / "01_sketch_runtime_preflight.json").read_text(encoding="utf-8")
             )["report"]
             self.assertEqual(preflight_report["error_type"], "MalformedPayload")
+            create_part.assert_not_called()
+            readback.assert_not_called()
+            self.assertFalse(Path(run["output_path"]).exists())
+
+    def test_failed_preflight_prevents_creation_and_readback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            preflight = _preflight()
+            preflight["report"]["ok"] = False
+            create_part = Mock(side_effect=_fake_create_part)
+            readback = Mock(side_effect=_fake_document_readback)
+            run = run_verified_kompas_task(
+                payload=_payload(), preflight=preflight,
+                output_base_dir=Path(temp_dir) / "real_task",
+                create_part=create_part, document_readback=readback,
+                invariant_spec=_invariant_spec(), contract_spec=_contract_spec(),
+            )
+            self.assertFalse(run["ok"])
+            create_part.assert_not_called()
+            readback.assert_not_called()
+            result = json.loads((Path(run["output_dir"]) / "03_kompas_create_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["error_type"], "PreflightFailed")
 
     def test_run_verified_kompas_task_handles_non_object_create_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

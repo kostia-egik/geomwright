@@ -332,30 +332,53 @@ def _section_break_contour(
     left_angle: float,
     right_angle: float,
     wave_depth: float,
+    wavy_sides: bool = False,
+    side_wave_depth: float | None = None,
 ) -> list[list[float]]:
     """Close a cropped end-view sector with the timing-pulley break style."""
     points: list[list[float]] = []
     side_samples = 24
-    for index in range(side_samples + 1):
-        progress = index / side_samples
-        smooth = progress * progress * (3.0 - 2.0 * progress)
-        radius = outside_radius + (break_radius - outside_radius) * smooth
-        radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
-        angle = right_angle + math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
-        points.append(_polar(radius, angle))
+    if not wavy_sides:
+        for index in range(side_samples + 1):
+            progress = index / side_samples
+            smooth = progress * progress * (3.0 - 2.0 * progress)
+            radius = outside_radius + (break_radius - outside_radius) * smooth
+            radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
+            angle = right_angle + math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
+            points.append(_polar(radius, angle))
+    if wavy_sides:
+        depth = wave_depth if side_wave_depth is None else side_wave_depth
+        side = _radial_break_contour(start_radius=outside_radius, end_radius=break_radius,
+                                     angle=right_angle, wave_depth=depth / 2)
+        # Keep the waves inside the sampled sector so the old straight crop
+        # edges are outside the clip, not visible behind the wavy boundary.
+        for index, p in enumerate(side):
+            radius = math.hypot(*p)
+            envelope = math.sin(math.pi * index / (len(side) - 1)) ** .35
+            angle = math.atan2(*p) - depth * .5 * envelope / radius
+            points.append(_polar(radius, angle))
     bottom_samples = 96
     for index in range(1, bottom_samples + 1):
         progress = index / bottom_samples
         angle = right_angle + (left_angle - right_angle) * progress
         radius = break_radius + math.sin(progress * math.pi * 8.0) * wave_depth
         points.append(_polar(radius, angle))
-    for index in range(1, side_samples + 1):
-        progress = index / side_samples
-        smooth = progress * progress * (3.0 - 2.0 * progress)
-        radius = break_radius + (outside_radius - break_radius) * smooth
-        radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
-        angle = left_angle - math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
-        points.append(_polar(radius, angle))
+    if not wavy_sides:
+        for index in range(1, side_samples + 1):
+            progress = index / side_samples
+            smooth = progress * progress * (3.0 - 2.0 * progress)
+            radius = break_radius + (outside_radius - break_radius) * smooth
+            radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
+            angle = left_angle - math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
+            points.append(_polar(radius, angle))
+    if wavy_sides:
+        side = _radial_break_contour(start_radius=break_radius, end_radius=outside_radius,
+                                     angle=left_angle, wave_depth=depth / 2)
+        for index, p in enumerate(side[1:], 1):
+            radius = math.hypot(*p)
+            envelope = math.sin(math.pi * index / (len(side) - 1)) ** .35
+            angle = math.atan2(*p) + depth * .5 * envelope / radius
+            points.append(_polar(radius, angle))
     return points
 
 
@@ -1882,80 +1905,8 @@ def _adapt_gear_bevel(preview: dict[str, Any], request: dict[str, Any]) -> dict[
     period = _points(geometry.get("end_view_period"))
     tooth_count = int(request.get("tooth_count") or summary.get("tooth_count") or 0)
     sector = _gear_sector_outline(period, tooth_count, 3)
-    tip_radius = float(geometry.get("tip_radius_mm") or 0.0)
-    pitch_radius = float(geometry.get("pitch_radius_mm") or 0.0)
-    root_radius = float(geometry.get("root_radius_mm") or 0.0)
-    gap_root_radius = root_radius
-    root_line = (geometry.get("tooth_lines") or {}).get("root_line") or []
-    if len(root_line) >= 1:
-        gap_root_radius = max(1e-6, float(root_line[0][1]))
-    step = 2.0 * math.pi / max(1, tooth_count)
-    if sector:
-        left_angle = math.atan2(sector[0][0], sector[0][1])
-        right_angle = math.atan2(sector[-1][0], sector[-1][1])
-        tooth_depth = max(0.1, tip_radius - gap_root_radius)
-        break_radius = max(gap_root_radius * 0.58, gap_root_radius - tooth_depth * 1.6)
-        break_path = _section_break_contour(
-            outside_radius=gap_root_radius,
-            break_radius=break_radius,
-            left_angle=left_angle,
-            right_angle=right_angle,
-            wave_depth=max(tooth_depth * 0.08, tip_radius * 0.0015),
-        )
-        break_path[0] = list(sector[-1])
-        break_path[-1] = list(sector[0])
-        outline = [*sector, *break_path[1:]]
-    else:
-        outline = []
-        left_angle, right_angle, break_radius = -step, step, gap_root_radius * 0.7
-    closed = _dedupe_points(outline) if outline else []
-    reference_paths = [
-        {"key": "tip_circle", "points": _radial_arc(tip_radius, left_angle, right_angle, count=96)},
-        {"key": "pitch_circle", "points": _radial_arc(pitch_radius, left_angle, right_angle, count=96)},
-        {"key": "root_circle", "points": _radial_arc(root_radius, left_angle, right_angle, count=96)},
-    ]
-    bounds = _bounds(
-        [closed] if closed else [],
-        [item["points"] for item in reference_paths],
-    )
-    dimension_start = max(1.0, break_radius * 1.12)
-    gap_angle = 0.5 * step
-    dimensions = [
-        {
-            "key": "tip_diameter",
-            "symbol": "dₐₑ",
-            "orientation": "radial",
-            "start": _polar(dimension_start, step),
-            "end": _polar(tip_radius, step),
-            "value": summary.get("outer_tip_diameter_mm"),
-            "unit": "mm",
-            "label_normal": 52,
-            "label_tangent": 62,
-        },
-        {
-            "key": "pitch_diameter",
-            "symbol": "dₑ",
-            "orientation": "radial",
-            "start": _polar(dimension_start, -gap_angle),
-            "end": _polar(pitch_radius, -gap_angle),
-            "value": summary.get("outer_pitch_diameter_mm"),
-            "unit": "mm",
-            "label_normal": -30,
-            "label_tangent": -6,
-        },
-        {
-            "key": "root_diameter",
-            "symbol": "d_fₑ",
-            "orientation": "radial",
-            "start": _polar(dimension_start, gap_angle),
-            "end": _polar(root_radius, gap_angle),
-            "value": summary.get("outer_root_diameter_mm"),
-            "unit": "mm",
-            "label_normal": 22,
-            "label_tangent": 2,
-        },
-    ]
-    axial = dict((geometry.get("axial_section") or {}))
+    from .bevel_preview import build_bevel_views
+    bevel_views = build_bevel_views(sector, geometry, summary, break_contour=_section_break_contour)
     outline = [[float(point[0]), float(point[1])] for point in (geometry.get("blank_profile") or [])]
     tooth_lines = {
         key: [[float(point[0]), float(point[1])] for point in (value or [])]
@@ -1996,32 +1947,19 @@ def _adapt_gear_bevel(preview: dict[str, Any], request: dict[str, Any]) -> dict[
         "ok": bool(preview.get("success")),
         "family": "gear_bevel",
         "view_mode": "end",
-        "closed_points": [closed] if closed else [],
         "feature_paths": [],
-        "tone_paths": (
-            [{"points": closed, "tone": "exhaust", "width": 2.4, "fill": "rgba(227,170,79,.05)"}]
-            if closed
-            else []
-        ),
         "guide_paths": [],
-        "reference_paths": reference_paths,
         "phantom_bodies": [],
-        "bounds": bounds,
         "coordinate_system": geometry.get("coordinate_system"),
         "summary": summary,
         "derived": preview.get("derived"),
         "measurements": preview.get("measurements"),
         "report": report,
-        "dimensions": dimensions,
         "warnings": list(preview.get("warnings") or []),
         "warning_items": list(preview.get("warning_items") or []),
-        "preview_window": {
-            "tooth_gap_count": 3,
-            "visible_tooth_count": 3,
-            "section_style": "cropped_sector",
-        },
         "secondary_view": secondary_view,
         "request": dict(request),
+        **bevel_views,
     }
 
 
@@ -2173,7 +2111,7 @@ _MODULES: dict[str, PreviewModule] = {
     "gear_bevel": PreviewModule(
         kind="gear_bevel",
         name="Коническая шестерня (прямозубая)",
-        description="Коническое колесо с прямыми зубьями: макрогеометрия ГОСТ 19624-74, виртуальное колесо Тредголда, торцовое и осевое сечение с контрольными размерами.",
+        description="Коническое колесо по проекции Тредголда: сектор венца, осевой разрез и увеличенный вид большого торца зуба.",
         standard="ГОСТ 19624-74 / ГОСТ 13754-68 (nominal)",
         request_model=BevelGearRequest,
         defaults=BevelGearRequest().model_dump(exclude_none=True),

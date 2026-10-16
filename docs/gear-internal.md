@@ -4,7 +4,7 @@ Status: implemented, live-verified create-only slice for internal spur and
 helical gears with the same four basic-rack systems as the external gear
 (GOST 19274-73 geometry; G4 subfamily of
 [gear-transmission-concept.md](gear-transmission-concept.md)); exposed as three
-MCP tools.
+family-specific MCP tools and the shared module contract.
 
 This module builds one internal cylindrical gear — a ring gear — from an
 explicit ring blank. The teeth are cut from the inner surface of the ring; the
@@ -120,7 +120,10 @@ The live acceptance cases are stored under `experiments/spikes/`
   roots: one solid, expected bounds and a verified recreatable block after
   save/reopen;
 - the same spur gear with tooth-tip chamfers `0.5 × 45°`: one solid with the
-  integrated chamfer removal included in the expected volume.
+  integrated chamfer removal included in the expected volume. The
+  cubic-Bezier-transition build returned `55 519.623 mm³` against
+  `55 533.453 mm³` expected (`0.025%` relative error); both revolved chamfer
+  features were valid.
 
 These checks cover the solid, its bounds, the physical tooth count and the
 managed-block recipe. They do not certify the pinion-cutter root shape,
@@ -129,8 +132,10 @@ strength, or the mesh with a mating gear.
 ## Studio and MCP
 
 Studio exposes the module under **Механические передачи → Зубчатые передачи**;
-the end view shows a cropped three-tooth sector with the `D`, `d`, `d_a2`,
-`d_f2` dimensions, and the side view shows the ring width with the bore window.
+the end view shows a cropped three-tooth sector with wavy radial break edges,
+three open reference arcs and the `d`, `d_a2`, `d_f2` dimensions. The side view
+shows the ring width, bore window, and the optional tooth-tip chamfers in their
+internal-gear orientation.
 The persisted block is read-only and recreatable from its recipe.
 
 MCP tools:
@@ -139,6 +144,13 @@ MCP tools:
 - `create_internal_gear` — plan with `execute=false`, write only with
   `confirm_write=true`;
 - `inspect_internal_gear` — read the managed block and its recipe.
+
+The shared MCP/CLI interface also exposes `module_id="gear_internal"` with
+`preview|plan|create|inspect`; see [the request format](../README.md#cad-module-pilot-mcp-and-cli).
+`get_cad_module_contract` returns this family's schema and explicit ring-diameter
+example. Creation makes a new unsaved part, not an edit to an existing ring.
+Inspection restores parameters only when `data.recreatable=true`; without a
+complete recipe they are `null`. Recognition is not a fresh geometry audit.
 
 ## Out of scope
 

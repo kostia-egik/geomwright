@@ -57,34 +57,61 @@ def _bounds(paths: list[list[list[float]]]) -> dict[str, float] | None:
 
 def _section_break_contour(
     *,
-    outside_radius: float,
+    start: list[float],
+    end: list[float],
     break_radius: float,
-    left_angle: float,
-    right_angle: float,
     wave_depth: float,
 ) -> list[list[float]]:
+    """Uniform arc-length waves, joining the circular crop ends normally.
+
+    Two tangent-continuous cubics retain the low centre of the section. Their
+    endpoint handles point into the shaft along its radii, perpendicular to
+    the root circle. Wave amplitude fades only within a quarter wavelength,
+    preserving those endpoint directions without long smooth side sections.
+    """
+    middle = [(start[0] + end[0]) / 2, break_radius]
+    handle = (end[0] - start[0]) * 0.18
+    curves = [
+        [start, [v * 0.75 for v in start], [middle[0] - handle, middle[1]], middle],
+        [middle, [middle[0] + handle, middle[1]], [v * 0.75 for v in end], end],
+    ]
+
+    def baseline(parameter: float) -> tuple[list[float], list[float]]:
+        segment = min(1, int(parameter))
+        t = parameter - segment
+        u = 1 - t
+        a, b, c, d = curves[segment]
+        point = [u**3*a[k] + 3*u*u*t*b[k] + 3*u*t*t*c[k] + t**3*d[k] for k in (0, 1)]
+        tangent = [3*u*u*(b[k]-a[k]) + 6*u*t*(c[k]-b[k]) + 3*t*t*(d[k]-c[k]) for k in (0, 1)]
+        return point, tangent
+
+    # Resample by distance, so the wave is equally dense at the ends and centre.
+    baseline_samples = 512
+    lengths = [0.0]
+    previous = start
+    for index in range(1, baseline_samples + 1):
+        point, _ = baseline(2 * index / baseline_samples)
+        lengths.append(lengths[-1] + math.dist(previous, point))
+        previous = point
+    total_length = lengths[-1]
+    waves = max(12, min(24, round(total_length / (8 * wave_depth))))
+    samples = waves * 48
     points: list[list[float]] = []
-    side_samples = 24
-    for index in range(side_samples + 1):
-        progress = index / side_samples
-        smooth = progress * progress * (3.0 - 2.0 * progress)
-        radius = outside_radius + (break_radius - outside_radius) * smooth
-        radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
-        angle = right_angle + math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
-        points.append(_polar(radius, angle))
-    bottom_samples = 96
-    for index in range(1, bottom_samples + 1):
-        progress = index / bottom_samples
-        angle = right_angle + (left_angle - right_angle) * progress
-        radius = break_radius + math.sin(progress * math.pi * 8.0) * wave_depth
-        points.append(_polar(radius, angle))
-    for index in range(1, side_samples + 1):
-        progress = index / side_samples
-        smooth = progress * progress * (3.0 - 2.0 * progress)
-        radius = break_radius + (outside_radius - break_radius) * smooth
-        radius += math.sin(progress * math.pi * 4.0) * wave_depth * 0.045
-        angle = left_angle - math.sin(progress * math.pi) * wave_depth * 0.14 / outside_radius
-        points.append(_polar(radius, angle))
+    interval = 0
+    for index in range(samples + 1):
+        progress = index / samples
+        distance = progress * total_length
+        while interval < baseline_samples - 1 and lengths[interval + 1] < distance:
+            interval += 1
+        fraction = (distance - lengths[interval]) / (lengths[interval + 1] - lengths[interval])
+        point, tangent = baseline(2 * (interval + fraction) / baseline_samples)
+        edge = min(1.0, progress * waves * 4, (1 - progress) * waves * 4)
+        envelope = edge * edge * (3 - 2 * edge)
+        offset = math.sin(progress * math.tau * waves) * wave_depth * envelope
+        tangent_length = math.hypot(*tangent)
+        points.append([point[0] - tangent[1] / tangent_length * offset,
+                       point[1] + tangent[0] / tangent_length * offset])
+    points[0], points[-1] = list(start), list(end)
     return points
 
 
@@ -125,17 +152,20 @@ def _crop_sector(points: list[list[float]], half_span: float) -> list[list[float
     cropped = [list(points[index]) for index in range(first, last + 1)]
     # Если соседние точки лежат за границей окна, добавить точное пересечение.
     if first > 0:
-        cropped[0] = _boundary_point(points[first - 1], points[first], half_span, angles[first - 1], angles[first])
+        cropped.insert(0, _boundary_point(points[first - 1], points[first], half_span))
     if last < len(points) - 1:
-        cropped[-1] = _boundary_point(points[last], points[last + 1], -half_span, angles[last], angles[last + 1])
+        cropped.append(_boundary_point(points[last], points[last + 1], -half_span))
     return _dedupe_points(cropped)
 
 
-def _boundary_point(a: list[float], b: list[float], target_angle: float, angle_a: float, angle_b: float) -> list[float]:
-    span = angle_b - angle_a
-    if abs(span) <= 1e-12:
+def _boundary_point(a: list[float], b: list[float], target_angle: float) -> list[float]:
+    # Intersect the segment with the boundary ray, retaining corners next to it.
+    ray = _polar(1.0, target_angle)
+    delta = [b[0] - a[0], b[1] - a[1]]
+    cross = delta[0] * ray[1] - delta[1] * ray[0]
+    if abs(cross) <= 1e-12:
         return list(a)
-    progress = (target_angle - angle_a) / span
+    progress = (a[1] * ray[0] - a[0] * ray[1]) / cross
     progress = max(0.0, min(1.0, progress))
     return [a[0] + (b[0] - a[0]) * progress, a[1] + (b[1] - a[1]) * progress]
 
@@ -166,7 +196,9 @@ def _sector_outline(
     assembled = _rotate_path(assembled, 0.5 * step)
     half_span = 1.5 * step
     cropped = _crop_sector(assembled, half_span)
-    return cropped, -half_span, half_span
+    if not cropped:
+        return [], half_span, -half_span
+    return cropped, math.atan2(*cropped[0]), math.atan2(*cropped[-1])
 
 
 def adapt_spline_preview(preview: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
@@ -212,29 +244,32 @@ def adapt_spline_preview(preview: dict[str, Any], request: dict[str, Any]) -> di
         outside_radius = outer_radius
         if sector:
             tooth_depth = max(0.1, outer_radius - root_radius)
-            break_radius = max(root_radius * 0.58, root_radius - tooth_depth * 1.6)
+            # Show a substantial part of the shaft core, including for shallow
+            # teeth; tooth-depth-based cropping leaves an overly thin strip.
+            break_radius = root_radius * 0.52
             break_path = _section_break_contour(
-                outside_radius=root_radius,
+                start=sector[-1],
+                end=sector[0],
                 break_radius=break_radius,
-                left_angle=left_angle,
-                right_angle=right_angle,
-                wave_depth=max(tooth_depth * 0.08, outer_radius * 0.0015),
+                wave_depth=max(tooth_depth * 0.12, outer_radius * 0.002),
             )
-            break_path[0] = list(sector[-1])
-            break_path[-1] = list(sector[0])
             outline = _dedupe_points([*sector, *break_path[1:]])
         else:
             outline = []
-            break_radius = root_radius * 0.7
+            break_radius = root_radius * 0.52
         reference_paths = [
             {"key": "outer_circle", "points": _radial_arc(outer_radius, left_angle, right_angle, count=96)},
             {"key": "root_circle", "points": _radial_arc(root_radius, left_angle, right_angle, count=96)},
         ]
         tone_paths = (
-            [{"points": outline, "tone": "exhaust", "width": 2.4, "fill": "rgba(227,170,79,.05)"}]
+            [
+                {"points": outline, "stroke": False, "fill": "rgba(227,170,79,.05)"},
+                {"points": sector, "tone": "exhaust", "width": 2.2, "closed": False},
+                {"points": break_path, "tone": "exhaust", "width": 1.15, "closed": False},
+            ]
             if outline else []
         )
-        dimension_start = max(1.0, break_radius * 1.12)
+        dimension_start = max(1.0, root_radius * 0.8)
         dimensions = [
             {
                 "key": "outer_diameter",
@@ -262,8 +297,8 @@ def adapt_spline_preview(preview: dict[str, Any], request: dict[str, Any]) -> di
                 "key": "tooth_width",
                 "symbol": "b",
                 "orientation": "horizontal",
-                "start": [-0.5 * float(summary.get("tooth_width_mm") or 0.0), root_radius + 0.35 * (outer_radius - root_radius)],
-                "end": [0.5 * float(summary.get("tooth_width_mm") or 0.0), root_radius + 0.35 * (outer_radius - root_radius)],
+                "start": [-0.5 * float(summary.get("tooth_width_mm") or 0.0), outer_radius],
+                "end": [0.5 * float(summary.get("tooth_width_mm") or 0.0), outer_radius],
                 "value": summary.get("tooth_width_mm"),
                 "unit": "mm",
                 "label_normal": 0,
@@ -272,6 +307,9 @@ def adapt_spline_preview(preview: dict[str, Any], request: dict[str, Any]) -> di
         ]
     else:
         hub_radius = float(geometry.get("hub_outside_radius_mm") or outer_radius)
+        # geometry.outer_radius_mm is the hub blank, while D is the groove
+        # diameter. Its reference circle and dimension must use the spline size.
+        outer_radius = 0.5 * float(summary["outer_diameter_mm"])
         inside_radius = float(geometry.get("bore_radius_mm") or root_radius)
         outside_radius = hub_radius
         if sector:
@@ -302,7 +340,13 @@ def adapt_spline_preview(preview: dict[str, Any], request: dict[str, Any]) -> di
             {"key": "outer_circle", "points": _radial_arc(hub_radius, left_angle, right_angle, count=96)},
         ]
         tone_paths = (
-            [{"points": outline, "tone": "exhaust", "width": 2.2, "fill": "rgba(227,170,79,.09)", "stroke": "#e3aa4f"}]
+            [
+                {"points": outline, "stroke": False, "fill": "rgba(227,170,79,.09)"},
+                {"points": sector, "tone": "exhaust", "width": 2.2, "closed": False},
+                {"points": outer_path, "tone": "exhaust", "width": 2.2, "closed": False},
+                {"points": right_break, "tone": "exhaust", "width": 1.15, "closed": False},
+                {"points": left_break, "tone": "exhaust", "width": 1.15, "closed": False},
+            ]
             if outline else []
         )
         dimension_start = max(1.0, 0.82 * inside_radius)
@@ -333,11 +377,11 @@ def adapt_spline_preview(preview: dict[str, Any], request: dict[str, Any]) -> di
                 "key": "hub_outside_diameter",
                 "symbol": "Dо",
                 "orientation": "radial",
-                "start": _polar(0.55 * hub_radius, 0.0),
-                "end": _polar(hub_radius, 0.0),
+                "start": _polar(0.9 * outer_radius, -0.28 * step),
+                "end": _polar(hub_radius, -0.28 * step),
                 "value": summary.get("hub_outside_diameter_mm"),
                 "unit": "mm",
-                "label_normal": 20,
+                "label_normal": -20,
                 "label_tangent": 0,
             },
         ]

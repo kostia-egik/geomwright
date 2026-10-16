@@ -38,6 +38,13 @@ class RuntimeErrorClassificationTests(unittest.TestCase):
             ("invalid input: entities must be a non-empty list", "INVALID_INPUT", "input"),
             ("ambiguous target: provide sketch_ref or create_new_sketch, not both", "AMBIGUOUS_TARGET", "target_resolution"),
             ("unsupported COM shape: existing sketch_ref target is not implemented", "UNSUPPORTED_COM_SHAPE", "com_shape"),
+            ("CAD_SELF_INTERSECTION: compression spring sweep is invalid; KOMPAS ObjectError=31", "CAD_SELF_INTERSECTION", "geometry"),
+            ("CAD_SESSION_BLOCKED: unknown outcome; pywintypes.com_error", "CAD_SESSION_BLOCKED", "session"),
+            ("CAD_DIAGNOSTICS_REQUIRED: CAD_MODE_MISMATCH: finished failure", "CAD_DIAGNOSTICS_REQUIRED", "session"),
+            ("CAD_MODE_MISMATCH: selected hidden session", "CAD_MODE_MISMATCH", "session"),
+            ("CAD_RUNTIME_INVALID: SyntaxError before CAD launch", "CAD_RUNTIME_INVALID", "environment"),
+            ("CAD_SESSION_BLOCKED: CAD_RUNTIME_INVALID: old failure", "CAD_SESSION_BLOCKED", "session"),
+            ("CAD_SESSION_BLOCKED: CAD_MODE_MISMATCH: selected hidden session", "CAD_SESSION_BLOCKED", "session"),
         ]
 
         for message, code, category in cases:
@@ -45,6 +52,18 @@ class RuntimeErrorClassificationTests(unittest.TestCase):
                 result = classify_runtime_error(message)
                 self.assertEqual(result["code"], code)
                 self.assertEqual(result["category"], category)
+                if code == "CAD_SELF_INTERSECTION":
+                    self.assertFalse(result["retryable"])
+                    self.assertIn("do not retry", result["hint"])
+                if code == "CAD_RUNTIME_INVALID":
+                    self.assertFalse(result["retryable"])
+                    self.assertIn("KOMPAS_PYTHON",result["hint"])
+                if code == "CAD_SESSION_BLOCKED":
+                    self.assertFalse(result["retryable"])
+                    self.assertIn("without COM", result["hint"])
+                if code == "CAD_DIAGNOSTICS_REQUIRED":
+                    self.assertFalse(result["retryable"])
+                    self.assertIn("confirm_idle=false", result["hint"])
 
     def test_unknown_error_keeps_message_and_hint(self) -> None:
         result = classify_runtime_error("unexpected bridge payload")

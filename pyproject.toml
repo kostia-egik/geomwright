@@ -11,7 +11,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Kostia Egik" }]
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=1,<2",
+  "mcp>=1.27,<2",
 ]
 
 keywords = ["cad", "kompas-3d", "mcp", "parametric-cad", "automation"]
@@ -40,6 +40,7 @@ ui = [
 
 [project.scripts]
 geomwright-mcp = "geomwright.__main__:main"
+geomwright-model = "geomwright.model:main"
 geomwright-studio = "geomwright.studio.__main__:main"
 kompas-mcp = "kompas_mcp.__main__:main"
 kompas-mechanics-ui = "geomwright.studio.__main__:main"

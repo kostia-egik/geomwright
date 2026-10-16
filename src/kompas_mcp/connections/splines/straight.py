@@ -364,22 +364,6 @@ def _shaft_fillet(tooth_angle: float, root_radius: float, b_mm: float, r_mm: flo
     return center, flank_point, root_point
 
 
-def _hub_fillet(tooth_angle: float, root_radius: float, b_mm: float, r_mm: float) -> tuple[list[float], list[float], list[float]]:
-    """Галтель впадины втулки: центр внутри паза, касание дна D и бока."""
-    tangent = _tangent_unit(tooth_angle)
-    normal_offset = -(0.5 * b_mm + r_mm)
-    squared = (root_radius - r_mm) ** 2 - normal_offset ** 2
-    if squared <= 0.0:
-        raise ValueError("Галтель r не помещается между боковой стороной и дном D втулки")
-    center = _add(
-        _scale(_axis_unit(tooth_angle), math.sqrt(squared)),
-        _scale(tangent, normal_offset),
-    )
-    root_point = _scale(center, root_radius / (root_radius - r_mm))
-    flank_point = _add(center, _scale(tangent, r_mm))
-    return center, flank_point, root_point
-
-
 def _arc_entity(identifier: str, center: list[float], radius: float, start: list[float], end: list[float], middle: list[float]) -> dict[str, Any]:
     return {
         "id": identifier,
@@ -454,8 +438,10 @@ def contour_points(entities: list[dict[str, Any]], samples: int = 24, *, close: 
                 points.append([center[0] + radius * math.cos(angle), center[1] + radius * math.sin(angle)])
         else:
             raise ValueError(f"Контур содержит неизвестную сущность: {entity.get('kind')}")
-    if close and points:
-        points.append(list(points[0]))
+    if points:
+        # An open chain still includes its terminal endpoint. Omitting it
+        # shortens the last flank and makes period closure tilt that side.
+        points.append(list(points[0] if close else entities[-1]["end"]))
     return points
 
 
@@ -530,49 +516,54 @@ def space_interior_entities(entities: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def build_hub_space_entities(tooth_count: int, bore_radius: float, groove_radius: float, b_mm: float, r_mm: float) -> list[dict[str, Any]]:
-    """Точный контур паза втулки, открытого внутрь отверстия d."""
-    step = 2.0 * math.pi / tooth_count
-    tooth_angle = 0.5 * step
-    center_plus, flank_plus, bottom_plus = _hub_fillet(tooth_angle, groove_radius, b_mm, r_mm)
-    bore_plus = _flank_side_point(tooth_angle, b_mm, bore_radius)
-    center_minus = [-center_plus[0], center_plus[1]]
-    flank_minus = [-flank_plus[0], flank_plus[1]]
-    bottom_minus = [-bottom_plus[0], bottom_plus[1]]
-    bore_minus = [-bore_plus[0], bore_plus[1]]
-    bottom_middle = [0.0, groove_radius]
-    bore_middle = [0.0, bore_radius]
-    fillet_plus_clockwise = abs(_arc_sweep(flank_plus, bottom_plus, center_plus, True)) <= abs(
-        _arc_sweep(flank_plus, bottom_plus, center_plus, False)
-    )
-    fillet_minus_clockwise = abs(_arc_sweep(bottom_minus, flank_minus, center_minus, True)) <= abs(
-        _arc_sweep(bottom_minus, flank_minus, center_minus, False)
-    )
+    """Nominal negative of one retained shaft tooth, phased to its centre.
+
+    r is the mating shaft-root transition at d, not an inward rounding at D
+    that would intersect its square tooth tip. No cutter-generation claim.
+    """
+    center_minus, flank_minus, bore_minus = _shaft_fillet(0.0, bore_radius, b_mm, r_mm)
+    if math.hypot(*flank_minus) >= groove_radius or abs(math.atan2(bore_minus[0],bore_minus[1])) >= math.pi/tooth_count:
+        raise ValueError("Ответная галтель не помещается между d, D и соседними пазами втулки")
+    tip_minus = _flank_side_point(0.0, b_mm, groove_radius)
+    center_plus = [-center_minus[0], center_minus[1]]
+    flank_plus = [-flank_minus[0], flank_minus[1]]
+    bore_plus = [-bore_minus[0], bore_minus[1]]
+    tip_plus = [-tip_minus[0], tip_minus[1]]
+    short_arc = lambda a, c, centre: abs(_arc_sweep(a, c, centre, True)) <= abs(_arc_sweep(a, c, centre, False))
     entities = [
-        _segment_entity("spline_space_flank_right", bore_plus, flank_plus),
         {
             "id": "spline_space_fillet_right",
             "kind": "arc",
             "center": center_plus,
             "radius": float(r_mm),
-            "start": flank_plus,
-            "end": bottom_plus,
-            "direction": bool(fillet_plus_clockwise),
+            "start": bore_plus,
+            "end": flank_plus,
+            "direction": short_arc(bore_plus, flank_plus, center_plus),
             "style": 1,
         },
-        _arc_entity("spline_space_root", [0.0, 0.0], groove_radius, bottom_plus, bottom_minus, bottom_middle),
+        _segment_entity("spline_space_flank_right", flank_plus, tip_plus),
+        _arc_entity("spline_space_root", [0.0, 0.0], groove_radius, tip_plus, tip_minus, [0.0, groove_radius]),
+        _segment_entity("spline_space_flank_left", tip_minus, flank_minus),
         {
             "id": "spline_space_fillet_left",
             "kind": "arc",
             "center": center_minus,
             "radius": float(r_mm),
-            "start": bottom_minus,
-            "end": flank_minus,
-            "direction": bool(fillet_minus_clockwise),
+            "start": flank_minus,
+            "end": bore_minus,
+            "direction": short_arc(flank_minus, bore_minus, center_minus),
             "style": 1,
         },
-        _segment_entity("spline_space_flank_left", flank_minus, bore_minus),
-        _arc_entity("spline_space_bore", [0.0, 0.0], bore_radius, bore_minus, bore_plus, bore_middle),
+        _arc_entity("spline_space_bore", [0.0, 0.0], bore_radius, bore_minus, bore_plus, [0.0, bore_radius]),
     ]
+    # External spaces are centred at 0; retained teeth (and hub slots) at pi/z.
+    angle = math.pi / tooth_count
+    cosine, sine = math.cos(angle), math.sin(angle)
+    for entity in entities:
+        for key in ("start", "end", "center"):
+            if key in entity:
+                x, y = entity[key]
+                entity[key] = [x*cosine+y*sine, y*cosine-x*sine]
     if not _chain_is_closed(entities):
         raise ValueError("Контур паза втулки не замкнут")
     return entities
@@ -584,22 +575,21 @@ def build_period_outline(
     tip_radius: float,
     b_mm: float,
 ) -> list[list[float]]:
-    """Один период венца: от боковой точки паза до той же точки следующего паза.
+    """One boundary period from an open flank/fillet chain (without cutter cap).
 
-    Период начинается на боковой стороне зуба (tip_plus), проходит паз до
-    второй боковой стороны и заканчивается дугой вершины следующего зуба в
-    точке tip_plus - step. Повторы периода в отрицательном направлении
-    угла смыкаются без разрывов.
+    Close the material boundary at tip_radius toward the start point rotated
+    by minus one pitch. Derive endpoints from the actual shaft or hub contour;
+    the external gap's angular-width formula cannot describe an internal slot.
     """
     if len(space_entities) < 2 or tooth_count < 3:
         return []
-    half = math.pi / tooth_count
-    delta = math.asin(min(1.0, 0.5 * b_mm / tip_radius))
-    angle_plus = half - delta
-    interior = contour_points(space_entities[:-1], samples=24, close=False)
+    step = 2.0 * math.pi / tooth_count
+    interior = contour_points(space_entities, samples=24, close=False)
     if len(interior) < 2:
         return []
-    tip_out = _polar_arc(tip_radius, -angle_plus, angle_plus - 2.0 * half, count=12)
+    start_angle = math.atan2(interior[0][0], interior[0][1])
+    end_angle = math.atan2(interior[-1][0], interior[-1][1])
+    tip_out = _polar_arc(tip_radius, end_angle, start_angle-step, count=12)
     return [*interior, *tip_out[1:]]
 
 
@@ -804,6 +794,7 @@ def build_spline_geometry(request: dict[str, Any] | StraightSplineRequest) -> Sp
                 "Для втулки исполнение вала не применяется; номинальный профиль строится по d и D",
             )
         execution = "hub"
+        ok("spline_hub_mating_complement", "Номинальный ответный контур зуба вала; r повторяет переход у d, не скругляет дно D. Не профиль инструмента и не проверка предельной посадки")
         bore_radius = 0.5 * d
         groove_radius = 0.5 * D
         hub_outside = model.hub_outside_diameter_mm
@@ -830,13 +821,6 @@ def build_spline_geometry(request: dict[str, Any] | StraightSplineRequest) -> Sp
         except ValueError as exc:
             space_entities = []
             fail("spline_space_invalid", str(exc))
-        if D - b <= 4.0 * fillet:
-            fail(
-                "spline_hub_fillet",
-                "Галтель r не помещается между боковой стороной и дном D втулки",
-                value=D - b,
-                limit=4.0 * fillet,
-            )
         space_area = abs(contour_signed_area(space_entities)) if space_entities else 0.0
         if space_area <= 0.0 and space_entities:
             fail("spline_space_area", "Площадь паза втулки не положительна")
@@ -844,7 +828,7 @@ def build_spline_geometry(request: dict[str, Any] | StraightSplineRequest) -> Sp
         section_area = ring_area - tooth_count * space_area
         chamfer_volume = 0.0
         expected_volume = section_area * length
-        interior_source = space_interior_entities(space_entities)
+        interior_source = space_entities[:-1]
 
     if expected_volume <= 0.0:
         fail("spline_volume", "Ожидаемый объём тела не положителен", value=expected_volume)
@@ -860,7 +844,8 @@ def build_spline_geometry(request: dict[str, Any] | StraightSplineRequest) -> Sp
     )
 
     tip_land = b - 2.0 * chamfer if body == "shaft" and model.include_tip_chamfer else b
-    space_half_angle = math.pi / tooth_count - math.asin(min(1.0, b / D))
+    space_half_angle = (math.pi / tooth_count - math.asin(min(1.0, b / D)) if body == "shaft"
+                        else math.asin(min(1.0, b / D)))
     measurements = {
         "tip_land_mm": tip_land,
         "space_width_at_tip_mm": 2.0 * 0.5 * D * math.sin(space_half_angle),
@@ -968,7 +953,9 @@ def build_straight_spline_preview(request: dict[str, Any] | StraightSplineReques
     fit_report = build_fit_report(model, geometry.size, geometry.centering)
     summary["fits"] = fit_report["selected"]
     geometry_payload = {
-        "coordinate_system": "YOZ sketch; x tangential, y radial; space centered on +Y",
+        "coordinate_system": ("YOZ sketch; x tangential, y radial; hub slot centred at pi/z from +Y to mate the shaft tooth"
+                              if geometry.body == "hub" else "YOZ sketch; x tangential, y radial; space centered on +Y"),
+        **({"profile_geometry_revision": 2} if geometry.body == "hub" else {}),
         "space_entities": geometry.space_entities,
         "period_outline": geometry.period_outline,
         "root_radius_mm": geometry.root_radius_mm,

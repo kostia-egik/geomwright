@@ -103,9 +103,11 @@ def register_gear_tools(mcp: Any, adapter: Any) -> None:
     def create_bevel_gear(request: BevelGearCreateRequest) -> dict:
         """Plan (execute=false) or create one verified create-only straight bevel gear part.
 
-        The module builds a conical blank and one tooth-space cut lofted between
-        two exact projected frontal sections. Creation stores a checksummed
-        recipe so a reopened block restores its Studio form for a new build.
+        The module builds a dish blank and a nominal Tredgold tooth-space cut
+        lofted between two homothetic cone-normal sections. It does not verify
+        mating contact, strength, or an exact cutter-generated profile.
+        Creation stores a checksummed recipe so a reopened block restores its
+        Studio form for a new build.
         """
         profile = request.model_dump(
             exclude={"name", "execute", "confirm_write", "visible"},

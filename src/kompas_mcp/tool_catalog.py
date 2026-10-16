@@ -6,6 +6,12 @@ from typing import Any
 
 TOOL_CATEGORIES: list[dict[str, Any]] = [
     {
+        "name": "finished_geometry",
+        "stability": "experimental",
+        "purpose": "Read and measure final bodies, trimmed faces/edges and face shape snapshots independently of construction history.",
+        "tools": ["list_model_bodies", "list_body_faces", "list_body_edges", "inspect_body_face", "measure_model_geometry"],
+    },
+    {
         "name": "cam_design",
         "stability": "experimental",
         "purpose": "Plan and create one verified create-only cam, without shaft or hub.",
@@ -15,7 +21,13 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
         "name": "server_guidance",
         "stability": "stable",
         "purpose": "Discover the MCP tool surface and choose the right workflow.",
-        "tools": ["get_mcp_tool_catalog"],
+        "tools": ["get_mcp_tool_catalog", "get_cad_module_contract", "get_construction_chain_contract"],
+    },
+    {
+        "name": "cad_modules",
+        "stability": "experimental",
+        "purpose": "Run supported CAD families through a shared bounded module contract.",
+        "tools": ["run_cad_module", "run_construction_chain"],
     },
     {
         "name": "native_modules",
@@ -100,6 +112,10 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
         "stability": "stable",
         "purpose": "Check, open, close, save, and smoke-test KOMPAS documents.",
         "tools": [
+            "get_cad_session_guard",
+            "recover_cad_session",
+            "get_cad_work_mode",
+            "set_cad_work_mode",
             "get_session_state",
             "list_documents",
             "check_file_access",
@@ -110,6 +126,7 @@ TOOL_CATEGORIES: list[dict[str, Any]] = [
             "save_document",
             "save_document_as",
             "save_export_copy",
+            "export_model_png",
         ],
     },
     {

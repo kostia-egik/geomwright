@@ -5,16 +5,18 @@
 
 Отчет по реализации `inspect_sketch_full`.
 
-## Что добавлено
+## Как работает
 
-Добавлен новый read-only инструмент `inspect_sketch_full`:
+Read-only инструмент `inspect_sketch_full`:
 
 - bridge action: `inspect_sketch_full`;
 - adapter method: `KompasAdapter.inspect_sketch_full(...)`;
 - MCP tool: `inspect_sketch_full` в `sketch_tools.py`.
 
-Инструмент не меняет модель. Он открывает существующий эскиз через
-`BeginEdit()`, читает drawing container и закрывает эскиз через `EndEdit()`.
+Публичный инструмент не меняет и не перестраивает модель. Он открывает существующий
+эскиз через `BeginEditEx(true)`, читает drawing container и закрывает эскиз через
+`EndEdit()`. API5-данные, требующие активного редактора, в этом режиме не берутся из
+другого активного 2D-документа; их недоступность отражается в `coverage`.
 
 ## Что возвращает tool
 
@@ -28,6 +30,7 @@
 - `collections` - группировка по коллекциям;
 - `dimensions`;
 - `constraints`.
+- `read_only` и `coverage` — полнота перечисленных коллекций и доступность API5.
 
 Актуальные диагностические поля текущей версии:
 
@@ -78,6 +81,8 @@
 - `Circles` -> `circle`;
 - `Points` -> `point`;
 - `Ellipses` -> `ellipse`.
+- `Nurbses` -> `nurbs`;
+- `Beziers` -> `bezier`, с базовыми точками и управляющими ручками.
 
 Для координат используется cast к конкретным COM-интерфейсам:
 
@@ -86,6 +91,8 @@
 - `ICircle`;
 - `IPoint`;
 - `IEllipse`.
+- `INurbs`;
+- `IBezier`.
 
 Это важно: без cast эталонный sketch возвращал entity counts, но координаты
 отрезков/дуг приходили как `None`.
@@ -97,6 +104,12 @@
 операция или состояние эскиза `under_constrained`.
 
 Минимальный порядок анализа:
+
+Сначала проверь `coverage.listed_collections_complete` и ошибки коллекций. При
+усечении или ошибке чтения отсутствие сущности не доказывается. Endpoint-аудит
+учитывает отрезки, дуги, NURBS и Безье; он не является полной проверкой замкнутых
+окружностей/эллипсов или произвольных макроэлементов. Для таких эскизов `closed=false`
+сам по себе не доказывает разрыв.
 
 1. `sketch_diagnostics.closure_audit.primary_style.closed` - должен быть `true`
    для одного рабочего контура операции.
@@ -119,10 +132,11 @@ same primary-style closure audit after sketch parameterization and before the
 revolve update. A failed preflight means the generator intentionally stopped
 before KOMPAS built from an open, branched, or self-intersecting primary profile.
 
-`inspect_sketch_full` updates the target sketch before reading `ConstraintsState`
-by default (`update_before_state=true`). This avoids stale under-constrained
-readback immediately after reopening a document whose sketch becomes fully
-defined after KOMPAS recomputes the solver state.
+Public `inspect_sketch_full` does not call `Update` before reading the sketch.
+Stored solver state can consequently be stale; inspection must not repair it
+silently. Internal generation/verification routines can explicitly update a sketch
+they own before reading its solver state. Their editable-context API5 evidence is
+not a promise that all those constraints are available in public read-only mode.
 
 SDK notes:
 

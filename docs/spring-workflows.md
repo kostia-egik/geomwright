@@ -12,13 +12,18 @@ a research surface.
 | Compression | `preview_compression_spring`, `create_compression_spring` | implemented and live-verified | [compression-spring.md](compression-spring.md) |
 | Conical | parametric workflow operations | implemented and live-verified | [conical-spring.md](conical-spring.md) |
 | Torsion | parametric workflow operations | implemented and live-verified | [torsion-spring.md](torsion-spring.md) |
-| Extension | hook-family parametric scenarios | experimental family coverage | See the runtime catalog and `parametric-workflows.md` |
-| Disc/Belleville | `disc_spring` | implemented in the shared workflow | [parametric-workflows.md](parametric-workflows.md) |
-| Diaphragm | `diaphragm_spring` plus cut/relief/pattern operations | complete | [diaphragm-spring.md](diaphragm-spring.md) |
+| Extension | hook-family parametric scenarios | eight implemented hook families, independent left/right composition; current verification limits in contract | [extension-spring.md](extension-spring.md) |
+| Disc/Belleville | `disc_spring` | shared create-only module; legacy driving edits not certified | [disc-spring.md](disc-spring.md) |
+| Diaphragm | `diaphragm_spring` common module, using existing cut/relief/pattern workflow | finalized legacy geometry; common create/save/reopen verified, saved sketch states reported separately | [diaphragm-spring.md](diaphragm-spring.md) |
 
 The runtime catalog returned by `get_mcp_tool_catalog` is authoritative for
 public MCP names. Internal bridge operations documented here are composed by the
 managed workflow executor and are not necessarily exposed as standalone tools.
+
+The category label `experimental` describes API stability, not unfinished family
+geometry. Extension hook mechanics were finalized in July2026, including mixed
+ends, self-wrapping and bent-ring geometry. Historic `spike` identifiers remain
+for compatibility; fresh runtime regressions are reported separately.
 
 ## Common workflow
 

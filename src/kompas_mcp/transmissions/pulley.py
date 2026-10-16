@@ -90,8 +90,9 @@ def build_managed_pulley_plan(
                 "axis": "global_x",
                 "body_count": 1,
                 "outer_diameter": float(derived["outside_diameter"]),
-                "axial_min": 0.0,
-                "axial_max": float(inputs["face_width"]),
+                # Native YOZ extrusion builds this existing family toward -X.
+                "axial_min": -float(inputs["face_width"]),
+                "axial_max": 0.0,
                 "parameter_base": {
                     "outer_radius_variable": "TB_OR",
                     "face_width_variable": "TB_B",

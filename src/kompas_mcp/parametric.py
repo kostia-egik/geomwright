@@ -16,8 +16,6 @@ from .sketch import build_operation_label
 from .sketch import build_external_conical_step_constraint_plan
 from .sketch import build_external_conical_step_dimension_plan
 from .sketch import build_external_conical_step_variable_plan
-from .sketch import build_face_ring_groove_constraint_plan
-from .sketch import build_face_ring_groove_dimension_plan
 from .sketch import build_face_ring_groove_variable_plan
 from .sketch import build_flat_step_constraint_plan
 from .sketch import build_flat_step_dimension_plan
@@ -773,17 +771,12 @@ def preview_face_ring_groove(params: dict[str, Any]) -> dict[str, Any]:
         float(axis_start[0]) + (-float(normalized["depth"]) if normalized["axial_direction"] == "backward" else float(normalized["depth"])),
         float(axis_start[1]),
     ]
-    dimension_plan = build_face_ring_groove_dimension_plan(
-        normalized,
-        profile_points,
-        parameter_prefix=parameter_prefix,
-    )
+    dimension_plan, constraint_plan = _build_face_ring_groove_sketch_plans(normalized, profile_points)
     variable_plan = build_face_ring_groove_variable_plan(
         normalized,
         parameter_prefix=parameter_prefix,
         operation_label=operation_label,
     )
-    constraint_plan = build_face_ring_groove_constraint_plan(profile_points)
     operations = [
         {
             "operation": "create_part_document",
@@ -1321,6 +1314,205 @@ def preview_external_helical_thread(params: dict[str, Any]) -> dict[str, Any]:
 def preview_internal_helical_thread(params: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_internal_helical_thread_params(params)
     return _preview_helical_thread(normalized, scenario="internal_helical_thread")
+
+
+def _plan_internal_metric_end(params: dict[str, Any], *, exit_mode: str,
+                              thread_length: float, bore_span: list[float], stock_span: list[float]) -> dict[str, Any]:
+    """Pure endpoint plan from the verified round contour, not a CAD write.
+
+    The input is an unchanged version-1 full-bore profile. This independent plan
+    does not widen the public through schema/guard or mutate its recipe/preview.
+    Blind length is the last trace, not certified functional profile length.
+    """
+    if exit_mode not in ("blind", "through") or len(bore_span) != 2 or len(stock_span) != 2:
+        raise ValueError("Internal ending requires blind/through and explicit bore/stock intervals")
+    lo, bore_end = (float(v) for v in bore_span)
+    stock_start, stock_end = (float(v) for v in stock_span)
+    length = float(thread_length)
+    diameter, bore, pitch = (float(params[k]) for k in ("diameter", "carrier_diameter", "pitch"))
+    entry, angle, clearance = (float(params[k]) for k in ("profile_entry_offset", "profile_angle_degrees", "clearance"))
+    surface_offset = float(params["profile_surface_offset"])
+    original_length = float(params["length"])
+    values = (lo, bore_end, stock_start, stock_end, length, diameter, bore, pitch, entry, angle, clearance, original_length, surface_offset)
+    method = {"schema": "geomwright.internal_metric_through.plan", "version": 1,
+        "bore_diameter_mm": bore, "bore_policy": "immutable_input",
+        "diameter_driver_semantics": "nominal_major_diameter", "profile_depth_semantics": "actual_radial_cut",
+        "native_verification_required": True, "functional_thread_length_verified": False}
+    if (params.get("internal_metric_method") != method or not params.get("internal") or
+            params.get("thread_profile_family") != "metric_v60" or params.get("carrier_shape") != "cylindrical" or
+            params.get("profile_root_shape") != "round" or params.get("root_width_mode") != "auto" or
+            params.get("root_round_radius_mode") != "auto" or params.get("profile_entry_offset_mode") != "auto" or
+            params.get("profile_surface_offset_mode") != "auto" or params.get("thread_depth_mode") != "auto" or
+            params.get("crest_round_pass") or not all(math.isfinite(v) for v in values) or
+            not 0 < bore < diameter or pitch <= 0 or not 2 <= length / pitch <= 64 or
+            not stock_start == lo < bore_end <= stock_end or angle != 60 or clearance != 0 or
+            abs(surface_offset - 0.05 * pitch) > 1e-9 or
+            params.get("spiral_phase_degrees") != (0 if params.get("left_thread") else 180) or
+            abs(entry - 1.05 * pitch) > 1e-9 or params.get("start_origin") != [lo, 0, 0] or
+            params.get("end_origin") != [bore_end, 0, 0] or
+            abs(original_length - (bore_end - lo)) > 1e-9):
+        raise ValueError("Internal ending requires the verified full-bore +X automatic metric profile")
+    end = lo + length
+    if exit_mode == "through" and (abs(end - bore_end) > 1e-9 or bore_end != stock_end):
+        raise ValueError("Through internal ending requires the complete bore and a free exit face")
+    if exit_mode == "blind" and not end < bore_end:
+        raise ValueError("Blind internal ending requires a positive smooth bore tail")
+    depth, radius = (diameter - bore) / 2, pitch / (16 * math.cos(math.pi / 6))
+    tangent = depth - radius / 2
+    half = pitch / 16 + tangent * math.tan(math.pi / 6)
+    if not 0 < radius < depth or not 0 < half < pitch / 2 or not depth + radius < math.sqrt(3) * pitch / 2:
+        raise ValueError("Internal ending round contour does not fit the bore and pitch")
+    for key, expected in (("root_radius", radius), ("radial_cut_depth", depth),
+                          ("profile_outer_half_width", half), ("profile_tangent_depth", tangent),
+                          ("profile_arc_center_depth", depth - radius), ("profile_virtual_apex_depth", depth + radius)):
+        actual = float(params[key])
+        if not math.isfinite(actual) or abs(actual - expected) > 1e-9:
+            raise ValueError("Internal ending contour differs from its nominal drivers")
+    points = [[-half, -bore / 2], [-pitch / 16, -bore / 2 - tangent],
+              [pitch / 16, -bore / 2 - tangent], [half, -bore / 2], [-half, -bore / 2]]
+    actual_points = params.get("profile_points", [])
+    if len(actual_points) != 5 or any(len(a) != 2 or any(not math.isfinite(float(v)) or abs(float(v)-e) > 1e-9
+        for v, e in zip(a, expected)) for a, expected in zip(actual_points, points)):
+        raise ValueError("Internal ending requires the canonical round profile points")
+    arcs = params.get("profile_arcs", [])
+    if len(arcs) != 1 or arcs[0].get("direction") is not True:
+        raise ValueError("Internal ending requires one canonical round arc")
+    for key, expected in (("xc", 0), ("yc", -bore / 2 - depth + radius), ("radius", radius),
+                          ("x1", pitch / 16), ("y1", -bore / 2 - tangent),
+                          ("x2", -pitch / 16), ("y2", -bore / 2 - tangent)):
+        actual = float(arcs[0][key])
+        if not math.isfinite(actual) or abs(actual-expected) > 1e-9:
+            raise ValueError("Internal ending arc differs from its tangent-circle method")
+    names = [params["public_" + key + "_variable_name"] for key in ("diameter", "pitch", "length")]
+    if len(set(names)) != 3 or any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", n) for n in names):
+        raise ValueError("Internal ending requires distinct nominal diameter/pitch/length drivers")
+    d_name, p_name, l_name = names
+    actual_expr = f"({d_name} - {_format_thread_expression_number(bore)}) / 2"
+    r_expr = _build_thread_linear_expression(p_name, 1 / (16 * math.cos(math.pi / 6)))
+    half_expr = (f"({_build_thread_linear_expression(p_name, 1 / 16)}) + "
+                 f"(({actual_expr}) - ({r_expr}) / 2) * {_format_thread_expression_number(math.tan(math.pi / 6))}")
+    if params["profile_dimension_expressions"]["sketch_outer_half"] != half_expr:
+        raise ValueError("Internal ending half-width expression differs from the round method")
+    bindings = params["operation_variable_bindings"]
+    if len(bindings) != 2 or {b["role"] for b in bindings} != {"spiral_pitch", "spiral_height"}:
+        raise ValueError("Internal ending requires pitch and height operation bindings")
+    binding = copy.deepcopy(next(b for b in bindings if b["role"] == "spiral_height"))
+    sign = -1 if exit_mode == "blind" else 1
+    binding["expression"] = f"{l_name} + 1.3 * {p_name} {'-' if sign < 0 else '+'} ({half_expr})"
+    return {"schema": "geomwright.internal_metric.end.plan", "version": 1, "exit_mode": exit_mode,
+        "stock_span_mm": [stock_start, stock_end], "bore_span_mm": [lo, bore_end], "working_span_mm": [lo, end],
+        "bore_diameter_mm": bore, "nominal_diameter_mm": diameter,
+        "kernel_frame_offset_mm": pitch / 4, "profile_outer_half_width_mm": half,
+        "spiral_length_mm": length + 1.3 * pitch + sign * half, "height_binding": binding,
+        "last_cut_trace_mm": end, "terminal_section_projection_mm": [end - 2 * half, end] if sign < 0 else [end, end + 2 * half],
+        "terminal_section_is_virtual": exit_mode == "through",
+        "partial_terminal_projection_width_mm": 2 * half if sign < 0 else 0,
+        "conservative_profile_projection_end_mm": end - 2 * half if sign < 0 else end,
+        "smooth_bore_tail_mm": bore_end - end, "bottom_stock_thickness_mm": stock_end - bore_end,
+        "bore_has_bottom": bore_end < stock_end, "verified": False,
+        "native_end_section_audit_required": True, "functional_thread_length_verified": False,
+        "controlled_runout": False}
+
+
+def _prepare_internal_metric_through_preview(preview: dict[str, Any]) -> dict[str, Any]:
+    """Versioned Layer 2 prerequisite, not a registered scenario or chain mode.
+
+    Keep the incoming bore immutable. The thread's diameter driver is nominal,
+    unlike the legacy internal reference-diameter driver. Recalculate the round
+    contour from actual cut depth and its virtual flank apex (THREAD-001).
+    Existing public normalization and old recipes never select this adapter.
+    Native phase, ownership, stock and actual coverage still require auditing.
+    """
+    p = copy.deepcopy(preview.get("params") or {})
+    if (preview.get("scenario") != "internal_helical_thread" or not p.get("internal") or
+            p.get("thread_profile_family") != "metric_v60" or p.get("carrier_shape") != "cylindrical" or
+            p.get("profile_root_shape") != "round" or p.get("root_width_mode") != "auto" or
+            p.get("root_round_radius_mode") != "auto" or p.get("thread_depth_mode") != "auto" or
+            p.get("profile_entry_offset_mode") != "auto" or p.get("profile_surface_offset_mode") != "auto" or p.get("crest_round_pass") or
+            p.get("internal_metric_method") is not None):
+        raise ValueError("Internal through planner requires the legacy automatic round metric cylinder")
+    diameter, bore, pitch, length = (float(p[key]) for key in ("diameter", "carrier_diameter", "pitch", "length"))
+    start, end = float(p["start_origin"][0]), float(p["end_origin"][0])
+    angle, clearance, surface, entry = (float(p[key]) for key in
+        ("profile_angle_degrees", "clearance", "profile_surface_offset", "profile_entry_offset"))
+    origins = p["start_origin"] + p["end_origin"]
+    if (len(origins) != 6 or not all(math.isfinite(float(v)) for v in origins) or
+            any(float(v) != 0 for v in (*p["start_origin"][1:], *p["end_origin"][1:])) or
+            not all(math.isfinite(v) for v in (diameter, bore, pitch, length, start, end, angle, clearance, surface, entry)) or
+            not 0 < bore < diameter or pitch <= 0 or length <= 0 or not 2 <= length / pitch <= 64 or
+            abs(end - start - length) > 1e-6 or abs(angle - 60) > 1e-9 or
+            clearance != 0 or abs(surface - 0.05 * pitch) > 1e-9 or abs(entry - 1.05 * pitch) > 1e-9):
+        raise ValueError("Internal through planner requires finite complete +X metric stock and automatic entry")
+    names = [p["public_" + key + "_variable_name"] for key in ("diameter", "pitch", "length")]
+    if len(set(names)) != 3 or any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) for name in names):
+        raise ValueError("Internal thread requires three distinct valid driving variable names")
+    d_name, p_name, l_name = names
+    depth = (diameter - bore) / 2
+    radius = pitch / (16 * math.cos(math.pi / 6))
+    tangent = depth - radius / 2
+    half = radius * math.cos(math.pi / 6) + tangent * math.tan(math.pi / 6)
+    virtual = depth + radius
+    height = math.sqrt(3) * pitch / 2
+    if not 0 < radius < depth or not 0 < half < pitch / 2 or not 0 < virtual < height:
+        raise ValueError("Internal rounded contour does not fit the fixed bore and requested pitch")
+    bore_text = _format_thread_expression_number(bore)
+    actual_expr = f"({d_name} - {bore_text}) / 2"
+    radius_expr = _build_thread_linear_expression(p_name, 1 / (16 * math.cos(math.pi / 6)))
+    half_expr = (f"({_build_thread_linear_expression(p_name, 1 / 16)}) + "
+                 f"(({actual_expr}) - ({radius_expr}) / 2) * {_format_thread_expression_number(math.tan(math.pi / 6))}")
+    virtual_expr = f"({actual_expr}) + ({radius_expr})"
+    expressions = {
+        "sketch_reference_radius": _format_thread_expression_number(bore / 2),
+        "sketch_pitch_half": _build_thread_linear_expression(p_name, 0.5),
+        "sketch_crest_drop": f"({_build_thread_linear_expression(p_name, math.sqrt(3) / 2)}) - ({virtual_expr})",
+        "sketch_depth": virtual_expr, "sketch_outer_half": half_expr,
+        "sketch_root_half": _build_thread_linear_expression(p_name, 1 / 16), "sketch_radius": radius_expr,
+    }
+    p.update(radial_cut_depth=depth, thread_depth=depth, root_radius=radius,
+             thread_reference_diameter=bore, thread_reference_radius=bore / 2,
+             carrier_radius=bore / 2,
+             root_width=pitch / 8, profile_root_half_width=pitch / 16,
+             profile_tangent_depth=tangent, profile_arc_center_depth=depth - radius,
+             profile_outer_half_width=half, profile_virtual_apex_depth=virtual,
+             profile_crest_drop=height - virtual, profile_dimension_expressions=expressions,
+             spiral_length=length + 1.3 * pitch + half,
+             spiral_phase_degrees=0.0 if p["left_thread"] else 180.0,
+             internal_metric_method={"schema": "geomwright.internal_metric_through.plan", "version": 1,
+                 "bore_diameter_mm": bore, "bore_policy": "immutable_input",
+                 "diameter_driver_semantics": "nominal_major_diameter",
+                 "profile_depth_semantics": "actual_radial_cut",
+                 "native_verification_required": True, "functional_thread_length_verified": False})
+    geometry = _build_helical_thread_profile_geometry(p)
+    for key in ("profile_points", "profile_lines", "profile_arcs"):
+        p[key] = geometry[key]
+    p["profile_construction_lines"] = geometry["construction_lines"]
+    p["profile_axis_start"], p["profile_axis_end"] = geometry["axis_start"], geometry["axis_end"]
+    targets = {"radius_ref": "sketch_reference_radius", "right_pitch_ref": "sketch_pitch_half",
+               "theory_drop_ref": "sketch_crest_drop", "apex_ref": "sketch_depth",
+               "right_outer_ref": "sketch_outer_half", "right_root_ref": "sketch_root_half"}
+    if len(p["profile_dimensions"]) != len(targets) or {d["target"] for d in p["profile_dimensions"]} != set(targets):
+        raise ValueError("Internal thread requires the complete legacy driving dimension set")
+    for dimension in p["profile_dimensions"]:
+        if dimension["target"] not in targets:
+            raise ValueError("Unexpected legacy internal profile dimension")
+        dimension["expression"] = expressions[targets[dimension["target"]]]
+    variables = {v["name"]: v for v in p["profile_variables"]}
+    if set(variables) != set(names) or len(p["profile_variables"]) != 3:
+        raise ValueError("Internal thread requires exactly three independent driving inputs")
+    variables[d_name]["value"] = diameter
+    variables[d_name]["note"] = variables[d_name]["note"].replace("Public thread diameter", "Nominal major thread diameter")
+    bindings = p["operation_variable_bindings"]
+    if len(bindings) != 2 or {b["role"] for b in bindings} != {"spiral_pitch", "spiral_height"}:
+        raise ValueError("Internal thread requires pitch and height operation bindings")
+    for binding in bindings:
+        binding["expression"] = p_name if binding["role"] == "spiral_pitch" else f"{l_name} + 1.3 * {p_name} + ({half_expr})"
+    result = _preview_helical_thread(p, scenario="internal_helical_thread")
+    for key in ("source_scenario", "source_params", "source_preview", "source_variable_bindings"):
+        result["params"].pop(key, None)
+    result["operations"] = [op for op in result["operations"] if op["operation"] not in ("create_part_document", "create_source_body")]
+    result["summary"]["internal_metric_method"] = copy.deepcopy(p["internal_metric_method"])
+    result["creation_policy"] = "resolved_input_bore_only_native_audit_required"
+    return result
 
 
 def preview_bolt_circle_holes(params: dict[str, Any]) -> dict[str, Any]:
@@ -4714,6 +4906,10 @@ def _normalize_bent_coil_left_spike_v2(result: dict[str, Any]) -> dict[str, Any]
     params = result.get("params") if isinstance(result, dict) else None
     if not isinstance(params, dict) or params.get("hook_type") != "bent_coil_left_spike":
         return result
+    # Side fragments already contain normalized bent segments. Replacing them
+    # here would discard the opposite hook and its associative plane.
+    if params.get("side_hook_composition", {}).get("mode") == "side_fragments":
+        return result
 
     spring_name = str(params.get("name") or "EXTENSION_SPRING")
     pitch = float(params.get("pitch", 0.0) or 0.0)
@@ -6628,7 +6824,7 @@ def _build_spring_rotation_expression_from_turns(
     if turns_expression in (None, ""):
         return None
     if left_hand:
-        angle_offset = 90.0 + float(start_phase_degrees) + float(extra_angle_offset_degrees)
+        angle_offset = float(start_phase_degrees) + float(extra_angle_offset_degrees)
         if abs(angle_offset) <= 1e-9:
             angle_offset = 0.0
         return _build_spring_normalized_degrees_expression(
@@ -6651,7 +6847,9 @@ def _resolve_spring_segment_initial_angle_degrees(
     left_hand: bool,
 ) -> float:
     if left_hand:
-        return _normalize_spring_turning_angle_degrees(-(360.0 * float(turns_before)))
+        return _normalize_spring_turning_angle_degrees(
+            float(start_phase_degrees) - (360.0 * float(turns_before))
+        )
     turn_delta = -360.0 * float(turns_before)
     signed_phase = float(start_phase_degrees) + turn_delta
     return _normalize_spring_turning_angle_degrees(90.0 - signed_phase)
@@ -8523,6 +8721,15 @@ def _build_helical_thread_dimension_expression_plan(normalized: dict[str, Any]) 
             )
         else:
             expressions["sketch_depth"] = _format_thread_expression_number(float(normalized["radial_cut_depth"]))
+        if str(normalized.get("root_round_radius_mode") or "auto") == "auto":
+            # Keep the same tangent-circle construction used by normalization.
+            # A frozen initial radius changes the root depth when pitch changes.
+            sin_half_angle = math.sin(half_angle_radians)
+            expressions["sketch_radius"] = (
+                f"(({expressions['sketch_outer_half']}) * {_format_thread_expression_number(cos_half_angle)}"
+                f" - ({expressions['sketch_depth']}) * {_format_thread_expression_number(sin_half_angle)})"
+                f" / {_format_thread_expression_number(1.0 - sin_half_angle)}"
+            )
         return expressions
 
     cut_depth_expr = (
@@ -9284,7 +9491,7 @@ def _build_helical_thread_profile_geometry(normalized: dict[str, Any]) -> dict[s
     tangent_depth = float(normalized["profile_tangent_depth"])
     arc_center_depth = float(normalized["profile_arc_center_depth"])
     crest_drop = -float(normalized["profile_crest_drop"])
-    radial_root = float(normalized["radial_cut_depth"])
+    radial_root = float(normalized.get("profile_virtual_apex_depth", normalized["radial_cut_depth"]))
     crest_y = -reference_radius
     pitch_y = crest_y - crest_drop
     root_y = crest_y - tangent_depth
@@ -11590,6 +11797,55 @@ def _build_internal_cylindrical_step_profile_points(normalized: dict[str, Any]) 
     points.append([x, 0.0])
     points.append([0.0, 0.0])
     return points
+
+
+def _build_face_ring_groove_sketch_plans(
+    normalized: dict[str, Any], profile_points: list[list[float]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    # This annular contour starts at the outer radius, not on the rotation axis.
+    # Shaft segment mapping would wrongly discard a straight outer wall as axis
+    # geometry. All four sides here belong to the cut, including zero-angle walls.
+    prefix = normalized["parameter_prefix"]
+    depth_name = build_parameter_name("DEP", 1, prefix=prefix)
+    sketch_depth_name = build_parameter_name("SKDEP", 1, prefix=prefix)
+    dimensions = [{
+        "kind": "line_length", "name": sketch_depth_name, "variable": sketch_depth_name,
+        "expression": depth_name, "source_variable": depth_name,
+        "orientation": "horizontal", "target": "axis", "value": float(normalized["depth"]),
+        "driving": True, "placement_index": 0,
+    }]
+    for placement_index, (radius, diameter, key, line, point) in enumerate((
+        ("OR", "OD", "outer_radius", 1, 0),
+        ("IR", "ID", "inner_radius", 1, 1),
+        ("BIR", "BID", "bottom_inner_radius", 3, 0),
+        ("BOR", "BOD", "bottom_outer_radius", 3, 1),
+    )):
+        name = build_parameter_name(radius, 1, prefix=prefix)
+        x, y = profile_points[line - 1 + point]
+        dimensions.append({
+            "kind": "axis_distance", "name": name, "variable": name,
+            "expression": f"{build_parameter_name(diameter, 1, prefix=prefix)} / 2",
+            "orientation": "vertical", "target": f"profile_line_{line}",
+            "point_x": float(x), "point_y": float(y), "support_point_index": point,
+            "value": float(normalized[key]), "driving": True, "placement_index": placement_index,
+        })
+    constraints = [
+        {"kind": "horizontal", "target": "axis", "name": "axis_horizontal"},
+        {"kind": "fixed_point", "target": "axis", "index": 0, "name": "axis_origin_fixed"},
+        {"kind": "vertical", "target": "profile_line_1", "name": "face_plane_vertical"},
+        {"kind": "point_on_curve", "target": "axis", "index": 0, "partner": "profile_line_1", "name": "axis_origin_on_face_plane"},
+        {"kind": "vertical", "target": "profile_line_3", "name": "bottom_face_vertical"},
+        {"kind": "point_on_curve", "target": "axis", "index": 1, "partner": "profile_line_3", "name": "axis_end_on_bottom_face"},
+    ]
+    for line, partner, name in (
+        (1, 2, "top_to_inner_wall"), (2, 3, "inner_wall_to_bottom"),
+        (3, 4, "bottom_to_outer_wall"), (4, 1, "outer_wall_to_top"),
+    ):
+        constraints.append({
+            "kind": "merge_points", "target": f"profile_line_{line}", "index": 1,
+            "partner": f"profile_line_{partner}", "partner_index": 0, "name": name,
+        })
+    return dimensions, constraints
 
 
 def _build_face_ring_groove_profile_points(normalized: dict[str, Any]) -> list[list[float]]:

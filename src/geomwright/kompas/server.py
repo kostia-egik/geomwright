@@ -7,8 +7,10 @@ import os
 from mcp.server.fastmcp import FastMCP
 
 from kompas_mcp.batch_tools import register_batch_tools
+from kompas_mcp.body_geometry_tools import register_body_geometry_tools
 from kompas_mcp.cam_tools import register_cam_tools
 from kompas_mcp.gear_tools import register_gear_tools
+from kompas_mcp.module_tools import register_module_tools
 from kompas_mcp.silent_chain_tools import register_silent_chain_tools
 from kompas_mcp.spline_tools import register_spline_tools
 from kompas_mcp.document_tools import register_document_tools
@@ -67,6 +69,7 @@ if _research_tools_enabled():
 register_thread_tools(mcp)
 register_transmission_tools(mcp, adapter)
 register_gear_tools(mcp, adapter)
+register_module_tools(mcp, adapter)
 register_spline_tools(mcp, adapter)
 register_cam_tools(mcp, adapter)
 register_silent_chain_tools(mcp, adapter)
@@ -80,6 +83,7 @@ register_spring_tools(mcp, adapter)
 register_specification_tools(mcp, adapter)
 register_workflow_tools(mcp, adapter, _rules)
 register_document_tools(mcp, adapter)
+register_body_geometry_tools(mcp, adapter)
 register_quality_tools(mcp, adapter, _rules)
 
 

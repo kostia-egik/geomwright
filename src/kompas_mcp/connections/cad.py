@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from typing import Any
 
 from .splines.spec import StraightSplineRequest
@@ -44,9 +45,104 @@ def _full_outline(period: list[list[float]], tooth_count: int) -> list[list[floa
     step = 2.0 * math.pi / tooth_count
     points: list[list[float]] = []
     for index in range(tooth_count):
-        rotated = [_rotate(point, index * step) for point in period]
+        rotated = [_rotate(point, -index * step) for point in period]
         points.extend(rotated)
     return points
+
+
+def _plan_straight_spline_input_shaft(
+    request: dict[str, Any], *, carrier_diameter_mm: float,
+    axial_start_mm: float, name: str = "Input shaft spline",
+) -> dict[str, Any]:
+    """Private Layer 2 bounded cutter plan; not executable/public chain support.
+
+    Reuse the shaft's exact contour and area without constructing another blank.
+    The future native adapter must supply the current profile plane/global-X axis,
+    verify finite extrusion depth and audit protected stock and pattern removal.
+    Numeric profile inputs remain create-only; no new hub geometry is selected.
+    """
+    model = StraightSplineRequest.model_validate(request)
+    if model.body != "shaft":
+        raise ValueError("Input spline slice supports external shaft geometry only")
+    if model.include_tip_chamfer:
+        raise ValueError("Input spline slice requires include_tip_chamfer=false; end chamfers are separate work")
+    carrier, start = float(carrier_diameter_mm), float(axial_start_mm)
+    if not all(math.isfinite(v) for v in (carrier, start)) or carrier <= 0:
+        raise ValueError("Input spline placement and carrier diameter must be finite")
+    family = build_straight_spline_plan(model.model_dump(exclude_none=True), name=name)
+    geometry = deepcopy(family["geometry"])
+    # Standalone [-L,0] bounds and full spline-body volume do not describe
+    # either a placed working zone or the final composite input shaft.
+    geometry.pop("bounds_candidates_mm")
+    geometry.pop("expected_volume_mm3")
+    if abs(carrier-geometry["outer_diameter_mm"]) > 1e-6:
+        raise ValueError("Input shaft diameter must match spline D; implicit stock resizing is unsupported")
+    length = geometry["length_mm"]
+    if not math.isfinite(length) or not math.isfinite(start+length) or length <= 0:
+        raise ValueError("Input spline requires a finite positive working length")
+    operations = deepcopy(family["workflow"]["params"]["operations"][-3:])
+    if [o["scenario"] for o in operations] != ["numeric_profile_sketch", "cut_extrusion", "circular_pattern"]:
+        raise ValueError("Unexpected shaft spline family cutter structure")
+    operations[0]["params"]["plane"] = "input.profile_plane"
+    # The input adapter's CoordinateSystem=parallel plane frame has +X normal;
+    # do not reuse the standalone default-plane extrusion direction.
+    operations[1]["params"].update(direction="normal", end_condition="length", depth=length)
+    operations[2]["params"]["axis"] = "input.axis"
+    single_removed = geometry["space_area_mm2"]*length
+    removed = single_removed*geometry["tooth_count"]
+    if not 0 < removed < math.pi*(carrier/2)**2*length:
+        raise ValueError("Input spline must retain a positive solid root core")
+    return {
+        "schema": "geomwright.straight_spline.input_shaft.plan", "version": 1,
+        "name": family["name"], "profile_request": family["profile_request"],
+        "geometry": geometry, "operations": operations,
+        "inputs": {"profile_plane": {"axis": "global_x", "origin_mm": [start,0,0], "direction": 1},
+                   "axis": "global_x", "carrier_diameter_mm": carrier},
+        "working_span_mm": [start,start+length],
+        "expected_single_space_removal_cm3": single_removed/1000,
+        "expected_removal_cm3": removed/1000,
+        "verification": {"verified": False, "native_span_audit_required": True,
+            "native_pattern_removal_audit_required": True, "native_protected_stock_audit_required": True,
+            "numeric_profile_readback_required": True, "functional_length_verified": False},
+        "capabilities": {"creates_blank": False, "internal_spline": False, "tip_chamfer": False,
+            "tool_runout": False, "in_place_recipe_editing": False, "native_execution_implemented": False},
+    }
+
+
+def _plan_straight_spline_input_hub(request: dict[str, Any], *, carrier_outside_diameter_mm: float,
+                                  bore_diameter_mm: float, axial_start_mm: float,
+                                  name: str = "Input hub spline") -> dict[str, Any]:
+    """Revision-2 tooth counterpart on an immutable existing cylindrical bore."""
+    model = StraightSplineRequest.model_validate(request)
+    if model.body != "hub" or model.include_tip_chamfer:
+        raise ValueError("Input hub spline requires body=hub and include_tip_chamfer=false")
+    outside, bore, start = map(float,(carrier_outside_diameter_mm,bore_diameter_mm,axial_start_mm))
+    if not all(math.isfinite(v) for v in (outside,bore,start)) or not 0 < bore < outside:
+        raise ValueError("Input hub dimensions/placement must be finite and positive")
+    if model.hub_outside_diameter_mm is not None and abs(model.hub_outside_diameter_mm-outside)>1e-6:
+        raise ValueError("Input hub outside diameter is immutable; implicit stock resizing unsupported")
+    family = build_straight_spline_plan(model.model_copy(update={"hub_outside_diameter_mm":outside}).model_dump(exclude_none=True),name=name)
+    geometry = deepcopy(family["geometry"])
+    if abs(geometry["inner_diameter_mm"]-bore)>1e-6:
+        raise ValueError("Input bore diameter must match spline d; implicit bore resizing unsupported")
+    geometry.pop("bounds_candidates_mm")
+    geometry.pop("expected_volume_mm3")
+    width = geometry["length_mm"]
+    operations = deepcopy(family["workflow"]["params"]["operations"][-3:])
+    operations[0]["params"]["plane"] = "input.profile_plane"
+    operations[1]["params"].update(direction="normal",end_condition="length",depth=width)
+    operations[2]["params"]["axis"] = "input.axis"
+    single = geometry["space_area_mm2"]*width/1000
+    return {"schema":"geomwright.straight_spline.input_hub.plan","version":1,"profile_geometry_revision":2,
+        "name":family["name"],"profile_request":family["profile_request"],"geometry":geometry,"operations":operations,
+        "inputs":{"profile_plane":{"axis":"global_x","origin_mm":[start,0,0],"direction":1},
+            "axis":"global_x","carrier_outside_diameter_mm":outside,"bore_diameter_mm":bore},
+        "working_span_mm":[start,start+width],"expected_single_space_removal_cm3":single,
+        "expected_removal_cm3":single*geometry["tooth_count"],
+        "verification":{"verified":False,"native_span_audit_required":True,"native_pattern_removal_audit_required":True,
+            "native_protected_stock_audit_required":True,"numeric_profile_readback_required":True,"functional_length_verified":False},
+        "capabilities":{"creates_blank":False,"internal_spline":True,"tip_chamfer":False,"tool_runout":False,
+            "in_place_recipe_editing":False,"native_execution_implemented":False}}
 
 
 def build_straight_spline_plan(
@@ -250,6 +346,7 @@ def build_straight_spline_plan(
         "ok": True,
         "stage": PLAN_STAGE,
         "plan_version": 1,
+        **({"profile_geometry_revision": 2} if geometry.body == "hub" else {}),
         "family": "straight_spline",
         "name": requested_name,
         "profile_request": model.model_dump(exclude_none=True),
@@ -306,6 +403,8 @@ def build_straight_spline_plan(
         },
         "accuracy": {
             "profile": "nominal_straight_sided_flanks_with_root_fillets",
+            **({"hub_profile_method": "nominal_negative_of_retained_shaft_tooth", "hub_profile_geometry_revision": 2}
+               if geometry.body == "hub" else {}),
             "profile_encoding": "exact_segments_and_arcs_numeric_profile",
             "representation_mode": "nominal",
             "create_only": True,

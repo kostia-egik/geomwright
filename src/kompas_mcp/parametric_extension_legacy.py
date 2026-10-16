@@ -597,6 +597,7 @@ def preview_disc_spring(params: dict[str, Any]) -> dict[str, Any]:
         outer_radius=outer_radius,
         inner_radius=inner_radius,
         thickness=thickness,
+        free_height=cone_height + thickness,
         cone_height=cone_height,
         radial_width=radial_width,
         center_radial_span=center_radial_span,
@@ -2538,6 +2539,8 @@ def preview_compression_spring(params: dict[str, Any]) -> dict[str, Any]:
             "outer_diameter": normalized["outer_diameter"],
             "inner_diameter": normalized["inner_diameter"],
             "wire_diameter": normalized["wire_diameter"],
+            "end_pitch_gap": normalized["end_pitch_gap"],
+            "end_pitch": normalized["end_pitch"],
             "pitch": normalized["pitch"],
             "height": normalized["height"],
             "turns": normalized["turns"],
@@ -6722,6 +6725,12 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         raise ValueError("compression_spring requires wire_diameter")
     wire_diameter = float(wire_diameter)
 
+    end_pitch_gap = _optional_non_negative_float(params, "end_pitch_gap", "end_pitch_gap")
+    end_pitch_gap = float(end_pitch_gap or 0.0)
+    end_pitch = wire_diameter + end_pitch_gap
+    if not math.isfinite(end_pitch_gap) or not math.isfinite(end_pitch):
+        raise ValueError("end_pitch_gap and derived end pitch must be finite")
+
     mean_diameter, diameter_mode = _resolve_compression_spring_mean_diameter(
         params,
         wire_diameter=wire_diameter,
@@ -6908,7 +6917,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     if variable_pitch_enabled:
         variable_pitch_active_height = float(working_turns_1) * float(pitch_1) + float(working_turns_2) * float(pitch_2)
         if free_length is None and standard_length is None:
-            free_length = total_end_turns * wire_diameter + variable_pitch_active_height
+            free_length = total_end_turns * end_pitch + variable_pitch_active_height
 
     length_model = _build_compression_spring_length_model(
         standard_length=float(standard_length) if standard_length is not None else None,
@@ -6918,9 +6927,10 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         finish_end_turns=finish_end_turns,
         start_ground_turns=start_ground_turns,
         finish_ground_turns=finish_ground_turns,
+        end_pitch=end_pitch,
     )
     free_length = float(length_model["centerline_length"])
-    minimum_length = total_end_turns * wire_diameter
+    minimum_length = total_end_turns * end_pitch
     if free_length <= minimum_length:
         raise ValueError("compression_spring free_length is too small for the requested end turns")
     active_height = free_length - minimum_length
@@ -7227,16 +7237,28 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     mean_diameter = float(mean_diameter)
     pitch = float(pitch)
     turns = float(working_turns)
-    start_end_turn_span = start_end_turns * wire_diameter
-    finish_end_turn_span = finish_end_turns * wire_diameter
+    end_pitch_expression = wire_diameter_variable
+    if "end_pitch_gap" in params:
+        gap_variable = build_parameter_name("EG", 1, prefix=parameter_prefix)
+        end_pitch_variable = build_parameter_name("EP", 1, prefix=parameter_prefix)
+        variable_plan.extend([
+            {"name": gap_variable, "value": end_pitch_gap, "kind": "driving_end_pitch_gap",
+             "note": build_parameter_note(operation_label, "spring", gap_variable, "Axial end-pitch increment"),
+             "step_name": "spring", "operation_label": operation_label, "external": True},
+            {"name": end_pitch_variable, "value": end_pitch, "expression": f"{wire_diameter_variable} + {gap_variable}",
+             "kind": "derived_end_pitch", "step_name": "spring", "operation_label": operation_label, "external": False},
+        ])
+        end_pitch_expression = end_pitch_variable
+    start_end_turn_span = start_end_turns * end_pitch
+    finish_end_turn_span = finish_end_turns * end_pitch
     active_height = pitch * turns
     if (
-        end_projection_mode == "projected_to_v1_symmetric"
+        (end_projection_mode == "projected_to_v1_symmetric" or "end_pitch_gap" in params)
         and start_end_turns_variable is not None
         and finish_end_turns_variable is not None
     ):
-        start_end_height_expression = f"{start_end_turns_variable} * {wire_diameter_variable}"
-        finish_end_height_expression = f"{finish_end_turns_variable} * {wire_diameter_variable}"
+        start_end_height_expression = f"{start_end_turns_variable} * {end_pitch_expression}"
+        finish_end_height_expression = f"{finish_end_turns_variable} * {end_pitch_expression}"
         if end_contract["end_contract_mode"] == "v1_symmetric":
             active_height_expression = f"{height_variable} - 2 * ({start_end_height_expression})"
         else:
@@ -7339,7 +7361,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     segment_plan: list[dict[str, Any]] = []
     segment_phase_raw = float(start_phase_raw)
     if start_end_turn_span > 1e-9:
-        segment_end_phase_raw = segment_phase_raw + phase_multiplier * (start_end_turn_span / wire_diameter)
+        segment_end_phase_raw = segment_phase_raw + phase_multiplier * start_end_turns
         segment_plan.append(
             {
                 "role": "start_end",
@@ -7350,8 +7372,8 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                 "sweep_name": "spring_start_end_body",
                 "height": start_end_turn_span,
                 "height_expression": start_end_height_expression,
-                "pitch": wire_diameter,
-                "pitch_expression": wire_diameter_variable,
+                "pitch": end_pitch,
+                "pitch_expression": end_pitch_expression,
                 "turns": float(start_end_turns),
                 "start_offset": 0.0,
                 "start_offset_expression": None,
@@ -7366,7 +7388,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                 "turn_delta_degrees": float(segment_end_phase_raw - segment_phase_raw),
                 "operation_variable_bindings": _build_spring_spiral_variable_bindings(
                     mean_diameter_expression,
-                    wire_diameter_variable,
+                    end_pitch_expression,
                     start_end_height_expression or _format_compression_spring_expression_literal(start_end_turn_span),
                 ),
             }
@@ -7497,7 +7519,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         )
         segment_phase_raw = segment_end_phase_raw
     if finish_end_turn_span > 1e-9:
-        segment_end_phase_raw = segment_phase_raw + phase_multiplier * (finish_end_turn_span / wire_diameter)
+        segment_end_phase_raw = segment_phase_raw + phase_multiplier * finish_end_turns
         segment_plan.append(
             {
                 "role": "finish_end",
@@ -7508,8 +7530,8 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                 "sweep_name": "spring_finish_end_body",
                 "height": finish_end_turn_span,
                 "height_expression": finish_end_height_expression,
-                "pitch": wire_diameter,
-                "pitch_expression": wire_diameter_variable,
+                "pitch": end_pitch,
+                "pitch_expression": end_pitch_expression,
                 "turns": float(finish_end_turns),
                 "start_offset": start_end_turn_span + active_height,
                 "start_offset_expression": finish_start_offset_expression,
@@ -7528,7 +7550,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
                 "turn_delta_degrees": float(segment_end_phase_raw - segment_phase_raw),
                 "operation_variable_bindings": _build_spring_spiral_variable_bindings(
                     mean_diameter_expression,
-                    wire_diameter_variable,
+                    end_pitch_expression,
                     finish_end_height_expression
                     or _format_compression_spring_expression_literal(finish_end_turn_span),
                 ),
@@ -7880,7 +7902,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
     if start_ground_turns > 1e-9 or finish_ground_turns > 1e-9:
         length_model["centerline_height_expression"] = (
             f"{standard_length_variable} - {wire_diameter_variable} + "
-            f"(({start_ground_turns_variable} + {finish_ground_turns_variable}) * {wire_diameter_variable})"
+            f"(({start_ground_turns_variable} + {finish_ground_turns_variable}) * {end_pitch_expression})"
         )
     else:
         length_model["centerline_height_expression"] = f"{standard_length_variable} - {wire_diameter_variable}"
@@ -7943,6 +7965,7 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         enabled=start_ground_turns > 1e-9 or finish_ground_turns > 1e-9,
         height_expression=height_variable,
         wire_diameter_expression=wire_diameter_variable,
+        end_pitch_expression=end_pitch_expression,
         start_end_turns_expression=start_end_turns_variable,
         finish_end_turns_expression=finish_end_turns_variable,
         start_ground_turns_expression=(
@@ -7985,6 +8008,9 @@ def normalize_compression_spring_params(params: dict[str, Any]) -> dict[str, Any
         "outer_diameter": outer_diameter,
         "inner_diameter": mean_diameter - wire_diameter,
         "wire_diameter": wire_diameter,
+        "end_pitch_gap": end_pitch_gap,
+        "end_pitch": end_pitch,
+        "end_pitch_expression": end_pitch_expression,
         "pitch_mode": "two_zone" if variable_pitch_enabled else "constant",
         "pitch": pitch,
         "working_turns_1": float(working_turns_1) if variable_pitch_enabled else None,
@@ -8107,8 +8133,9 @@ def _build_compression_spring_ground_trim_plan(
     start_ground_turns: float,
     finish_ground_turns: float,
     axis: str,
+    end_pitch_expression: str | None = None,
 ) -> dict[str, Any]:
-    """Describe future end-grinding section cuts without executing unsupported bridge geometry."""
+    """Plan joint-relative end-grinding planes for the native section-cut workflow."""
     if not enabled:
         return {
             "enabled": False,
@@ -8131,6 +8158,13 @@ def _build_compression_spring_ground_trim_plan(
     finish_depth_expression = (
         f"(({finish_end_expression} - {finish_ground_expression} + 0.5) * {wire_diameter_expression})"
     )
+    if end_pitch_expression and end_pitch_expression != wire_diameter_expression:
+        start_depth_expression = (
+            f"-((({start_end_expression} - {start_ground_expression}) * {end_pitch_expression}) + 0.5 * {wire_diameter_expression})"
+        )
+        finish_depth_expression = (
+            f"((({finish_end_expression} - {finish_ground_expression}) * {end_pitch_expression}) + 0.5 * {wire_diameter_expression})"
+        )
     operations: list[dict[str, Any]] = []
     if start_ground_turns > 1e-9:
         operations.append(
@@ -8159,13 +8193,14 @@ def _build_compression_spring_ground_trim_plan(
         "height_reference": "centerline_start_to_centerline_finish",
         "full_height_status": "unverified_against_standard",
         "axis": axis,
-        "offset_formula_model": "joint_based_end_turns_minus_ground_turns_times_wire_diameter",
+        "offset_formula_model": "joint_based_end_turns_minus_ground_turns_times_end_pitch_plus_half_wire",
         "standards_link_variables": {
             "start_end_turns": start_end_expression,
             "finish_end_turns": finish_end_expression,
             "start_ground_turns": start_ground_expression,
             "finish_ground_turns": finish_ground_expression,
             "wire_diameter": wire_diameter_expression,
+            "end_pitch": end_pitch_expression or wire_diameter_expression,
             "height": height_expression,
         },
         "operations": operations,
@@ -8181,9 +8216,13 @@ def _build_compression_spring_length_model(
     finish_end_turns: float,
     start_ground_turns: float,
     finish_ground_turns: float,
+    end_pitch: float | None = None,
 ) -> dict[str, Any]:
     if start_ground_turns > 1e-9 or finish_ground_turns > 1e-9:
-        centerline_offset = (-1.0 + float(start_ground_turns) + float(finish_ground_turns)) * float(wire_diameter)
+        resolved_end_pitch = float(end_pitch if end_pitch is not None else wire_diameter)
+        centerline_offset = -float(wire_diameter) + (
+            float(start_ground_turns) + float(finish_ground_turns)
+        ) * resolved_end_pitch
         expression = "L1 - WD1 + ((N31 + N32) * WD1)"
         reference = "ground_cut_to_ground_cut"
     else:
@@ -10196,7 +10235,7 @@ def _build_spring_rotation_expression_from_turns(
     if turns_expression in (None, ""):
         return None
     if left_hand:
-        angle_offset = 90.0 + float(start_phase_degrees) + float(extra_angle_offset_degrees)
+        angle_offset = float(start_phase_degrees) + float(extra_angle_offset_degrees)
         if abs(angle_offset) <= 1e-9:
             angle_offset = 0.0
         return _build_spring_normalized_degrees_expression(
@@ -10219,7 +10258,9 @@ def _resolve_spring_segment_initial_angle_degrees(
     left_hand: bool,
 ) -> float:
     if left_hand:
-        return _normalize_spring_turning_angle_degrees(-(360.0 * float(turns_before)))
+        return _normalize_spring_turning_angle_degrees(
+            float(start_phase_degrees) - (360.0 * float(turns_before))
+        )
     turn_delta = -360.0 * float(turns_before)
     signed_phase = float(start_phase_degrees) + turn_delta
     return _normalize_spring_turning_angle_degrees(90.0 - signed_phase)

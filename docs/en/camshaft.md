@@ -109,6 +109,26 @@ writing also requires `confirm_write=true`:
 the existing crank-event conversion. Rockers use the arm/contact parameters in
 `kompas_mcp/cams/spec.py`; Studio translates its layout into that contract.
 
+## Shared module interface
+
+`get_cad_module_contract("cam")` describes typed nested calculation inputs,
+defaults, units and limitations. `run_cad_module` and `geomwright-model` accept
+`module_id: "cam"` with `preview`, `plan`, `create` or `inspect`. The `parameters`
+object contains `request`, `width`, `rotation_deg` and `tolerance`; name, visibility
+and write confirmation remain in the common envelope. Existing `create_cam` and
+`inspect_cam` remain compatible.
+
+Preview/plan use the existing strict CAD preflight at 10 samples per cam degree,
+not just a displayed candidate. Compact responses omit profile, NURBS and chart
+arrays. Create executes that plan through the same native readback, host checks
+and `CAM_VERIFIED` finalization. Actual bounds are returned as `data.body.bounds_mm`.
+Inspect returns restorable numeric parameters even without a saved Studio form;
+the derived `law_continuity_order` is not an input. Timing is restored as equivalent
+cam angles, automatic law selection as the selected law, and sampling as the CAD
+density. `verification.stored_verified` reads the persisted marker; `verified`
+remains false because recognition is not a fresh geometry audit. Version-1 or
+invalid recipes return `parameters: null`, never a default replacement.
+
 ## Calculation contract
 
 - Direct drive uses a flat translating follower. The envelope includes the

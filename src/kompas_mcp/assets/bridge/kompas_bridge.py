@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import uuid
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from win32com.client import Dispatch
 
 
@@ -784,6 +785,9 @@ def _set_model_object_hidden(model_object, hidden=True, *, role=None):
     current_hidden = safe_get(model_object, "Hidden")
     if current_hidden is not None:
         report["hidden_before"] = bool(current_hidden)
+        if bool(current_hidden) == bool(hidden):
+            report.update(ok=True, hidden_after=bool(current_hidden), reason="already_requested_state", update_available=False)
+            return report
         try:
             model_object.Hidden = bool(hidden)
         except Exception as exc:
@@ -959,6 +963,10 @@ def _bind_operation_variables(model_object, planned_bindings):
                     break
             if matched is None:
                 raise RuntimeError("operation_variable_not_found")
+            if bool(safe_get(matched, "Information", False)):
+                raise RuntimeError("informational_output_variable_cannot_drive_geometry")
+            if bool(safe_get(matched, "ReadOnly", False)):
+                raise RuntimeError("read_only_operation_variable")
             before_expression = safe_get(matched, "Expression")
             matched.Expression = expression
             update = safe_get(matched, "Update")
@@ -1392,48 +1400,45 @@ def iter_collection(collection):
 _APP5 = None
 _REQUIRE_VISIBLE_KOMPAS = False
 _ACTIVE_API7_DIRECT = False
+_CAD_SESSION = None
+_CAD_ACCESS_STARTED = False
+_DISPATCH_FINISHED = False
+
+
+def _load_cad_session(context):
+    import importlib.util
+    runtime_path = os.path.join(os.path.dirname(__file__), "cad_session_runtime.py")
+    if not os.path.exists(runtime_path):
+        runtime_path = os.path.join(os.path.dirname(__file__), "..", "src", "kompas_mcp", "assets", "bridge", "cad_session_runtime.py")
+    spec = importlib.util.spec_from_file_location("cad_session_runtime", runtime_path)
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    return runtime.Session(context)
+
+
+def _cad_is_interactive():
+    return _CAD_SESSION is not None and _CAD_SESSION.mode == "interactive"
+
+
+def _close_document_for_workflow(document, close_mode=0):
+    if _cad_is_interactive() and not _CAD_SESSION.allow_explicit_close:
+        return False
+    document.Close(close_mode)
+    return True
 
 
 def make_app():
+    global _CAD_ACCESS_STARTED
+    _CAD_ACCESS_STARTED = True
     import win32com.client
     global _APP5, _ACTIVE_API7_DIRECT
-    _ACTIVE_API7_DIRECT = False
-    if _REQUIRE_VISIBLE_KOMPAS:
-        try:
-            _APP5 = win32com.client.GetActiveObject("KOMPAS.Application.5")
-        except Exception:
-            # KOMPAS v23 may register the visible interactive controller only
-            # under Application.7.  Do not call Dispatch(Application.5) here:
-            # that creates a second hidden KOMPAS process and leaves Studio
-            # talking to the wrong document collection.
-            try:
-                _APP5 = win32com.client.GetActiveObject("KOMPAS.Application.7")
-                _ACTIVE_API7_DIRECT = True
-            except Exception:
-                raise RuntimeError("No running visible KOMPAS-3D instance. Start KOMPAS-3D and keep its main window open; Studio will reconnect automatically.")
-        if not bool(safe_get(_APP5, "Visible", False)):
-            try:
-                _APP5.Visible = True
-            except Exception:
-                pass
-        if not bool(safe_get(_APP5, "Visible", False)):
-            raise RuntimeError("The running KOMPAS-3D instance could not be made visible. Studio refuses to open documents in a hidden session.")
-    else:
-        _APP5 = win32com.client.Dispatch("KOMPAS.Application.5")
-    controller_api = getattr(_APP5, "ActivateControllerAPI", None)
-    if callable(controller_api):
-        controller_api()
-    else:
-        controller_api
-    if _ACTIVE_API7_DIRECT:
-        return _APP5
-    app7 = getattr(_APP5, "ksGetApplication7", None)
-    if callable(app7):
-        try:
-            return app7()
-        except Exception:
-            return app7
-    return app7
+    if _CAD_SESSION is None:
+        raise RuntimeError("CAD_SESSION_POLICY_REQUIRED: reload the host before CAD access")
+    app = _CAD_SESSION.attach(win32com.client)
+    _APP5, _ACTIVE_API7_DIRECT = _CAD_SESSION.raw, _CAD_SESSION.api7_direct
+    report_progress(0, "cad_session_attached", cad_mode=_CAD_SESSION.mode,
+                    session_identity=_CAD_SESSION.context.get("binding"))
+    return app
 
 
 def detect_kind(part):
@@ -1651,6 +1656,21 @@ def _sketch_entity_geometry(entity_kind, entity):
                     geometry["end"] = list(points[-1])
             except Exception as exc:
                 geometry["readback_error"] = str(exc)
+        return geometry
+    if entity_kind == "bezier":
+        count = int(safe_get(entity, "PointsCount", 0) or 0)
+        geometry = {"closed": bool(safe_get(entity, "Closed", False)), "node_count": count,
+                    "bezier_nodes": [], "complete": count <= 128}
+        for index in range(min(count, 128)):
+            values = entity.GetPoint(index)
+            if not values or len(values) != 7 or not values[0]:
+                geometry["complete"] = False
+                geometry["readback_error"] = "Bezier node unavailable: %s" % index
+                break
+            geometry["bezier_nodes"].append({"base": list(values[1:3]), "left": list(values[3:5]), "right": list(values[5:7])})
+        if geometry["bezier_nodes"] and geometry["complete"]:
+            geometry["start"] = geometry["bezier_nodes"][0]["base"]
+            geometry["end"] = geometry["start"] if geometry["closed"] else geometry["bezier_nodes"][-1]["base"]
         return geometry
     if entity_kind == "ellipse":
         return {
@@ -1949,7 +1969,11 @@ def _get_api5_kompas_object():
         import win32com.client.gencache
 
         api5_module = win32com.client.gencache.EnsureModule(_API5_LIBID, 0, 1, 0)
-        raw_app = win32com.client.Dispatch("KOMPAS.Application.5")
+        if _APP5 is None:
+            make_app()
+        raw_app = _APP5
+        if _ACTIVE_API7_DIRECT and not hasattr(raw_app, "ksGetApplication7"):
+            raise RuntimeError("API5 is unavailable on the selected COM object; another application's controller will not be used")
         app5 = api5_module.KompasObject(raw_app._oleobj_)
         return app5, api5_module, {"ok": True, "class": app5.__class__.__name__}
     except Exception as exc:
@@ -2510,6 +2534,7 @@ def _inspect_sketch_full_entity(entity, *, entity_kind, collection_name, index):
         "point": "IPoint",
         "ellipse": "IEllipse",
         "nurbs": "INurbs",
+        "bezier": "IBezier",
     }.get(entity_kind)
     if interface_name:
         try:
@@ -2590,6 +2615,7 @@ def _inspect_sketch_full_collection(drawing_container, collection_name, accessor
         "accessor_used": accessor_used,
         "accessor_attempts": accessor_attempts,
         "count": count,
+        "truncated": count > max_items,
         "items": [],
         "errors": [],
     }
@@ -2840,7 +2866,65 @@ def _read_sketch_entity_projection_link(entity, max_items=10):
     return data
 
 
+@contextmanager
+def _readonly_sketch_fragment(sketch):
+    """Read exported geometry without opening the source sketch definition.
+
+    BeginEditEx(True) changes native ConstraintsState even with Changed=False.
+    WriteToFragment preserves that state. Fragment references are not source
+    references and its missing parametric API5 data must remain explicit.
+    """
+    import tempfile
+    fragment = None
+    app = safe_get(sketch, "Application")
+    if app is None:
+        raise RuntimeError("Source sketch application is unavailable")
+    active = safe_get(app, "ActiveDocument")
+    active_changed = safe_get(active, "Changed")
+    state = safe_get(sketch, "ConstraintsState")
+    owner_document = safe_get(safe_get(sketch, "Part"), "Parent")
+    changed = safe_get(owner_document, "Changed")
+    path = os.path.join(tempfile.gettempdir(), "geomwright-sketch-read-" + uuid.uuid4().hex + ".frw")
+    try:
+        if not sketch.WriteToFragment(path) or not os.path.isfile(path):
+            raise RuntimeError("Source sketch fragment export failed")
+        fragment, attempts = _open_document_in_app(app, path, visible=False, read_only=True)
+        if fragment is None:
+            raise RuntimeError("Exported sketch fragment could not be opened: " + str(attempts)[:500])
+        drawing = _cast_to_com_interface(fragment, "IKompasDocument2D")
+        if drawing is None:
+            raise RuntimeError("Exported sketch fragment has no 2D document interface")
+        yield drawing
+    finally:
+        try:
+            if fragment is not None:
+                fragment.Close(0)
+        finally:
+            if active is not None:
+                _cast_to_com_interface(active, "IKompasDocument").Active = True
+            if os.path.isfile(path):
+                os.remove(path)
+            if (safe_get(sketch, "ConstraintsState") != state or safe_get(owner_document, "Changed") != changed or
+                    safe_get(active, "Changed") != active_changed):
+                raise RuntimeError("Read-only sketch inspection changed source state")
+
+
 def _inspect_sketch_full(model_container, payload):
+    if bool(payload.get("update_before_state", True)):
+        return _inspect_sketch_full_in_document(model_container, payload)
+    sketch = _resolve_existing_sketch(model_container, _extract_sketch_ref(payload))
+    if sketch is None:
+        raise RuntimeError("Sketch not found")
+    with _readonly_sketch_fragment(sketch) as fragment:
+        result = _inspect_sketch_full_in_document(model_container, payload, fragment)
+    result["coverage"].update(entity_reference_scope="exported_fragment_not_source",
+        source_definition_opened=False, source_state_preserved=True)
+    for entity in result.get("entities", []):
+        entity["reference_scope"] = "exported_fragment_not_source"
+    return result
+
+
+def _inspect_sketch_full_in_document(model_container, payload, readonly_document=None):
     sketch_ref = _extract_sketch_ref(payload)
     if sketch_ref in (None, ""):
         raise RuntimeError("sketch_ref is required")
@@ -2853,8 +2937,8 @@ def _inspect_sketch_full(model_container, payload):
             sketch.Update()
         except Exception:
             pass
-    begin_edit = safe_get(sketch, "BeginEdit")
-    end_edit = safe_get(sketch, "EndEdit")
+    begin_edit = (lambda: readonly_document) if readonly_document is not None else safe_get(sketch, "BeginEdit")
+    end_edit = None if readonly_document is not None else safe_get(sketch, "EndEdit")
     if not callable(begin_edit):
         result = {
             "sketch_ref": str(sketch_ref),
@@ -2887,7 +2971,10 @@ def _inspect_sketch_full(model_container, payload):
             return _sketch_full_json_safe(result)
         drawing_container = _get_sketch_drawing_container(sketch_doc)
         symbols_container = None
-        api5_doc2d, api5_doc2d_status = _get_api5_document2d()
+        if not bool(payload.get("update_before_state", True)):
+            api5_doc2d, api5_doc2d_status = None, {"ok": False, "reason": "Read-only fragment does not activate the API5 editor; do not read constraints from an unrelated active 2D document"}
+        else:
+            api5_doc2d, api5_doc2d_status = _get_api5_document2d()
         for collection_name, accessors, entity_kind in (
             ("segments", ("LineSegments", "GetLineSegments"), "segment"),
             ("arcs", ("Arcs", "GetArcs"), "arc"),
@@ -2895,6 +2982,7 @@ def _inspect_sketch_full(model_container, payload):
             ("points", ("Points", "GetPoints"), "point"),
             ("ellipses", ("Ellipses", "GetEllipses"), "ellipse"),
             ("nurbs", ("Nurbses", "GetNurbses"), "nurbs"),
+            ("beziers", ("Beziers", "GetBeziers"), "bezier"),
         ):
             collection_result = _inspect_sketch_full_collection(drawing_container, collection_name, accessors, entity_kind, max_items=max_items)
             result["collections"].append(collection_result)
@@ -2993,6 +3081,10 @@ def _inspect_sketch_full(model_container, payload):
     result["constraint_state_summary"] = _summarize_entity_constraint_states(result.get("entities") or [])
     result["summary"]["constraint_state_counts"] = result["constraint_state_summary"].get("counts")
     result["summary"]["not_full_entity_count"] = len(result["constraint_state_summary"].get("not_full") or [])
+    result["read_only"] = not bool(payload.get("update_before_state", True))
+    result["coverage"] = {"listed_collections_complete": all(
+        not row.get("errors") and not row.get("truncated") for row in result.get("collections", [])),
+        "api5_constraints_available": bool(api5_doc2d_status.get("ok")), "construction_history_complete": False}
     closure_tolerance = float(payload.get("closure_tolerance") or 1e-5)
     primary_style = int(payload.get("closure_style") or 1)
     result["closure_audit"] = {
@@ -3486,6 +3578,7 @@ def _feature_state_payload(feature):
 
 
 def _feature_variables_payload(feature, max_items=25):
+    feature = _cast_to_com_interface(feature, "IFeature7")
     variables = []
     for index, variable in enumerate(_iter_operation_variables(feature)[:max_items]):
         row = {"index": index}
@@ -3980,9 +4073,17 @@ def iter_parts_with_ids(part, node_id):
 def describe_document(document, app, runtime_index=None):
     path_name = normalize_display_path(safe_get(document, "PathName", ""))
     name = safe_get(document, "Name", "") or os.path.basename(path_name) or "Untitled"
-    runtime_id = path_name or ("@document:%s" % int(runtime_index) if runtime_index is not None else name)
+    reference = safe_get(document, "Reference")
+    try:
+        reference = int(reference)
+    except (TypeError, ValueError):
+        reference = 0
+    # API7's document reference identifies the opened document, not its
+    # position in Documents. Missing identity must not become another model
+    # after a neighboring document closes.
+    runtime_id = path_name or ("@reference:%s" % reference if reference > 0 else None)
     return {
-        "id": path_name or name,
+        "id": runtime_id or name,
         "runtime_id": runtime_id,
         "name": name,
         "path": path_name,
@@ -4558,39 +4659,21 @@ def resolve_document(app, document_id):
                 return casted
         return None
 
-    if isinstance(document_id, str) and document_id.startswith("@document:"):
-        try:
-            requested_index = int(document_id.split(":", 1)[1])
-        except (TypeError, ValueError):
-            return None
-        documents = list(iter_collection(safe_get(app, "Documents")))
-        if 0 <= requested_index < len(documents):
-            return cast_document_3d(documents[requested_index])
-        return None
+    if isinstance(document_id, str) and document_id.startswith(("@document:", "@reference:")):
+        return resolve_document_strict(app, document_id)
 
-    if active_document is not None:
-        active_description = describe_document(active_document, app)
-        if document_id in (active_description["id"], active_description["path"], active_description["name"]):
-            return cast_document_3d(active_document)
-
+    matches = []
     for document in iter_collection(safe_get(app, "Documents")):
         description = describe_document(document, app)
         if document_id in (description["id"], description["path"], description["name"]):
-            return cast_document_3d(document)
-    if active_document is not None:
-        casted = cast_document_3d(active_document)
-        if casted is not None:
-            return casted
-    documents = list(iter_collection(safe_get(app, "Documents")))
-    for document in reversed(documents):
-        casted = cast_document_3d(document)
-        if casted is not None:
-            return casted
-    return None
+            matches.append(document)
+    return cast_document_3d(matches[0]) if len(matches) == 1 else None
 
 
 def resolve_document_strict(app, document_id):
-    if not document_id:
+    # Positional IDs cannot be resolved safely after unrelated closes. Clients
+    # holding one must refresh the workspace rather than silently retarget it.
+    if not document_id or str(document_id).startswith("@document:"):
         return None
     documents = list(iter_collection(safe_get(app, "Documents")))
     for runtime_index, document in enumerate(documents):
@@ -4602,6 +4685,16 @@ def resolve_document_strict(app, document_id):
 
 def _open_document_in_app(app, path, visible=True, read_only=False):
     normalized_path = os.path.abspath(os.path.normpath(path))
+    if _cad_is_interactive():
+        for existing in iter_collection(safe_get(app, "Documents")):
+            if build_path_aliases(safe_get(existing, "PathName", "")) & build_path_aliases(normalized_path):
+                activate = safe_get(existing, "Activate")
+                if callable(activate):
+                    activate()
+                else:
+                    app.ActiveDocument = existing
+                return cast_document_3d(existing), [{"path": normalized_path, "returned_document": True,
+                                                    "reused_open_document": True, "reopened": False}]
     attempt_paths = [normalized_path]
     short_path = get_short_path(normalized_path)
     if short_path and normalize_fs_path(short_path) != normalize_fs_path(normalized_path):
@@ -4747,6 +4840,24 @@ def _replace_staging_file(app, staging_path, target_path, reopen_target=False, v
     return None, report
 
 
+def _require_document_save_success(document, save_result, target_path=None):
+    """Confirm a boolean save or API7's void save before discarding the document."""
+    changed = safe_get(document, "Changed")
+    if save_result is not None and not bool(save_result):
+        raise RuntimeError("Failed to save document: Save returned failure")
+    if changed is not None and bool(changed):
+        raise RuntimeError("Failed to save document: unsaved changes remain")
+    # IKompasDocument.Save/SaveAs are void in API7. File existence alone says
+    # nothing about this save; require the document's clean-state readback.
+    if save_result is None and (changed is None or bool(changed)):
+        raise RuntimeError("Failed to save document: clean state was not confirmed")
+    path = normalize_display_path(safe_get(document, "PathName", ""))
+    if not path or (target_path and not build_path_aliases(path).intersection(build_path_aliases(target_path))):
+        raise RuntimeError("Failed to save document: saved path was not confirmed")
+    if not os.path.isfile(target_path or path):
+        raise RuntimeError("Failed to save document: saved file was not found")
+
+
 def _save_document_via_staging(document, app, target_path, keep_open=False, visible=True):
     target_path = os.path.abspath(os.path.normpath(target_path))
     target_dir = os.path.dirname(target_path)
@@ -4761,17 +4872,40 @@ def _save_document_via_staging(document, app, target_path, keep_open=False, visi
             % json.dumps(dirty_matches, ensure_ascii=False)
         )
 
+    if _cad_is_interactive():
+        # Interactive save must retain this exact visible document. Staged
+        # Close/replace/reopen is a hidden-workflow policy, not an invisible
+        # verification step in the user's window.
+        if preexisting_matches:
+            raise RuntimeError("Interactive save target is already open in another document; choose another path or explicitly close that document first")
+        save_result = document.SaveAs(target_path)
+        _require_document_save_success(document, save_result, target_path)
+        description = describe_document(document, app)
+        actual_path = description.get("path") or ""
+        if not (build_path_aliases(actual_path) & build_path_aliases(target_path)):
+            raise RuntimeError("Interactive save did not confirm the document target path; document retained")
+        report_progress(95, "visible_document_saved", document_id=description.get("runtime_id") or description.get("id"),
+                        target=target_path, cad_mode="interactive")
+        retained = True
+        if not keep_open and _CAD_SESSION.allow_explicit_close:
+            document.Close(0)
+            retained = False
+        return document if retained else None, {"strategy": "interactive_direct_save", "kept_open": retained,
+                          "source_document": description, "reopened": False,
+                          "save_reopen_verification": "deferred"}
+
     staging_path = _build_save_staging_path(target_path)
     try:
         save_result = document.SaveAs(staging_path)
     except Exception as exc:
         raise RuntimeError("Failed to save staging document: %s" % exc)
-    if not (bool(save_result) or os.path.exists(staging_path)):
-        raise RuntimeError("Staging save did not create file: %s" % staging_path)
+    _require_document_save_success(document, save_result, staging_path)
 
     document_description = describe_document(document, app)
     try:
-        _close_generated_document(document, app)
+        _close_document_for_workflow(document, 0)
+        if _collect_open_documents_by_path(app, staging_path):
+            raise RuntimeError("Staging document is still open")
     except Exception as exc:
         raise RuntimeError("Failed to close staging document before replace: %s" % exc)
 
@@ -4799,13 +4933,14 @@ def _save_document_via_staging(document, app, target_path, keep_open=False, visi
             replace_report["final_update_sketches_after_reopen"] = False
             replace_report["final_update_sketches_error"] = str(exc)
         try:
-            reopened_document.Save()
+            _require_document_save_success(reopened_document, reopened_document.Save(), target_path)
             replace_report["final_save_after_reopen"] = True
         except Exception as exc:
             replace_report["final_save_after_reopen"] = False
             replace_report["final_save_error"] = str(exc)
+            raise RuntimeError("Failed to save reopened document; document remains open: %s" % exc)
         try:
-            reopened_document.Close(0)
+            _close_document_for_workflow(reopened_document, 0)
             replace_report["final_close_after_reopen"] = True
         except Exception as exc:
             replace_report["final_close_after_reopen"] = False
@@ -4980,6 +5115,7 @@ def get_session_state():
         "visible": bool(safe_get(app, "Visible", False)),
         "documents_count": len(documents),
         "active_document": active_info,
+        "cad_session": _CAD_SESSION.describe() if _CAD_SESSION is not None else None,
     }
 
 
@@ -5380,18 +5516,16 @@ def _sketch_list_item(sketch, index):
 
 
 def _sketch_entity_counts(sketch):
-    sketch_doc = sketch.BeginEdit()
-    if sketch_doc is None:
-        raise RuntimeError("BeginEdit returned None")
-    try:
+    sketch = _cast_to_com_interface(sketch, "ISketch")
+    with _readonly_sketch_fragment(sketch) as sketch_doc:
         drawing_container = _get_sketch_drawing_container(sketch_doc)
         counts = {}
         for kind in ("segment", "circle", "point", "arc", "ellipse"):
             collection, collection_name = _collection_for_sketch_entity_kind(drawing_container, kind)
             counts[collection_name] = collection_count(collection)
+        counts["nurbs"] = collection_count(safe_get(drawing_container, "Nurbses"))
+        counts["beziers"] = collection_count(safe_get(drawing_container, "Beziers"))
         return counts
-    finally:
-        sketch.EndEdit()
 
 
 def _list_existing_sketches(model_container, payload):
@@ -10304,6 +10438,8 @@ def handle_list_sketch_entities(payload):
 
 
 def handle_inspect_sketch_full(payload):
+    payload = dict(payload)
+    payload.setdefault("update_before_state", False)
     app = make_app()
     document = resolve_document(app, payload.get("document_id"))
     if document is None:
@@ -11235,7 +11371,7 @@ def handle_create_specification(payload):
     document_description = describe_document(document, app)
     closed = False
     if saved and payload.get("close_after_save"):
-        document.Close(0)
+        _close_document_for_workflow(document, 0)
         closed = True
 
     return {
@@ -11305,7 +11441,7 @@ def handle_apply_specification_changes(payload):
     document_description = describe_document(document, app)
     closed = False
     if saved and payload.get("close_after_save"):
-        document.Close(0)
+        _close_document_for_workflow(document, 0)
         closed = True
 
     return {
@@ -11387,7 +11523,7 @@ def handle_close_document(payload):
     document_path = description.get("path")
     documents_count_before = len(list(iter_collection(safe_get(app, "Documents"))))
     if save:
-        document.Save()
+        _require_document_save_success(document, document.Save(), document_path)
 
     close_mode = parse_close_mode(payload.get("close_mode"))
     document.Close(close_mode)
@@ -11418,7 +11554,7 @@ def handle_shutdown_session(payload):
         description = describe_document(document, app)
         try:
             if save:
-                document.Save()
+                _require_document_save_success(document, document.Save(), description.get("path"))
             document.Close(close_mode)
             closed_description = dict(description)
             closed_description["file_access"] = (
@@ -11431,14 +11567,9 @@ def handle_shutdown_session(payload):
     remaining_documents = list_documents(app)
 
     quit_called = False
-    for candidate in (app, _APP5):
-        quitter = safe_get(candidate, "Quit")
-        if callable(quitter):
-            try:
-                quitter()
-                quit_called = True
-            except Exception:
-                pass
+    if not remaining_documents and not failed and _CAD_SESSION is not None and _CAD_SESSION.mode == "hidden" and payload.get("_user_requested_close"):
+        _CAD_SESSION.quit_owned()
+        quit_called = True
 
     return {
         "closed_count": len(closed),
@@ -11509,7 +11640,7 @@ def handle_apply_changeset(payload):
     document_description = describe_document(document, app)
     closed = False
     if saved and payload.get("close_after_save"):
-        document.Close(0)
+        _close_document_for_workflow(document, 0)
         closed = True
 
     return {
@@ -11548,11 +11679,9 @@ def handle_save_document(payload):
 
     if normalize_fs_path(target_path) == normalize_fs_path(current_path):
         save_result = document.Save()
-        saved = bool(save_result) or bool(os.path.exists(target_path))
-        if not saved:
-            raise RuntimeError("Failed to save document to %s" % target_path)
+        _require_document_save_success(document, save_result, target_path)
         if close_after_save:
-            document.Close(0)
+            _close_document_for_workflow(document, 0)
         result_document = description if close_after_save else describe_document(document, app)
     else:
         reopened_document, save_report = _save_document_via_staging(
@@ -11667,7 +11796,7 @@ def handle_apply_relink_paths(payload):
     document_description = describe_document(document, app)
     closed = False
     if saved and payload.get("close_after_save"):
-        document.Close(0)
+        _close_document_for_workflow(document, 0)
         closed = True
 
     return {
@@ -11752,7 +11881,7 @@ def handle_relink_document_file(payload):
 
     document.Save()
     result_document = describe_document(document, app)
-    document.Close(0)
+    _close_document_for_workflow(document, 0)
 
     return {
         "document": result_document,
@@ -11783,7 +11912,7 @@ def handle_create_spw_from_rows(payload):
     if temp_doc is None:
         raise RuntimeError("Failed to create temporary SPW document")
     temp_doc.SaveAs(output_path)
-    temp_doc.Close(0)
+    _close_document_for_workflow(temp_doc, 0)
 
     spc_document = getattr(app5, "SpcDocument", None)
     if spc_document is None:
@@ -11898,7 +12027,7 @@ def handle_create_spw_from_rows(payload):
             }
         document_description = describe_document(inspect_document, app)
     finally:
-        inspect_document.Close(0)
+        _close_document_for_workflow(inspect_document, 0)
 
     return {
         "document": document_description,
@@ -13808,21 +13937,8 @@ def _apply_part_variables(part, planned_variables):
 
 def _create_part_document(app, visible):
     doc3 = app.Documents.Add(4, bool(visible))
-    if doc3 is None and _REQUIRE_VISIBLE_KOMPAS:
-        raise RuntimeError("The visible KOMPAS instance could not create a part. Finish active editing and retry; no substitute instance was started.")
-    fallback_error = None
     if doc3 is None:
-        try:
-            import win32com.client
-
-            app = win32com.client.DispatchEx("KOMPAS.Application.7")
-            app.Visible = bool(visible)
-            doc3 = app.Documents.Add(4, bool(visible))
-        except Exception as exc:
-            fallback_error = str(exc)
-            doc3 = None
-    if doc3 is None:
-        raise RuntimeError("Documents.Add(ksDocumentPart) returned None; DispatchEx fallback error=%s" % fallback_error)
+        raise RuntimeError("The selected KOMPAS instance could not create a part; no substitute instance was started. Active editing is a possible cause, not a verified diagnosis.")
     part = safe_get(doc3, "TopPart")
     if part is None:
         doc3_model = cast_document_3d(doc3)
@@ -13855,7 +13971,7 @@ def _save_generated_part_document(doc3, app, output_path, close_after_save, step
         raise RuntimeError("Failed to save generated part: target file missing after replace")
 
     created_document = describe_document(reopened_document, app) if reopened_document is not None else {"id": output_path, "name": os.path.basename(output_path), "path": output_path, "active": False, "changed": False}
-    if close_after_save and reopened_document is not None:
+    if close_after_save and reopened_document is not None and not _cad_is_interactive():
         try:
             _update_document_sketches(reopened_document)
             reopened_document.Save()
@@ -13866,6 +13982,7 @@ def _save_generated_part_document(doc3, app, output_path, close_after_save, step
         except Exception as exc:
             created_document["closed_after_save"] = False
             created_document["close_after_save_error"] = str(exc)
+            raise RuntimeError("Failed to close owned saved document; no follow-up reopen is safe: %s" % exc)
     return saved, created_document
 
 
@@ -13977,8 +14094,16 @@ def _apply_saved_compression_spring_anchor_rotation_bindings(app, output_path, p
                 "bridge_path": bridge_path,
                 "output_path": get_short_path(output_path),
                 "planned_bindings": planned,
+                "cad_session_context": _CAD_SESSION.context if _CAD_SESSION is not None else None,
             }
             child_script = r"""
+import importlib.util, os
+# Enrol only this Python helper before any CAD import or COM access. Children
+# break away from the host's job, so KOMPAS is never in its termination domain.
+helper_spec = importlib.util.spec_from_file_location("helper_guard", os.environ["KOMPAS_MCP_HELPER_GUARD"])
+helper_guard = importlib.util.module_from_spec(helper_spec)
+helper_spec.loader.exec_module(helper_guard)
+helper_guard.join_helper_job(os.environ["KOMPAS_MCP_HELPER_JOB"], os.environ["KOMPAS_MCP_HELPER_RECORD"])
 import json, sys
 payload = json.loads(sys.argv[1])
 try:
@@ -13992,6 +14117,7 @@ if importlib_util is not None and hasattr(importlib_util, "spec_from_file_locati
 else:
     import imp
     bridge = imp.load_source("kompas_bridge_fresh_bind", payload["bridge_path"])
+bridge._CAD_SESSION = bridge._load_cad_session(payload["cad_session_context"])
 app = bridge.make_app()
 document, attempts = bridge._open_document_in_app(app, payload["output_path"], visible=False, read_only=False)
 if document is None:
@@ -14033,13 +14159,14 @@ try:
     print(json.dumps(fresh_report, ensure_ascii=False))
 finally:
     try:
-        document.Close(bridge.parse_close_mode(None))
+        bridge._close_document_for_workflow(document, bridge.parse_close_mode(None))
     except Exception:
         pass
 """
             subprocess_module = __import__("subprocess")
             process = subprocess_module.Popen(
                 [sys.executable, "-c", child_script, json.dumps(child_payload, ensure_ascii=False)],
+                stdin=subprocess_module.DEVNULL,
                 stdout=subprocess_module.PIPE,
                 stderr=subprocess_module.PIPE,
                 universal_newlines=True,
@@ -14083,7 +14210,7 @@ finally:
         return report
     finally:
         try:
-            document.Close(parse_close_mode(None))
+            _close_document_for_workflow(document, parse_close_mode(None))
         except Exception:
             pass
 
@@ -14182,7 +14309,7 @@ def _verify_saved_compression_spring_anchor_rotation_bindings(app, output_path, 
         return report
     finally:
         try:
-            document.Close(parse_close_mode(None))
+            _close_document_for_workflow(document, parse_close_mode(None))
         except Exception:
             pass
 
@@ -14313,11 +14440,20 @@ def _create_point3d_displace(
             expressions.append(None)
         while len(components) < 3:
             components.append(0.0)
-        parameters.DX = str(expressions[0]) if expressions[0] not in (None, "") else float(components[0])
-        parameters.DY = str(expressions[1]) if expressions[1] not in (None, "") else float(components[1])
-        parameters.DZ = str(expressions[2]) if expressions[2] not in (None, "") else float(components[2])
+        # IPoint3DParamDisplace offsets are numeric-only. Formula drivers belong
+        # to native operation variables exposed after the point is updated.
+        parameters.DX, parameters.DY, parameters.DZ = [float(value) for value in components[:3]]
     if not point.Update():
         raise RuntimeError("Point3D Update returned False for displacement point")
+    if offset_expressions and guiding_object is None and distance is None and distance_expression is None:
+        bindings = [{"parameter_note": "Перенос "+axis,
+            "parameter_note_aliases": ["Перенос "+axis, "Translation "+axis, "Offset "+axis],
+            "expression": str(expression), "role": "point3d_displace_"+axis.lower()}
+            for axis, expression in zip(("X", "Y", "Z"), offset_expressions) if expression not in (None, "")]
+        if bindings:
+            report["offset_binding_report"] = _bind_operation_variables(point, bindings)
+            if not report["offset_binding_report"].get("ok") or not point.Update():
+                raise RuntimeError("Failed to bind point displacement coordinate expressions")
     if distance_expression not in (None, ""):
         binding_report = _bind_operation_variables(
             point,
@@ -14895,7 +15031,7 @@ def _project_parameterization_anchors(model_container, sketch, specs, sketch_ent
     return reports
 
 
-def _build_stepped_shaft_feature(part, model_container, params, preview, steps_report, coordinate_system=None, operation_kind="boss"):
+def _build_stepped_shaft_feature(part, model_container, params, preview, steps_report, coordinate_system=None, operation_kind="boss", plane_override=None):
     extracted = _extract_stepped_shaft_preview_data(preview, params)
     steps = extracted["steps"]
     profile_points = extracted["profile_points"]
@@ -14915,7 +15051,7 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
         default_object = safe_get(part, "GetDefaultObject")
     if not callable(default_object):
         raise RuntimeError("Part does not expose DefaultObject/GetDefaultObject")
-    plane = default_object(plane_id)
+    plane = plane_override if plane_override is not None else default_object(plane_id)
     if plane is None:
         raise RuntimeError("Failed to get default sketch plane")
 
@@ -14932,6 +15068,8 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
     if sketch is None:
         raise RuntimeError("Sketchs.Add returned None")
     try:
+        if plane_override is not None:
+            sketch.CoordinateSystem = coordinate_system if coordinate_system is not None else plane
         sketch.Plane = plane
     except Exception as exc:
         raise RuntimeError("Failed to assign stepped-shaft sketch plane: " + str(exc))
@@ -14940,7 +15078,7 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
             sketch.Fixed = True
         except Exception as exc:
             raise RuntimeError("Failed to fix stepped-shaft sketch placement: " + str(exc))
-    if coordinate_system is not None:
+    if coordinate_system is not None and plane_override is None:
         try:
             sketch.CoordinateSystem = coordinate_system
         except Exception as exc:
@@ -15259,7 +15397,7 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
         parameterization_report["sketch_state"] = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
         if (
             bool(params.get("require_fully_defined", False))
-            and (parameterization_report.get("sketch_state") or {}).get("code") != 2
+            and (parameterization_report.get("sketch_state") or {}).get("code") != KS_SKETCH_STATE_WELL_CONSTRAINED
         ):
             parameterization_report["initial_sketch_state"] = parameterization_report["sketch_state"]
             settle_doc = None
@@ -15273,7 +15411,7 @@ def _build_stepped_shaft_feature(part, model_container, params, preview, steps_r
             parameterization_report["sketch_state"] = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
         if (
             bool(params.get("require_fully_defined", False))
-            and (parameterization_report.get("sketch_state") or {}).get("code") != 2
+            and (parameterization_report.get("sketch_state") or {}).get("code") != KS_SKETCH_STATE_WELL_CONSTRAINED
         ):
             raise RuntimeError(
                 "Stepped-shaft sketch is not fully defined: "
@@ -15651,7 +15789,7 @@ def _build_bolt_circle_holes_source_feature(part, model_container, params, previ
     raise RuntimeError("Unsupported bolt_circle_holes source_scenario: %s" % (params.get("source_scenario"),))
 
 
-def _build_bolt_circle_holes_feature(part, model_container, params, preview, steps_report, coordinate_system=None, require_source=False):
+def _build_bolt_circle_holes_feature(part, model_container, params, preview, steps_report, coordinate_system=None, require_source=False, chain_mode=False):
     if params.get("source_scenario"):
         _build_bolt_circle_holes_source_feature(part, model_container, params, preview, steps_report)
     elif require_source:
@@ -15697,7 +15835,19 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
         center_point,
         [1.0, 0.0, 0.0],
     )
-    first_hole_point = _create_point3d_displace(
+    if chain_mode:
+        # Displacement outputs are informational in v23. A coordinate point has
+        # genuine Координата Y/Z inputs; chain axial placement is recreate-only.
+        first_hole_point = _create_point3d(model_container, params["name"]+"_HOLE_CENTER", first_hole_center)
+        bindings = [{"parameter_note": "Координата "+axis,
+            "parameter_note_aliases": ["Координата "+axis, "Coordinate "+axis],
+            "expression": expression, "role": "bolt_circle_center_"+axis.lower()}
+            for axis, expression in zip(("Y", "Z"), first_hole_offset_expressions[1:]) if expression]
+        bound = _bind_operation_variables(first_hole_point, bindings)
+        if not bound.get("ok"):
+            raise RuntimeError("Bolt-circle coordinate-point driver binding failed: "+str(bound["failed"]))
+    else:
+        first_hole_point = _create_point3d_displace(
         model_container,
         "%s_HOLE_CENTER" % (params.get("name") or "BOLT_CIRCLE"),
         center_point,
@@ -15720,7 +15870,13 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
     hole_params = dict(hole_preview.get("params") or {})
     if not hole_preview or not hole_params:
         raise RuntimeError("bolt_circle_holes preview must contain base_hole_preview")
-    base_hole = _build_internal_cylindrical_step_feature(
+    hole_plane = None
+    if chain_mode:
+        hole_plane = _create_plane_parallel_by_point(part, params["name"]+" hole plane", part.DefaultObject(1), first_hole_point)
+        base_hole = _build_stepped_shaft_feature(part, model_container, hole_params, hole_preview, steps_report,
+            coordinate_system=hole_lcs, operation_kind="cut", plane_override=hole_plane)
+    else:
+        base_hole = _build_internal_cylindrical_step_feature(
         part,
         model_container,
         hole_params,
@@ -15781,6 +15937,9 @@ def _build_bolt_circle_holes_feature(part, model_container, params, preview, ste
         steps_report.append(step_report)
     return {
         "base_hole": base_hole,
+        "center_point": center_point,
+        "axis_tip_point": axis_tip_point,
+        "hole_plane": hole_plane,
         "pattern": pattern,
         "pattern_axis": pattern_axis,
         "first_hole_center": first_hole_point,
@@ -18030,7 +18189,7 @@ def _extract_flat_step_preview_data(preview, params):
     }
 
 
-def _build_flat_step_feature(part, model_container, params, preview, steps_report, coordinate_system=None, operation_kind="boss"):
+def _build_flat_step_feature(part, model_container, params, preview, steps_report, coordinate_system=None, operation_kind="boss", plane_override=None):
     extracted = _extract_flat_step_preview_data(preview, params)
     helper_circle = extracted["helper_circle"]
     profile_lines = extracted["profile_lines"]
@@ -18049,7 +18208,7 @@ def _build_flat_step_feature(part, model_container, params, preview, steps_repor
         default_object = safe_get(part, "GetDefaultObject")
     if not callable(default_object):
         raise RuntimeError("Part does not expose DefaultObject/GetDefaultObject")
-    plane = default_object(plane_id)
+    plane = plane_override if plane_override is not None else default_object(plane_id)
     if plane is None:
         raise RuntimeError("Failed to get default sketch plane")
 
@@ -18063,12 +18222,18 @@ def _build_flat_step_feature(part, model_container, params, preview, steps_repor
     sketch = sketchs.Add()
     if sketch is None:
         raise RuntimeError("Sketchs.Add returned None")
-    sketch.Plane = plane
-    if coordinate_system is not None:
-        sketch.CoordinateSystem = coordinate_system
-    if params.get("name"):
+    if plane_override is not None:
+        sketch.CoordinateSystem = plane
+        sketch.Plane = plane
+    else:
+        sketch.Plane = plane
+        if coordinate_system is not None:
+            sketch.CoordinateSystem = coordinate_system
+    if params.get("fix_sketch_placement"):
+        sketch.Fixed = True
+    if params.get("sketch_name") or params.get("name"):
         try:
-            sketch.Name = "%s profile" % params.get("name")
+            sketch.Name = str(params.get("sketch_name") or ("%s profile" % params.get("name")))
         except Exception:
             pass
     if not sketch.Update():
@@ -18474,7 +18639,7 @@ def _extract_polygonal_step_preview_data(preview, params):
     }
 
 
-def _build_polygonal_step_feature(part, model_container, params, preview, steps_report, coordinate_system=None, operation_kind="boss"):
+def _build_polygonal_step_feature(part, model_container, params, preview, steps_report, coordinate_system=None, operation_kind="boss", plane_override=None):
     extracted = _extract_polygonal_step_preview_data(preview, params)
     vertices = extracted["vertices"]
     planned_variables = extracted["planned_variables"]
@@ -18491,7 +18656,7 @@ def _build_polygonal_step_feature(part, model_container, params, preview, steps_
         default_object = safe_get(part, "GetDefaultObject")
     if not callable(default_object):
         raise RuntimeError("Part does not expose DefaultObject/GetDefaultObject")
-    plane = default_object(plane_id)
+    plane = plane_override if plane_override is not None else default_object(plane_id)
     if plane is None:
         raise RuntimeError("Failed to get default sketch plane")
 
@@ -18505,12 +18670,18 @@ def _build_polygonal_step_feature(part, model_container, params, preview, steps_
     sketch = sketchs.Add()
     if sketch is None:
         raise RuntimeError("Sketchs.Add returned None")
-    sketch.Plane = plane
-    if coordinate_system is not None:
-        sketch.CoordinateSystem = coordinate_system
-    if params.get("name"):
+    if plane_override is not None:
+        sketch.CoordinateSystem = plane
+        sketch.Plane = plane
+    else:
+        sketch.Plane = plane
+        if coordinate_system is not None:
+            sketch.CoordinateSystem = coordinate_system
+    if params.get("fix_sketch_placement"):
+        sketch.Fixed = True
+    if params.get("sketch_name") or params.get("name"):
         try:
-            sketch.Name = "%s profile" % params.get("name")
+            sketch.Name = params.get("sketch_name") or "%s profile" % params.get("name")
         except Exception:
             pass
     if not sketch.Update():
@@ -18826,7 +18997,9 @@ def _build_polygonal_step_feature(part, model_container, params, preview, steps_
     if operation_binding_report is not None:
         steps_report.append(operation_binding_report)
         if not operation_binding_report.get("ok"):
-            raise RuntimeError("Failed to bind polygonal-step extrusion operation variables")
+            raise RuntimeError("Failed to bind polygonal-step extrusion operation variables: %s; available notes=%s" % (
+                [row.get("error") for row in operation_binding_report.get("failed", [])],
+                [safe_get(v,"ParameterNote") for v in _iter_operation_variables(extrusion)][:8]))
         depth_binding = "operation_variable"
         depth_value = operation_binding_report.get("applied", [{}])[0].get("expression_after", depth_value)
     steps_report.append(
@@ -19999,6 +20172,30 @@ def _build_helical_thread_feature(part, model_container, params, preview, steps_
         params.get("end_selector"),
         source_preview,
     )
+    result = _apply_helical_thread_feature(
+        part, model_container, params, preview, steps_report, scenario=scenario,
+        base_face=base_face, start_face=start_face, end_face=end_face,
+        face_reports={"base_face": base_face_report, "start_face": start_face_report, "end_face": end_face_report},
+    )
+    result.update(source_feature=source_feature, source_scenario=source_scenario)
+    return result
+
+
+def _apply_helical_thread_feature(part, model_container, params, preview, steps_report, *,
+                                  scenario, base_face, start_face, end_face, face_reports):
+    """Apply the existing physical cutter to already resolved native carrier faces.
+
+    The caller owns input selection, namespaced profile-variable installation and
+    carrier/span preflight. This executor never builds/replaces source material;
+    the legacy wrapper retains its original source-creation responsibility.
+    """
+    if scenario not in ("external_helical_thread", "internal_helical_thread"):
+        raise ValueError("Physical helical-thread scenario required")
+    if any(face is None for face in (base_face, start_face, end_face)):
+        raise ValueError("Resolved base/start/end carrier faces are required")
+    base_face_report, start_face_report, end_face_report = [face_reports[key]
+        for key in ("base_face", "start_face", "end_face")]
+    source_scenario = str(params.get("source_scenario") or "").strip().lower()
     steps_report.append(
         {
             "step": "resolve_helical_thread_reference_faces",
@@ -20109,6 +20306,27 @@ def _build_helical_thread_feature(part, model_container, params, preview, steps_
     building_direction = float(end_origin[0]) >= float(start_origin[0])
     spiral.BuildingDirection = building_direction
     spiral.TurnDirection = not bool(params.get("left_thread", False))
+    mirror_metric_phase = (
+        building_direction and bool(params.get("left_thread", False))
+        and not bool(params.get("internal")) and carrier_shape == "cylindrical"
+        and params.get("thread_profile_family") == "metric_v60"
+    )
+    if mirror_metric_phase:
+        # The XY profile stays on +Y. TurnDirection alone mirrors the path in
+        # Y, not Z; rotate the left path half a turn to mirror the right sweep
+        # across that unchanged profile plane (SPIRAL-002). This is a frame
+        # alignment constant, not an extra thread-design parameter.
+        spiral.TurningAngle = 180.0
+    internal_method = params.get("internal_metric_method")
+    if internal_method is not None:
+        phase = 0.0 if params.get("left_thread") else 180.0
+        if (scenario != "internal_helical_thread" or not building_direction or carrier_shape != "cylindrical" or
+                params.get("thread_profile_family") != "metric_v60" or
+                internal_method.get("schema") != "geomwright.internal_metric_through.plan" or
+                internal_method.get("version") != 1 or params.get("spiral_phase_degrees") != phase):
+            raise ValueError("Internal metric method requires its verified +X profile frame")
+        # Negative-Y internal profile has the opposite phase branch (THREAD-001).
+        spiral.TurningAngle = phase
     path_display_name = str(params.get("path_display_name") or "").strip()
     if path_display_name:
         try:
@@ -20117,6 +20335,10 @@ def _build_helical_thread_feature(part, model_container, params, preview, steps_
             pass
     if not bool(spiral.Update()):
         raise RuntimeError("Failed to create helical path for %s" % scenario)
+    if mirror_metric_phase and abs(float(spiral.TurningAngle)-180.0) > 1e-7:
+        raise RuntimeError("Left metric spiral phase alignment was not retained")
+    if internal_method is not None and abs(float(spiral.TurningAngle)-phase) > 1e-7:
+        raise RuntimeError("Internal metric spiral phase alignment was not retained")
     spiral_binding_report = _bind_operation_variables(spiral, params.get("operation_variable_bindings") or [])
     spiral_binding_report["scenario"] = scenario
     spiral_binding_report["target"] = "spiral_path"
@@ -20141,6 +20363,8 @@ def _build_helical_thread_feature(part, model_container, params, preview, steps_
             "building_direction_reason": "end_x_ge_start_x",
             "direction": str(params.get("direction") or "right"),
             "turn_direction": bool(safe_get(spiral, "TurnDirection", False)),
+            "turning_angle_degrees": safe_get(spiral, "TurningAngle"),
+            "phase_alignment": "internal_metric_positive_x" if internal_method is not None else "left_metric_positive_x_mirror" if mirror_metric_phase else "legacy",
             "start_origin_x": float(start_origin[0]),
             "end_origin_x": float(end_origin[0]),
             "position_association_reference": safe_get(safe_get(spiral_position, "AssociationObject"), "Reference"),
@@ -20564,7 +20788,6 @@ def _build_helical_thread_feature(part, model_container, params, preview, steps_
         "crest_round_thread": crest_round_feature,
         "crest_round_spiral": crest_round_spiral,
         "crest_round_profile_sketch": crest_round_profile_sketch,
-        "source_feature": source_feature,
         "source_scenario": source_scenario,
         "base_face": base_face,
         "start_face": start_face,
@@ -20573,6 +20796,129 @@ def _build_helical_thread_feature(part, model_container, params, preview, steps_
         "start_face_report": start_face_report,
         "end_face_report": end_face_report,
     }
+
+
+def _metric_helix_edge_evidence(points, pitch, left_thread=False, tolerance=1e-5):
+    """Signed lead from trimmed native samples, not spiral property labels.
+
+    The caller samples at least 16 points per expected turn. Refuse ambiguous
+    angular jumps rather than accepting an aliased lead. Units are mm/radians.
+    """
+    if len(points) < 2 or not math.isfinite(pitch) or pitch <= 0:
+        raise ValueError("Positive pitch and bounded native edge samples required")
+    if any(len(p) != 3 or any(not math.isfinite(float(v)) for v in p) for p in points):
+        raise ValueError("Finite 3D edge samples required")
+    angles = [math.atan2(p[2], p[1]) for p in points]
+    unwrapped = [angles[0]]
+    for a, c in zip(angles, angles[1:]):
+        delta = (c-a+math.pi) % (2*math.pi)-math.pi
+        if abs(delta) > math.pi/2:
+            raise RuntimeError("Thread edge sample density is insufficient for angular unwrapping")
+        unwrapped.append(unwrapped[-1]+delta)
+    dx, da = points[-1][0]-points[0][0], unwrapped[-1]-unwrapped[0]
+    if abs(dx) <= tolerance or abs(da) < 2*math.pi:
+        return None  # end/profile trims and sub-turn boundaries are not proof
+    signed_pitch = -pitch if left_thread else pitch
+    lead = 2*math.pi*dx/da
+    if abs(lead-signed_pitch) > tolerance:
+        raise RuntimeError("Actual thread edge lead/hand differs from requested pitch")
+    radii = [math.hypot(p[1], p[2]) for p in points]
+    if max(radii)-min(radii) > tolerance:
+        raise RuntimeError("Metric thread helical boundary is not cylindrical")
+    residual = max(abs((p[0]-points[0][0])-signed_pitch*(a-unwrapped[0])/(2*math.pi))
+        for p,a in zip(points,unwrapped))
+    if residual > tolerance:
+        raise RuntimeError("Actual thread edge is not a constant-lead helix")
+    return {"axial_min_mm": min(p[0] for p in points), "axial_max_mm": max(p[0] for p in points),
+        "radius_mm": sum(radii)/len(radii), "signed_lead_mm": lead,
+        "turns": abs(da)/(2*math.pi), "max_lead_residual_mm": residual,
+        "sample_count": len(points)}
+
+
+def _verify_external_metric_thread_geometry(doc, part, params, *, before_volume_cm3):
+    """Internal readback gate for a complete, cylindrical +X carrier only.
+
+    No COM writes or source recreation. Partial/reversed/conical spans and a
+    compound body's arbitrary carrier selection require a separate contract.
+    Sampled geometry and shell-volume bounds do not claim exact BREP, machining
+    accuracy or standard conformity. Existing profile/driver audit is separate.
+    """
+    start, end = params["start_origin"][0], params["end_origin"][0]
+    length, pitch, radius = float(params["length"]), float(params["pitch"]), float(params["carrier_diameter"])/2
+    depth = float(params["thread_depth"])+float(params.get("clearance") or 0)
+    if (params.get("thread_profile_family") != "metric_v60" or params.get("internal") or
+            params.get("carrier_shape") != "cylindrical" or params.get("crest_round_pass") or
+            not all(math.isfinite(v) for v in (start,end,length,pitch,radius,depth,before_volume_cm3)) or
+            not 0 < depth < radius or pitch <= 0 or length <= 0 or before_volume_cm3 <= 0 or
+            abs(end-start-length) > 1e-5 or length/pitch < 2 or length/pitch > 64):
+        raise ValueError("Thread geometry audit requires a complete +X external metric cylinder with 2..64 turns")
+    # This initial contract has one complete cylinder, not a hidden source model.
+    expected_blank = math.pi*radius*radius*length/1000
+    if abs(before_volume_cm3-expected_blank) > max(1e-7, expected_blank*1e-5):
+        raise ValueError("Thread audit input volume is not the selected complete cylindrical carrier")
+    bodies = _ensure_dispatch_sequence(_cast_to_com_interface(part,"IFeature7").ResultBodies)
+    if len(bodies) != 1:
+        raise RuntimeError("Physical thread result must have one current body")
+    body = _cast_to_com_interface(bodies[0],"IBody7")
+    box = body.GetGabarit()
+    expected_bounds = [start,-radius,-radius,end,radius,radius]
+    if not box or not box[0] or len(box) != 7 or any(abs(float(a)-c)>1e-5 for a,c in zip(box[1:],expected_bounds)):
+        raise RuntimeError("Physical thread changed the carrier bounds/span")
+    selected = _cast_to_com_interface(doc,"IKompasDocument")
+    app = safe_get(selected,"Application")
+    active = safe_get(app,"ActiveDocument")
+    if describe_runtime_document(active,app).get("runtime_id") != describe_runtime_document(doc,app).get("runtime_id"):
+        raise RuntimeError("Thread mass audit requires the exact active document")
+    metrics = _active_api5_primary_body_metrics()
+    removed = before_volume_cm3-float(metrics["volume"])
+    maximum = math.pi*(radius**2-(radius-depth)**2)*length/1000
+    if metrics["body_count"] != 1 or not metrics["solid"] or not math.isfinite(removed) or not 1e-6 < removed <= maximum+1e-6:
+        raise RuntimeError("Physical thread removal must stay within the selected outer shell")
+    faces = _ensure_dispatch_sequence(_cast_to_com_interface(body,"IFeature7").ModelObjects(6))
+    if not 1 <= len(faces) <= 256:
+        raise RuntimeError("Thread face readback budget exceeded")
+    intervals, seen, radii, curved_faces = [], set(), [], 0
+    count = max(65, int(math.ceil(length/pitch))*16+1)
+    for obj in faces:
+        face = _cast_to_com_interface(obj,"IFace")
+        if not safe_get(face,"IsPlanar",False) and not safe_get(face,"IsCylinder",False):
+            curved_faces += 1
+        edges = _ensure_dispatch_sequence(safe_get(face,"LimitingEdges"))
+        if len(edges)>64:
+            raise RuntimeError("Thread face boundary budget exceeded")
+        for edge in edges:
+            ref = safe_get(edge,"Reference")
+            if ref in seen:
+                continue
+            seen.add(ref)
+            if len(seen)>512:
+                raise RuntimeError("Thread edge readback budget exceeded")
+            curve = _cast_to_com_interface(safe_get(edge,"MathCurve"),"IMathCurve3D")
+            points=[]
+            for i in range(count):
+                value=curve.GetPoint(curve.ParamMin+(curve.ParamMax-curve.ParamMin)*i/(count-1))
+                if not isinstance(value,tuple) or len(value)!=4 or not value[0]:
+                    raise RuntimeError("Trimmed thread edge samples unavailable")
+                points.append([float(v) for v in value[1:]])
+            for p in points:
+                r=math.hypot(p[1],p[2]);radii.append(r)
+                if not start-1e-5<=p[0]<=end+1e-5 or not radius-depth-1e-5<=r<=radius+1e-5:
+                    raise RuntimeError("Thread boundary escapes the selected working shell/span")
+            evidence=_metric_helix_edge_evidence(points,pitch,bool(params.get("left_thread",False)))
+            if evidence is not None:
+                intervals.append(evidence)
+    if curved_faces<2 or len(intervals)<2 or not any(
+            row["axial_min_mm"]<=start+1e-5 and row["axial_max_mm"]>=end-1e-5 for row in intervals):
+        raise RuntimeError("Physical helical boundaries do not cover the full selected working span")
+    if abs(min(radii)-(radius-depth))>1e-4:
+        raise RuntimeError("Actual metric thread root depth differs from requested profile")
+    return {"ok":True,"verified":True,"working_span_mm":[start,end],"bounds_mm":list(box[1:]),
+        "volume_cm3":metrics["volume"],"removed_cm3":removed,"outer_shell_removal_upper_bound_cm3":maximum,
+        "helix_edges":intervals,"curved_face_count":curved_faces,"edge_count":len(seen),
+        "left_thread":bool(params.get("left_thread",False)),"pitch_mm":pitch,
+        "sampled_geometry":True,"sample_count_per_edge":count,"length_comparison_tolerance_mm":1e-5,
+        "reference":"actual_trimmed_native_edges_not_spiral_property_only",
+        "scope":"complete_external_metric_cylinder_positive_x","chain_carrier_selection_verified":False}
 
 
 def _build_external_helical_thread_feature(part, model_container, params, preview, steps_report):
@@ -23465,6 +23811,8 @@ def _section_entities_to_sketch_2d(entities, frame):
             item["weights"] = [float(value) for value in list(entity.get("weights") or [])]
             item["knots"] = [float(value) for value in list(entity.get("knots") or [])]
             item["degree"] = int(entity.get("degree") or 3)
+            # Section plans use mathematical degree; API7 expects order (CURVE-001).
+            item["order"] = int(entity.get("order") or item["degree"] + 1)
             item["closed"] = False
         elif kind == "arc":
             center = _frame_to_sketch_2d(entity["center3"], frame)
@@ -23643,7 +23991,25 @@ def _build_revolved_profile_blank(part, model_container, params, scenario):
     return runtime_entry, step_entry
 
 
-def _execute_workflow_operation(part, model_container, operation, runtime_objects, steps_report):
+def _cut_extrusion_extent(params, bounded_cut_depth=None):
+    """Private finite-cut gate; ordinary workflows retain through-all only."""
+    direction = str(params.get("direction") or "both").strip().lower()
+    if direction not in ("normal", "reverse", "both"):
+        raise ValueError("cut_extrusion direction must be normal, reverse, or both")
+    condition = str(params.get("end_condition") or "through_all").strip().lower()
+    if bounded_cut_depth is None:
+        if condition != "through_all":
+            raise ValueError("Finite cut extrusion requires the private bounded caller")
+        return {"direction": direction, "types": {"normal": (1,0), "reverse": (0,1), "both": (1,1)}[direction], "depth": None}
+    depth, expected = float(params.get("depth", 0)), float(bounded_cut_depth)
+    if (condition != "length" or direction != "normal" or
+            not math.isfinite(depth) or not math.isfinite(expected) or
+            depth <= 0 or abs(depth-expected) > 1e-9):
+        raise ValueError("Bounded spline cut requires its explicit positive input-frame normal depth")
+    return {"direction": direction, "types": (0,0), "depth": depth}
+
+
+def _execute_workflow_operation(part, model_container, operation, runtime_objects, steps_report, bounded_cut_depth=None):
     operation_id = str(operation.get("id") or "")
     scenario = str(operation.get("scenario") or "")
     params = dict(operation.get("params") or {})
@@ -23827,7 +24193,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         )
         if parameterize and not bool((parameterization_report or {}).get("ok")):
             raise RuntimeError("Numeric profile sketch parameterization failed: %s" % parameterization_report)
-        if parameterize and bool(params.get("require_fully_defined", True)) and sketch_state.get("code") != 2:
+        if parameterize and bool(params.get("require_fully_defined", True)) and sketch_state.get("code") != KS_SKETCH_STATE_WELL_CONSTRAINED:
             raise RuntimeError("Numeric profile sketch is not fully defined: %s" % sketch_state)
         if not bool(profile_preflight.get("ok")):
             raise RuntimeError("Numeric profile sketch preflight failed: %s" % profile_preflight)
@@ -24441,7 +24807,8 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
             entry_shift_variable = inner_radius_variable[:-4] + "_SLOT_ENTRY_SHIFT1"
         else:
             entry_shift_variable = "DIA_SLOT_ENTRY_SHIFT1"
-        entry_shift_object = _find_operation_variable(part, entry_shift_variable)
+        entry_shift_object = next((variable for variable in _iter_operation_variables(part)
+                                   if str(safe_get(variable, "Name", "")) == entry_shift_variable), None)
         entry_plane_shift = float(safe_get(entry_shift_object, "Value", 0.0) or 0.0)
         if entry_plane_shift < -1e-9:
             raise RuntimeError("cut_reference_points_sketch entry-plane shift must be >= 0")
@@ -25578,8 +25945,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         if direction not in direction_codes:
             raise RuntimeError("cut_extrusion direction must be normal, reverse, or both")
         end_condition = str(params.get("end_condition") or "through_all").strip().lower()
-        if end_condition != "through_all":
-            raise RuntimeError("cut_extrusion currently supports only end_condition=through_all")
+        extent = _cut_extrusion_extent(params, bounded_cut_depth)
 
         sketch_snapshot = _inspect_sketch_full(
             model_container,
@@ -25625,14 +25991,14 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
             bool(item.get("updated")) and bool(item.get("driving_created"))
             for item in source_dimensions
         )
-        if constraints_state_code != 2:
+        if constraints_state_code != KS_SKETCH_STATE_WELL_CONSTRAINED:
             deferred_constraints_state = (
                 sketch_runtime.get("scenario") in ("diaphragm_cut_profile_sketch", "diaphragm_terminal_relief_sketch")
                 and sketch_step is not None
                 and source_constraints_ok
                 and source_dimensions_ok
             )
-        if bool(params.get("require_fully_defined", True)) and constraints_state_code != 2 and not deferred_constraints_state:
+        if bool(params.get("require_fully_defined", True)) and constraints_state_code != KS_SKETCH_STATE_WELL_CONSTRAINED and not deferred_constraints_state:
             raise RuntimeError(
                 "cut_extrusion sketch must be fully defined; constraints_state=%s; deferred_diagnostics=%s"
                 % (
@@ -25676,7 +26042,12 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         extrusion.Name = str(params.get("name") or "Cut extrusion")
         extrusion.Sketch = sketch
         extrusion.Direction = direction_codes[direction]
-        if direction == "normal":
+        if extent["depth"] is not None:
+            extrusion.SetExtrusionType(True, 0)
+            extrusion.SetDepth(True, extent["depth"])
+            extrusion.SetExtrusionType(False, 0)
+            extrusion.SetDepth(False, 0.0)
+        elif direction == "normal":
             extrusion.SetExtrusionType(False, 0)
             extrusion.SetDepth(False, 0.0)
             extrusion.SetExtrusionType(True, 1)
@@ -25696,11 +26067,7 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
         readback_direction = int(safe_get(extrusion, "Direction", -1))
         readback_normal_type = int(extrusion.ExtrusionType(True))
         readback_reverse_type = int(extrusion.ExtrusionType(False))
-        expected_types = {
-            "normal": (1, 0),
-            "reverse": (0, 1),
-            "both": (1, 1),
-        }[direction]
+        expected_types = extent["types"]
         if not operation_valid:
             raise RuntimeError("KOMPAS API7 cut extrusion is invalid after update")
         if readback_direction != direction_codes[direction] or (readback_normal_type, readback_reverse_type) != expected_types:
@@ -25709,6 +26076,14 @@ def _execute_workflow_operation(part, model_container, operation, runtime_object
                 % (readback_direction, readback_normal_type, readback_reverse_type)
             )
 
+        if extent["depth"] is not None:
+            depth_variables = [v for v in _iter_operation_variables(extrusion)
+                if safe_get(v, "ParameterNote") in ("Distance 1", "Расстояние 1")]
+            actual_depth = float(safe_get(depth_variables[0], "Value")) if len(depth_variables) == 1 else float("nan")
+            if not math.isfinite(actual_depth) or abs(actual_depth-extent["depth"]) > 1e-7:
+                raise RuntimeError("Finite cut extrusion depth readback differs from its bounded plan")
+            steps_report.append({"step": "bounded_cut_extent", "depth_mm": extent["depth"],
+                "direction": direction, "normal_type": readback_normal_type, "reverse_type": readback_reverse_type})
         body_after = _active_api5_primary_body_metrics()
         volume_removed = float(body_before["volume"]) - float(body_after["volume"])
         volume_tolerance = max(1e-9, abs(float(body_before["volume"])) * 1e-9)
@@ -26586,11 +26961,7 @@ def _handle_create_point_scenario(payload, scenario):
             "file_access": file_access_diagnostics(output_path),
         }
     except Exception as exc:
-        if close_after_save:
-            try:
-                _close_generated_document(doc3, app)
-            except Exception:
-                pass
+        _report_retained_partial_document(doc3, output_path, current_stage)
         raise RuntimeError(
             "create_part_from_scenario failed at %s: %s | steps=%s"
             % (current_stage, exc, json.dumps(steps_report, ensure_ascii=False))
@@ -26726,11 +27097,7 @@ def _handle_create_lcs_scenario(payload, scenario):
             "file_access": file_access_diagnostics(output_path),
         }
     except Exception as exc:
-        if close_after_save:
-            try:
-                _close_generated_document(doc3, app)
-            except Exception:
-                pass
+        _report_retained_partial_document(doc3, output_path, current_stage)
         raise RuntimeError(
             "create_part_from_scenario failed at %s: %s | steps=%s"
             % (current_stage, exc, json.dumps(steps_report, ensure_ascii=False))
@@ -26959,6 +27326,24 @@ def _handle_create_workflow_scenario(payload, scenario):
                 }
             )
 
+        if payload.get("diaphragm_module_recipe") is not None:
+            current_stage = "diaphragm_module_verification"
+            if [op.get("scenario") for op in operations] != [
+                    "diaphragm_spring", "tangent_plane", "cut_reference_points_sketch",
+                    "projection_point", "projection_point", "diaphragm_cut_profile_sketch",
+                    "diaphragm_terminal_relief_sketch", "cut_extrusion", "cut_extrusion", "circular_pattern"]:
+                raise ValueError("Diaphragm module recipe requires the complete owned workflow")
+            recipe = payload["diaphragm_module_recipe"]
+            rotation = _cast_to_com_interface(_resolve_runtime_workflow_output(runtime_objects, "base", "body")["object"], "IRotated")
+            rotation.Name = recipe["sweep_name"]
+            if not rotation.Update() or not cast_document_3d(doc3).RebuildDocument():
+                raise RuntimeError("Diaphragm owned rotation/rebuild failed")
+            _diaphragm_module_readback(part, recipe)
+            metrics = _active_api5_primary_body_metrics()
+            if metrics.get("body_count") != 1 or not metrics.get("solid") or float(metrics.get("volume") or 0) <= 0:
+                raise RuntimeError("Diaphragm module must produce one positive-volume solid")
+            _store_compression_module_recipe(part, recipe, "diaphragm")
+
         current_stage = "save"
         saved, created_document = _save_generated_part_document(
             doc3,
@@ -26989,15 +27374,16 @@ def _handle_create_workflow_scenario(payload, scenario):
             "file_access": file_access_diagnostics(output_path),
         }
     except Exception as exc:
-        if close_after_save:
-            try:
-                _close_generated_document(doc3, app)
-            except Exception:
-                pass
+        _report_retained_partial_document(doc3, output_path, current_stage)
         raise RuntimeError(
             "create_part_from_scenario failed at %s: %s | steps=%s"
             % (current_stage, exc, json.dumps(steps_report, ensure_ascii=False))
         )
+
+
+# ISketch.ConstraintsState returns ksConstraintsStateEnum (v23 typelib readback).
+# Drawing-object ConstraintsState uses a different enum; keep its decoder separate.
+KS_SKETCH_STATE_WELL_CONSTRAINED = 1
 
 
 def _describe_constraints_state(state):
@@ -27007,8 +27393,8 @@ def _describe_constraints_state(state):
         return {"code": None, "name": "unknown", "label": "unknown"}
     mapping = {
         0: ("unknown", "unknown"),
-        1: ("under_constrained", "has_degrees_of_freedom"),
-        2: ("well_constrained", "fully_defined"),
+        1: ("well_constrained", "fully_defined"),
+        2: ("under_constrained", "has_degrees_of_freedom"),
         3: ("unresolved_redundancy", "has_conflicting_constraints"),
     }
     name, label = mapping.get(code, ("unknown", "unknown"))
@@ -27066,7 +27452,7 @@ def _entity_style_id(entity):
 def _entity_curve_endpoints(entity):
     kind = entity.get("kind")
     geometry = entity.get("geometry") or {}
-    if kind not in ("segment", "arc", "nurbs"):
+    if kind not in ("segment", "arc", "nurbs", "bezier"):
         return None
     start = geometry.get("start")
     end = geometry.get("end")
@@ -27087,6 +27473,19 @@ def _sample_curve_points(geometry, samples=16):
     end = geometry.get("end")
     if not isinstance(start, list) or not isinstance(end, list) or len(start) != 2 or len(end) != 2:
         return []
+    nodes = geometry.get("bezier_nodes")
+    if nodes:
+        points = []
+        pairs = list(zip(nodes, nodes[1:]))
+        if geometry.get("closed"):
+            pairs.append((nodes[-1], nodes[0]))
+        for first, second in pairs:
+            control = [first["base"], first["right"], second["left"], second["base"]]
+            for index in range(samples):
+                t = index / float(samples)
+                points.append([sum(weight*p[axis] for weight, p in zip(
+                    ((1-t)**3, 3*(1-t)**2*t, 3*(1-t)*t*t, t**3), control)) for axis in (0, 1)])
+        return points + [end]
     control_points = geometry.get("points")
     if control_points and geometry.get("knots"):
         knots, weights = geometry["knots"], geometry.get("weights") or []
@@ -27329,11 +27728,286 @@ def _sketch_diagnostics_focus(constraint_state_summary, closure_audit, sketch_co
         focus.append({"kind": "multiple_primary_contours", "severity": "medium", "count": primary.get("component_count")})
     if all_geometry.get("gap_count") and not primary.get("gap_count"):
         focus.append({"kind": "helper_or_axis_open_endpoints", "severity": "info", "count": all_geometry.get("gap_count"), "items": all_geometry.get("gaps")})
-    sketch_is_fully_defined = (sketch_constraints_state or {}).get("code") == 2
+    sketch_is_fully_defined = (sketch_constraints_state or {}).get("code") == KS_SKETCH_STATE_WELL_CONSTRAINED
     not_full = (constraint_state_summary or {}).get("not_full") or []
     if not_full and not sketch_is_fully_defined:
         focus.append({"kind": "not_fully_parametric_entities", "severity": "medium", "count": len(not_full), "items": not_full[:20]})
     return focus
+
+
+def _creation_module_recipe(part, family):
+    prefix = {"compression": "CSPR", "extension": "ESPR", "torsion": "TSPR", "disc": "DSPR", "diaphragm": "DIAPR", "stepped_shaft": "SHFT", "external_conical_step": "ECON", "external_polygonal_step": "EPOL", "external_flat_step": "EFLT", "construction_chain": "CHN"}[family]
+    variables = {str(safe_get(v, "Name") or ""): v for v in _iter_operation_variables(part)}
+    if prefix + "_RECIPE_COUNT" not in variables:
+        return None, None
+    try:
+        import hashlib
+        count = int(safe_get(variables[prefix + "_RECIPE_COUNT"], "Value") or 0)
+        if not 1 <= count <= 120:
+                raise ValueError("Invalid spring recipe count")
+        text = "".join(str(safe_get(variables[prefix + "_RECIPE_%03d" % i], "Note") or "") for i in range(count))
+        if len(text) > 24000 or hashlib.sha256(text.encode("ascii")).hexdigest() != str(safe_get(variables[prefix + "_RECIPE_HASH"], "Note") or ""):
+            raise ValueError("Spring recipe checksum differs")
+        recipe = json.loads(text)
+        if recipe.get("schema") != "geomwright.%s.recipe" % family or recipe.get("version") != 1:
+            raise ValueError("Unsupported spring recipe")
+        return recipe, None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _compression_module_recipe(part, family="compression"):
+    return _creation_module_recipe(part, family)
+
+
+def _store_creation_module_recipe(part, recipe, family):
+    prefix = {"compression": "CSPR", "extension": "ESPR", "torsion": "TSPR", "disc": "DSPR", "diaphragm": "DIAPR", "stepped_shaft": "SHFT", "external_conical_step": "ECON", "external_polygonal_step": "EPOL", "external_flat_step": "EFLT", "construction_chain": "CHN"}[family]
+    import hashlib
+    text = json.dumps(recipe, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    if len(text) > 24000:
+        raise ValueError("Spring recipe exceeds 24000 characters")
+    chunks = [text[i:i+200] for i in range(0, len(text), 200)]
+    values = [{"name": prefix + "_RECIPE_COUNT", "value": len(chunks)},
+              {"name": prefix + "_RECIPE_HASH", "value": 1, "note": hashlib.sha256(text.encode("ascii")).hexdigest()}]
+    values.extend({"name": prefix + "_RECIPE_%03d" % i, "value": 1, "note": chunk} for i, chunk in enumerate(chunks))
+    if not _apply_part_variables(part, values).get("ok"):
+        raise RuntimeError("Creation recipe variables could not be written")
+    # AddVariable supplies Note only for new variables. An appended chain reuses
+    # the bounded metadata slots, so replace their actual text explicitly.
+    actual = {str(safe_get(v, "Name") or ""): v for v in _iter_operation_variables(part)}
+    for value in values:
+        actual[value["name"]].Value = float(value["value"])
+        if "note" in value:
+            actual[value["name"]].Note = value["note"]
+    decoded, recipe_error = _creation_module_recipe(part, family)
+    if decoded != json.loads(text) or recipe_error:
+        raise RuntimeError("Creation recipe persistence readback failed: " + str(recipe_error or "decoded inputs differ"))
+
+
+def _store_compression_module_recipe(part, recipe, family="compression"):
+    return _store_creation_module_recipe(part, recipe, family)
+
+
+def handle_inspect_rotational_module(payload, family="stepped_shaft"):
+    app = make_app()
+    if not str(payload.get("document_id") or "").strip():
+        raise ValueError("Exact document_id is required")
+    selected = resolve_document_strict(app, payload["document_id"])
+    if selected is None:
+        raise RuntimeError("Exact shaft document is not open")
+    doc = cast_document_3d(selected)
+    if doc is None:
+        raise RuntimeError("Shaft inspection requires a 3D document")
+    part = doc.TopPart
+    model = cast_model_container(part)
+    recipe, error = _creation_module_recipe(part, family)
+    refs = []
+    sketch = rotation = None
+    if recipe:
+        try:
+            for collection, name in (("Sketchs",recipe["profile_name"]),("Extrusions" if family in ("external_polygonal_step","external_flat_step") else "Rotateds",recipe["body_name"])):
+                roots = [obj for obj in iter_collection(safe_get(model,collection)) if safe_get(obj,"Name") == name]
+                if len(roots) != 1 or not bool(safe_get(_cast_to_com_interface(roots[0],"IFeature7"),"Valid",False)):
+                    raise RuntimeError("Shaft owned root missing or invalid: " + name)
+                ref = safe_get(roots[0],"Reference")
+                if not ref:
+                    raise RuntimeError("Shaft owned reference unavailable")
+                refs.append(ref)
+                if collection == "Sketchs":
+                    sketch = roots[0]
+                else:
+                    rotation = roots[0]
+        except Exception as exc:
+            error, recipe = str(exc), None
+    result = {"ok":True,"recognized":bool(recipe or error),"document":describe_runtime_document(doc,app),
+        "block":{"module":family,"recipe":recipe,"recipe_error":error,"owned_references":refs,
+                 "name":recipe.get("name") if recipe else None}}
+    if payload.get("creation_body_readback"):
+        if not recipe:
+            raise RuntimeError("Shaft body readback requires valid recipe/roots")
+        active = describe_runtime_document(safe_get(app,"ActiveDocument"),app)
+        if active.get("runtime_id") != result["document"].get("runtime_id"):
+            raise RuntimeError("Shaft body readback requires exact active document")
+        if family == "stepped_shaft":
+            _, report = _select_stepped_shaft_planar_face(rotation,"far_end_face")
+            result["faces"] = [{"reference":face["reference"],"surface_type":"cylinder" if face["is_cylinder"] else "plane",
+                "radius_mm":face["radius"],"axial_min":face["x_min"],"axial_max":face["x_max"]} for face in report["candidates"]]
+        elif family == "external_conical_step":
+            face, report = _select_external_conical_step_face(rotation,"outer_face")
+            if not bool(safe_get(face,"IsCone",False)):
+                raise RuntimeError("External cone has no native conical surface")
+            points = []
+            for edge in _ensure_dispatch_sequence(safe_get(face,"LimitingEdges")):
+                for endpoint in (True,False):
+                    point = edge.GetPoint(endpoint)
+                    if isinstance(point,tuple) and len(point)>=4 and point[0]:
+                        points.append([float(v) for v in point[1:4]])
+            if not points:
+                raise RuntimeError("Cone trimmed boundaries unavailable")
+            low, high = min(p[0] for p in points),max(p[0] for p in points)
+            radii = [[math.hypot(p[1],p[2]) for p in points if abs(p[0]-x)<1e-7] for x in (low,high)]
+            if high-low<=1e-9 or any(not values or max(values)-min(values)>1e-5 for values in radii):
+                raise RuntimeError("Cone boundary ends are inconsistent")
+            result["faces"] = [{"reference":safe_get(face,"Reference"),"surface_type":"cone",
+                "axial_min":low,"axial_max":high,"start_radius_mm":radii[0][0],"end_radius_mm":radii[1][0]}]
+        elif family == "external_flat_step":
+            bodies = _ensure_dispatch_sequence(safe_get(_cast_to_com_interface(part,"IFeature7"),"ResultBodies"))
+            if len(bodies) != 1:
+                raise RuntimeError("Flat readback requires exactly one final body")
+            objects = _ensure_dispatch_sequence(_cast_to_com_interface(bodies[0],"IFeature7").ModelObjects(6))
+            if len(objects) not in (4,6):
+                raise RuntimeError("Flat final face count differs from standalone constructor")
+            faces = []
+            for obj in objects:
+                face = _cast_to_com_interface(obj,"IFace")
+                planar, cylinder = bool(safe_get(face,"IsPlanar",False)), bool(safe_get(face,"IsCylinder",False))
+                if planar == cylinder:
+                    raise RuntimeError("Flat face must be planar or cylindrical")
+                edges = _ensure_dispatch_sequence(safe_get(face,"LimitingEdges"))
+                if not 2 <= len(edges) <= 4:
+                    raise RuntimeError("Flat trimmed boundary edge count differs")
+                points = []
+                for edge in edges:
+                    for endpoint in (True,False):
+                        point = edge.GetPoint(endpoint)
+                        if not isinstance(point,tuple) or len(point)<4 or not point[0]:
+                            raise RuntimeError("Flat boundary vertex unavailable")
+                        xyz = [float(v) for v in point[1:4]]
+                        if not all(math.isfinite(v) for v in xyz):
+                            raise RuntimeError("Flat boundary vertex is non-finite")
+                        points.append(xyz)
+                faces.append({"reference":safe_get(face,"Reference"),"surface_type":"plane" if planar else "cylinder",
+                    "radius_mm":float(safe_get(face,"Radius",0.0) or 0.0),"points_mm":points})
+            result["faces"] = faces
+        else:
+            bodies = _ensure_dispatch_sequence(safe_get(_cast_to_com_interface(part,"IFeature7"),"ResultBodies"))
+            if len(bodies)!=1:
+                raise RuntimeError("Polygon readback requires exactly one final body")
+            objects = _cast_to_com_interface(bodies[0],"IFeature7").ModelObjects(6)
+            points = []
+            for obj in _ensure_dispatch_sequence(objects):
+                face = _cast_to_com_interface(obj,"IFace")
+                if not bool(safe_get(face,"IsPlanar",False)):
+                    raise RuntimeError("Polygon prism has a non-planar face")
+                for edge in _ensure_dispatch_sequence(safe_get(face,"LimitingEdges")):
+                    for endpoint in (True,False):
+                        point = edge.GetPoint(endpoint)
+                        if not isinstance(point,tuple) or len(point)<4 or not point[0]:
+                            raise RuntimeError("Polygon boundary vertex unavailable")
+                        xyz = [float(v) for v in point[1:4]]
+                        if not all(math.isfinite(v) for v in xyz):
+                            raise RuntimeError("Polygon boundary vertex is non-finite")
+                        if not any(max(abs(a-b) for a,b in zip(xyz,p))<1e-7 for p in points):
+                            points.append(xyz)
+            result["faces"] = [{"surface_type":"prism_vertices","points_mm":points}]
+        result["body"] = _active_api5_primary_body_metrics()
+        result["sketch_state"] = _describe_constraints_state(safe_get(_cast_to_com_interface(sketch,"ISketch"),"ConstraintsState"))
+    return result
+
+
+def handle_inspect_stepped_shaft_module(payload):
+    return handle_inspect_rotational_module(payload,"stepped_shaft")
+
+
+def _diaphragm_module_readback(part, recipe):
+    """Read owned final-workflow structure without rebuilding or writing."""
+    model = cast_model_container(part)
+    refs = []
+    sketch_states = {}
+    pattern = None
+    roots = [("Rotateds", recipe["sweep_name"]), ("FeaturePatterns", "Diaphragm cuts")]
+    roots += [("Sketchs", name) for name in (recipe["profile_name"], "Cut radius references", "Cut profile sketch", "Terminal relief sketch")]
+    for collection, name in roots:
+        matches = [obj for obj in iter_collection(safe_get(model, collection)) if safe_get(obj, "Name") == name]
+        if len(matches) != 1:
+            raise RuntimeError("Diaphragm owned root missing: " + name)
+        feature = _cast_to_com_interface(matches[0], "IFeature7")
+        if not bool(safe_get(feature, "Valid", False)):
+            raise RuntimeError("Diaphragm owned root invalid: " + name)
+        refs.append(safe_get(matches[0], "Reference"))
+        if collection == "Sketchs" and not bool(safe_get(_cast_to_com_interface(matches[0], "IModelObject"), "Hidden", False)):
+            raise RuntimeError("Diaphragm auxiliary sketch not hidden: " + name)
+        if collection == "Sketchs":
+            sketch_states[name] = _describe_constraints_state(safe_get(_cast_to_com_interface(matches[0], "ISketch"), "ConstraintsState"))
+        if collection == "FeaturePatterns":
+            pattern = _cast_to_com_interface(matches[0], "ICircularPattern")
+    initial = _ensure_dispatch_sequence(safe_get(pattern, "InitialObjects"))
+    initial_refs = [safe_get(obj, "Reference") for obj in initial]
+    count = recipe["parameters"]["slot_count"]
+    # Extrusions also contains patterned copies carrying the original names.
+    # The pattern's InitialObjects identifies the two actual source operations.
+    if len(initial_refs) != 2 or not all(initial_refs) or len(set(initial_refs)) != 2 or {safe_get(obj, "Name") for obj in initial} != {"Diaphragm slot cut", "Diaphragm relief cut"}:
+        raise RuntimeError("Diaphragm pattern must own both slot and relief cuts")
+    if not all(bool(safe_get(_cast_to_com_interface(obj, "IFeature7"), "Valid", False)) for obj in initial):
+        raise RuntimeError("Diaphragm initial cut invalid")
+    refs.extend(initial_refs)
+    auxiliary = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+    for collection, name in (("Planes3D", "Diaphragm tangent plane"), ("Points3D", "Cut start projection"), ("Points3D", "Cut end projection")):
+        owner = model if collection == "Points3D" else auxiliary
+        matches = [obj for obj in iter_collection(safe_get(owner, collection)) if safe_get(obj, "Name") == name]
+        if len(matches) != 1 or not bool(safe_get(_cast_to_com_interface(matches[0], "IModelObject"), "Hidden", False)):
+            raise RuntimeError("Diaphragm auxiliary geometry missing or visible: " + name)
+        refs.append(safe_get(matches[0], "Reference"))
+    if not all(refs):
+        raise RuntimeError("Diaphragm owned references unavailable")
+    if int(pattern.Count2) != count or abs(float(pattern.Step2) - 360.0/count) > 1e-7 or bool(pattern.SaveInitialOrientation):
+        raise RuntimeError("Diaphragm native pattern parameters differ")
+    return {"owned_references": refs, "count": int(pattern.Count2), "angle_step": float(pattern.Step2),
+            "initial_object_count": len(initial_refs), "auxiliary_geometry_hidden": True, "sketch_states": sketch_states}
+
+
+def handle_inspect_compression_module(payload, family="compression"):
+    app = make_app()
+    if not str(payload.get("document_id") or "").strip():
+        raise ValueError("Exact document_id is required")
+    doc = cast_document_3d(resolve_document_strict(app, payload["document_id"]))
+    part = safe_get(doc, "TopPart")
+    recipe, error = _compression_module_recipe(part, family)
+    recipe_name = recipe.get("name") if recipe else None
+    model = cast_model_container(part)
+    refs = []
+    if recipe:
+        for collection, name in (("Sketchs", recipe["profile_name"]), ("Rotateds" if family in ("disc", "diaphragm") else "Evolutions", recipe["sweep_name"])):
+            roots = [item for item in iter_collection(safe_get(model, collection)) if safe_get(item, "Name") == name]
+            if len(roots) != 1 or safe_get(roots[0], "Valid") is False:
+                error = "Spring owned root missing or invalid: " + name
+                recipe = None
+                break
+            refs.append(safe_get(roots[0], "Reference"))
+        if family == "diaphragm" and recipe:
+            try:
+                refs = _diaphragm_module_readback(part, recipe)["owned_references"]
+            except Exception as exc:
+                error = str(exc)
+                recipe = None
+    result = {"ok": True, "recognized": bool(recipe or error), "block": {
+        "module": family + "_spring", "id": family + ":" + "-".join(str(r) for r in refs),
+        "schema": "geomwright." + family, "version": 1, "recipe": recipe,
+        "recipe_error": error, "name": recipe_name,
+        "owned_references": refs}, "document": describe_runtime_document(doc, app)}
+    if payload.get("creation_body_readback"):
+        active = describe_runtime_document(safe_get(app, "ActiveDocument"), app)
+        if active.get("runtime_id") != result["document"].get("runtime_id"):
+            raise RuntimeError("Spring body readback requires its exact active created document")
+        result["body"] = _active_api5_primary_body_metrics()
+        if family == "diaphragm" and recipe:
+            result["diaphragm"] = _diaphragm_module_readback(part, recipe)
+        if family in ("extension", "torsion") and recipe:
+            auxiliary = _cast_to_com_interface(part, "IAuxiliaryGeomContainer")
+            coils = [s for s in iter_collection(safe_get(auxiliary, "Spirals3D"))
+                     if safe_get(s, "Name") == recipe["body_path_name"]]
+            if len(coils) != 1:
+                raise RuntimeError("Extension must have one named native coil")
+            coil = _cast_to_com_interface(coils[0], "ICylindricSpiral3D")
+            variables = {str(safe_get(v, "Name")): v for v in _iter_operation_variables(part)}
+            result["coil"] = {"diameter": float(coil.Diameter), "pitch": float(coil.Step),
+                              "height": float(coil.Height), "turn_direction": bool(coil.TurnDirection),
+                              "wire_diameter": float(safe_get(variables["WD1"], "Value"))}
+            if family == "torsion":
+                lines = {str(safe_get(line, "Name")): line for line in iter_collection(safe_get(auxiliary, "LineSegments3D"))}
+                result["legs"] = {role: _sample_curve_endpoints(_cast_to_com_interface(lines[name], "ILineSegment3D"))
+                                  for role, name in recipe["leg_path_names"].items()}
+    return result
 
 
 def handle_create_part_from_scenario(payload):
@@ -27457,7 +28131,8 @@ def handle_create_part_from_scenario(payload):
         elif scenario == "diaphragm_spring":
             _build_diaphragm_spring_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
         elif scenario == "external_conical_step":
-            _build_external_conical_step_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
+            build_result = _build_external_conical_step_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
+            created_feature = build_result.get("rotated")
         elif scenario == "internal_conical_step":
             _build_internal_conical_step_feature(
                 part,
@@ -27477,7 +28152,8 @@ def handle_create_part_from_scenario(payload):
                 require_source=True,
             )
         elif scenario == "external_polygonal_step":
-            _build_external_polygonal_step_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
+            build_result = _build_external_polygonal_step_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
+            created_feature = build_result.get("extrusion")
         elif scenario == "internal_polygonal_step":
             _build_internal_polygonal_step_feature(
                 part,
@@ -27488,7 +28164,8 @@ def handle_create_part_from_scenario(payload):
                 require_source=True,
             )
         elif scenario == "external_flat_step":
-            _build_external_flat_step_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
+            build_result = _build_external_flat_step_feature(part, model_container, params, payload.get("preview") or {}, steps_report)
+            created_feature = build_result.get("extrusion")
         elif scenario == "internal_flat_step":
             _build_internal_flat_step_feature(
                 part,
@@ -27544,6 +28221,82 @@ def handle_create_part_from_scenario(payload):
                 }
             )
 
+        shaft_module_body = None
+        rotational_recipe = payload.get("legacy_body_module_recipe") or payload.get("rotational_module_recipe") or payload.get("shaft_module_recipe")
+        if rotational_recipe is not None:
+            current_stage = "shaft_module_verification"
+            if scenario not in ("stepped_shaft","external_conical_step","external_polygonal_step","external_flat_step") or rotational_recipe.get("schema") != "geomwright.%s.recipe" % scenario:
+                raise ValueError("Rotational recipe does not match scenario")
+            recipe = rotational_recipe
+            if scenario == "external_polygonal_step":
+                sketch = _cast_to_com_interface(build_result["sketch"],"ISketch")
+                if safe_get(sketch,"Name") != recipe["profile_name"]:
+                    raise RuntimeError("Polygon profile canonical name must be assigned before parameterization")
+            if scenario == "external_flat_step":
+                sketch = _cast_to_com_interface(build_result["sketch"],"ISketch")
+                if safe_get(sketch,"Name") != recipe["profile_name"]:
+                    raise RuntimeError("Flat profile canonical name must be assigned before parameterization")
+            rotation = _cast_to_com_interface(created_feature,"IExtrusion" if scenario in ("external_polygonal_step","external_flat_step") else "IRotated")
+            rotation.Name = recipe["body_name"]
+            if not rotation.Update() or not cast_document_3d(doc3).RebuildDocument():
+                raise RuntimeError("Shaft rotation/rebuild failed")
+            if not bool(safe_get(_cast_to_com_interface(rotation,"IFeature7"),"Valid",False)):
+                raise RuntimeError("Shaft native rotation invalid")
+            shaft_module_body = _active_api5_primary_body_metrics()
+            if shaft_module_body.get("body_count") != 1 or not shaft_module_body.get("solid") or float(shaft_module_body.get("volume") or 0) <= 0:
+                raise RuntimeError("Shaft must contain one positive-volume solid")
+            _store_creation_module_recipe(part,recipe,scenario)
+
+        compression_module_body = None
+        module_recipe = payload.get("compression_module_recipe")
+        module_family = "compression"
+        if payload.get("extension_module_recipe") is not None:
+            if module_recipe is not None:
+                raise ValueError("Specify only one spring module recipe")
+            module_recipe = payload["extension_module_recipe"]
+            module_family = "extension"
+        if payload.get("torsion_module_recipe") is not None:
+            if module_recipe is not None:
+                raise ValueError("Specify only one spring module recipe")
+            module_recipe = payload["torsion_module_recipe"]
+            module_family = "torsion"
+        if payload.get("disc_module_recipe") is not None:
+            if module_recipe is not None:
+                raise ValueError("Specify only one spring module recipe")
+            module_recipe = payload["disc_module_recipe"]
+            module_family = "disc"
+        if module_recipe is not None:
+            current_stage = "compression_module_verification"
+            allowed_scenarios = (module_family + "_spring",) if module_family != "compression" else ("compression_spring", "compression_spring_variable_pitch", "conical_compression_spring")
+            if scenario not in allowed_scenarios:
+                raise ValueError("Spring module recipe does not match the requested scenario")
+            if not cast_document_3d(doc3).RebuildDocument():
+                raise RuntimeError("Compression module rebuild failed")
+            if module_family == "disc":
+                rotations = list(iter_collection(safe_get(model_container, "Rotateds")))
+                if len(rotations) != 1:
+                    raise RuntimeError("Disc module requires one owned rotation")
+                rotation_feature = _cast_to_com_interface(rotations[0], "IFeature7")
+                rotation = _cast_to_com_interface(rotations[0], "IRotated")
+                rotation.Name = module_recipe["sweep_name"]
+                if not rotation.Update() or str(rotation_feature.Name) != module_recipe["sweep_name"]:
+                    raise RuntimeError("Disc rotation name readback failed")
+            sweeps = [item for item in iter_collection(safe_get(model_container, "Rotateds" if module_family == "disc" else "Evolutions"))
+                      if str(safe_get(item, "Name", "")) == str(module_recipe.get("sweep_name"))]
+            if len(sweeps) != 1:
+                raise RuntimeError("Compression module must own exactly one named sweep")
+            sweep_feature = _cast_to_com_interface(sweeps[0], "IFeature7")
+            if not bool(safe_get(sweep_feature, "Valid", False)):
+                native_error = safe_get(sweep_feature, "ObjectError")
+                if native_error == 31:
+                    raise RuntimeError("CAD_SELF_INTERSECTION: %s spring sweep is invalid; "
+                                       "KOMPAS ObjectError=31 (object self-intersects)" % module_family)
+                raise RuntimeError("%s spring sweep is invalid; KOMPAS ObjectError=%s" % (module_family, native_error))
+            compression_module_body = _active_api5_primary_body_metrics()
+            if (compression_module_body.get("body_count") != 1 or not compression_module_body.get("solid")
+                    or float(compression_module_body.get("volume") or 0) <= 0):
+                raise RuntimeError("Compression module must produce one positive-volume solid")
+            _store_compression_module_recipe(part, module_recipe, module_family)
         current_stage = "save"
         saved, created_document = _save_generated_part_document(
             doc3,
@@ -27569,6 +28322,10 @@ def handle_create_part_from_scenario(payload):
             "output_path": output_path,
             "saved": saved,
             "closed": close_after_save,
+            "compression_module_body": compression_module_body,
+            "shaft_module_body": shaft_module_body,
+            "rotational_module_body": shaft_module_body,
+            "legacy_module_body": shaft_module_body,
             "steps": steps_report,
             "summary": {
                 "step_count": len(params.get("steps") or []),
@@ -27579,6 +28336,7 @@ def handle_create_part_from_scenario(payload):
             "file_access": file_access_diagnostics(output_path),
         }
     except Exception as exc:
+        _report_retained_partial_document(doc3, output_path, current_stage)
         partial_save_report = None
         if material_settings is not None and material_settings_snapshot is not None:
             try:
@@ -27618,30 +28376,38 @@ def handle_create_part_from_scenario(payload):
                     "remaining_documents": list_documents(app),
                     "file_access": file_access_diagnostics(output_path),
                 }
-        if close_after_save and not (partial_save_report and partial_save_report.get("saved")):
-            try:
-                _close_generated_document(doc3, app)
-            except Exception:
-                pass
         raise RuntimeError(
             "create_part_from_scenario failed at %s: %s | steps=%s | partial_save=%s"
             % (
                 current_stage,
-                exc,
-                json.dumps(steps_report, ensure_ascii=False),
+                str(exc)[:2000],
+                json.dumps([{"step": s.get("step"), "ok": s.get("ok"), "role": s.get("role")}
+                            for s in steps_report], ensure_ascii=False),
                 json.dumps(partial_save_report, ensure_ascii=False),
             )
         )
 
 
+def _report_retained_partial_document(doc3, output_path, stage):
+    # No COM access here: after a failed build even Close/readback can block.
+    report_progress(0, "partial_document_retained", failed_stage=str(stage)[:200],
+                    partial_document={"owned_reference_available": doc3 is not None,
+                                      "intended_output_path": str(output_path or "")[:1000],
+                                      "document_id": None},
+                    cleanup={"attempted": False, "verified_closed": False,
+                             "reason": "CAD outcome unknown; explicit user recovery required"})
+
+
 def _close_generated_document(doc3, app):
-    active_document = safe_get(app, "ActiveDocument")
-    if active_document is not None:
-        try:
-            active_document.Close(0)
-            return
-        except Exception:
-            pass
+    if _cad_is_interactive():
+        return False
+    # The active document can have changed during a failed multi-step build.
+    # Never close it as a substitute for the document this invocation owns.
+    owned_document = _cast_to_com_interface(doc3, "IKompasDocument") if doc3 is not None else None
+    close_owned = safe_get(owned_document, "Close")
+    if callable(close_owned):
+        close_owned(0)
+        return
     if doc3 is not None:
         for method_name in ("close", "Close"):
             method = safe_get(doc3, method_name)
@@ -27991,7 +28757,7 @@ def handle_apply_v_belt_grooves(payload):
         if callable(rebuild) and rebuild() is False:
             raise RuntimeError("V-belt document rebuild after fixing sketch returned False")
     post_rebuild_sketch_state = _describe_constraints_state(safe_get(sketch, "ConstraintsState"))
-    if bool(params.get("require_fully_defined", False)) and post_rebuild_sketch_state.get("code") != 2:
+    if bool(params.get("require_fully_defined", False)) and post_rebuild_sketch_state.get("code") != KS_SKETCH_STATE_WELL_CONSTRAINED:
         raise RuntimeError(
             "V-belt groove sketch is not fully defined after rebuild: "
             + str(post_rebuild_sketch_state.get("name") or "unknown")
@@ -28026,7 +28792,7 @@ def handle_apply_v_belt_grooves(payload):
         and volume_decreased
         and operation_valid
         and rebuild_ok is not False
-        and post_rebuild_sketch_state.get("code") == 2
+        and post_rebuild_sketch_state.get("code") == KS_SKETCH_STATE_WELL_CONSTRAINED
     )
     warnings = []
     if ratio_error is not None and ratio_error > max_ratio_error:
@@ -28213,10 +28979,14 @@ def _build_managed_flat_pulley(document, part, model_container, plan, steps_repo
     feature_valid = safe_get(feature, "Valid") is not False
     if not feature_valid:
         raise RuntimeError("Managed flat pulley rotation is invalid after rebuild")
-    body = {"body_count": 1, "volume": None, "source": "valid_rotation_and_rebuild"}
+    body = _active_api5_primary_body_metrics()
+    if int(body.get("body_count") or 0) != 1 or not body.get("solid") or float(body.get("volume") or 0) <= 0:
+        raise RuntimeError("Managed flat pulley must create one positive-volume solid")
     report_progress(92, "flat_pulley_body_readback", name=str(ownership.get("blank_feature_name") or ""))
     expected_volume = float(member.get("expected_volume_cm3") or 0.0)
-    volume_error = None
+    volume_error = abs(float(body["volume"]) / expected_volume - 1) if expected_volume > 0 else None
+    if volume_error is None or volume_error > 0.005:
+        raise RuntimeError("Managed flat pulley volume differs from the profile integration")
     return {
         "success": True,
         "feature": feature,
@@ -28627,9 +29397,13 @@ def handle_create_chain_sprocket(payload):
             "steps": steps_report,
         }
     except Exception as exc:
+        try:
+            partial_document = describe_runtime_document(doc3, app) if doc3 else None
+        except Exception as describe_exc:
+            partial_document = {"unresolved": True, "describe_error": str(describe_exc)}
         raise RuntimeError(
-            "create_chain_sprocket failed at %s: %s | completed_steps=%s"
-            % (current_stage, exc, json.dumps([
+            "create_chain_sprocket failed at %s: %s | partial_document=%s | completed_steps=%s"
+            % (current_stage, exc, json.dumps(partial_document), json.dumps([
                 {"id": item.get("id"), "step": item.get("step"), "ok": item.get("ok")}
                 for item in steps_report
             ], ensure_ascii=False))
@@ -29087,6 +29861,40 @@ def handle_inspect_gear_spur(payload):
     return block
 
 
+def _verify_gear_spur_foundation(doc3, part, plan, steps_report):
+    """Family acceptance in an existing document, before composite additions."""
+    bodies = _ensure_dispatch_sequence(_cast_to_com_interface(part, "IFeature7").ResultBodies)
+    body = _active_api5_primary_body_metrics()
+    if len(bodies) != 1 or not body["solid"] or not 0.0 < float(body["volume"]):
+        raise RuntimeError("Gear result must be one positive-volume solid")
+    box = _cast_to_com_interface(bodies[0], "IBody7").GetGabarit()
+    if not box or not box[0] or len(box) != 7:
+        raise RuntimeError("Gear body bounds unavailable")
+    body["bounds_mm"] = [float(value) for value in box[1:]]
+    verify = plan.get("verification") or {}
+    expected_volume = float(verify.get("expected_volume_mm3") or 0.0)
+    if expected_volume <= 0.0:
+        raise RuntimeError("Gear plan expected volume is missing")
+    error = abs(float(body["volume"]) * 1000.0 / expected_volume - 1.0)
+    if error > float(verify.get("volume_relative_tolerance") or 0.01):
+        raise RuntimeError("Gear body volume disagrees with the plan: " + str(error))
+    expected_bounds = [float(value) for value in (verify.get("expected_bounds_mm") or [])]
+    candidates = [[float(value) for value in candidate]
+                  for candidate in (verify.get("expected_bounds_candidates_mm") or [expected_bounds]) if len(candidate) == 6]
+    tolerance = float(verify.get("bounds_tolerance_mm") or 0.05)
+    width, radius = float(verify.get("face_width_mm") or 0.0), float(verify.get("max_radius_mm") or 0.0)
+    actual = body["bounds_mm"]
+    extent_ok = (radius > 0 and abs(actual[0]+width) <= tolerance and abs(actual[3]) <= tolerance and
+                 max(abs(actual[i]) for i in (1, 2, 4, 5)) <= radius+tolerance and
+                 max(abs(actual[i]) for i in (1, 2, 4, 5)) >= .5*radius)
+    if not extent_ok and not any(all(abs(a-c) <= tolerance for a, c in zip(actual, candidate)) for candidate in candidates):
+        raise RuntimeError("Gear body bounds disagree with the plan: " + str(actual))
+    pattern = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
+    if pattern is None or int(pattern.get("count") or 0) != int(verify.get("pattern_count") or 0):
+        raise RuntimeError("Gear physical tooth count readback failed")
+    return body, error, pattern
+
+
 def handle_create_gear_spur(payload):
     if payload.get("execute") is not True or payload.get("confirm_write") is not True:
         raise ValueError("Spur-gear creation requires execute=true and confirm_write=true")
@@ -29142,47 +29950,7 @@ def handle_create_gear_spur(payload):
         stage = "rebuild_and_body_verification"
         if not cast_document_3d(doc3).RebuildDocument():
             raise RuntimeError("Gear final rebuild failed")
-        import win32com.client
-        bodies = _ensure_dispatch_sequence(win32com.client.CastTo(part, "IFeature7").ResultBodies)
-        body = _active_api5_primary_body_metrics()
-        if len(bodies) != 1 or not body["solid"] or not 0.0 < float(body["volume"]):
-            raise RuntimeError("Gear result must be one positive-volume solid")
-        box = win32com.client.CastTo(bodies[0], "IBody7").GetGabarit()
-        if not box or not box[0] or len(box) != 7:
-            raise RuntimeError("Gear body bounds unavailable")
-        body["bounds_mm"] = [float(value) for value in box[1:]]
-        verify = plan.get("verification") or {}
-        expected_volume = float(verify.get("expected_volume_mm3") or 0.0)
-        if expected_volume <= 0.0:
-            raise RuntimeError("Gear plan expected volume is missing")
-        error = abs(float(body["volume"]) * 1000.0 / expected_volume - 1.0)
-        if error > float(verify.get("volume_relative_tolerance") or 0.01):
-            raise RuntimeError("Gear body volume disagrees with the plan: " + str(error))
-        expected_bounds = [float(value) for value in (verify.get("expected_bounds_mm") or [])]
-        bound_candidates = [
-            [float(value) for value in candidate]
-            for candidate in (verify.get("expected_bounds_candidates_mm") or [expected_bounds])
-            if len(candidate) == 6
-        ]
-        bounds_tolerance = float(verify.get("bounds_tolerance_mm") or 0.05)
-        width = float(verify.get("face_width_mm") or 0.0)
-        max_radius = float(verify.get("max_radius_mm") or 0.0)
-        actual = [float(value) for value in body["bounds_mm"]]
-        extent_ok = (
-            max_radius > 0.0
-            and abs(actual[0] + width) <= bounds_tolerance
-            and abs(actual[3]) <= bounds_tolerance
-            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) <= max_radius + bounds_tolerance
-            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) >= 0.5 * max_radius
-        )
-        if not extent_ok and not any(
-            all(abs(actual_value - expected) <= bounds_tolerance for actual_value, expected in zip(actual, candidate))
-            for candidate in bound_candidates
-        ):
-            raise RuntimeError("Gear body bounds disagree with the plan: " + str(body["bounds_mm"]))
-        pattern_step = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
-        if pattern_step is None or int(pattern_step.get("count") or 0) != int(verify.get("pattern_count") or 0):
-            raise RuntimeError("Gear physical tooth count readback failed")
+        body, error, pattern_step = _verify_gear_spur_foundation(doc3, part, plan, steps_report)
         stage = "hide_auxiliary_geometry"
         auxiliary_objects = []
         blank_runtime = runtime_objects.get("blank") or {}
@@ -30010,6 +30778,8 @@ def _spline_recipe_variables(plan):
         "studio_profile": dict(plan.get("profile_request") or {}),
         "name": str(plan.get("name") or ""),
     }
+    if recipe["studio_profile"].get("body") == "hub":
+        recipe["profile_geometry_revision"] = plan.get("profile_geometry_revision", 1)
     encoded = json.dumps(recipe, ensure_ascii=True, sort_keys=True, allow_nan=False, separators=(",", ":"))
     chunks = [encoded[index:index + SPLINE_RECIPE_CHUNK] for index in range(0, len(encoded), SPLINE_RECIPE_CHUNK)] or [""]
     if len(chunks) > 120:
@@ -30108,6 +30878,9 @@ def _inspect_spline_block(doc3):
         if safe_get(item, "Reference")
     ]
     verified = bool(variables.get("SPL_VERIFIED") == 1)
+    legacy_hub = body == "hub" and (recipe or {}).get("profile_geometry_revision", 1) != 2
+    if legacy_hub:
+        verified = False
     return {
         "id": "spline:" + str(owned[0]) if owned else "spline:unknown",
         "schema": "geomwright.managed_spline_straight",
@@ -30118,7 +30891,9 @@ def _inspect_spline_block(doc3):
         "profile": profile,
         "editable": False,
         "verified": verified,
-        "status": "verified" if verified else "partial",
+        "status": "legacy_hub_profile" if legacy_hub else "verified" if verified else "partial",
+        "profile_geometry_revision": (recipe or {}).get("profile_geometry_revision", 1),
+        "profile_warning": "Legacy hub sectors are not complementary to shaft teeth; recreate with corrected inputs" if legacy_hub else None,
         "recipe": recipe,
         "recipe_error": recipe_error,
         "recreatable": bool(recipe and recipe.get("studio_profile")),
@@ -30143,6 +30918,57 @@ def handle_inspect_spline(payload):
     return block
 
 
+def _verify_straight_spline_metrics(plan, body_metrics, steps_report):
+    """Accept native foundation readback, including every patterned removal.
+
+    Numeric profiles remain recreate-only. A pattern counter or broad radial
+    envelope cannot replace the actual bounds and material audit (PATTERN-001).
+    """
+    verify = plan["verification"]
+    expected_volume = float(verify["expected_volume_mm3"])
+    volume = float(body_metrics["volume"])
+    actual = [float(value) for value in body_metrics["bounds_mm"]]
+    candidates = verify.get("expected_bounds_candidates_mm") or [verify["expected_bounds_mm"]]
+    bounds_tolerance = float(verify["bounds_tolerance_mm"])
+    volume_tolerance = float(verify["volume_relative_tolerance"])
+    if (not body_metrics.get("solid") or len(actual) != 6 or
+            not all(math.isfinite(value) for value in actual + [volume, expected_volume, bounds_tolerance, volume_tolerance]) or
+            volume <= 0 or expected_volume <= 0 or not 0 < bounds_tolerance <= 0.05 or not 0 < volume_tolerance <= 0.005):
+        raise RuntimeError("Spline foundation metrics/tolerances are invalid")
+    error = abs(volume * 1000.0 / expected_volume - 1.0)
+    if error > volume_tolerance:
+        raise RuntimeError("Spline body volume disagrees with the plan: " + str(error))
+    if not any(len(candidate) == 6 and all(math.isfinite(float(target)) and
+            abs(value - float(target)) <= bounds_tolerance for value, target in zip(actual, candidate))
+            for candidate in candidates):
+        raise RuntimeError("Spline body bounds disagree with the plan: " + str(actual))
+    source = next((step for step in steps_report if step.get("id") == "tooth_space_cut"), None)
+    pattern = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
+    count = int(verify["pattern_count"])
+    if (source is None or pattern is None or count < 4 or
+            pattern.get("count") != count or pattern.get("valid") is not True):
+        raise RuntimeError("Spline physical tooth count/validity readback failed")
+    removed = float(source["volume_removed"])
+    additional = float(pattern["additional_volume_removed"])
+    angle_step = float(pattern["angle_step"])
+    if not all(math.isfinite(value) for value in (removed, additional, angle_step)) or removed <= 0 or additional <= 0:
+        raise RuntimeError("Spline source/pattern removed no finite positive material")
+    if abs(angle_step - 360.0 / count) > 1e-7:
+        raise RuntimeError("Spline native pattern angle step differs from tooth count")
+    expected_additional = removed * (count - 1)
+    # 0.05% mass-property comparison plus 0.001 mm3 numerical floor, always
+    # below half one missing source cut. This is not a manufacturing tolerance.
+    removal_tolerance = min(max(1e-6, expected_additional * 0.0005), removed * 0.5)
+    if abs(additional - expected_additional) > removal_tolerance:
+        raise RuntimeError("Spline pattern material removal disagrees with all physical instances")
+    return {"ok": True, "final_rebuild_ok": True, "pattern_count": count,
+        "relative_volume_error": error, "bounds_verified": True,
+        "pattern_material_verified": True, "source_volume_removed_cm3": removed,
+        "additional_volume_removed_cm3": additional,
+        "expected_additional_volume_removed_cm3": expected_additional,
+        "pattern_removal_tolerance_cm3": removal_tolerance}
+
+
 def handle_create_spline(payload):
     if payload.get("execute") is not True or payload.get("confirm_write") is not True:
         raise ValueError("Spline creation requires execute=true and confirm_write=true")
@@ -30156,6 +30982,8 @@ def handle_create_spline(payload):
     body = str((plan.get("geometry") or {}).get("body") or "")
     if body not in ("shaft", "hub"):
         raise ValueError("Managed spline plan body must be shaft or hub")
+    if body == "hub" and plan.get("profile_geometry_revision") != 2:
+        raise ValueError("Hub creation requires corrected complementary profile geometry revision 2")
     workflow_params = (((plan.get("workflow") or {}).get("params")) or {})
     operations = list(workflow_params.get("operations") or [])
     scenario_list = [str(item.get("scenario") or "") for item in operations]
@@ -30215,51 +31043,17 @@ def handle_create_spline(payload):
         if not box or not box[0] or len(box) != 7:
             raise RuntimeError("Spline body bounds unavailable")
         body_metrics["bounds_mm"] = [float(value) for value in box[1:]]
-        verify = plan.get("verification") or {}
-        expected_volume = float(verify.get("expected_volume_mm3") or 0.0)
-        if expected_volume <= 0.0:
-            raise RuntimeError("Spline plan expected volume is missing")
-        error = abs(float(body_metrics["volume"]) * 1000.0 / expected_volume - 1.0)
-        if error > float(verify.get("volume_relative_tolerance") or 0.005):
-            raise RuntimeError("Spline body volume disagrees with the plan: " + str(error))
-        expected_bounds = [float(value) for value in (verify.get("expected_bounds_mm") or [])]
-        bound_candidates = [
-            [float(value) for value in candidate]
-            for candidate in (verify.get("expected_bounds_candidates_mm") or [expected_bounds])
-            if len(candidate) == 6
-        ]
-        bounds_tolerance = float(verify.get("bounds_tolerance_mm") or 0.05)
-        max_radius = float(verify.get("max_radius_mm") or 0.0)
-        actual = [float(value) for value in body_metrics["bounds_mm"]]
-        extent_ok = (
-            max_radius > 0.0
-            and abs(actual[0] + float(verify.get("length_mm") or 0.0)) <= bounds_tolerance
-            and abs(actual[3]) <= bounds_tolerance
-            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) <= max_radius + bounds_tolerance
-            and max(abs(actual[1]), abs(actual[2]), abs(actual[4]), abs(actual[5])) >= 0.5 * max_radius
-        )
-        if not extent_ok and not any(
-            all(abs(actual_value - expected) <= bounds_tolerance for actual_value, expected in zip(actual, candidate))
-            for candidate in bound_candidates
-        ):
-            raise RuntimeError("Spline body bounds disagree with the plan: " + str(body_metrics["bounds_mm"]))
-        pattern_step = next((step for step in steps_report if step.get("id") == "tooth_space_pattern"), None)
-        if pattern_step is None or int(pattern_step.get("count") or 0) != int(verify.get("pattern_count") or 0):
-            raise RuntimeError("Spline physical tooth count readback failed")
+        verification = _verify_straight_spline_metrics(plan, body_metrics, steps_report)
         stage = "hide_auxiliary_geometry"
         auxiliary_objects = []
         blank_runtime = runtime_objects.get("blank") or {}
         for role in ("axis_start", "axis_end", "axis"):
             if blank_runtime.get(role) is not None:
                 auxiliary_objects.append((role, blank_runtime[role]))
-        for operation_id in ("bore_cut", "tip_chamfer_face_a", "tip_chamfer_face_b"):
-            operation_runtime = runtime_objects.get(operation_id) or {}
-            if operation_runtime.get("sketch") is not None:
-                auxiliary_objects.append((operation_id + "_sketch", operation_runtime["sketch"]))
-        auxiliary_objects.extend(
-            ("sketch", sketch)
-            for sketch in iter_collection(safe_get(model, "Sketchs"))
-        )
+        # Patterns may expose unnamed derived collection records. Only hide
+        # owned source sketches; updating derived records is not safe.
+        auxiliary_objects.extend(("sketch", entry["sketch"])
+            for entry in runtime_objects.values() if entry.get("sketch") is not None)
         default_object = safe_get(part, "DefaultObject")
         if callable(default_object):
             for plane_id in (1, 2, 3, 71, 72, 73):
@@ -30331,13 +31125,7 @@ def handle_create_spline(payload):
                 for step in steps_report
                 if step.get("id")
             },
-            "verification": {
-                "ok": True,
-                "final_rebuild_ok": True,
-                "pattern_count": pattern_step["count"],
-                "relative_volume_error": error,
-                "bounds_verified": True,
-            },
+            "verification": verification,
             "accuracy": plan.get("accuracy"),
         }
     except Exception as exc:
@@ -30545,6 +31333,49 @@ def handle_inspect_cam(payload):
     return {"ok":True,"document":describe_runtime_document(doc,app),"recognized":block is not None,"block":block}
 
 
+def _read_shared_pulley_recipe(variables):
+    items = {str(item.get("name") or ""): item for item in variables}
+    if "GWP_RECIPE_COUNT" not in items:
+        return None, None
+    try:
+        import hashlib
+        count = int(items["GWP_RECIPE_COUNT"].get("value") or 0)
+        if not 1 <= count <= 120:
+            raise ValueError("Invalid pulley recipe chunk count")
+        encoded = "".join(str(items["GWP_RECIPE_%03d" % i].get("note") or "") for i in range(count))
+        if len(encoded) > 24000:
+            raise ValueError("Pulley recipe exceeds 24000 characters")
+        digest = str(items["GWP_RECIPE_HASH"].get("note") or "")
+        if hashlib.sha256(encoded.encode("ascii")).hexdigest() != digest:
+            raise ValueError("Pulley recipe checksum differs")
+        recipe = json.loads(encoded)
+        if recipe.get("schema") != "geomwright.pulley.recipe" or recipe.get("version") != 1:
+            raise ValueError("Unsupported pulley recipe")
+        return recipe, None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _store_shared_pulley_recipe(part, plan):
+    recipe = plan.get("shared_recipe")
+    if recipe is None:
+        return
+    import hashlib
+    encoded = json.dumps(recipe, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    if len(encoded) > 24000 or recipe.get("family") != plan.get("family"):
+        raise ValueError("Invalid shared pulley recipe")
+    chunks = [encoded[i:i + 200] for i in range(0, len(encoded), 200)]
+    variables = [{"name": "GWP_RECIPE_COUNT", "value": len(chunks)},
+                 {"name": "GWP_RECIPE_HASH", "value": 1, "note": hashlib.sha256(encoded.encode("ascii")).hexdigest()}]
+    variables.extend({"name": "GWP_RECIPE_%03d" % i, "value": 1, "note": chunk} for i, chunk in enumerate(chunks))
+    report = _apply_part_variables(part, variables)
+    actual = [{"name": str(safe_get(v, "Name") or ""), "value": safe_get(v, "Value"),
+               "note": safe_get(v, "Note")} for v in _iter_operation_variables(part)]
+    readback, error = _read_shared_pulley_recipe(actual)
+    if not report.get("ok") or error or readback != recipe:
+        raise RuntimeError("Shared pulley recipe persistence readback failed: %s" % error)
+
+
 def handle_create_managed_pulley(payload):
     if not bool(payload.get("execute", False)):
         raise ValueError("create_managed_pulley requires execute=true")
@@ -30619,6 +31450,7 @@ def handle_create_managed_pulley(payload):
             body = _active_api5_primary_body_metrics()
             if int(body.get("body_count") or 0) != 1 or float(body.get("volume") or 0.0) <= 0.0:
                 raise RuntimeError("Managed timing pulley must create one positive-volume body")
+            _store_shared_pulley_recipe(part, plan)
             inspection = handle_inspect_managed_pulley({"_document": doc3})
             if not inspection.get("recognized") or inspection.get("family") != family:
                 raise RuntimeError("Managed timing-pulley ownership fingerprint was not recognized")
@@ -30644,6 +31476,7 @@ def handle_create_managed_pulley(payload):
         if family == "flat_belt":
             current_stage = "build_owned_flat_pulley"
             member_result = _build_managed_flat_pulley(doc3, part, model_container, plan, steps_report)
+            _store_shared_pulley_recipe(part, plan)
             report_progress(96, "verify_result", name=str(plan.get("name") or "Geomwright flat pulley"))
             inspection = handle_inspect_managed_pulley({"_document": doc3})
             report_progress(98, "flat_pulley_ownership_readback", name=str(plan.get("name") or "Geomwright flat pulley"))
@@ -30771,6 +31604,7 @@ def handle_create_managed_pulley(payload):
         final_rebuild_ok = bool(rebuild()) if callable(rebuild) else None
         if final_rebuild_ok is False:
             raise RuntimeError("Managed pulley final rebuild returned False")
+        _store_shared_pulley_recipe(part, plan)
         report_progress(100, "completed", name=str(plan.get("name") or "Geomwright pulley"))
         semantic_outputs = {
             "member.blank_feature": _v_belt_object_reference(blank_feature, "member.blank_feature"),
@@ -30804,9 +31638,15 @@ def handle_create_managed_pulley(payload):
             "steps": steps_report,
         }
     except Exception as exc:
+        try:
+            partial_document = describe_runtime_document(doc3, app) if doc3 else None
+        except Exception as describe_exc:
+            partial_document = {"unresolved": True, "describe_error": str(describe_exc)}
         raise RuntimeError(
-            "create_managed_pulley failed at %s: %s | steps=%s"
-            % (current_stage, exc, json.dumps(steps_report, ensure_ascii=False))
+            "create_managed_pulley failed at %s: %s | partial_document=%s | steps=%s"
+            % (current_stage, exc, json.dumps(partial_document), json.dumps([
+                {"id": item.get("id"), "step": item.get("step"), "ok": item.get("ok")}
+                for item in steps_report], ensure_ascii=False))
         )
 
 
@@ -31341,9 +32181,10 @@ def handle_inspect_managed_pulley(payload):
         name = str(safe_get(variable, "Name") or "")
         if not name:
             continue
-        note = safe_get(variable, "ParameterNote")
+        # AddVariable text metadata lives in Note (VAR-002), not ParameterNote.
+        note = safe_get(variable, "Note")
         if note is None:
-            note = safe_get(variable, "Note")
+            note = safe_get(variable, "ParameterNote")
         variables.append(
             {
                 "name": name,
@@ -31535,6 +32376,7 @@ def handle_inspect_managed_pulley(payload):
             "gost_profile_variant": None,
         }
         display_name = blank_name[:-6] if blank_name.lower().endswith(" blank") else "Chain sprocket"
+    module_recipe, module_recipe_error = _read_shared_pulley_recipe(variables)
     chain_recipe = None
     chain_recipe_error = None
     if family == "chain_sprocket":
@@ -31605,6 +32447,8 @@ def handle_inspect_managed_pulley(payload):
         "identity_references": identity_references,
         "recipe": chain_recipe,
         "recipe_error": chain_recipe_error,
+        "module_recipe": module_recipe,
+        "module_recipe_error": module_recipe_error,
         "recreatable": bool(family == "chain_sprocket" and chain_recipe and chain_recipe.get("studio_profile")),
         "document": describe_document(document, app),
         "evidence": evidence,
@@ -31680,6 +32524,12 @@ def handle_studio_workspace_snapshot(payload):
             if bevel_gear_block is not None:
                 entry["blocks"].append(bevel_gear_block)
                 owned.update(bevel_gear_block["owned_references"])
+            spline_block = _inspect_spline_block(doc3)
+            if spline_block is not None:
+                spline_block = dict(spline_block)
+                spline_block["module"] = "hub_spline" if spline_block["body"] == "hub" else "shaft_spline"
+                entry["blocks"].append(spline_block)
+                owned.update(spline_block["owned_references"])
             model_container = cast_model_container(safe_get(doc3, "TopPart"))
             for collection_name, accessors in MODEL_OBJECT_COLLECTION_SPECS:
                 collection, _accessor, _errors = _resolve_model_object_collection(model_container, accessors)
@@ -31717,10 +32567,59 @@ def handle_studio_workspace_snapshot(payload):
 
 
 def _dispatch_action(request):
-    global _REQUIRE_VISIBLE_KOMPAS
+    global _REQUIRE_VISIBLE_KOMPAS, _CAD_SESSION, _CAD_ACCESS_STARTED
     action = request.get("action")
     payload = dict(request.get("payload") or {})
-    _REQUIRE_VISIBLE_KOMPAS = bool(payload.pop("_require_visible_kompas", False))
+    payload.pop("_require_visible_kompas", None)
+    _CAD_SESSION = _load_cad_session(payload.pop("_cad_session_context", None))
+    _REQUIRE_VISIBLE_KOMPAS = _cad_is_interactive()
+    if action == "audit_session_recovery":
+        import win32com.client
+        _CAD_ACCESS_STARTED = True
+        return _CAD_SESSION.audit_recovery(win32com.client, sys.modules[__name__])
+    _CAD_SESSION.allow_explicit_close = bool(payload.get("_user_requested_close")) and action in (
+        "close_document", "shutdown_session", "save_document", "save_document_as", "save_export_copy")
+    if action in ({"smoke_check_session", "create_spw_from_rows"} if _cad_is_interactive() else
+                  {"launch_native_module_command", "probe_native_entrypoint_loader_hosted"}):
+        raise RuntimeError("CAD_MODE_UNSUPPORTED_ACTION: no implicit mode transition permitted")
+    if _cad_is_interactive():
+        payload["visible"] = True
+        if not _CAD_SESSION.allow_explicit_close:
+            payload["close_after_save"] = False
+        if isinstance(payload.get("params"), dict):
+            payload["params"] = {**payload["params"], "close_after_save": False}
+        if action in ("close_document", "shutdown_session") and not payload.pop("_user_requested_close", False):
+            return {"ok": True, "closed": False, "retained_for_user": True, "cad_mode": "interactive"}
+    if request.get("action") in ("list_model_bodies", "list_body_faces", "list_body_edges", "inspect_body_face", "measure_model_geometry"):
+        import importlib.util
+        runtime_path = os.path.join(os.path.dirname(__file__), "body_geometry_runtime.py")
+        if not os.path.exists(runtime_path):
+            runtime_path = os.path.join(os.path.dirname(__file__), "..", "src", "kompas_mcp", "assets", "bridge", "body_geometry_runtime.py")
+        spec = importlib.util.spec_from_file_location("body_geometry_runtime", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        return runtime.handle(action, payload, sys.modules[__name__])
+
+    if action == "export_model_png":
+        import importlib.util
+        runtime_path = os.path.join(os.path.dirname(__file__), "model_image_runtime.py")
+        if not os.path.exists(runtime_path):
+            runtime_path = os.path.join(os.path.dirname(__file__), "..", "src", "kompas_mcp", "assets", "bridge", "model_image_runtime.py")
+        spec = importlib.util.spec_from_file_location("model_image_runtime", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        return runtime.handle(action, payload, sys.modules[__name__])
+
+    if action in ("create_construction_chain", "inspect_construction_chain", "continue_construction_chain"):
+        import importlib.util
+        runtime_path = os.path.join(os.path.dirname(__file__), "construction_chain_runtime.py")
+        if not os.path.exists(runtime_path):
+            runtime_path = os.path.join(os.path.dirname(__file__), "..", "src", "kompas_mcp", "assets", "bridge", "construction_chain_runtime.py")
+        spec = importlib.util.spec_from_file_location("construction_chain_runtime", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = runtime
+        spec.loader.exec_module(runtime)
+        return runtime.handle(action, payload, sys.modules[__name__])
 
     if action == "get_session_state":
         return get_session_state()
@@ -31728,6 +32627,24 @@ def _dispatch_action(request):
         return handle_create_cam(payload)
     if action == "finalize_cam":
         return handle_finalize_cam(payload)
+    if action == "inspect_compression_module":
+        return handle_inspect_compression_module(payload)
+    if action == "inspect_extension_module":
+        return handle_inspect_compression_module(payload, family="extension")
+    if action == "inspect_torsion_module":
+        return handle_inspect_compression_module(payload, family="torsion")
+    if action == "inspect_disc_module":
+        return handle_inspect_compression_module(payload, family="disc")
+    if action == "inspect_stepped_shaft_module":
+        return handle_inspect_stepped_shaft_module(payload)
+    if action == "inspect_external_conical_step_module":
+        return handle_inspect_rotational_module(payload,"external_conical_step")
+    if action == "inspect_external_polygonal_step_module":
+        return handle_inspect_rotational_module(payload,"external_polygonal_step")
+    if action == "inspect_external_flat_step_module":
+        return handle_inspect_rotational_module(payload,"external_flat_step")
+    if action == "inspect_diaphragm_module":
+        return handle_inspect_compression_module(payload, family="diaphragm")
     if action == "inspect_cam":
         return handle_inspect_cam(payload)
     if action == "inspect_silent_chain_sprocket":
@@ -31862,16 +32779,50 @@ def _dispatch_action(request):
     raise RuntimeError("Unsupported action: %s" % action)
 
 
+def _acquire_session_gate():
+    """Reject overlapping COM jobs across MCP/Studio processes before touching CAD."""
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateMutexW(None, False, "Local\\Geomwright.Kompas.COM.v1")
+    if not handle:
+        raise RuntimeError("Cannot acquire KOMPAS session gate: " + str(ctypes.get_last_error()))
+    wait = kernel.WaitForSingleObject(handle, 0)
+    if wait not in (0, 0x80):
+        kernel.CloseHandle(handle)
+        if wait == 0x102:
+            raise RuntimeError("CAD_BUSY: another MCP/Studio request owns the KOMPAS session. Wait for that request to finish, then retry; do not issue parallel CAD requests.")
+        raise RuntimeError("KOMPAS session gate failed: " + str(ctypes.get_last_error()))
+    return kernel, handle
+
+
 def dispatch(request):
+    global _DISPATCH_FINISHED, _CAD_ACCESS_STARTED
+    _DISPATCH_FINISHED, _CAD_ACCESS_STARTED = False, False
     action = str(request.get("action") or "unknown")
     payload = request.get("payload") or {}
     document_id = payload.get("document_id") if isinstance(payload, dict) else None
     report_progress(0, "action_started", document_id=document_id, target=action)
+    gate = None
     try:
+        gate = _acquire_session_gate()
         result = _dispatch_action(request)
     except Exception as exc:
         report_progress(100, "action_failed", document_id=document_id, target=action, error=str(exc)[:500])
         raise
+    finally:
+        if gate is not None:
+            kernel, handle = gate
+            kernel.ReleaseMutex(handle)
+            kernel.CloseHandle(handle)
+        _DISPATCH_FINISHED = True
     report_progress(100, "action_completed", document_id=document_id, target=action)
     return result
 
@@ -31886,13 +32837,25 @@ def main():
     try:
         request = read_request(request_path)
         payload = dispatch(request)
-        write_response(response_path, {"ok": True, "data": payload})
+        write_response(response_path, {"ok": True, "data": payload,
+                                      "completion": _completion_receipt(request)})
     except Exception as exc:
         write_response(
             response_path,
-            {"ok": False, "error": {"message": str(exc), "type": exc.__class__.__name__}},
+            {"ok": False, "error": {"message": str(exc), "type": exc.__class__.__name__},
+             "completion": _completion_receipt(locals().get("request"))},
         )
         raise
+
+
+def _completion_receipt(request):
+    if not _DISPATCH_FINISHED or not isinstance(request, dict):
+        return None
+    return {"version": 1, "token": request.get("completion_token"),
+            "action": request.get("action"),
+            "outcome": "settled" if (_CAD_ACCESS_STARTED and
+                (request.get("action") == "audit_session_recovery" or
+                 getattr(_CAD_SESSION, "cad_effects_started", True))) else "no_cad"}
 
 
 if __name__ == "__main__":

@@ -171,6 +171,11 @@ line/arc joins in every groove are tangent, and construction centerlines keep th
 set symmetric about `PV_CENTER`. The bridge requires `ConstraintsState=2` after
 the staged parameterization and rebuild.
 
+Historical raw `ConstraintsState=2` values in the live evidence below are not
+full-definition proof: the original decoder had 1/2 reversed. The strict gate is
+now corrected; old models need new solver-state review. Geometric, driving and
+topology evidence remain distinct. See [SKETCH-011](../CAD_PATTERNS.md#sketch-011-decode-sketch-state-from-the-native-enum-not-an-assumed-numeric-scale).
+
 The eight driving dimensions are:
 
 ```text

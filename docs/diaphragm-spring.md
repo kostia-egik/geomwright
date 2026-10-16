@@ -63,3 +63,54 @@ For both circle and oval variants, verify after reopen:
 
 Canonical local evidence uses the `final_module_v4` S-bend artifacts under
 `sample/live_outputs/`. Those binaries are intentionally ignored by Git.
+
+## Common module interface
+
+`get_cad_module_contract("diaphragm_spring")` exposes the typed schema and a complete
+S-bend example. `run_cad_module` supports `preview`, `plan`, create-only `create`,
+and saved-recipe `inspect`. This integration reuses the finalized workflow above;
+it does not introduce another geometry algorithm or a new Studio editor.
+
+All dimensions are in millimetres. The rotation axis is global X and the base
+profile is in global XOY. Supply `tip_variant`, outer diameter, normal thickness,
+cone height, and explicit slot/relief dimensions and count. Variant-specific inputs
+are validated, not silently ignored:
+
+- `no_bend`: final inner diameter; bend and free-height inputs are inapplicable;
+- `single_bend`: body inner diameter, bend inner radius, tip angle, and exactly one
+  of `free_height` or `tip_length`; final inner diameter is calculated;
+- `s_bend`: body/final/intermediate inner diameters, intermediate/free heights,
+  and both bend inner radii; tip angle and tip length are inapplicable.
+
+Circle relief has no straight-length input; oval relief requires it. Slot count
+includes the original pair of cuts. The legacy height meanings remain owned by
+the family generator, not by the disc-spring alias contract.
+
+Creation requires `confirm_write: true`, saves a unique generated export, and opens
+that generated document. It checks valid owned operations, one positive-volume
+solid, outer diameter and axial bounds, both pattern source cuts, count/angle,
+additional material removal against the source-pair volume times `count - 1`,
+hidden auxiliary sketches, and unchanged native volume after save/reopen.
+Pattern-volume comparison uses a 1% geometric readback tolerance (numerical floor
+0.000001 cm³), capped at one quarter of a source-pair volume so one missing group
+cannot be accepted at high counts. This is not a manufacturing tolerance or a
+load/strength/standard-compliance claim.
+
+`DIAPR_RECIPE_*` is versioned, checksummed creation metadata, not driving variables
+or a geometry-verification stamp. Inspect requires an exact opened document ID.
+Missing, corrupt or structurally invalid recipes cannot substitute default inputs
+for recreation. Initial cut ownership is read through `ICircularPattern.InitialObjects`:
+the complete extrusion collection also contains repeated copies with the same names.
+
+Creation returns per-sketch constraint states in `data.diagnostics.native_workflow`.
+Intermediate reports and final reopened states may differ: the S-bend base reads
+as fully defined after reopen, while auxiliary/cut-sketch readback can report
+degrees of freedom. Creation-time cut preflight is separate from these saved-state
+diagnostics. Full definition of every saved sketch and in-place driving edits are
+not certified by this integration. Changed inputs create a new part; recognition
+alone is not a fresh geometry audit.
+
+Current common-interface live checks cover no-bend in both directions,
+single-bend, S-bend, circle/oval relief and an additional 9-slot size. Failures
+retain partial-file/document information and a bounded native checkpoint/root
+cause; no automatic retry or rollback is claimed.

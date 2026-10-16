@@ -59,7 +59,7 @@ class StraightSplineRequest(BaseModel):
     root_fillet_mm: float | None = Field(
         default=None, ge=0.05, le=10.0,
         title="Галтель r, мм",
-        description="Явная галтель для нестандартного размера; для табличного - ограничение r не более.",
+        description="Явная галтель для нестандартного размера; для табличного - ограничение r не более. У втулки это ответный переход корня зуба вала у d, не скругление дна паза D.",
     )
     tip_chamfer_mm: float | None = Field(
         default=None, ge=0.0, le=10.0,
@@ -122,4 +122,4 @@ def spline_selection() -> dict:
     """Studio selection metadata: series, sizes, centering and execution options."""
     from .straight import straight_spline_selection
 
-    return straight_spline_selection()
+    return straight_spline_selection(include_fits=True)

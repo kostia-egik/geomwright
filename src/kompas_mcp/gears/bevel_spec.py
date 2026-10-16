@@ -19,7 +19,7 @@ class BevelGearRequest(BaseModel):
     rejected until that method has its own named geometry.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     tooth_type: Literal["straight", "circular"] = Field(
         default="straight",
@@ -75,7 +75,8 @@ class BevelGearRequest(BaseModel):
         title="Back cone extension, mm",
         description=(
             "Axial extension of the back conical rim face behind the outer tip "
-            "plane. Empty selects 0.3 b sin(delta) (at least 1.5 mm)."
+            "plane. Empty selects the dish-blank heuristic 1.2 b sin(delta) "
+            "(at least 2 mm); this is not a standard-prescribed dimension."
         ),
     )
     rim_front_extension_mm: float | None = Field(
@@ -83,7 +84,8 @@ class BevelGearRequest(BaseModel):
         title="Front cone extension, mm",
         description=(
             "Axial extension of the front conical rim face behind the inner tip "
-            "plane. Empty selects 0.3 b sin(delta) (at least 1.5 mm)."
+            "plane. Empty selects the dish-blank heuristic 0.3 b sin(delta) "
+            "(at least 1.5 mm); this is not a standard-prescribed dimension."
         ),
     )
     pressure_angle_deg: float | None = Field(
@@ -127,7 +129,7 @@ class BevelGearRequest(BaseModel):
                 raise ValueError(
                     "coefficient overrides are only available for modification='custom'"
                 )
-        resolve_rack(
+        rack = resolve_rack(
             self.standard,
             self.modification,
             pressure_angle_deg=self.pressure_angle_deg,
@@ -135,6 +137,8 @@ class BevelGearRequest(BaseModel):
             clearance_coefficient=self.clearance_coefficient,
             root_fillet_coefficient=self.root_fillet_coefficient,
         )
+        self.standard = rack.standard
+        self.modification = rack.modification
         return self
 
     @property

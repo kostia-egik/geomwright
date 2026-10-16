@@ -3,7 +3,7 @@
 Status: implemented, live-verified create-only slice for external spur and
 helical gears with four basic-rack systems (G1–G2 and the cylindrical part of G4
 of [gear-transmission-concept.md](gear-transmission-concept.md)); also exposed as
-four MCP tools.
+four family-specific MCP tools and the shared module contract below.
 
 This is the first cylindrical-gear Studio module: one external gear with a
 nominal rack-generated profile. `helix_angle_deg = 0` is a spur gear; a positive
@@ -11,6 +11,25 @@ angle turns the same module into a helical gear whose end view is the transverse
 section. It is not a gear pair, not an internal, herringbone, bevel, or worm
 gear, and not a strength calculation. The architectural boundaries are in
 [ARCHITECTURE.md](../ARCHITECTURE.md); this page is the user-facing contract.
+
+## Shared contract usage / Общий контракт
+
+The approved shared-contract pilot exposes this family as `gear_spur` through
+`get_cad_module_contract` and `run_cad_module`, alongside the existing family
+tools. For CLI commands, request defaults and result semantics, see the
+[README usage section](../README.md#cad-module-pilot-mcp-and-cli).
+Use `list_gear_standards` for selection; keep `SpurGearRequest` parameters
+separate from envelope flags. Actions are `preview`, `plan`, `create`, `inspect`.
+
+`create` требует `confirm_write: true` и создаёт новую несохранённую деталь;
+update/apply не поддерживаются. `inspect` требует точный ID открытого документа
+и распознаёт сохранённый рецепт, **не проверяя геометрию заново**.
+Для повторного построения сначала проверьте `data.recreatable: true`, затем
+передайте возвращённые `parameters` в новый запрос `create`. Если рецепт нельзя
+восстановить, `parameters` равен `null`; замена на `{}` построила бы колесо
+с параметрами по умолчанию.
+`verified` остаётся `false` для preview/plan/inspect и становится `true` у create
+только после фактической проверки. Пилот не меняет Studio и границы этого семейства.
 
 ## Inputs
 
@@ -160,7 +179,7 @@ thickness, span or over-pin that cannot be measured on the flanks.
    default). The chamfers are cut into the blank **before** the tooth-space
    cut, so the expensive pattern rebuild stays the last feature; the final
    Boolean result is identical to chamfering the finished teeth;
-3. one numeric tooth-space sketch: two smooth cubic Bézier-NURBS curves per
+3. one numeric tooth-space sketch: two mathematical C2 interpolating cubic NURBS curves per
    flank (root transition and involute) joined at the form point, with exact
    cap and closure arcs;
 4. a tooth-space cut:
@@ -193,7 +212,12 @@ not be hidden; a clean model shows only the blank, the cuts, and the pattern.
 
 The combined entity count is seven per tooth space, so the pattern stays
 practical. Each flank curve is fitted to the analytic profile with a bounded
-deviation (reported in the plan; typically below 0.02 mm). The bridge verifies
+deviation (reported in the plan; cap `max(0.03, 0.01·m)` mm). `gears/cad.py`
+uses `interpolating_spline` with single interior knots and explicit native order 4
+(mathematical degree 3). Passing native order 3 silently reset knots; the later
+repeated-knot Bézier workaround introduced face fragmentation. The corrected C2
+representation retains the deviation cap and avoids that fragmentation. C2 applies
+within each curve, not across the theoretical root/involute join. The bridge verifies
 one solid body, the expected volume from the analytic contour clipped to the
 blank, body bounds, and the pattern count. The document stores
 `GW_GEAR_VERSION`, `GW_FAMILY_CODE`, the `GEAR_*` fingerprint (standard and
@@ -203,6 +227,33 @@ recipe with the Studio form values.
 Reopened gear blocks are recognized as read-only. "Create a new part from these
 settings" restores the form for a new build. In-place parameter editing is not
 implemented in this slice; change the request and create a new part.
+
+## Construction-chain foundation (Stage D)
+
+The separate [construction-chain interface](en/construction-chains.md)
+([Русский](ru/construction-chains.md)) accepts `gear_spur` only as the initial
+`own/create` foundation at origin 0, direction +1, native interval `[-b, 0]`,
+phase 0. It reuses the registered family plan and verifies the foundation before
+downstream additions/cuts. A cylindrical `stepped_shaft` hub attaches at the exposed
++X end. Cuts operate on the solid root core, not on arbitrary teeth or an arbitrary
+existing shaft; a continuous rim/hub bore uses two explicit nonoverlapping cuts.
+
+Live chain evidence covers `m2 z20 x0 b20`, spur without tip chamfers: root-core
+radius 17.5 mm, 100 tooth-zone faces (`tooth_zone.face_count`), Ø24×12 mm hub and
+continuous Ø10 mm bore, one final body of 27.53642813 cm³. Appending a face groove
+ID 14/OD 20/depth 2 mm at the hub end in −X saves the same selected file and yields
+27.21598568 cm³; reopen and native PNG review confirm the result. Host discovery
+exposes the family parameter schema; helical/chamfer variants are host-planned,
+not live chain-certified. This does not broaden standalone in-place editing or
+claim Studio integration for chains.
+
+`continue` accepts only new steps in an exact opened saved chain, audits the full
+saved prefix/current geometry before writing and refuses changed old roots or
+parameters. Persistent API7 object IDs survive reopened runtime references;
+canonical names are still checked strictly. `inspect` only recognizes the recipe.
+Failures retain partial-document evidence without rollback or automatic retry.
+Use the separate [PNG export](low-level-runtime.md#model-png-export) for visual
+review; it is not a modelling operation or a geometry audit.
 
 ## Representation limits
 

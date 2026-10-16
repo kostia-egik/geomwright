@@ -11,6 +11,7 @@ from .batch import build_file_list
 from .batch import scan_model_files as scan_model_files_payload
 from .batch import summarize_batch_results
 from .bridge_runner import BridgeError, BridgeRunner
+from .cad_session_policy import validate_mode_action
 from .analyzers import analyze_naming_issues
 from .analyzers import analyze_spec_issues
 from .composition import read_file_composition
@@ -639,6 +640,19 @@ class KompasAdapter:
 
     def get_session_state(self) -> dict[str, Any]:
         return self.runner.call("get_session_state")
+
+    def get_cad_session_guard(self) -> dict[str, Any]:
+        return self.runner.get_session_guard()
+
+    def get_cad_work_mode(self) -> dict[str, Any]:
+        return self.runner.get_cad_work_mode()
+
+    def set_cad_work_mode(self, mode: str, confirm_switch: bool, target_window_handle: int | None = None) -> dict[str, Any]:
+        return self.runner.set_cad_work_mode(mode, confirm_switch=confirm_switch,
+                                             target_window_handle=target_window_handle)
+
+    def recover_cad_session(self, token: str, confirm_idle: bool, reason: str) -> dict[str, Any]:
+        return self.runner.recover_session(token, confirm_idle=confirm_idle, reason=reason)
 
     def list_documents(self) -> dict[str, Any]:
         return self.runner.call("list_documents")
@@ -1786,6 +1800,36 @@ class KompasAdapter:
             payload["kinds"] = normalized_kinds
         return self.runner.call("list_features", payload)
 
+    def _body_geometry_call(self, action: str, document_id: str | None, **values: Any) -> dict[str, Any]:
+        from .body_geometry import finish_measurement, geometry_payload
+
+        payload = geometry_payload(action, document_id, **values)
+        result = self.runner.call(action, payload)
+        return finish_measurement(result) if action == "measure_model_geometry" else result
+
+    def list_model_bodies(self, document_id: str | None = None, *, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        return self._body_geometry_call("list_model_bodies", document_id, offset=offset, limit=limit)
+
+    def list_body_faces(self, document_id: str | None = None, *, body: dict[str, Any],
+                        surface_type: str | None = None, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        return self._body_geometry_call("list_body_faces", document_id, body=body,
+                                       surface_type=surface_type, offset=offset, limit=limit)
+
+    def list_body_edges(self, document_id: str | None = None, *, body: dict[str, Any],
+                        offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        return self._body_geometry_call("list_body_edges", document_id, body=body, offset=offset, limit=limit)
+
+    def inspect_body_face(self, document_id: str | None = None, *, body: dict[str, Any], face: dict[str, Any],
+                          max_edges: int = 64, curve_samples: int = 9, include_mesh: bool = False,
+                          max_mesh_points: int = 6000) -> dict[str, Any]:
+        return self._body_geometry_call("inspect_body_face", document_id, body=body, face=face,
+            max_edges=max_edges, curve_samples=curve_samples, include_mesh=include_mesh, max_mesh_points=max_mesh_points)
+
+    def measure_model_geometry(self, document_id: str | None = None, *, first: dict[str, Any],
+                               second: dict[str, Any], measurement: str = "minimum_distance") -> dict[str, Any]:
+        return self._body_geometry_call("measure_model_geometry", document_id, first=first, second=second,
+                                       measurement=measurement)
+
     def inspect_feature(
         self,
         document_id: str | None = None,
@@ -2344,7 +2388,12 @@ class KompasAdapter:
         save: bool = False,
         close_mode: int = 0,
         strict: bool = False,
+        user_requested: bool = False,
     ) -> dict[str, Any]:
+        reader = getattr(self.runner, "get_cad_work_mode", None)
+        if not user_requested and callable(reader) and reader()["mode"] == "interactive":
+            return {"closed": False, "retained_for_user": True, "document_id": document_id,
+                    "cad_mode": "interactive", "com_called": False}
         return self.runner.call(
             "close_document",
             {
@@ -2352,6 +2401,7 @@ class KompasAdapter:
                 "save": save,
                 "close_mode": close_mode,
                 "strict": strict,
+                "_user_requested_close": user_requested,
             },
         )
 
@@ -2360,10 +2410,11 @@ class KompasAdapter:
         *,
         save: bool = False,
         close_mode: int = 0,
+        user_requested: bool = False,
     ) -> dict[str, Any]:
         return self.runner.call(
             "shutdown_session",
-            {"save": save, "close_mode": close_mode},
+            {"save": save, "close_mode": close_mode, "_user_requested_close": user_requested},
         )
 
     def smoke_check_session(
@@ -2373,6 +2424,9 @@ class KompasAdapter:
         output_dir: str | None = None,
         visible: bool = False,
     ) -> dict[str, Any]:
+        reader = getattr(self.runner, "get_cad_work_mode", None)
+        if callable(reader):
+            validate_mode_action(reader()["mode"], "smoke_check_session")
         source = Path(path)
         if not source.exists():
             raise RuntimeError(f"Smoke-check source does not exist: {path}")
@@ -2958,22 +3012,61 @@ class KompasAdapter:
         confirm_write: bool = False,
         visible: bool = True,
         progress_callback: Any | None = None,
+        prepared_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if execute and confirm_write is not True:
             raise ValueError("confirm_write=true is required when execute=true")
         if family == "chain_sprocket":
             if top_edge_fillet_radius is not None:
                 raise ValueError("top_edge_fillet_radius is not supported for chain_sprocket")
-            plan = build_chain_sprocket_plan(**dict(profile_request), name=name)
+            if prepared_plan is None:
+                plan = build_chain_sprocket_plan(**dict(profile_request), name=name)
+            else:
+                source = (prepared_plan.get("ownership") or {}).get("source_profile") or {}
+                expected_profile = {key: source.get(key) for key in (
+                    "designation", "chain_type", "tooth_count", "row_count", "gost_profile_variant")}
+                if (prepared_plan.get("stage") != "managed_chain_sprocket_plan"
+                        or prepared_plan.get("plan_version") != 1 or prepared_plan.get("family") != family
+                        or prepared_plan.get("name") != name
+                        or dict(profile_request) != expected_profile):
+                    raise ValueError("prepared_plan must match the requested chain-sprocket profile and name")
+                plan = prepared_plan
             bridge_action = "create_chain_sprocket"
         else:
-            plan = build_managed_pulley_plan(
-                family,
-                dict(profile_request),
-                name=name,
-                top_edge_fillet_radius=top_edge_fillet_radius,
-                include_standard_top_edge_fillet=include_standard_top_edge_fillet,
-            )
+            if prepared_plan is None:
+                plan = build_managed_pulley_plan(
+                    family, dict(profile_request), name=name,
+                    top_edge_fillet_radius=top_edge_fillet_radius,
+                    include_standard_top_edge_fillet=include_standard_top_edge_fillet,
+                )
+                # Studio and direct adapter creation also retain the same full recipe.
+                from .cad_pulley_bindings import PULLEY_MODELS, attach_pulley_recipe
+                model = PULLEY_MODELS[family]
+                recipe_inputs = {key: value for key, value in profile_request.items()
+                                 if key in model.model_fields}
+                if family == "v_belt":
+                    recipe_inputs.update(top_edge_fillet_radius=top_edge_fillet_radius,
+                                         include_standard_top_edge_fillet=include_standard_top_edge_fillet)
+                try:
+                    recipe_parameters = model.model_validate(recipe_inputs).model_dump(exclude_none=True)
+                except ValueError:
+                    # Old direct calls may use a shape outside the public shared schema.
+                    # Preserve their existing build path, without claiming recipe recovery.
+                    recipe_parameters = None
+                if recipe_parameters is not None:
+                    attach_pulley_recipe(plan, recipe_parameters)
+            else:
+                if (prepared_plan.get("stage") != "managed_pulley_plan"
+                        or prepared_plan.get("plan_version") != 1 or prepared_plan.get("family") != family
+                        or prepared_plan.get("name") != name
+                        or prepared_plan.get("profile_request") != dict(profile_request)):
+                    raise ValueError("prepared_plan must match the requested pulley profile and name")
+                if family == "v_belt":
+                    saved_options = (prepared_plan.get("shared_recipe") or {}).get("parameters") or {}
+                    if (saved_options.get("top_edge_fillet_radius") != top_edge_fillet_radius
+                            or saved_options.get("include_standard_top_edge_fillet", True) != include_standard_top_edge_fillet):
+                        raise ValueError("prepared_plan must match requested V-belt finishing options")
+                plan = prepared_plan
             bridge_action = "create_managed_pulley"
         if not execute:
             return {
@@ -2998,12 +3091,27 @@ class KompasAdapter:
                 progress_callback=progress_callback,
             )
         if family == "chain_sprocket" and result.get("success"):
+            def retain_partial(exc: Exception) -> Exception:
+                exc.partial_result = {
+                    "document": result.get("document"),
+                    "stage": "transition_constraint_verification",
+                    "verified": False,
+                    "rollback_performed": False,
+                }
+                return exc
+
+            def finalize_call(action: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+                try:
+                    return self.runner.call(action, payload, **kwargs)
+                except Exception as exc:
+                    raise retain_partial(exc)
+
             sketch_step = next(
                 (item for item in list(result.get("steps") or []) if item.get("id") == "tooth_space_sketch"),
                 None,
             )
             if sketch_step is None:
-                raise RuntimeError("Managed chain-sprocket result is missing tooth-space sketch readback")
+                raise retain_partial(RuntimeError("Managed chain-sprocket result is missing tooth-space sketch readback"))
             if sketch_step is not None:
                 entity_results = {
                     str(item.get("id")): item
@@ -3035,14 +3143,14 @@ class KompasAdapter:
                     and partner_index is not None
                     and len(post_constraints) == 1
                 ):
-                    raise RuntimeError(
+                    raise retain_partial(RuntimeError(
                         "Managed chain-sprocket transition constraint contract is incomplete"
-                    )
+                    ))
                 if sketch_ref and document_id and target_index is not None and partner_index is not None and post_constraints:
                     constraint = dict(post_constraints[0])
                     finalize_timed_out = False
                     try:
-                        self.runner.call(
+                        finalize_call(
                             "apply_existing_sketch_constraint",
                             {
                                 "document_id": document_id,
@@ -3058,7 +3166,7 @@ class KompasAdapter:
                         if "timed out" not in str(exc).lower():
                             raise
                         finalize_timed_out = True
-                    inspection = self.runner.call(
+                    inspection = finalize_call(
                         "inspect_sketch_full",
                         {
                             "document_id": document_id,
@@ -3066,6 +3174,9 @@ class KompasAdapter:
                             "include_dimensions": True,
                             "include_constraints": True,
                             "include_diagnostics": True,
+                            # Creation verification needs the API5 editor's actual constraints.
+                            # Public read-only fragment inspection deliberately cannot expose them.
+                            "update_before_state": True,
                             "max_items": 300,
                         },
                         timeout_seconds=60.0,
@@ -3109,9 +3220,9 @@ class KompasAdapter:
                         and int(summary.get("closure_primary_self_intersection_count") or 0) == 0
                     )
                     if not verified:
-                        raise RuntimeError(
+                        raise retain_partial(RuntimeError(
                             "Managed chain-sprocket transition constraint verification failed"
-                        )
+                        ))
                     result["transition_constraint"] = {
                         "ok": True,
                         "kind": "point_on_curve",
@@ -3121,7 +3232,7 @@ class KompasAdapter:
                         "partner_reference": partner_reference,
                         "apply_call_timed_out": finalize_timed_out,
                         "constraints_state_readback": state,
-                        "constraints_state_requires_ui_confirmation": int(state.get("code") or 0) != 2,
+                        "constraints_state_requires_ui_confirmation": int(state.get("code") or 0) != 1,
                         "closed": True,
                         "gap_count": 0,
                         "self_intersection_count": 0,
@@ -3214,6 +3325,9 @@ class KompasAdapter:
         return candidate
 
     def _close_matching_documents(self, document_ids: list[str | None]) -> list[dict[str, Any]]:
+        reader = getattr(self.runner, "get_cad_work_mode", None)
+        if callable(reader) and reader()["mode"] == "interactive":
+            return [{"ok": True, "closed": False, "retained_for_user": True, "com_called": False}]
         wanted = {document_id for document_id in document_ids if document_id}
         if not wanted:
             return []
@@ -3387,8 +3501,9 @@ class KompasAdapter:
         self,
         document_id: str | None = None,
         *,
-        close_after_save: bool = True,
+        close_after_save: bool = False,
         strict: bool = False,
+        user_requested_close: bool = False,
     ) -> dict[str, Any]:
         return self.runner.call(
             "save_document",
@@ -3396,6 +3511,7 @@ class KompasAdapter:
                 "document_id": document_id,
                 "close_after_save": close_after_save,
                 "strict": strict,
+                "_user_requested_close": user_requested_close,
             },
         )
 
@@ -3404,8 +3520,9 @@ class KompasAdapter:
         path: str,
         document_id: str | None = None,
         *,
-        close_after_save: bool = True,
+        close_after_save: bool = False,
         strict: bool = False,
+        user_requested_close: bool = False,
     ) -> dict[str, Any]:
         return self.runner.call(
             "save_document",
@@ -3414,6 +3531,7 @@ class KompasAdapter:
                 "path": self._normalize_target_path_for_kompas(path),
                 "close_after_save": close_after_save,
                 "strict": strict,
+                "_user_requested_close": user_requested_close,
             },
         )
 
@@ -3422,14 +3540,20 @@ class KompasAdapter:
         document_id: str | None = None,
         suffix: str = "codex",
         *,
-        close_after_save: bool = True,
+        close_after_save: bool = False,
+        user_requested_close: bool = False,
     ) -> dict[str, Any]:
         selected = self._select_document(document_id=document_id)
-        export_path = self._build_export_path(selected.get("path") or selected.get("name") or "document.a3d", suffix=suffix)
+        source = selected.get("path") or selected.get("name") or "document"
+        # An unsaved part is normally named Untitled (no suffix). Choosing the
+        # assembly fallback makes KOMPAS refuse SaveAs without saving the part.
+        extension = ".m3d" if not selected.get("path") and selected.get("type") == 10024 else None
+        export_path = self._build_export_path(source, suffix=suffix, extension=extension)
         result = self.save_document_as(
             export_path,
             document_id=selected.get("id"),
             close_after_save=close_after_save,
+            user_requested_close=user_requested_close,
         )
         result["export_path"] = export_path
         return result

@@ -53,6 +53,16 @@ warning; the ASME choices intentionally have no invented chain designations.
 Its descriptor reports `preview=true` and `build=true`. Host-side radial and
 axial builders supply the two canvas views; missing construction dimensions or
 unresolved source conflicts block CAD planning and creation.
+The shared MCP/CLI interface also registers `module_id: "silent_chain_sprocket"`
+with the existing selection fields directly in `parameters`. Discovery defaults
+are partial: designation and physical tooth count require explicit selection.
+Preview exposes `data.summary.completion`; plan/create return `INPUT_REQUIRED`
+and `data.completion` without CAD writes until engineering inputs are complete.
+Suggestions are not automatically accepted. Compact responses omit contour and
+drawing arrays; inspect retains source warnings in `data.source_summary`.
+The saved block has no verification stamp (`verification.stored_verified=null`);
+recognition is not a fresh geometry audit. The rim occupies global X
+`[0, functional_width_mm]`; existing material-removal verification is unchanged.
 GOST axial sections use C1, h2/h3, guide-throat widths and rib spacing, hatching
 only the cut material. GOST type II uses the Figure 2 18 mm rib spacing and
 integral plate-packet count. The same plate packets repeat at 6s in GOST 13552-81,
@@ -109,6 +119,28 @@ requires an explicit confirmation.
 The flat-belt slice is complete: cylindrical and circular-crown sketches are
 fully constrained through formula-bound driving dimensions, and create, inspect,
 update, save, and reopen behavior has been verified in live KOMPAS.
+
+### Shared MCP/CLI pulley contract
+
+`get_cad_module_contract` / `run_cad_module` register `v_belt`, `poly_v`,
+`flat_belt`, `timing_trapezoidal` and `timing_curvilinear`. Existing typed family
+inputs are passed directly in `parameters`; V-belt finishing also exposes
+`top_edge_fillet_radius` and `include_standard_top_edge_fillet`. Full bounded
+creation recipes (`GWP_RECIPE_*`, version and SHA-256) retain custom inputs and
+finishing options, including ordinary adapter/Studio creation. They are metadata,
+not driving dimensions or persisted geometry verification. Existing editing paths
+remain available; the shared interface declares only create and recipe recognition.
+
+Inspect returns the stored **creation** recipe when available and compatible with
+readable driving inputs. Detected changes invalidate recreation; recognition is
+not proof of unchanged geometry, including manual downstream/finishing edits.
+Old blocks lacking a full recipe return `parameters: null`. New creation verifies
+positive single-solid volume and actual axial bounds; timing patterns additionally
+verify expected material removal. After reopening, control cases retain source
+parameters, both root sketch geometries and bounds. V/Poly-V/flat rims occupy
+positive global X; timing rims occupy `[-face_width, 0]`. The flat body's volume is
+read from native geometry and compared with profile integration, not inferred
+solely from a valid rotation operation.
 
 The timing-belt slice has managed CAD build for both trapezoidal T/AT and
 curvilinear HTD. Both modules use a cropped end view of three grooves and two teeth, short reference
@@ -496,7 +528,7 @@ profile formulas or CAD execution logic.
 Run the focused host-side contract checks:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_geomwright_studio.py
+.\scripts\check_change.ps1 -TestPath tests/test_geomwright_studio.py -TimeoutSeconds 120
 ```
 
 The command should complete with all checks passing. The create operation

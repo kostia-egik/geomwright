@@ -14,7 +14,9 @@ sharp generating rack at the full dedendum depth, joined to the involute at the
 numerically detected intersection. This is the same nominal envelope used by
 the open py_gearworks oracle (`enable_undercut=True`), which ignores the cutter
 tip radius as well. The selected basic-rack fillet radius is reported as
-metadata; a rounded-tip `generated_exact` envelope is a later refinement.
+metadata for the cylindrical baseline. Bevel may opt into an analytical,
+non-undercut junction and the normal-offset envelope of a rounded rack tip.
+That local rack refinement does not make the conical projection generated-exact.
 """
 from __future__ import annotations
 
@@ -226,6 +228,8 @@ def build_tooth_space_flank(
     corner_depth_mm: float,
     curve_samples: int = 260,
     max_involute_samples: int | None = None,
+    analytic_root_join: bool = False,
+    rack_corner_radius_mm: float = 0.0,
 ) -> dict:
     """Half tooth-space boundary of a sharp-rack generated involute profile.
 
@@ -239,6 +243,9 @@ def build_tooth_space_flank(
     Returns the half-gap path from the root-circle centre to the tip point
     (`surface`), its split index at the form point, and the diagnostic paths.
     A rejected profile returns an `errors` list without a surface.
+    `analytic_root_join` selects exact tangency for non-undercut virtual gears;
+    `rack_corner_radius_mm` then rounds the generating rack without changing
+    its root depth or straight flank. Undercut trimming remains the baseline.
     """
     errors: list[dict] = []
     lateral = math.pi * module_mm / 4.0 - rack_depth_mm * math.tan(pressure_angle_rad)
@@ -259,9 +266,58 @@ def build_tooth_space_flank(
         inv_pressure_angle=inv_alpha,
         count=involute_count,
     )
-    hits = _polyline_intersections(trochoid_curve, full_involute)
+    # Without undercut the two envelopes TOUCH rather than cross. A search
+    # for intersections of sampled chords can miss that tangency completely.
+    # Bevel's continuous virtual gear uses the exact rack-contact station;
+    # existing cylindrical families retain their accepted construction.
+    tangent_point = None
+    if analytic_root_join and corner_depth_mm <= pitch_radius * math.sin(pressure_angle_rad) ** 2:
+        # A rounded rack tip is the normal offset of its centre's roulette.
+        # Its centre is inset from the sharp corner so that BOTH the root
+        # depth and the unchanged straight rack flank remain tangent.
+        radius = float(rack_corner_radius_mm)
+        centre_depth = corner_depth_mm - radius
+        centre_lateral = lateral - radius * (1 - math.sin(pressure_angle_rad)) / math.cos(pressure_angle_rad)
+        if radius < 0 or centre_depth <= 0 or centre_lateral < 0:
+            return {"errors": [error_item(
+                "gear_root_radius_unfit",
+                "The rack corner radius does not fit the available root depth and land.",
+                root_radius_mm=radius, corner_depth_mm=corner_depth_mm,
+            )]}
+        t_root = -centre_lateral / pitch_radius
+        t_join = (centre_depth / math.tan(pressure_angle_rad) - centre_lateral) / pitch_radius
+        root_count = min(curve_samples, max(24, math.ceil(curve_samples * (t_join - t_root) / 1.2)))
+        trochoid_curve = []
+        for i in range(root_count + 1):
+            t = t_root + (t_join - t_root) * i / root_count
+            centre = _trochoid_point(pitch_radius, centre_depth, centre_lateral, t)
+            u = centre_lateral + pitch_radius * t
+            normal_length = math.hypot(centre_depth, u)
+            nx, ny = u / normal_length, -centre_depth / normal_length
+            c, s = math.cos(t), math.sin(t)
+            trochoid_curve.append([centre[0] + radius * (nx * c - ny * s),
+                                   centre[1] + radius * (nx * s + ny * c)])
+        tangent_point = trochoid_curve[-1]
+    hits = [] if tangent_point is not None else _polyline_intersections(trochoid_curve, full_involute)
     trochoid_used = bool(hits)
-    if hits:
+    if tangent_point is not None:
+        form_radius = _radius(tangent_point)
+        if form_radius >= outside_radius - 1e-9:
+            return {"errors": [error_item(
+                "gear_fillet_reaches_tip",
+                "The generated root trochoid reaches the outside circle; the tooth space is not valid.",
+                form_radius_mm=form_radius, outside_radius_mm=outside_radius,
+            )]}
+        involute_trim = sample_involute_flank(
+            base_radius=base_radius, radius_start=form_radius, radius_end=outside_radius,
+            base_half_angle=base_half_angle_rad, inv_pressure_angle=inv_alpha,
+            count=involute_count,
+        )
+        boundary = _dedupe([*trochoid_curve, *involute_trim[1:]], tolerance=max(1e-9, module_mm * 1e-6))
+        root_angle = _angle(trochoid_curve[0])
+        split_point = tangent_point
+        trochoid_used = True
+    elif hits:
         form_point = min(hits, key=_radius)
         form_radius = _radius(form_point)
         if form_radius >= outside_radius - 1e-9:
@@ -327,7 +383,9 @@ def build_tooth_space_flank(
         "surface_split_index": int(surface_split_index),
         "root_angle_rad": root_angle,
         "form_radius_mm": form_radius,
-        "root_envelope": "sharp_rack_trochoid" if trochoid_used else "involute_root_circle",
+        "root_envelope": ("rounded_rack_trochoid" if tangent_point is not None and rack_corner_radius_mm > 0
+                          else "sharp_rack_trochoid" if trochoid_used else "involute_root_circle"),
+        "junction": "analytic_rack_tangent" if tangent_point is not None else "sampled",
         "involute_path": involute_trim,
         "fillet_path": trochoid_curve if trochoid_used else [],
         "root_arc_path": root_arc,

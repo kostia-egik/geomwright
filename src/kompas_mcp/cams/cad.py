@@ -422,6 +422,15 @@ def create_cam(adapter: Any, request: dict, *, width: float = 12.0,
                           studio_profile=studio_profile)
     if not execute:
         return {k:v for k,v in plan.items() if k not in {"curve","base","source_request"}}
+    return execute_cam_plan(adapter, plan, confirm_write=confirm_write, visible=visible,
+                            progress_callback=progress_callback)
+
+
+def execute_cam_plan(adapter: Any, plan: dict, *, confirm_write: bool = False,
+                     visible: bool = True, progress_callback: Any = None) -> dict:
+    """Execute the already validated host plan through the existing verification chain."""
+    if plan.get("stage") != "cam_plan" or plan.get("plan_version") != 1:
+        raise ValueError("A cam_plan version 1 is required")
     if confirm_write is not True:
         raise ValueError("confirm_write=true is required when execute=true")
     cancellation = getattr(adapter.runner,"cancel_event",None)

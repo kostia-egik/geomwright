@@ -66,3 +66,39 @@ Current live CAD checks:
 
 Local native command-105 audit notes, where maintained, are separate from this
 custom parametric scenario and do not describe or limit its contract.
+
+## Shared module interface
+
+`module_id: torsion_spring` exposes the same generator through
+`get_cad_module_contract`, `run_cad_module` and the model CLI. Exactly one of
+mean/outer diameter and either one common leg length or both per-end lengths are
+required. Unlike the legacy scenario, this interface refuses
+`gap < minimum_gap > 0` rather than silently changing the gap. Unsupported
+tangent-phase and tangent-fillet inputs are refused before CAD.
+
+Creation follows `saved_unique_export_then_open`: a unique `.m3d` is written in
+`KOMPAS_EXPORT_DIR` and returned opened. `TSPR_RECIPE_*` retains the checksummed
+version-1 input recipe, separate from extension/compression metadata. Inspection
+recognizes complete saved inputs and valid profile/sweep roots, not a fresh
+geometry/formula audit. Missing inputs are never replaced by defaults. No new
+Studio block or common in-place edit capability is added.
+
+Fresh creation verifies valid native sweep, one positive solid, native coil
+diameter/pitch/height/hand, wire parameter and original leg-path endpoint
+coordinates. Original straight-leg lengths are before transition trimming;
+finished straight segments can be shorter. Actual body bounds include legs,
+whereas planned height refers only to the coil. Volume and recipe must survive
+save/reopen. Geometry does not certify torque, stiffness, strength or fatigue.
+
+Current shared-interface control cases cover all three end types and both hands
+with wire2, mean diameter20, body turns5, free angle45 and asymmetric leg lengths
+25/30 mm. Radial and axial transitions use start phase30; tangent uses phase0.
+All six pass save/reopen. The additional native leg-endpoint check was live
+verified on one representative of each end type. These are representative
+checks, not certification of all arbitrary parameter combinations.
+
+A separate native driving check changes LL1/LL2 from25/30 to27/33 mm, A1 from45
+to60 degrees and G1 from0.01 to0.02 mm. Actual source-line lengths, coil step
+2.02 and derived height10.4366667 mm follow the formulas; valid positive body and
+volume survive saving to a separate copy and readonly reopening. The creation
+recipe remains creation metadata, not an audit of these later driving edits.

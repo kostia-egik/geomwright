@@ -1,4 +1,5 @@
 import { t, formatNumber } from "./i18n.js";
+import { drawBevelAxial, drawBevelTooth } from "./bevel-views.js";
 
 const panel = document.querySelector("#axial-preview");
 const canvas = document.querySelector("#side-section-canvas");
@@ -7,21 +8,31 @@ const wrap = panel.closest(".canvas-wrap");
 const toggle = document.querySelector("#axial-preview-toggle");
 const rail = document.querySelector("#axial-preview-rail");
 const stacked = window.matchMedia("(max-width: 1200px)");
+const bevelStacked = window.matchMedia("(max-width: 820px)");
 let data = null;
 let manuallyHidden = false;
+const toothPanel = document.querySelector("#bevel-tooth-view");
+const toothCanvas = document.querySelector("#bevel-tooth-canvas");
+let toothData = null;
 
 function updateLayout() {
   rail.hidden = !data;
   panel.hidden = !data || manuallyHidden;
+  panel.classList.toggle("bevel-views", data?.family === "gear_bevel");
+  wrap.classList.toggle("bevel-three-view", data?.family === "gear_bevel");
+  toothPanel.hidden = !toothData || data?.family !== "gear_bevel";
   wrap.classList.toggle("has-side-section", Boolean(data));
   wrap.classList.toggle("side-section-collapsed", Boolean(data) && manuallyHidden);
   toggle.setAttribute("aria-expanded", String(!panel.hidden));
   const gear = ["gear_spur", "gear_internal", "gear_bevel"].includes(data?.family);
-  toggle.title = gear
+  toggle.title = data?.family === "gear_bevel"
+    ? t(manuallyHidden ? "gear.bevel_views_show" : "gear.bevel_views_hide")
+    : gear
     ? t(manuallyHidden ? "gear.axial_show" : "gear.axial_hide")
     : t(manuallyHidden ? "chain.axial_show" : "chain.axial_hide");
   toggle.setAttribute("aria-label", toggle.title);
-  toggle.firstElementChild.textContent = stacked.matches
+  const stackedViews = data?.family === "gear_bevel" ? bevelStacked.matches : stacked.matches;
+  toggle.firstElementChild.textContent = stackedViews
     ? (manuallyHidden ? "▴" : "▾") : (manuallyHidden ? "‹" : "›");
   requestAnimationFrame(draw);
 }
@@ -361,117 +372,6 @@ function drawGearSideView(rect) {
     : t(data.internal ? "gear.axial_note_spur_internal" : "gear.axial_note_spur", "Прямозубое колесо.");
 }
 
-function drawBevelSideView(rect) {
-  const outline = (Array.isArray(data.outline) ? data.outline : [])
-    .map(([x, r]) => [Number(x) || 0, Math.max(0, Number(r) || 0)]);
-  if (outline.length < 3) return;
-  const pitchLine = Array.isArray(data.pitch_line) ? data.pitch_line : [];
-  const rootLine = Array.isArray(data.root_line) ? data.root_line : [];
-  const xValues = outline.map((point) => point[0]);
-  const rValues = outline.map((point) => point[1]);
-  const xMin = Math.min(...xValues);
-  const xMax = Math.max(...xValues);
-  const rMax = Math.max(...rValues);
-  const widthMm = Math.max(1e-6, xMax - xMin);
-  const heightMm = Math.max(1e-6, 2 * rMax);
-  const leftMargin = 92;
-  const rightMargin = 66;
-  const topMargin = 66;
-  const bottomMargin = 120;
-  const scale = Math.max(0.01, Math.min(
-    (rect.width - leftMargin - rightMargin) / widthMm,
-    (rect.height - topMargin - bottomMargin) / heightMm,
-  ));
-  const width = widthMm * scale;
-  const height = heightMm * scale;
-  const left = leftMargin + Math.max(0, (rect.width - leftMargin - rightMargin - width) / 2);
-  const top = topMargin + Math.max(0, (rect.height - topMargin - bottomMargin - height) / 2);
-  const right = left + width;
-  const centerY = top + height / 2;
-  const projectX = (x) => left + ((x - xMin) / widthMm) * width;
-  const projectY = (r) => centerY - r * scale;
-  const project = ([x, r]) => [projectX(x), projectY(r)];
-
-  const topPoints = outline.map(project);
-  const bottomPoints = outline.map(([x, r]) => [projectX(x), projectY(-r)]);
-  const silhouette = new Path2D();
-  silhouette.moveTo(...topPoints[0]);
-  for (const point of topPoints.slice(1)) silhouette.lineTo(...point);
-  for (const point of [...bottomPoints].reverse()) silhouette.lineTo(...point);
-  silhouette.closePath();
-  ctx.fillStyle = "rgba(227,170,79,.05)";
-  ctx.fill(silhouette);
-  ctx.strokeStyle = "#e3aa4f";
-  ctx.lineWidth = 2;
-  ctx.stroke(silhouette);
-
-  ctx.setLineDash([6, 4]);
-  ctx.strokeStyle = "rgba(227,170,79,.72)";
-  ctx.lineWidth = 1.2;
-  for (const line of [pitchLine, rootLine]) {
-    if (line.length < 2) continue;
-    const a = project(line[0]);
-    const b = project(line[1]);
-    ctx.beginPath();
-    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
-    ctx.moveTo(a[0], centerY + (centerY - a[1])); ctx.lineTo(b[0], centerY + (centerY - b[1]));
-    ctx.stroke();
-  }
-  ctx.setLineDash([2, 3]);
-  ctx.strokeStyle = "rgba(142,174,196,.75)";
-  for (const key of ["back_cone", "front_cone", "tip_cone"]) {
-    const line = ((data.tooth_lines || {})[key]) || [];
-    if (line.length < 2) continue;
-    const a = project(line[0]);
-    const b = project(line[1]);
-    ctx.beginPath();
-    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
-    ctx.moveTo(a[0], centerY + (centerY - a[1])); ctx.lineTo(b[0], centerY + (centerY - b[1]));
-    ctx.stroke();
-  }
-  ctx.setLineDash([]);
-  dimension(left, right, top, top - 30,
-    t("gear.bevel_blank_width", "B = {value}", {
-      value: formatNumber(Number(data.blank_width_mm) || 0, 2),
-    }));
-  const tipX = projectX(Number(data.tip_corner_x_mm) || xMin);
-  const tipRadius = Math.max(1e-6, Number(data.tip_corner_radius_mm) || rMax);
-  const dimensionX = tipX + 40;
-  const tipTop = projectY(tipRadius);
-  const tipBottom = projectY(-tipRadius);
-  ctx.strokeStyle = "#8eacc0";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(tipX, tipTop); ctx.lineTo(dimensionX + 5, tipTop);
-  ctx.moveTo(tipX, tipBottom); ctx.lineTo(dimensionX + 5, tipBottom);
-  ctx.moveTo(dimensionX, tipTop); ctx.lineTo(dimensionX, tipBottom);
-  for (const [y, direction] of [[tipTop, 1], [tipBottom, -1]]) {
-    ctx.moveTo(dimensionX - 3, y + direction * 5);
-    ctx.lineTo(dimensionX, y);
-    ctx.lineTo(dimensionX + 3, y + direction * 5);
-  }
-  ctx.stroke();
-  ctx.save();
-  ctx.translate(dimensionX + 14, (tipTop + tipBottom) / 2);
-  ctx.rotate(-Math.PI / 2);
-  label(t("gear.bevel_axial_tip", "dₐₑ = {value}", {
-    value: formatNumber(Number(data.outer_tip_diameter_mm) || 0, 2),
-  }), 0, 0);
-  ctx.restore();
-  const angleText = [
-    t("gear.bevel_angle_delta", "δ = {value}°", { value: formatNumber(Number(data.pitch_cone_angle_deg) || 0, 2) }),
-    t("gear.bevel_angle_face", "δₐ = {value}°", { value: formatNumber(Number(data.face_cone_angle_deg) || 0, 2) }),
-    t("gear.bevel_angle_root", "δ_f = {value}°", { value: formatNumber(Number(data.root_cone_angle_deg) || 0, 2) }),
-  ].join("   ");
-  label(angleText, left + width / 2, top + height + 34);
-  document.querySelector("#axial-row-count").textContent = t(
-    "gear.axial_teeth", "z = {count}", { count: data.tooth_count });
-  document.querySelector("#axial-preview-note").textContent = t(
-    "gear.bevel_axial_note",
-    "Осевое сечение: тарелка с задним и передним конусами, перпендикулярными зубу.",
-  );
-}
-
 function draw() {
   if (panel.hidden || !data) return;
   const rect = canvas.getBoundingClientRect();
@@ -481,7 +381,18 @@ function draw() {
   canvas.height = Math.round(rect.height * ratio);
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
-  if (data.family === "gear_bevel") { drawBevelSideView(rect); return; }
+  if (data.family === "gear_bevel") {
+    drawBevelAxial(ctx, data, rect);
+    const toothRect = toothCanvas.getBoundingClientRect();
+    if (toothRect.width > 0 && toothRect.height > 0) {
+      const toothCtx = toothCanvas.getContext("2d");
+      toothCanvas.width = Math.round(toothRect.width * ratio);
+      toothCanvas.height = Math.round(toothRect.height * ratio);
+      toothCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      drawBevelTooth(toothCtx, toothData, toothRect);
+    }
+    return;
+  }
   if (["gear_spur", "gear_internal"].includes(data.family)) { drawGearSideView(rect); return; }
   const silent = data.family === "silent_chain_sprocket";
   document.querySelector("#axial-row-count").textContent = t(silent ? "silent.axial_ribs" : "chain.axial_rows", "", { count: data.row_count });
@@ -603,12 +514,13 @@ function draw() {
 
 window.addEventListener("geomwright-preview", (event) => {
   const result = event.detail;
+  toothData = result?.tooth_end_view || null;
   if (["gear_spur", "gear_internal", "gear_bevel"].includes(result?.family)) {
     data = result?.secondary_view ? { ...result.secondary_view, family: result.family } : null;
     const bevel = result?.family === "gear_bevel";
     for (const node of [panel.querySelector("h3"), rail.querySelector(".axial-rail-caption")]) {
-      node.dataset.i18n = "gear.axial_title";
-      node.textContent = t("gear.axial_title");
+      node.dataset.i18n = bevel ? "gear.bevel_section_title" : "gear.axial_title";
+      node.textContent = t(node.dataset.i18n);
     }
     const legendKey = bevel ? "gear.bevel_axial_legend" : "gear.axial_legend";
     panel.querySelector(".axial-legend").dataset.i18n = legendKey;
@@ -616,7 +528,14 @@ window.addEventListener("geomwright-preview", (event) => {
       legendKey,
       bevel ? "δ — угол делительного конуса · b — ширина венца" : "β — угол наклона · b — ширина венца",
     );
-    canvas.setAttribute("aria-label", t("gear.axial_label"));
+    canvas.dataset.i18nLabel = bevel ? "gear.bevel_section_title" : "gear.axial_label";
+    canvas.setAttribute("aria-label", t(canvas.dataset.i18nLabel));
+    delete document.querySelector("#axial-preview-note").dataset.i18n;
+    if (bevel && data) {
+      document.querySelector("#axial-preview-note").dataset.i18n = "gear.bevel_section_note";
+      document.querySelector("#axial-preview-note").textContent = t("gear.bevel_section_note");
+      document.querySelector("#axial-row-count").textContent = `z = ${data.tooth_count}`;
+    }
     updateLayout();
     panel.dataset.state = "ready";
     requestAnimationFrame(draw);
@@ -625,6 +544,8 @@ window.addEventListener("geomwright-preview", (event) => {
   data = result?.family === "silent_chain_sprocket"
     ? { ...(result.secondary_view || {}), family: result.family }
     : result?.family === "chain_sprocket" && result.secondary_view ? result.secondary_view : null;
+  delete document.querySelector("#axial-preview-note").dataset.i18n;
+  canvas.dataset.i18nLabel = "chain.axial_label";
   if (result?.family !== "silent_chain_sprocket") {
     for (const node of [panel.querySelector("h3"), rail.querySelector(".axial-rail-caption")]) {
       node.dataset.i18n = "chain.axial_title"; node.textContent = t("chain.axial_title");
@@ -645,4 +566,6 @@ window.addEventListener("geomwright-preview-state", (event) => {
 });
 window.addEventListener("geomwright-language", updateLayout);
 stacked.addEventListener("change", updateLayout);
+bevelStacked.addEventListener("change", updateLayout);
 new ResizeObserver(draw).observe(canvas);
+new ResizeObserver(draw).observe(toothCanvas);

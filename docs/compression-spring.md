@@ -81,6 +81,51 @@ initial evolution update fails.
 
 ## Live Evidence
 
+The experimental shared interface registers `module_id: compression_spring` with
+typed `variant: cylindrical|two_zone|conical`. Existing scenario/catalog APIs are
+preserved; `get_cad_module_contract` describes the supported engineering inputs.
+This adapter retains saved creation and post-save anchor bindings: it writes a
+unique export, opens it, and returns `saved=true`, `closed=false`. Global X is the
+spring axis. Creation verifies one positive-volume solid, radial envelope, owned
+roots, checksum recipe readback and volume preservation after save/reopen.
+Recipe inspection does not audit geometry or driving formulas and has no stored
+verification stamp. No new Studio spring block is implemented by this integration.
+
+Current-runtime control cases pass for an open cylinder, grounded right/left
+two-zone cylinders (left start phase30), and cones with constant pitch/constant
+angle. Native point probes identified a quarter-turn gap in the old left-hand
+plan: its first segment used angle0 while later segments used90. First and later
+angle formulas now use the same left-hand phase convention; both fillets produce
+three result edges. The original segmented cylinder (mean diameter30, wire4,
+centreline height48, working turns5, end turns1, ground turns0.5) still has native
+`ObjectError=31`: the sweep self-intersects at zero-clearance end turns. The same
+dimensions also fail right-handed. Shrinking only the diagnostic wire profile by
+0.02 mm, keeping the centreline helices unchanged, produces a valid sweep before
+ground cuts and through save/finalization/reopen. This is diagnostic evidence, not
+a changed engineering dimension or a production fallback. The shared creation
+interface checks native sweep validity before saving and reports
+`CAD_SELF_INTERSECTION` instead of blaming recipe/reopen.
+
+The shared module now exposes `end_pitch_gap` (default0.01 mm): end pitch equals
+wire diameter plus this axial increment. `EG1` is driving; `EP1=WD1+EG1` drives
+end spiral steps, turn spans, working-span derivation and grinding offsets. The
+nominal wire remains unchanged. Explicit zero is not clamped; negative/nonfinite
+inputs are refused. Legacy requests without the field retain their old zero gap,
+as do earlier saved version-1 recipes during recognition. New recipes retain the
+exact requested increment. This parameter is not a certified minimum distance
+between helical surfaces, and it does not guarantee every arbitrary spring input.
+
+Both hands of the original cylinder now pass native sweep validity, positive
+single-solid volume and save/reopen with gap0.01. Two-zone left phase30 and both
+cone pitch modes pass as well. A live change of EG1 from0.01 to0.02 changes native
+end steps4.01→4.02 with WD1=4, retaining valid body and positive volume through
+save/reopen. Asymmetric end/ground counts were checked with physical length50 mm.
+`height` and legacy `free_length` mean centreline span; `standard_length` means
+physical end-to-end length in the legacy ground/extreme-plane model. Only one
+length input is accepted. Optional `pitch` is a consistency check against the
+length/turn-derived working pitch, not an ignored override. No new Studio block
+is implemented; the shared-generator integration is not a complete Studio module.
+
 Current review models:
 
 - `cyl_23_left_native_full_com_cutpoints_default_r6.m3d`: left-hand native

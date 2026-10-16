@@ -71,19 +71,31 @@ def run_verified_kompas_task(
     output_name = str(payload["output_name"])
     output_path = output_dir / output_name
 
-    try:
-        result = create_part(
-            scenario,
-            params,
-            output_path=str(output_path),
-            visible=visible,
-            close_after_save=close_after_save,
-        )
-    except Exception as exc:
-        error_payload = _build_exception_payload(exc, stage=f"{stage_prefix}_create_part")
-        _write_json(output_dir / "03_kompas_create_error.json", error_payload)
-        _finish_transaction_phase(output_dir, transaction, "create", ok=False, details=error_payload)
-        raise
+    preflight_ok = bool(preflight["report"].get("ok"))
+    if not preflight_ok:
+        # Keep the standard failed-run dossier without crossing the CAD boundary.
+        result = {
+            "stage": f"{stage_prefix}_create_part",
+            "ok": False,
+            "saved": False,
+            "skipped": True,
+            "error_type": "PreflightFailed",
+            "message": "CAD creation skipped because preflight did not pass.",
+        }
+    else:
+        try:
+            result = create_part(
+                scenario,
+                params,
+                output_path=str(output_path),
+                visible=visible,
+                close_after_save=close_after_save,
+            )
+        except Exception as exc:
+            error_payload = _build_exception_payload(exc, stage=f"{stage_prefix}_create_part")
+            _write_json(output_dir / "03_kompas_create_error.json", error_payload)
+            _finish_transaction_phase(output_dir, transaction, "create", ok=False, details=error_payload)
+            raise
     if not isinstance(result, dict):
         result = _build_malformed_payload(
             stage=f"{stage_prefix}_create_part_result",
@@ -91,12 +103,15 @@ def run_verified_kompas_task(
             value=result,
         )
     _write_json(output_dir / "03_kompas_create_result.json", result)
-    _finish_transaction_phase(output_dir, transaction, "create", ok=bool(result.get("ok")), details={"saved": bool(result.get("saved"))})
+    _finish_transaction_phase(
+        output_dir, transaction, "create", ok=bool(result.get("ok")),
+        details={"saved": bool(result.get("saved")), "skipped": not preflight_ok},
+    )
 
     document_readback_report: dict[str, Any] | None = None
     document_readback_contract_report: OperationInvariantReport | None = None
     document_readback_manifest: dict[str, Any] | None = None
-    if document_readback is not None:
+    if document_readback is not None and preflight_ok:
         document_readback_report = run_document_readback(
             output_path,
             document_readback,

@@ -46,12 +46,15 @@ Evidence levels used by this file:
 | Need to project sketch geometry and constrain to it | `SKETCH-004`, `SKETCH-006`, `SKETCH-003` |
 | Need visible projection of a 3D point in a sketch | `SKETCH-006`, `SKETCH-005` |
 | Need to edit or inspect an existing sketch after reopening | `SKETCH-007`, `SKETCH-002` |
+| UI shows a fully defined sketch but the host calls native code 1 under-constrained | `SKETCH-011` |
 | Generated model file misses late-created sketches | `SKETCH-008` |
 | Symmetric/repeated copies accumulate duplicate dimensions or skipped constraints | `SKETCH-009`, `VAR-001` |
 | Sketch solver stalls after attaching auxiliary geometry to an already merged profile node | `SKETCH-010`, `SKETCH-005` |
 | Sketch arc, line, axis, or curve has wrong direction | `VERIFY-001`, `ARC-001`, `CS-002` |
 | Direction flag works but result is inverted | `DIR-001`, `VERIFY-001` |
 | Spiral direction is confused with spiral construction side | `DIR-001`, `SPIRAL-001`, `VERIFY-001` |
+| Physical thread has the requested hand but misses a working-span end | `SPIRAL-002`, `VERIFY-001` |
+| Internal round thread sketch solves but its root depth differs from the planned contour | `THREAD-001`, `SPIRAL-002` |
 | Solid body self-intersects at zero gap | `GAP-001` |
 | Resolve a 2D sketch point as a persistent 3D reference | `EDGE-001` |
 | Composite path mixes sketch edges and 3D edges | `EDGE-002` |
@@ -68,13 +71,281 @@ Evidence levels used by this file:
 | CAD job remains queued after a completed-looking operation | `SESSION-002` |
 | CAD model is created but Studio reports that the managed block is missing | `SESSION-003` |
 | Circular pattern reports the right count but leaves one uncut tooth space | `PATTERN-001` |
+| Internal straight-spline slots do not match the retained shaft teeth | `SPLINE-001`, `PATTERN-001` |
 | Host tests create duplicate CAD models during unrelated work | `SESSION-004` |
 | Bridge fails with `SyntaxError` although the project venv accepts the file | `BRIDGE-001` |
+| API7 attach returns a function or misses CLSID maps in gen_py | `BRIDGE-002` |
 | Numeric sketch creation times out with hundreds of entities | `OP-004`, `BRIDGE-001` |
 | Need a variable-section cut without a loft/loft-cut primitive | `LOFT-001`, `LOFT-002` |
 | An API-created plane's sketch 2D frame is unknown or mirrored | `FRAME-001`, `CS-004` |
+| Need final-body surfaces or assembly-coordinate measurements | `READ-001` |
 
 ## Rules
+
+### THREAD-001: Check Round Internal Cutter Geometry Before Solver Acceptance
+
+Evidence: live-verified private M20×2.5 cylindrical internal cutter, both hands,
+20 mm through bore in a Ø36 carrier, followed by actual save/close/reopen and
+read-only sketch inspection. This is not a public construction-chain capability
+or a thread-standard conformity claim.
+
+Symptom: a fully defined sketch and correct native signed lead coexist with a
+root radius different from the requested radial depth. An inconsistent numeric
+arc centre is moved by the solver to satisfy flank tangency. Solver success does
+not prove agreement with the planned contour.
+
+Rule: first validate that both arc endpoints lie on their declared circle and
+that the circle is tangent to the flank lines. Distinguish the deepest material
+cut from the virtual sharp apex of those lines. For the cylindrical symmetric
+round cutter with half-angle α, desired radial depth d and circle radius r:
+
+- tangent depth = d − r(1 − sin α);
+- circle centre depth = d − r;
+- tangent half-width = r cos α;
+- outer half-width = tangent half-width + tangent depth tan α;
+- virtual apex depth = d + r(1/sin α − 1).
+
+Use the virtual apex, not d, for the theoretical flank reference. The internal
+Layer 2 `_prepare_internal_metric_through_preview` holds these relations and
+nominal-diameter expressions with an immutable input bore; legacy standalone
+normalization does not select it. The version-1 public internal chain step now
+uses this method under its strict through-carrier and persisted native audit
+contract. A depth label and a stored recipe alone are not evidence of actual
+CAD driving relationships.
+
+Verification: the former default M20×2.5 round contour had native maximum radius
+9.819578 mm instead of 10 mm. A consistent corrected contour has circle centre
+radius 9.819578 mm, circle radius 0.180422 mm, tangent radius 9.909789 mm and actual
+maximum radius 10 mm. Read-only exported-fragment inspection matches the planned
+arc and preserves fully defined state/code1 and Changed=False after reopen.
+The private through-end proof also requires four distinct full-span trimmed
+helix boundaries, no material terminal section, positive shell removal and an
+unchanged outer cylindrical surface. Its negative-Y internal profile uses phase
+180° for right and 0° for left, unlike the verified positive-Y external profile;
+do not copy the external phase branch without checking actual native coverage.
+The phase and cutter overtravel remain family/frame-specific empirical evidence,
+not normative thread dimensions or general permission to relax carrier guards.
+
+Driver verification: fresh private right/left models built from the shared
+Layer 2 adapter pass pitch2.5→2, nominal diameter20→20.2 and restoration to
+20/2.5 while keeping the Ø17.29367 input bore unchanged. At every state, native
+Step/Height agree with the expressions, the profile remains fully defined, two
+bore-radius and two root-tangent boundaries cover [0,20], and the outer cylinder
+is unchanged. Save/actual close/reopen preserves restored volume, nominal input
+values and non-informational/non-read-only Step/Height expressions with
+Changed=False. Editing pitch in a fixed bore is engineering geometry, not a
+claim that its minor diameter matches the standard for the new pitch. These
+private driver checks do not establish public chain ownership or checkpoint
+support. The subsequent shared native executor proof separately verified seven
+new instance roots, grouping, persistent prefix/thread ownership and fresh saved
+checkpoint auditing after actual close/reopen on both hands. Compact diagnostic
+metadata keeps hashes plus checkpoint within the existing size budget; pending
+models still do not constitute supported public chain recipes. New supported
+recipes subsequently passed public left create/reopen/inspect/rebuild and right
+same-file continue/reopen/inspect. Source-preserving rebuild and old external
+blind/through/omitted recipe audits were independently checked.
+
+Private blind-end evidence: with automatic entry1.05P, frame allowanceP/4 and
+actual contour outer half-width a, Height=L+1.3P−a places the last cut trace at L;
+the partial terminal section projects over [L−2a,L]. M20×2.5 with L18 in a length20
+bore passes both hands, actual save/reopen, native cap depth and signed lead,
+two bore plus two tangent boundaries up to the conservative complete projection,
+and protected outer/exit faces. The same cutter in a flat-bottom length20 bore
+inside a length24 blank preserves the bottom at20 and rear face at24. For this
+profile a=0.88541667, Height20.36458333 and terminal projection[16.22916667,18].
+Keep last-cut length, bore depth and stock behind the bottom separate; no controlled
+runout or functional full-profile certification follows from this projection.
+This is bounded private evidence, not public blind-mode acceptance, a drill-point
+model or permission to loosen the current through-carrier guard.
+`_plan_internal_metric_end` now holds the pure relations and distinct stock/bore/
+working intervals. Its through Height value and binding match the existing method
+exactly; it does not mutate that preview or its recipe. A host-only comparison of
+all four retained create/reopen cases matches the native terminal projection to
+within 2e-10 mm (observed residual, not a manufacturing tolerance). Native blind
+guards/checkpoint integration and public blind-mode acceptance remain separate.
+The subsequent private full-through-bore blind guard binds the physical carrier
+and endpoint plan. Shared native snapshot/checkpoint verifies the cap and smooth
+tail, unchanged outer cylinder/exit annulus, persistent root inventory and drivers.
+Two existing private cuts were freshly read, given compact checkpoints, saved and
+actually reopened without another sweep; saved checkpoint auditing passed clean.
+The private flat-bottom guard now binds the complete stock and shorter bore
+separately; it does not broaden the public through-carrier gate. Shared snapshot
+and checkpoint preserve the outer cylinder, bottom disk and rear disk. Validate
+disk area and rim radius: sampled trimmed disk boundaries do not include the
+filled centre. Bind both positive gap-to-bottom and stock thickness behind it,
+not merely the working length. Both existing flat-bottom cuts passed fresh audit,
+checkpoint save and actual close/reopen without another sweep. The public blind
+mode subsequently reused this endpoint/guard/checkpoint contract: left creation
+and source-preserving rebuild, right same-file continuation in flat-bottom stock,
+and actual reopen/fresh inspection passed. Right blind-ending creation inside a
+through bore also passed. Existing through and external recipes remain unchanged;
+pending diagnostic files are never automatically promoted.
+
+### SPIRAL-002: Verify Physical Thread Hand And Axial Coverage Separately
+
+Evidence: live-verified readback and reopen of external metric M20×2.5 on a
+complete Ø20×20 carrier; not a general thread-family acceptance claim.
+
+Symptom: `Step`, `Height`, `TurnDirection` and successful evolution creation look
+correct, but the final helical boundaries do not reach a requested span end.
+Changing hand alone is not proof that the cutter placement/envelope is correct.
+The path initially starts on −Z for either hand, while the profile stays in XY
+on +Y. `TurnDirection` reflects the path in Y, not across that profile plane.
+The verified left external cylindrical metric +X fix uses `TurningAngle=180`
+to give the required Z reflection. Other phase branches remain unchanged.
+
+Rule: sample bounded trimmed native edge curves, unwrap `atan2(Z,Y)`, compare
+signed `2π ΔX / Δangle` and interior constant-lead/radius residuals, and check
+axial coverage independently. Ignore end/profile trims as helix witnesses.
+Also compare final body bounds, native removed volume and the allowed radial
+shell. These are sampled geometric checks, not exact BREP or manufacturing
+tolerances. Spiral height includes entry allowance; do not infer cutter limits
+from nominal thread length or silently permit changes to adjacent smooth stock.
+
+Implementation: internal `_metric_helix_edge_evidence` and
+`_verify_external_metric_thread_geometry`. The latter initially requires a
+complete +X external metric cylinder with 2–64 turns and one full-span helix
+witness; partial/compound carriers remain unsupported. Do not relax this gate
+to accept a short span merely because handedness or positive removal passes.
+
+Verification: right-hand M20×2.5 has native lead +2.5 and a full [0,20] witness;
+left-hand native lead −2.5 is correct, but all long helical edges end at or before
+18.46875 rather than 20. Native volumes are respectively 5.37495107149 and
+5.43286770775 cm³. The left rejection and volume persist after actual reopen.
+The original short-span file remains a retained negative example.
+New right/left builds pass full-span, depth, profile code1, pitch2.5→2→2.5 and
+reopen. Automatic external root radius is now the normalization tangent-circle
+relation in current width/depth expressions, not a frozen initial number;
+explicit radii remain constant. Changed volume/code1 alone would miss this bug.
+
+Compound protection prerequisite: select the complete exposed +X cylindrical
+constructor explicitly and keep all other rotational stock strictly inside the
+thread root core and behind its start. Do not infer cutter limits from nominal
+length or accept root tangency. The initial host guard excludes prior cuts and
+virtual gear/spline/polygon carriers. A left M20×2.5 on the second step of
+Ø12×12 + Ø20×20 preserves the neck's native cylindrical/end-plane radius, axial
+bounds and areas through cut/reopen; one original rotation remains. This is
+bounded analytical/sampled evidence, not persistent chain ownership or exact
+BREP preservation. Resolve actual native faces again before every write.
+For saved chain input, `_thread_carrier_context` verifies the saved recipe and
+expectations, existing persistent ownership/names/groups and current body before
+resolving the carrier and end planes. It rejects a mismatched input prefix without
+writing. The live two-step chain has four stable root IDs and two audited groups
+after reopen, with unchanged dirty state. This is pre-write verification only:
+fresh COM faces expire on rebuild/cut; it does not certify new thread-root
+ownership, install variables or update the saved chain recipe.
+Internal execution now reuses that context, installs a collision-free instance
+namespace, reacquires the faces and calls the existing source-free family sweep.
+Compare whole root inventories: the verified metric round mode creates exactly
+one sketch, evolution, axis, spiral, local CS and two points. Group only those
+seven roots; never include the input body, face references or prefix supports.
+For persistence, keep a compact creation checkpoint with persistent root IDs,
+the protected-face/bounds baseline and the actual audited native thread volume.
+The radial shell is only a removal upper bound, not an analytic thread-volume
+prediction. Reopen auditing uses the pure carrier gate and current ownership,
+root inventory, trimmed geometry and drivers; never send the already-threaded
+body through the uncut-stock reader. The internal checkpoint passed actual
+save/close/reopen in both pending right/left diagnostic copies with Changed=False.
+The accepted terminal-thread chain now stores this evidence in its final recipe;
+old pending prototypes are still not promoted automatically.
+Check protected analytical face areas/bounds, shell removal and trimmed helix
+witnesses both before and after grouping. Then reuse persistent ownership for
+the prefix and new group. Right/left M20×2.5 on the real two-step stock pass
+pitch2.5→2→2.5, profile code1, driver expression/input-flag readback and reopen.
+The original file remains byte-identical. The diagnostic copies use a pending
+recipe marker that prevents supported-chain recognition/rebuild/continue; this
+does not itself establish the public saved thread-step contract. That contract
+was subsequently verified through normal create, same-file continue, fresh
+inspect after actual reopen and source-preserving rebuild on both hands.
+NewDocument returns the base IKompasDocument: explicitly cast to the 3D interface
+before passing it to readers requiring TopPart. The stopped stock prefix was
+audited and continued, not blindly recreated. Evidence remains sampled/analytical,
+not exact BREP or a standard-conformity certificate.
+
+### GROUP-001: Group Only Instance-Owned Roots In A 3D Macro
+
+Evidence: live-verified on the shaft/cone/bore/face-groove chain and two independent
+shaft instances, including rebuild, driver restoration, save/reopen and Destroy.
+
+Use `IModelContainer.MacroObjects3D.Add`, assign `Objects` as a typed
+`VT_ARRAY | VT_DISPATCH` of this instance's sketch and operation, then `Update`.
+Keep incoming bodies and earlier supports outside the group. Verify member
+references, current final geometry and downstream operations after grouping.
+`IMacroObject3D.Destroy()` ungroups while retaining the roots; the checksummed
+recipe and root references retain instance identity. Collection items may expose
+only `IModelObject`: cast explicitly before reading interface-specific properties.
+Stage D gear/hub/bore continuation also verifies grouping. Persist root and macro
+IDs through API7 `GetObjectId`/`FindObjectById`: runtime `Reference` can change on
+reopen. Never guess identity by name alone; continuation still enforces canonical
+root names and does not promise arbitrary rename acceptance. Reused checksummed
+recipe slots explicitly replace `.Value` and `.Note`, then verify decoded metadata.
+This evidence applies to the supported rotational chain, not arbitrary families.
+Do not diagnose a grouped operation as suppressed merely from its own
+`IFeature7.Excluded=True`, `State=4` or empty `ResultBodies`. These were observed
+on the accepted metric-thread member while its owner macro was included and the
+part's final body contained the verified thread. An unthreaded experimental part
+showed the same member flags. Read owner context and final part geometry/material
+delta; neither member flags nor successful Update alone establish the result.
+
+### VISUAL-001: Export A Native Model Raster Without The UI Dialog
+
+Evidence: live-verified PNG export of the construction chain in interactive v23.
+
+API5 `ksDocument3D.RasterFormatParam()` and `SaveAsToRasterFormat(path, params)`
+export the active model without a save dialog. Initialize parameters; PNG uses
+`ksRasterFormatPNG=3`, with explicit colour depth and resolution. Select and check
+the exact active document before using API5. Hide owned auxiliary sketches and
+default planes during construction for a readable result. The public
+`export_model_png` selects an exact opened document and supports native
+current/front/rear/top/bottom/left/right/isometric views, DPI 150 and fit by default.
+It performs no geometry operation or rebuild. Temporary orientation/fit restores
+and checks `Matrix3D`, `Scale` and previous activation; exact screen pan is not
+certified. Native `left` may show a global-X part's side, not its end. Default UUID
+PNG paths and explicit new destinations never overwrite existing files. Arbitrary
+Euler angles are not exposed until native units are verified. Stage D gear PNGs
+were visually reviewed for smooth tooth faces, bore and face groove.
+For an inactive document, cast to `IKompasDocument` and assign `Active=True`;
+the typed API7 wrappers do not expose `Activate()`. Apply the same property when
+restoring the prior tab and verify both runtime identities. Live inactive-tab
+exports of the polygon control and shaft/polygon/bore/groove chain preserve
+Matrix3D, Scale, prior activation and the document's unchanged flag.
+Inspect the image with vision; an export success flag alone does not verify appearance.
+
+### READ-001: Measure Final Trimmed Geometry In The Document Frame
+
+Evidence: live-verified on ordinary user-built washer, multibody gear and gearbox
+assembly, including independent reopen readback with unchanged source hashes.
+
+Symptom: cylinder placement appears to be identity, two assembly shaft axes
+incorrectly coincide, or a cylinder height exceeds the finished shaft length.
+
+Cause: a trimmed mathematical surface can return an unhelpful placement; body
+geometry is component-local, and supporting-surface extent is not a trimmed
+boundary dimension.
+
+Rule: enumerate final `IFeature7.ResultBodies`, then their `ModelObjects` faces/
+edges/vertices. Recover a cylinder axis from two radial normals; use the V
+derivative only to orient it, not to assume an axial parameterization. Verify
+the radial centres lie on that axis. Compose
+nested component placements child*parent for KOMPAS row-vector matrices. Transform
+points, axes and meshes into document coordinates. Preserve conservative AABB
+status; do not call a transformed box exact geometry bounds.
+
+Implementation: shared `assets/bridge/body_geometry_runtime.py`; read-only
+`finished_geometry` tools. Radius/area/edge length come from native geometry;
+infinite axes/planes and sampled meshes have explicit distinct meanings. Native
+minimum-distance witness points must agree with the reported scalar; native
+axis/centre interpretations cannot be labelled surface clearance.
+
+Verification: washer OD32/ID22 and 0.6 mm face distance; two-body primary sixth
+gear, 202 tooth-body faces/590 edges; transformed gearbox shaft spacing58.49 mm.
+Document Changed/update stamps and original file hashes remain unchanged. Public
+sketch inspection exports with `WriteToFragment`, reads a separate read-only
+fragment and includes Beziers, without opening the source definition.
+
+Known limits: no universal BREP export, manufacturing tolerances or construction
+recipe recovery. The process gate returns `CAD_BUSY` for overlapping bridge
+dispatches; direct COM scripts and manual UI actions remain outside the gate.
 
 ### PATTERN-001: Verify Material Removal, Not Only The Circular Pattern Counter
 
@@ -109,11 +380,142 @@ actual profile entities and arc directions, bounds, rebuild and save/reopen.
 Known example: `transmissions/silent_chain.py` and
 `handle_create_silent_chain_sprocket`.
 
-### BRIDGE-001: The Bridge Must Parse Under KOMPAS Python 3.2
+The straight-sided spline foundation follows the same rule through
+`_verify_straight_spline_metrics`: explicit bound candidates and actual pattern
+removal are mandatory, not merely a radial envelope and Count2. Live shaft/hub
+`8x36x40` and a custom shaft pass source-profile/direction readback and actual
+reopen. In construction chains, audit the spline before adding other material:
+its inherited through-all cutter must not be rebuilt to process later sections.
+Subsequent core cuts preserve the audited lateral tooth-zone fingerprint; it is
+sampled geometry evidence, not exact BREP equivalence.
+
+Private bounded-input shaft evidence: an `8x36x40` space cut over X=[10,30]
+inside a Ø40×50 cylinder with a Ø30×10 continuation passes exact single/all-space
+mass comparisons, unchanged end/shoulder faces and sampled boundary containment
+before save and after actual reopen. Both extrusion ends must use finite-depth
+type0, the inactive side depth must be zero, and the active depth is read back
+from the native operation variable. Ordinary workflow calls retain through-all.
+With `CoordinateSystem=parallel_plane` assigned before `Plane`, normal cuts +X;
+the reverse proof instead cut toward X=0 and changed that protected end face.
+Its readable depth20 and correct array count did not imply correct working span.
+Preserve that negative example; do not infer the input-plane normal from the
+standalone default-YOZ blank direction. Strict input-chain ownership/checkpoint
+and public acceptance remain separate from this primitive geometry proof.
+
+The later private input executor uses the verified uncut prefix context, owns
+seven explicit roots and preserves prior root identities. Pattern sources come
+from the returned source cut, not name-matching generated copies. Its length
+input drives the active native Distance1; both extrusion ending types remain0
+and the inactive Distance2 remains0. Length20→22→20 changes only the bounded
+working length and passes geometry/profile/protected-face/driver audits through
+save/actual reopen. Numeric profile readback and persistent source/axis identities
+are checked independently. Group/hide exact owned roots only. This evidence does
+not certify whole inventory/checkpoint acceptance or public recipe recognition;
+pending metadata remains deliberately unsupported.
+
+Read-only inventory discovery identifies each extra extrusion through its native
+`OwnerFeature` (array exemplar), then that exemplar's `OwnerFeature` (the owned
+pattern). `ICircularPattern.Exemplar(1,index)` resolves the same exemplar; do not
+classify copies by repeated display names. The observed seven extra coordinate
+records have empty persistent IDs and names, type11014/model-type70, self ownership,
+TopPart parent and zero coordinates; they need a separate bounded record policy,
+not invented persistent ownership. On the same cut specimen, checkpoint preparation,
+metadata-only save and actual close/reopen passed with unchanged inventory and
+`Changed=False`; ownership/profile/driver/protected-stock audits passed without
+replaying cuts. This verifies the private checkpoint, not public recipe support.
+For this workflow `SaveInitialOrientation` is explicitly False so copies rotate
+with the array. The low-level pattern factory defaults True: copying that default
+into a checkpoint guard caused a read-only false rejection and quarantine. Bind
+the policy to the actual workflow call, not the helper default; never change the
+already verified model merely to satisfy that mistaken guard.
+
+Public input/remove acceptance reuses this executor/checkpoint as a sole terminal
+cut on uncut rotational stock. Require positive smooth margins at both cylinder
+ends: the current bounds/protected-face contract does not certify open ends.
+An in-memory prefix envelope precedes the cut; only the final supported recipe
+and `spline_audit` are saved. Standard `8x36x40` creation, same-file continue after
+reopen, fresh inspect/reopen and source-preserving rebuild passed. Custom
+z8/d35/D40/b6/r0.3 creation/reopen passed too. Historical pending recipes remain
+unsupported; never convert them implicitly or replay cuts on their evidence models.
+
+For grouped cuts, read actual sources from `ICircularPattern.InitialObjects`.
+The final extrusion collection can contain patterned copies with the same names;
+display-name uniqueness across that collection is not source ownership. Compare
+additional removal with the original group removal times `count - 1`, and cap any
+relative/numerical tolerance below the volume of one missing group. This is also
+live-verified on diaphragm circle/oval relief groups at 12 instances and a custom
+9-instance part. Use `IModelObject`/raw-object references; an `IFeature7` cast does
+not expose their `Reference` property in this path.
+
+### SPLINE-001: Verify Mating Complement, Not Two Independent Spline Volumes
+
+Symptom: a shaft and hub each pass their own volume/pattern/save checks, but their
+straight-sided sectors do not mate. The old hub reused the external inter-tooth
+gap construction with neighbouring tooth axes; rotating by half a pitch cannot
+repair the wrong flank directions/width. Its inward floor fillet at D also
+occupies the square corner of a nominal shaft tooth.
+
+Rule: for the nominal counterpart, cut the retained shaft tooth, not its gap.
+Use two parallel b-spaced flanks, phase the hub slot at the shaft tooth centre
+(pi/z from the external gap), and repeat the mating shaft-root transition at d.
+Do not add an inward floor rounding at D without a matching tip relief. This
+analytic counterpart is not a cutter reconstruction or tolerance-stack certification.
+
+Implementation: `connections/splines/straight.py` shares `_shaft_fillet` and builds
+the hub's six-entity complementary cutter. Period closure derives from actual
+boundary points and includes every flank/fillet. Full outlines repeat with the
+same negative angular direction as the period; opposite repetition creates
+crossing diagonals in a misleading display.
+
+Verification: exact shared side/root boundaries plus Green-integral area complement
+for standard/custom inputs; an offline diagnostic passed all53 catalog rows.
+New standard hub and shaft and a custom hub passed native create/save/actual
+reopen, exact sketch readback and mass checks. Native hub PNG and shared paired
+section were visually reviewed. New hub recipes carry `profile_geometry_revision=2`;
+legacy hubs are recognized but flagged `legacy_hub_profile`, verified=false.
+Retain their inputs for recreation; never silently migrate existing geometry.
+
+Input-hub chain acceptance uses a sole terminal full-through cut on one explicit
+cylinder plus its explicit bore. Do not reuse the external smooth-margin policy:
+a smaller smooth bore collar would obstruct a mating tooth at entry. Require the
+full bore span, zero offset, immutable d and inherited outside diameter. Bind the
+cut's length input to the existing native bore-length variable. Protect the full
+outer cylinder; end annuli change intentionally. Verify both working-radius
+extremes, exact source/all removal, profile/persistent IDs and complete inventory.
+Standard create/continue/actual reopen/source-preserving rebuild and custom
+create/reopen passed using the shared executor/checkpoint. The explicit blind
+variant below is separate; arbitrary partial spans, subsequent operations and
+arbitrary stock remain unsupported.
+
+Blind-hub acceptance: a finite cut from open entry leaves a positive
+smooth tail before a flat-bottom bore and positive stock behind that bottom.
+Audit both original bottom/rear disks, outer cylinder, smooth-tail witnesses and
+flat terminal faces separately. The first live job stopped after construction
+at a false independent-input check; that partial model remains diagnostic.
+New corrected standard create/continue/source-preserving rebuild/actual reopen and
+custom create/reopen passed. Native length20→22→20 restored geometry and the original
+checkpoint, then save/actual reopen passed. This is flat numeric termination,
+not tool runout or a manufacturing functional-length certificate.
+`_apply_part_variables` converts an empty planned expression plus numeric Value
+into a numeric Expression. Thus independent does not mean Expression is empty:
+accept an equivalent numeric constant, reject another variable or derived formula.
+Keep the active cut binding to its owned length input; never change correct
+geometry or reapply a cut merely to satisfy a mistaken expression predicate.
+An `IVariable7` is not an operation and has no `Update()` method. Assign its
+Expression and rebuild the owning document; verify actual geometry, native depth
+binding and restored checkpoint, not merely the input scalar. A scratch proof
+that called variable.Update stopped before rebuild; after closing without saving,
+the clean saved model passed the corrected proof. Exact-document inspection also
+requires opening the target first; a closed-file path is not an open document ID.
+
+### BRIDGE-001: Compile The Bridge With The Configured CAD Interpreter
+
+Evidence: implementation-backed runtime requirement; historical failures below
+explain why a host compile alone cannot verify a separately configured bridge.
 
 Applies when:
 - editing `bridge/kompas_bridge.py` or its packaged copy;
-- adding any syntax that is newer than Python 3.2;
+- changing bridge syntax or its interpreter configuration;
 - debugging a bridge that fails before any handler runs.
 
 Symptom:
@@ -123,41 +525,77 @@ Symptom:
 - the same file imports and compiles cleanly in the project `.venv`.
 
 Cause:
-- `bridge/kompas_bridge.py` runs under KOMPAS's bundled interpreter,
-  `C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe`, which reports
-  Python 3.2.5. Generalised unpacking, f-strings, `yield from`, and other
-  post-3.2 syntax abort the whole module before the requested action is read.
-  The project `.venv` is Python 3.11, so ordinary host-side checks do not catch
-  this failure class.
+- `BridgeRunner` launches a separate interpreter. Constructor arguments and
+  `KOMPAS_PYTHON` override the checkout-owned `.venv/cad-bridge` default. Without
+  that venv, its final fallback names the KOMPAS installation's Python; an old installation
+  can select Python 3.2.5. The current bridge uses modern Python syntax and
+  cannot run under that interpreter. Compiling with the host venv does not check
+  a different configured runtime or whether that runtime has `pywin32`.
 
 Rule:
-- Treat the bridge as Python 3.2 source. Keep f-strings, starred unpacking, and
-  modern typing conveniences outside the bridge.
-- Write `[a] + list(b) + [c]` instead of `(a, *b, c)`; keep `%` formatting for
-  bridge-side messages.
-- Verify with the KOMPAS interpreter, not the project venv:
-  `& "C:\ProgramData\ASCON\KOMPAS-3D\23\Python 3\App\python.exe" -m py_compile bridge\kompas_bridge.py`.
-- `ast.parse(..., feature_version=(3, 2))` under the host Python does **not**
-  reliably reject starred display expressions; the bundled-interpreter
-  `py_compile` and the source guard in `test_geomwright_studio.py` are the
-  dependable checks.
+- Configure an actual modern Windows Python executable with `pywin32` through
+  `KOMPAS_PYTHON`; using the host Python 3.11+ for both is the simplest supported
+  setup. See [English](docs/en/setup.md) / [Русский](docs/ru/setup.md).
+- Compile the bridge and changed runtime assets with that interpreter. Keep the
+  root and packaged bridge copies byte-identical.
+- Production calls now preflight selected source syntax plus `pywin32` import,
+  without loading the bridge or calling KOMPAS, under a five-second deadline.
+  A local failure is `CAD_RUNTIME_INVALID` before the tracked CAD launch and must
+  not turn into unknown-outcome quarantine. Actual CAD failures remain guarded.
+- Studio does not read the private MCP-client config. Explicitly configure its
+  launch environment or use the existing checkout-owned CAD venv; do not assume
+  variables from `opencode.json` exist in the standalone Studio process.
+- Do not infer interpreter compatibility from string/AST syntax guards. The
+  existing Studio test still contains legacy 3.2 commentary and syntax guards;
+  they do not establish current runtime support.
+
+Example finite check after setting `KOMPAS_PYTHON`:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_bounded.py --timeout 30 -- $env:KOMPAS_PYTHON -m py_compile bridge/kompas_bridge.py src/kompas_mcp/assets/bridge/kompas_bridge.py
+```
 
 Verification:
-- A clean `py_compile` exit under the KOMPAS interpreter before any live run.
+- A clean `py_compile` exit under the configured CAD interpreter before any live run.
+- COM-free preflight accepted the owned Python 3.11 runtime and rejected the
+  installed SDK Python 3.2.5 with unchanged shared guard. Focused tests cover
+  selection priority, failure/timeout without CAD launch and source-cache invalidation.
 - One live action through the production Studio path.
 
-Known example:
+Historical examples under the old bundled runtime:
 - `_inspect_gear_spur_block` used `(blank, gap, *cuts, pattern)`; the host venv
   compiled it, and the Studio workspace failed until it was rewritten as a list
   concatenation.
 - `handle_create_gear_internal` then reintroduced
   `["blank", *ring_chamfer_ids, ...]`; the venv compiled it, and the Studio
   "Создать в КОМПАС" job failed with the same `SyntaxError` until it was
-  rewritten as list concatenation. The bundled-interpreter compile catches it.
+  rewritten as list concatenation. These cases explain the old workaround;
+  they do not make Python 3.2 a current requirement.
 
 Related:
 - `SESSION-002`
 - `OP-004`
+
+---
+
+### BRIDGE-002: Repair Only The Broken Generated COM Library
+
+Evidence: live-verified during extension-family integration; subsequent creation
+and save/reopen of conventional hooks and a compression control case passed.
+
+Symptom: the bridge reaches a function instead of API7 and reports no `Documents`.
+A direct `ksGetApplication7()` call reveals missing `CLSIDToClassMap` or
+`CLSIDToPackageMap`. The API7 `win32com.gen_py` package has no `__file__` because
+its generated `__init__.py` is missing, despite existing interface modules.
+
+Rule: diagnose the raw attach exception before changing CAD geometry. Under the
+configured CAD interpreter, regenerate only the installed SDK's `kAPI7.tlb` with
+`win32com.client.makepy.GenerateFromTypeLibSpec(library_path, bForDemand=True)`.
+Do not delete unrelated caches, restart KOMPAS or close user documents to repair
+Python's generated library. Verify both Application5→API7 and direct Application7
+attach, then one bounded live action with unchanged existing-document count.
+This recovery applies to an evidenced missing generated package, not every COM
+failure or a busy/modal KOMPAS session.
 
 ---
 
@@ -166,6 +604,8 @@ Related:
 Evidence: live-verified on direct C2 and roller-rocker cam profiles, including
 rebuild and save/reopen curve readback; DIN silent sprocket curves also verified
 with 15, 23 and 114 teeth.
+Stage D external gear also uses mathematical C2 interpolation with simple interior
+knots: m2/z20/b20 readback has 100 tooth-zone faces and a smooth native PNG.
 
 Symptom:
 - `INurbs.SetNurbsParams` returns false with ordinary Python arrays or the
@@ -184,6 +624,15 @@ Rule and implementation:
 - Cast indexed items to `INurbs`/`IArc` before calling their readback methods.
 - Read all poles, weights and knots after rebuild. Do not count `Update()` as
   proof of curve accuracy or correct base-arc direction.
+- Preserve an explicit native `order` during section-frame conversion. If the
+  section plan supplies mathematical `degree`, pass `degree + 1` to API7.
+  Order 3 with cubic poles/knots can be accepted while KOMPAS silently replaces
+  the knot vector; the resulting loft may fail instead of reporting a spline error.
+  In external gears this also led to an incorrect profile; a repeated-knot Bézier
+  workaround fragmented faces. `gears/cad.py` now uses `interpolating_spline` for
+  the external root/involute curves, single interior knots and explicit order 4,
+  retaining the existing deviation cap. Verify native knots and the actual raster;
+  C2 within a curve does not remove the theoretical join between separate curves.
 - Sample the evaluated rational curve for topology checks, not its control
   polygon. `GetNurbsParams`' first return value is success, not curve closure;
   read the native `Closed` property separately.
@@ -200,10 +649,19 @@ Verification:
 
 Known examples: `kompas_mcp/sketch_runtime/cubic.py`, `kompas_mcp/cams/cad.py`,
 `transmissions/silent_geometry/silent_chain_din.py`, and bridge `_sample_curve_points`.
+The default bevel wheel (`m3 z20 delta45`) was accepted through the shared MCP
+contract on 2026-10-09 after `_section_entities_to_sketch_2d` retained native order 4.
+Both sections preserved knots/weights and pole distances, with successful body
+verification and save/reopen. Native order alone did not prevent loft-face
+fragmentation: the Bezier-chain plan produced 743 faces in about 92 seconds,
+whereas the simple-knot C2 plan produced 183 faces in about 30 seconds locally
+(see `CURVE-002`). Cancellation of the bridge does not mean that an in-flight
+native operation has stopped.
 
 ### VAR-002: Read AddVariable Text From Note, Not ParameterNote
 
-Evidence: live-verified on direct and rocker cam recipes, including save/reopen.
+Evidence: live-verified on direct and rocker cam recipes and roller/bush-chain
+sprocket recipes (including a two-row sprocket), including save/reopen.
 
 Symptom:
 - numeric variables exist, but a saved recipe checksum fails because all text
@@ -224,7 +682,8 @@ Verification:
 - compare decoded actual text with the complete recipe at creation and after
   save/reopen. Direct and rocker recipes, including Studio form settings, match.
 
-Known example: `_inspect_cam_block` and `_execute_create_cam`.
+Known example: `_inspect_cam_block`, `_execute_create_cam`, and
+`handle_inspect_managed_pulley`. Do not prefer an empty `ParameterNote` over `Note`.
 
 ### SESSION-004: Host Tests Must Not Reach the Live CAD Adapter
 
@@ -274,11 +733,19 @@ Cause:
   application instance.
 
 Rule:
-- Interactive hosts must use `GetActiveObject("KOMPAS.Application.5")`, set a
-  hidden registered instance to `Visible = True`, and verify visibility before
-  document reads or writes. KOMPAS may register only one active object even
-  when several process windows exist, so process enumeration cannot select a
-  different visible COM object reliably.
+- Interactive hosts use registered `.5`/`.7` objects but must not make a hidden
+  instance visible or create a substitute application. Match MainWindowHandle,
+  owning PID and process creation time to a persistent selected binding before
+  document reads/writes. Multiple visible processes require explicit HWND
+  selection; enumeration detects ambiguity but cannot make an unregistered
+  COM object selectable.
+- In KOMPAS v23, `IApplication.MainWindowHandle` can identify an invisible
+  controller window owned by the visible application frame. `Visible=true`
+  plus `IsWindowVisible(MainWindowHandle)=false` does not prove a hidden instance.
+  Resolve the native root/owner chain, checking that every link has the same PID;
+  bind the resolved presentation HWND plus PID and process creation time. Reject
+  cycles, excessive depth and cross-process ownership. Do not search an arbitrary
+  visible window by PID as a substitute for a proven ownership relationship.
 - KOMPAS v23 can expose the visible interactive controller only as
   `KOMPAS.Application.7`. Interactive bridge code must try the active `.7`
   object after `.5` and use that API7 object directly; it must not fall back to
@@ -286,14 +753,40 @@ Rule:
   process and a separate document collection.
 - Absence of a running object is a recoverable disconnected state, not
   permission to create an application.
-- Non-interactive MCP workflows retain their explicit existing session policy.
+- `interactive` is the shared MCP/Studio default. `hidden` is explicit and may
+  use only a separately created process proven absent from the pre-create PID
+  snapshot. A successful DispatchEx call alone does not prove isolation. Keep
+  its owned identity across calls; if ROT cannot reattach it, refuse instead of
+  creating another instance or using the visible user's process.
+- Legacy `visible=false` is not a mode selector. The session policy enforces
+  document visibility in Add/Open. Interactive documents remain open by default;
+  staged Close/replace/reopen is reserved for hidden workflows. Do not report
+  fresh reopen verification when the open document was merely reused.
+- Bind a context token per host so another client's explicit mode switch between
+  workflow steps is detected before the next COM call. Quarantine recovery and
+  mode selection are separate operations; neither proves CAD readiness.
 - API5 `ActiveDocument3D` may be exposed as a method or as an already-resolved
   dispatch document. A dispatch object is also callable, so `callable()` alone
   is insufficient: if it exposes `GetPart`, use it directly. Invoking its default
   member instead fails with DISP_E_MEMBERNOTFOUND during body verification.
 
 Verification:
+- Deterministic host/fake-COM tests cover instance substitution, preexisting
+  hidden-process reuse, document visibility, identity loss, stale context tokens
+   and retained interactive save. The owned hidden creation/ROT policy remains
+   implementation-backed pending live isolation verification.
 - Start the host before KOMPAS and confirm no KOMPAS process is created.
+- A bounded native discovery probe confirmed `.5` and `.7` return the same hidden
+  controller HWND while its native owner is the user's visible frame in the same
+   process. Corrected ownership resolution passed native COM attachment and
+   repeated short-lived bridge reattachment during creation of a 30/20 x 25 mm
+   cone, direct save and geometry/recipe readback. The same presentation HWND,
+   PID and creation time were retained; one active saved document remained open,
+   with fully defined sketch and exact analytic/native volume agreement. This
+   is visible saved readback, not fresh reopen or proof of per-action animation;
+   user-side visual confirmation and hidden isolation are separate checks. Keep
+  per-ProgID discovery stages/errors so a conversion failure is not misreported
+  as absent visible UI.
 - Start visible KOMPAS afterwards and confirm the host discovers its documents
   without restarting.
 - Open/create from the host and confirm the document appears in that same window.
@@ -327,6 +820,37 @@ Rule:
   not fix this. Live stdio-MCP creation/save and read-only session calls verify
   the isolated-input path;
 - cancellation terminates only the child bridge, never KOMPAS or the document;
+- child exit does not cancel an outstanding COM operation. Persist a host-side
+  in-flight marker before launch. Only a production token/action-bound completion
+  receipt published after handler and mutex completion can distinguish `no_cad`
+  (rejection before any controller activation, instance creation or model access;
+  release guard) from a finished `settled` failure
+  (`settled_failure`). Timeout/cancellation/malformed response/crash/failed custom scripts
+  without a trusted receipt remain `unknown_outcome`; reject further ordinary COM
+  calls, including document counts, while guarded;
+- recover `settled_failure` through the exclusive 15-second same-bound-instance
+  audit: native responsive/enabled frame and visible standard dialogs, COM
+  document listing, API5 graphical process, possible sketch editor and in-place
+  component edit blockers. No instance creation, controller/document activation,
+  edit/rebuild/save/close. A blocker retains the settled marker; the user handles
+  unresolved UI state. A pass clears it with basis
+  `completed_handler_and_session_audit`, but returns `model_verified=False` and
+  `cad_readiness_verified=False`. Inspect the affected document and partial
+  changes before writing; never blindly retry;
+- if the previously bound server process exited, settled recovery may remove the
+  marker without COM (`bound_session_exited`). Explicitly select a session before
+  any further CAD call; never attach a replacement as part of recovery;
+- `recover_cad_session(token, reason, confirm_idle=False)` uses a fresh guard
+  token. Actual `unknown_outcome` still requires fresh explicit user
+  `confirm_idle=True` after idle UI and partial-document resolution; that branch
+  does not call COM. A zero API document count is not proof that visible tabs
+  were closed. Recovery is neither general asynchronous cancellation nor an
+  idle-UI guarantee;
+- use the shared 300-second bridge default for MCP and Studio. An outer watchdog
+  must exceed the complete workflow budget (the sum of sequential call budgets
+  plus host/cleanup overhead), not interrupt one 300-second call after 45 seconds;
+- retain the owned partial document on a failed scenario by default. Do not
+  issue automatic Close after an ambiguous CAD failure or hide its failure;
 - queued jobs must observe cancellation before entering COM;
 - place progress checkpoints around risky post-operation rebuild/readback steps;
 - if one readback channel is proven to block after a valid operation, replace it
@@ -334,8 +858,15 @@ Rule:
   that family, and document the verification gap explicitly.
 
 Verification:
-- cancel a running bridge and confirm the job becomes `cancelled`, the CAD lock
-  is released, and KOMPAS remains open;
+- deterministic fake-bridge timeout/cancellation and external host-kill checks
+  confirm the durable marker survives and later calls cannot launch another
+  ordinary bridge; verify trusted receipt binding and completion ordering, and
+  distinguish settled-failure audit recovery from host-only unknown-outcome
+  recovery. Neither branch closes documents or certifies idle UI/model validity;
+- live owned-hidden checks pass with zero documents and a saved shaft: a disabled
+  frame refuses recovery, an enabled frame permits audit, active document state
+  is unchanged, and actual close/reopen readback succeeds. Refreshed stdio MCP
+  separately passes a missing-document rejection and automatic recovery;
 - create a managed flat-belt pulley and confirm `completed / verified` without
   calling the blocking API5 active-body volume probe.
 
@@ -542,6 +1073,20 @@ Cause:
 Rule:
 - Classify the target field before assignment.
 - Do not assume that a UI formula field accepts a string formula through COM.
+- Before binding an operation variable, reject `Information=True` and
+  `ReadOnly=True`; matching ParameterNote and successful Update do not establish
+  that it is a driving input. Never clear Information merely to force a binding.
+
+Known example: `IPoint3DParamDisplace.DX/DY/DZ` accept numbers, not strings.
+The generated `Перенос Y/Z` variables are informational in the tested v23 mode;
+assigning expressions creates “attempt to override output parameters”/redundancy
+errors even when body volume, feature Valid and stored Expression look correct.
+The bolt-circle chain instead uses a coordinate point (ParameterType1) with
+non-informational `Координата Y/Z` inputs and a numeric recreate-only X placement.
+PCD drives those coordinates; actual centre/radius/span, input Information flags,
+pattern ownership and real reopen are checked. This does not certify arbitrary
+relative-point formula modes. Preserve the rejected attempts as diagnostics,
+not as accepted models or grounds to relax the output-variable gate.
 
 Field classes:
 
@@ -832,7 +1377,7 @@ Known examples:
 
 ---
 
-### SKETCH-001: Finished Sketches Must Be Fully Constrained
+### SKETCH-001: Fully Define Parameterized Sketches; Justify Numeric Exceptions
 
 Applies when:
 - a generated sketch drives a 3D operation;
@@ -850,11 +1395,25 @@ Cause:
   can also report a false positive fully-defined UI status.
 
 Rule:
-- Every production sketch must be fully constrained.
-- Explicit create-only numeric cam profiles are an exception: they promise no
-  dimension-driven editing and use native curve/arc readback plus rebuild/reopen
-  stability instead of a fully-defined solver status. Do not label such a profile
-  parameterized or turn its source metadata into driving variables.
+- Parameterize every dimension, relationship, and operation where complexity,
+  rebuild reliability, and maintenance cost make it rational. Assess each sketch
+  and operation separately; a numeric profile does not exempt simple blank,
+  extrusion, placement, or pattern parameters from that assessment.
+- Parameterized operational sketches must be fully constrained. Full definition
+  and parameterization are distinct: fixing numeric geometry does not establish
+  editable driving relationships.
+- A numeric sketch that cannot reasonably be parameterized or fully constrained
+  may have a local exception. Record the specific sketch, reason, editing limits,
+  and alternative verification in its family contract. This is not a blanket
+  exception for an entire module or permission to leave simple geometry free.
+- Verify excepted geometry through actual curve/profile readback, direction,
+  rebuild, and save/reopen stability rather than claiming a fully-defined solver
+  state. Do not label the numeric profile parameterized or turn source metadata
+  into driving variables. Example: a calculated cam profile can need numeric
+  construction while its simple extrusion is assessed separately for parameterization.
+- For the full module contract, see [English](docs/en/module-development.md) /
+  [Русский](docs/ru/module-development.md), section 8. These are development
+  requirements, not a claim that existing numeric generators already have driving bindings.
 - Create sketch constraints inside the original `BeginEdit()` block, directly
   after creating the relevant geometry. `AddConstraint` after `EndEdit()` can
   return `None` without applying anything.
@@ -872,13 +1431,15 @@ sketch.AddConstraint("fixed_length", [line], value=radius)
 sketch.EndEdit()
 ```
 
-Status check:
+Status check (API7 `ISketch`, verified v23 enum; see `SKETCH-011`):
 ```python
-status = ksSketchDef.GetStatus()
-# 0 = not defined, 1 = under-defined, 2 = fully defined, 3 = over-defined
-if status == 2:
-    success = ksPart.Rebuild()
+status = sketch.ConstraintsState  # ksConstraintsStateEnum
+if status == 1:  # ksStateWellConstrained; 2 is ksStateUnderConstrained
+    success = document.RebuildDocument()
 ```
+Do not transfer this mapping to an API5 `GetStatus()` or drawing-object property
+without checking its declared enum. A positive status is necessary on the strict
+path, but not sufficient proof of driving relationships or geometric correctness.
 
 Verification:
 - Rebuild after dimensions and constraints.
@@ -1281,6 +1842,24 @@ Cause:
 
 Rule:
 - For readback, use `inspect_sketch_full` first.
+- Public read-only inspection uses `WriteToFragment` and does not activate the
+  API5 editor. An empty constraint list with `coverage.api5_constraints_available`
+  false is unavailable evidence, not proof that constraints are absent. Creation
+  finalizers that must verify an actual API5 constraint explicitly pass
+  `update_before_state=True` on their owned newly created sketch; do not change the
+  public reader's non-mutating default.
+- `BeginEditEx(True)` is not state-neutral: live M20×2.5 changed native
+  ConstraintsState1→2 at BeginEditEx while Changed remained false. Closing its
+  fragment, EndEdit, Refresh and Rebuild did not restore state; editing the actual
+  parametric definition exposed151links/7dimensions and returned code1, but marked
+  Changed. Do not compensate by adding duplicate constraints or resetting flags.
+  Read a separately exported `.frw`, close it and delete only that owned temporary
+  file. KOMPAS may hold its parent-directory handle: use a unique file in an
+  existing temp directory, not a disposable directory whose rmdir can fail.
+  Exported entity references are fragment-local, not source-edit selectors. Source
+  ConstraintsState/Changed and previous active document must remain unchanged.
+  This is verified on metric thread driver/reopen and gear/spline/polygon/flat-hole
+  chain geometry regressions. Empty fragment API5 data stays unavailable evidence.
 - For UI-like edits, activate/open the target document and sketch, then use API5
   active-document operations such as `ksFindObj` when a direct API7 object is not
   available.
@@ -1313,6 +1892,10 @@ Known examples:
 - Projected style changes require API5 hit-test refs (`SKETCH-003`).
 - A reopened projected sketch can be visible but not expose the same editable
   API7 line collection as during creation.
+- Chain-sprocket finalization: the read-only fragment reported zero API5
+  constraints, while editor-backed readback found the actual segment-to-datum
+  `point_on_curve` pair and a closed contour. Roller single/two-row and bush
+  creation plus recipe save/reopen pass with explicit editor-backed verification.
 
 Related:
 - `SKETCH-003`
@@ -1441,7 +2024,8 @@ assert every surviving dimension has a valid semantic expression
 ```
 
 Verification:
-- `ConstraintsState == 2` after solver settle and save/reopen.
+- `ConstraintsState == 1` (`ksStateWellConstrained`) after solver settle and
+  save/reopen. Earlier code-2 evidence needs reassessment under `SKETCH-011`.
 - Intended component count and profile topology are unchanged.
 - Master/dependent centers and shared levels match readback.
 - Applied counts equal planned counts; skipped/failed counts are zero.
@@ -1462,6 +2046,144 @@ Related:
 - `OP-002`
 
 ---
+
+### SKETCH-011: Decode Sketch State From The Native Enum, Not An Assumed Numeric Scale
+
+Evidence: live type-library readback of KOMPAS v23 `ISketch.ConstraintsState`
+and active-editor object inspection on the standalone flat-step probes.
+
+Symptom: the user sees a fully defined profile and every inspected drawing object
+is fully defined, while a host check rejects sketch code 1. A temporary code 2
+after placement/rebuild is incorrectly reported as success.
+
+Cause: the existing `_describe_constraints_state` decoder reverses the two native
+values. `ISketch.ConstraintsState` returns `ksConstraintsStateEnum`:
+
+| Native value | Type-library constant | Meaning |
+| --- | --- | --- |
+| 0 | `ksStateUnknown` | Unknown |
+| 1 | `ksStateWellConstrained` | Fully defined |
+| 2 | `ksStateUnderConstrained` | Has degrees of freedom |
+| 3 | `ksStateUnresolvedRedundancy` | Conflicting constraints |
+
+Rule: inspect the property's declared return enum and use its named constants.
+Do not confuse sketch state with drawing-object state or treat a stored label as
+fresh verification. Full definition still requires driving geometry and rebuild/
+save/reopen evidence; do not numerically fix entities to satisfy a wrong predicate.
+
+Implementation: the shared decoder and sketch-state gates now use the verified
+mapping in both bridge copies and host consumers. Drawing-object decoding remains
+separate. The flat-step probe passes separate D/L/F driver changes, restoration
+and actual reopen for one and two flats. Earlier family claims based only on code
+2 are not evidence of full definition and need new live review; correcting host
+logic does not revalidate those models or invalidate their geometric readback.
+
+Verification: retain bounded type-info evidence of the enum names/values; inspect
+the exact active editor; reject native under-constrained code 2; verify real
+diameter/length/profile drivers and actual save/reopen on the corrected path.
+
+Fresh read-only review of retained legacy controls confirms the distinction:
+the control cone reads native sketch code 1 with all four drawing objects full;
+the saved angle-driver pentagon, hexagon and triangle each read native sketch
+code 2, despite closed geometric contours and earlier successful driver/volume
+checks. Document identities, paths and changed flags remain unchanged. This is
+current open-state evidence, not a fresh driver/save/reopen certification or a
+claim about every input mode. A read-only fragment may expose ordinary object
+state 0 and no API5 constraint channel; those incomplete diagnostics do not prove
+that constraints were lost or identify a particular missing degree of freedom.
+Diagnose in the actual owned editor context before choosing any correction.
+
+An editor follow-up on separate disk copies of these three polygon controls
+reads 37/43/21 API5 constraint records (pentagon/hexagon/triangle). The existing
+`Update` then `BeginEdit`/`EndEdit` inspection cycle changes the subsequent native
+sketch readback from code 2 to code 1, without adding constraints or changing the
+read-back entity coordinates. The inspection's own state field is captured
+before that editor cycle finishes; read the native sketch again afterwards.
+This proves a reproducible state-refresh effect, not a particular missing
+constraint or persistent repair. Source files and documents remain unchanged;
+the copies are not saved. Require driver changes and actual save/reopen before
+certifying stable full definition, and do not introduce numeric fixing merely
+to turn a pre-editor state into success.
+
+A subsequent driver/reopen preflight on the same triangle diagnostic copy reads
+native `ISketch.ConstraintsState=2` again and stops before any variable write,
+save or close. A separate same-reference interface comparison confirms that
+`IModelObject` does not expose this property, while the explicit `ISketch` returns
+2. The earlier post-editor code 1 is therefore not stable full-definition proof.
+Do not infer another enum reversal, missing constraints, or a certified repair
+from this transition; require a consistent typed readback before driver testing.
+
+The user then manually activated the triangle diagnostic sketch and confirmed
+the UI changed to fully defined, identifying a known KOMPAS status-refresh issue
+on API-created sketches. An activation-aware driver audit subsequently verifies
+D/L/angle changes to 36/26/31 degrees, restoration to 24/17/23 degrees, exact
+vertices/volume, and actual save/close/reopen on that copy. Changed/restored states
+and the first native read after reopen are code 1. An additional programmatic
+`BeginEdit`/`EndEdit` after reopening changes that status to code 2 without changing
+the read-back geometry. Thus editor activation is not an unconditional repair:
+record typed states before/inside/after it, preserve independent driver/geometry
+evidence, and do not add freezing or missing-constraint claims from the flag alone.
+The complete activation-aware probe remains failed at its final status gate;
+do not conflate passing driver/reopen geometry with stable status certification.
+
+Separate geometry-audit runs on the hexagon and pentagon copies also pass
+diameter/length/angle changes to 36/26/31 degrees, restoration, exact vertices,
+one-body volumes and actual save/close/reopen. Original source files, saved
+recipes and foreign document states are preserved. Native code 2 remains at all
+logged stages for these two controls, including programmatic activation; their
+results explicitly separate `geometry_verified=true` from
+`fully_defined_verified=false`. This mode is an evidence-gathering diagnostic,
+not a relaxation of production full-definition gates or proof of every input.
+
+A fresh saved-file review on separate read-only copies of three shaft and five
+diaphragm controls preserves native geometry, recipes, source/copy file hashes
+and pre-existing documents. Shaft profiles read code 2 before/after primary
+inspection. Each diaphragm base reads code 2; the three other named roots read
+code 1 initially and code 2 after primary read-only inspections, with unchanged
+volume/recipe/disk files. Keep these transient status observations separate from
+geometric preservation and driver certification. Diaphragm enumeration is bounded
+to20 entries and also returns unnamed state0 records; those are not identified or
+certified, and this is not exhaustive sketch coverage or proof of lost constraints.
+
+A subsequent independent D1/L1 audit on a new writable three-step shaft copy
+verifies diameter 30 to34 and back, then length 20 to24 and back, every trimmed
+cylinder radius/span, analytical volume and actual save/close/reopen. Native code2
+remains separate from this successful geometric/driving evidence. An owned-editor
+audit of a no-bend diaphragm copy finds all12dimension-variable links across its
+four named sketches, including base radius/thickness/cone-height formulas and
+slot/relief drivers. API5 constraint records are available in that editor context.
+These links are real readback, not proof that every diaphragm driver rebuilds
+correctly; no diaphragm parameter changes or saved edits are performed in that
+association audit. Sources and foreign documents remain unchanged.
+
+The no-bend diaphragm follow-up subsequently verifies cone height6 to7 and back
+using actual body bounds, then slot-entry width4 to5 and back using transverse
+sketch geometry, the coupled start radius and increased material removal. The
+restored copy passes actual save/close/reopen with its recipe, CH6/W4, bounds and
+volume preserved. A measured restored-volume difference of about3.54e-6cm3 is
+inside the existing production criterion max(1e-7,reference*1e-5); an earlier
+diagnostic absolute1e-6 gate was unnecessarily stricter. Preserve measured deltas
+before rejecting restoration, and do not loosen unrelated geometric checks.
+This is representative no-bend driver evidence, not every-parameter/bent-variant
+or full-definition certification. Sources and foreign documents remain unchanged.
+
+Bent controls subsequently pass owned-editor association readback(15/18/19
+dimension links for single-bend/S-circle/S-oval) and independent first bend
+radius8 to9 and back; both S-controls also pass second radius7 to8 and back.
+Actual inner/outerarc radii follow normal thickness3, bodyvolume responds while
+protected bounds remain stable, and complete original profile geometry is
+restored. All three pass actualsave/close/reopen, recipe/source/foreign preservation
+and the existing volume tolerance. Nativebasecode2 remains separate from this
+representative geometric driver proof; neither all-parameter coverage nor full
+sketch-definition certification is implied. No public in-place editing is added.
+
+For the current legacy review, the user accepts the API/UI full-definition flag
+instability as a KOMPAS limitation and closes further attempts to repair that
+indicator. Retain its raw meaning; do not relabel code2 as code1 or freeze geometry
+to satisfy it. Continue independent body, parameter-link, rebuild and saved-file
+verification. This review decision does not silently change production gates or
+override genuine operation/geometry errors; functional driving limitations remain
+separate from the indicator issue.
 
 ### SKETCH-010: Do Not Re-Merge An Already Owned Profile Node Through Auxiliary Geometry
 
@@ -1490,7 +2212,7 @@ Rule:
 
 Verification:
 - all planned constraints and dimensions apply without skips or failures;
-- `ConstraintsState == 2`, primary-contour preflight passes, and save/reopen is
+- `ConstraintsState == 1` (`ksStateWellConstrained`), primary-contour preflight passes, and save/reopen is
   stable;
 - change one driving variable and confirm the intended geometry moves while the
   contour remains closed.
@@ -1568,7 +2290,9 @@ Known example:
   now creates all features first, applies this one relation in an isolated bridge
   call, and independently verifies the exact reference pair and contour topology.
   Preserve both the unsaved live state and a saved artifact when investigating
-  future solver discrepancies.
+   future solver discrepancies. This historical label conflict may also involve
+   the reversed sketch-state decoder (`SKETCH-011`); the original raw codes and
+   declared interface must be checked before attributing it to KOMPAS unreliability.
 
 ---
 
@@ -1641,18 +2365,34 @@ Cause:
   The solid modeler can classify this as self-intersection.
 
 Rule:
-- Always keep gap strictly greater than zero.
-- Use `0.01 mm` as a safe minimum unless a task-specific tolerance says
-  otherwise.
+- Use an explicit positive clearance policy when non-touching CAD turns are
+  required. Preserve requested nominal wire dimensions.
+- `0.01 mm` is a verified starting axial increment for the compression control
+  cases below, not a universal minimum surface clearance or manufacturing tolerance.
+- Do not silently clamp an explicit zero. Report contact/self-intersection when
+  the native solid is invalid, and let the caller choose an increment.
 
 Implementation:
 ```python
-gap = max(requested_gap, 0.01)
+gap = 0.01 if requested_gap is None else requested_gap
 ```
 
 Known examples:
 - `compression_spring`: models with no clearance between turns produced
   self-intersection errors.
+- Compression integration (2026-10): mean30, wire4, height48, working turns5,
+  closed ends1, ground ends0.5 failed for both hands with `IFeature7.Valid=False`
+  and `ObjectError=31` (SDK `ErrorType3d.et3dError31`: object self-intersects),
+  despite successful evolution Update and positive cached volume. A diagnostic
+  profile diameter3.98 on unchanged pitch4 helices removed the error before ground
+  cuts and through save/reopen. This is not permission to shrink nominal wire or
+  silently clamp engineering inputs: an explicit clearance policy is required.
+  The shared compression interface refuses an invalid native sweep before saving.
+  Its explicit `end_pitch_gap` now defaults to0.01 mm (legacy absence remains0),
+  driving `EG1` and `EP1=WD1+EG1`. Both cylinder hands pass with nominal wire4 and
+  end pitch4.01; changing EG1 to0.02 yields4.02 and survives rebuild/save/reopen.
+  This is an axial pitch increment, not a certified minimum surface distance.
+  Explicit zero is preserved and may be refused; no hidden wire shrink is used.
 
 ---
 
@@ -1935,7 +2675,7 @@ Known examples:
   rebuild before reading `ConstraintsState`; save/reopen mutation of `PV_E`,
   `PV_RT`, and `PV_ALPHA` retained a fully defined closed PH profile.
 - `Poly-V groove`: require exactly one closed component, zero gaps, branches,
-  and self-intersections, `ConstraintsState=2`, one unchanged body, and an
+   and self-intersections, raw `ConstraintsState=2` (historical, not full-definition proof; `SKETCH-011`), one unchanged body, and an
   actual/analytical removed-volume check. The PH/PJ/PK/PL/PM live matrix retained
   these properties after save/reopen.
 - `disc_spring`: the constrained profile was fully defined, but the revolve
@@ -1990,6 +2730,9 @@ Rule:
   canonical operation descriptor.
 - Compute exact sketch/feature/dependent-feature names in Layer 2 and carry them
   through the execution plan. The bridge applies those names verbatim.
+- Assign a sketch's canonical name before its initial Update and parameterization
+  when constructing a new owned branch. Verify its persistence and solver state
+  from disk; a matching in-memory Name alone is not proof of saved identity.
 - Do not include `FINAL`, dates, timestamps, UUIDs, or output filenames in model
   tree names. Keep run identity in the artifact manifest.
 
@@ -2005,6 +2748,24 @@ Known example:
   `V-belt grooves A x2 top edge fillets R1`.
 - `Poly-V groove`: `Poly-V grooves PJ x6 profile` and
   `Poly-V grooves PJ x6 cut rotation`.
+- `external_flat_step`: late `ISketch.Name` assignment appeared correct before save,
+  but reopen restored the initial request-derived name and EFLT owned-root recognition
+  failed. A late explicit Update persisted the name but returned under-constrained
+  native state 2, including after reopen. Honoring `params.sketch_name` before the
+  first Update/BeginEdit fixed the common path; fresh one-flat forward and two-flat
+  backward stdio-MCP create/inspect plus actual reopen retained both roots, checksum
+  recipe, geometry and full native state 1. This family evidence does not authorize
+  renaming an arbitrary existing user sketch or interpreting state 2 as success.
+- `external_polygonal_step`: assign the planned canonical name and fixed sketch
+  placement before the initial Update/parameterization as well. The previous
+  common adapter renamed and fixed the sketch afterwards and unconditionally
+  reopened its editor to settle the solver. Remove that late mutation/edit cycle;
+  it is not a reliable state-refresh repair (`SKETCH-011`). Fresh common-module
+  hexagon D30/L10, backward pentagon D32/L22/17 degrees and circumcircle triangle
+  D24/L17/23 degrees pass strict native state1 and geometry checks without manual
+  activation. Actual close/reopen also preserves state1 on the hexagon/pentagon.
+  This representative construction evidence does not certify arbitrary editor
+  cycles or manual driver changes and does not weaken the native state gate.
 
 Related:
 - `OP-001`
@@ -2189,6 +2950,48 @@ Related:
 
 ---
 
+### OP-007: Inner-Edge Chamfers Open At The End Face
+
+Applies when:
+- cutting a symmetric chamfer on a bore or internal tooth-tip edge with a
+  revolved triangular profile;
+- adapting an outside-edge chamfer profile to internal geometry.
+
+Symptom:
+- the chamfer narrows the opening at the end face or slopes like an external
+  gear-tip chamfer;
+- the side preview and the CAD cut agree with each other but both point inward.
+
+Cause:
+- reusing the outside-edge triangle without reversing its radial placement.
+  For an internal edge the material is at `r > r_bore`: the face opening must
+  be larger than the nominal inner radius.
+
+Rule:
+- at face `x=x0`, use the cut triangle `(x0,r)`, `(x0,r+d)`,
+  `(x0+c,r)`, where `c` is axial chamfer width and `d=c tan(alpha)`;
+- mirror the axial coordinate for the opposite face, but do not invert the
+  radial rule;
+- draw the side-view bevel from `r+d` at the face to `r` inside the width.
+
+Verification:
+- inspect the planned profile points before COM;
+- verify from the radial point ordering that the face opening is larger than
+  the nominal internal tip/bore diameter;
+- live-build and verify two valid revolved cuts and one positive solid.
+
+Known example:
+- internal gear `m2 z40 D100 x 20`, tooth-tip chamfers `0.5 x 45 deg`: KOMPAS
+  accepted both revolved cuts and the cubic-NURBS tooth-space pattern; readback
+  mass was `436.1621575 g` for steel density `7.856 g/cm3`.
+
+Related:
+- `OP-005`
+- `OP-006`
+- `VERIFY-001`
+
+---
+
 ### SPIRAL-001: InitialAngle Is Not Positioning Orientation
 
 Applies when:
@@ -2207,13 +3010,15 @@ Cause:
 | Mechanism | Initial angle | Positioning orientation |
 |---|---|---|
 | Meaning | phase of the first turn | rotation of local CS relative to guide |
-| API surface | `spiral.InitialAngle` or spiral parameter | `ILocalCSAxesDirectionParam`, Euler readback, object orientation modes |
+| API surface | `spiral.TurningAngle` in verified v23 `ICylindricSpiral3D` | `ILocalCSAxesDirectionParam`, Euler readback, object orientation modes |
 | Formula support | yes, when field supports it | not a formula field; COM derives absolute orientation from placement mode |
 | Use in bent coil | phase of the helical curve | placement of the spiral's local coordinate system |
 
 Rule:
-- Control spiral phase through `InitialAngle`, not through positioning CS
-  rotation.
+- Control spiral phase through the native phase field, not through positioning CS
+  rotation. The v23 interface exposes `TurningAngle`; the thread trace found no
+  `InitialAngle` property. Do not infer an API property from the conceptual name
+  or assume that an unverified legacy fallback setter is authoritative.
 - Do not treat visible nutation/precession/rotation fields as disposable
   garbage. KOMPAS shows absolute orientation values for the positioned local CS;
   they can appear regardless of the placement mode.
@@ -2233,6 +3038,11 @@ Verification:
 Known examples:
 - `CASE-001`: `_apply_spiral_turning_angle` changed positioning orientation,
   not spiral phase. Stable left hook used numeric initial angle `90`.
+- Compression integration (2026-10): native point-on-curve probes found first
+  left-hand segment angle0, subsequent segment angle90 and a quarter-turn gap.
+  Aligning the first and subsequent left-hand angle formulas fixes the missing
+  second fillet edges. A left two-zone spring with phase30 survives save/reopen.
+  This phase defect is separate from zero-clearance solid contact (`GAP-001`).
 - `bent_coil_left_spike`: orient-by-object was re-tested and rejected because it
   gives an incorrect physical placement despite the correct orientation object.
 - `bent_coil_left_spike` right hook: with axis-direction positioning, KOMPAS can
@@ -2245,7 +3055,7 @@ Related:
 
 ---
 
-### CURVE-002: Build KOMPAS Splines As A Cubic Bezier Chain
+### CURVE-002: Preserve Spline Shape With Family-Specific Knots
 
 Applies when:
 - an analytic curve must become one smooth KOMPAS spline entity;
@@ -2264,14 +3074,20 @@ Cause:
 - The sketch readback requires casting the entity to `INurbs` before
   `GetNurbsParams`; the raw dispatch object exposes neither `Degree` nor the
   method, so the geometry reads empty and the entity is skipped.
-- KOMPAS preserves the piecewise-Bezier knot convention used by the accepted
-  cam path, not an arbitrary simple-knot B-spline. Interior knots must be
-  repeated three times with clamped ends.
+- Passing mathematical degree where API7 expects order can silently alter the
+  knot vector (`CURVE-001`). This is not proof that simple knots are unsupported.
+- Triple interior knots in the accepted piecewise-Bezier representation expose
+  separate spans to a loft. A nominally tangent chain can fragment the final
+  surface and make circular patterns substantially more expensive.
 
 Rule:
-- Represent one smooth curve as a C1 cubic Bezier chain: Catmull-Rom control
-  points through the data, weights 1, knots `[t0]*4`, `[t_i]*3` at interior
-  parameters, `[t_n]*4`; degree 3, `closed = false`.
+- Retain the family's verified representation. Existing cam and cylindrical-gear
+  paths use cubic Bezier chains with clamped ends and triple interior knots.
+- Bevel loft sections use the existing interpolating cubic B-spline with simple
+  interior knots (C2 within each curve), weights 1 and native order 4. This avoids
+  unnecessary loft seams. Keep real root/involute discontinuities separate.
+- Do not change a family's knots based only on `Update()` success: compare native
+  order, poles, weights, knots, body bounds/volume and save/reopen readback.
 - Cast to `INurbs` in `_inspect_sketch_full_entity` and read `values[1]` points,
   `values[2]` weights, `values[3]` knots, degree from `Degree`.
 - Split a profile at a real tangent discontinuity (for example the gear form
@@ -2288,6 +3104,10 @@ Known example:
 - Cam: `cams/cad.py` piecewise-Bezier knots; gear `gear_spur`: root and
   involute curves per flank, seven tooth-space entities, live cut accepted with
   0.007 % volume error.
+- Bevel `m3 z20 delta45`: simple-knot C2 splines retained all native parameters,
+  reduced faces from 743 to 183 and creation from 91.58 to 30.03 seconds locally;
+  the single-solid volume error was 0.0121%, with identical bounds and recipe
+  restoration after save/reopen.
 
 Related:
 - `CURVE-001`

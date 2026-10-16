@@ -29,7 +29,9 @@ function viewport() {
   const dx = Math.max(bounds.x_max - bounds.x_min, 1e-6);
   const dy = Math.max(bounds.y_max - bounds.y_min, 1e-6);
   const compact = width < 620;
-  const padding = {
+  const padding = state.data?.family === "gear_bevel" ? {
+    left: 40, right: 100, top: 70, bottom: 60,
+  } : {
     left: compact ? 44 : 76,
     right: compact ? 132 : 190,
     top: compact ? 82 : 104,
@@ -593,6 +595,15 @@ function draw() {
   drawBackground(view);
   if (!state.data) return;
   drawAxes(view);
+  const cropped = Boolean(state.data.crop_outline?.length);
+  if (cropped) {
+    context.save();
+    const clip = new Path2D();
+    clip.moveTo(...view.point(state.data.crop_outline[0]));
+    for (const p of state.data.crop_outline.slice(1)) clip.lineTo(...view.point(p));
+    clip.closePath();
+    context.clip(clip);
+  }
   drawPhantomBodies(view);
   drawReferencePaths(view);
   for (const guide of state.data.guide_paths || []) {
@@ -604,6 +615,7 @@ function draw() {
         stroke: item.stroke === false ? false : toneColor(item.tone),
         lineWidth: item.width ?? (item.active ? 2.4 : 1.6),
         dashed: item.dashed ?? item.active === false,
+        closed: item.closed ?? true,
         fill: typeof item.fill === "string" ? item.fill : (item.fill ? "#10151c" : null),
       });
     }
@@ -620,6 +632,23 @@ function draw() {
   const activePath = state.data.active_path;
   if (activePath?.points?.length) {
     drawPath(activePath.points, view, { stroke: toneColor(activePath.tone), lineWidth: 3.8 });
+  }
+  if (cropped) {
+    context.restore();
+    // Cut marks are annotations, not geometry. Do not draw them over empty
+    // gaps when a very narrow rim has disconnected material at the crop.
+    context.save();
+    const material = new Path2D();
+    for (const outline of state.data.closed_points || []) {
+      material.moveTo(...view.point(outline[0]));
+      for (const p of outline.slice(1)) material.lineTo(...view.point(p));
+      material.closePath();
+    }
+    context.clip(material);
+    for (const points of state.data.break_paths || []) {
+      drawPath(points, view, {closed: false, stroke: "rgba(227,170,79,.82)", lineWidth: 1.15});
+    }
+    context.restore();
   }
   drawArrows(view);
   drawDimensions(view);

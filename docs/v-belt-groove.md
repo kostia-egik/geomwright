@@ -328,6 +328,12 @@ The bridge verifies:
    fillet update/rebuild, unchanged body count, and additional volume decrease;
 9. hidden sketch status unless diagnostic visibility is explicitly requested.
 
+Solver-state evidence caveat: historical `ConstraintsState=2` below was wrongly
+decoded as fully defined. API7 `ISketch` uses 1 for well-constrained and 2 for
+under-constrained; see [SKETCH-011](../CAD_PATTERNS.md#sketch-011-decode-sketch-state-from-the-native-enum-not-an-assumed-numeric-scale).
+The decoder/gates are corrected, but old solver-state claims require a fresh live
+review. Their geometry, topology, volume and expression readback remain separate evidence.
+
 The live acceptance case used profile A, datum diameter 100 mm, two grooves, and
 a Ø105.6 × 35 mm disposable blank. The cut changed volume from
 306.5390182185 cm³ to 236.8417682919 cm³. Removed volume matched the analytical

@@ -6,11 +6,12 @@ from pathlib import Path
 import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 try:
     from fastapi import FastAPI, HTTPException, Request
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised by installation boundary
@@ -22,11 +23,29 @@ from .registry import get_module, list_modules, preview_module
 from .registry import managed_pulley_plan
 from .camshaft import CamshaftGeometryError, CamshaftPhasesRequest, cam_profile_request
 from kompas_mcp.adapter import KompasAdapter
+from kompas_mcp.bridge_runner import DEFAULT_NORMAL_TIMEOUT_SECONDS
 from kompas_mcp import cams
 from kompas_mcp.cams.errors import CamSynthesisError
 
 
 _ROOT = Path(__file__).resolve().parent
+_TRUSTED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_FINISHED_JOB_LIMIT = 100
+
+
+def _http_authority(value: str, scheme: str) -> tuple[str, int]:
+    """Parse a single HTTP authority without accepting URL syntax in Host."""
+    parsed = urlsplit(f"{scheme}://{value}")
+    if (scheme not in {"http", "https"} or not value or parsed.netloc != value or parsed.path
+            or parsed.query or parsed.fragment or parsed.username is not None
+            or parsed.password is not None or any(c.isspace() for c in value)
+            or value.endswith(":") or "\\" in value):
+        raise ValueError("Invalid HTTP authority")
+    host = parsed.hostname
+    port = parsed.port
+    if host is None or (port is not None and not 1 <= port <= 65535):
+        raise ValueError("Invalid HTTP authority")
+    return host, port if port is not None else (443 if scheme == "https" else 80)
 
 
 def _static_content_version() -> str:
@@ -54,6 +73,34 @@ def _studio_content_version() -> str:
     for path in sorted(Path(cams.__file__).parent.glob("*.py")):
         digest.update(f"cams/{path.name}".encode("utf-8"))
         digest.update(path.read_bytes())
+    # CAD plans and spline fitting are cached in this process too. A geometry-only
+    # fix must not reuse a Studio instance with the old gear generator.
+    from kompas_mcp import gears
+    for path in sorted(Path(gears.__file__).parent.glob("*.py")):
+        digest.update(f"gears/{path.name}".encode("utf-8"))
+        digest.update(path.read_bytes())
+    # Spline previews retain both calculation/catalog code and request schemas.
+    # Hash the package tree so new helpers also invalidate an existing process.
+    from kompas_mcp.connections import splines
+    spline_root = Path(splines.__file__).parent
+    for path in sorted(spline_root.rglob("*.py")):
+        digest.update(f"connections/splines/{path.relative_to(spline_root).as_posix()}".encode("utf-8"))
+        digest.update(path.read_bytes())
+    # Managed creation finalizers live in the cached host adapter, not the bridge.
+    from kompas_mcp import adapter as adapter_runtime
+    digest.update(b"kompas_mcp/adapter.py")
+    digest.update(Path(adapter_runtime.__file__).read_bytes())
+    from kompas_mcp import bridge_runner as runner_runtime
+    digest.update(b"kompas_mcp/bridge_runner.py")
+    digest.update(Path(runner_runtime.__file__).read_bytes())
+    from kompas_mcp import session_guard as guard_runtime
+    digest.update(b"kompas_mcp/session_guard.py")
+    digest.update(Path(guard_runtime.__file__).read_bytes())
+    # Same source with a different launch environment must not reuse a server
+    # whose cached adapters select the previous native interpreter.
+    selected_python = os.environ.get("KOMPAS_PYTHON") or str(runner_runtime.default_kompas_python_path())
+    digest.update(b"cad_python_selection")
+    digest.update(str(Path(selected_python).resolve()).encode("utf-8"))
     from kompas_mcp.transmissions import silent_chain
     digest.update(b"transmissions/silent_chain.py")
     digest.update(Path(silent_chain.__file__).read_bytes())
@@ -131,7 +178,8 @@ def create_app(
         runner = getattr(adapter, "runner", None)
         if runner is not None:
             runner.require_visible_kompas = True
-            runner.timeout_seconds = 180.0 if interruptible else None
+            runner.cad_mode = "interactive"
+            runner.timeout_seconds = DEFAULT_NORMAL_TIMEOUT_SECONDS
             runner.cancel_event = cancel_event if interruptible else None
         return adapter
 
@@ -146,6 +194,38 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(_ROOT / "static")), name="static")
 
     @app.middleware("http")
+    async def _local_http_boundary(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # CORS response headers do not prevent a foreign page from sending a
+        # simple POST. Check before any route can invoke a picker or adapter.
+        try:
+            hosts = request.headers.getlist("host")
+            if len(hosts) != 1:
+                raise ValueError("A single Host is required")
+            authority = _http_authority(hosts[0], request.url.scheme)
+            if authority[0] not in _TRUSTED_HOSTS:
+                raise ValueError("Untrusted Host")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Untrusted or invalid Host"})
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origins = request.headers.getlist("origin")
+            fetch_sites = request.headers.getlist("sec-fetch-site")
+            valid = not origins and not any(key.startswith("sec-fetch-") for key in request.headers)
+            if len(origins) == 1:
+                try:
+                    origin = urlsplit(origins[0])
+                    valid = (origins[0] == f"{origin.scheme}://{origin.netloc}"
+                             and origin.scheme == request.url.scheme
+                             and not origin.path and not origin.query and not origin.fragment
+                             and _http_authority(origin.netloc, origin.scheme) == authority)
+                except ValueError:
+                    valid = False
+                if fetch_sites and fetch_sites not in (["same-origin"], ["none"]):
+                    valid = False
+            if not valid:
+                return JSONResponse(status_code=403, content={"detail": "A same-origin request is required"})
+        return await call_next(request)
+
+    @app.middleware("http")
     async def _revalidate_static(request, call_next):  # type: ignore[no-untyped-def]
         response = await call_next(request)
         if request.url.path.startswith("/static/"):
@@ -158,6 +238,39 @@ def create_app(
     cad_build_lock = threading.Lock()
     cad_cancel_events: dict[str, threading.Event] = {}
 
+    def prune_finished_jobs() -> None:
+        # Caller holds cad_jobs_lock; cancel events share the same lifetime.
+        finished = sorted(
+            (job for job in cad_jobs.values() if job["status"] in {"completed", "failed", "cancelled"}),
+            key=lambda job: float(job.get("finished_at") or 0.0),
+        )
+        for job in finished[:-_FINISHED_JOB_LIMIT]:
+            cad_jobs.pop(job["id"], None)
+            cad_cancel_events.pop(job["id"], None)
+
+    def submit_cad_job(target: Any, args: tuple[Any, ...]) -> dict[str, Any]:
+        job_id = uuid4().hex
+        with cad_jobs_lock:
+            # The UI tracks one build. Refuse extra work before allocating a
+            # thread; cancellation remains outstanding until the worker settles.
+            if any(job["status"] in {"queued", "running"} for job in cad_jobs.values()):
+                raise HTTPException(status_code=409, detail="A CAD job is already active; wait for it to finish")
+            prune_finished_jobs()
+            cad_jobs[job_id] = {
+                "id": job_id, "status": "queued", "stage": "queued",
+                "created_at": time.time(), "started_at": None,
+                "finished_at": None, "result": None, "error": None,
+            }
+            cad_cancel_events[job_id] = threading.Event()
+            try:
+                threading.Thread(target=target, args=(job_id, *args),
+                                 name=f"geomwright-cad-{job_id[:8]}", daemon=True).start()
+            except Exception as exc:
+                cad_jobs.pop(job_id, None)
+                cad_cancel_events.pop(job_id, None)
+                raise HTTPException(status_code=503, detail="Could not start the CAD worker") from exc
+        return job_snapshot(job_id)
+
     def job_snapshot(job_id: str) -> dict[str, Any]:
         with cad_jobs_lock:
             job = cad_jobs.get(job_id)
@@ -168,6 +281,7 @@ def create_app(
     def update_job(job_id: str, **values: Any) -> None:
         with cad_jobs_lock:
             cad_jobs[job_id].update(values)
+            prune_finished_jobs()
 
     def run_cad_job(job_id: str, module_kind: str, profile: dict[str, Any], name: str) -> None:
         cancel_event = cad_cancel_events[job_id]
@@ -463,6 +577,7 @@ def create_app(
                         document_id=document_id,
                         close_after_save=True,
                         strict=True,
+                        user_requested_close=True,
                     )
                 elif save_path:
                     closed = adapter.save_document_as(
@@ -470,6 +585,7 @@ def create_app(
                         document_id=document_id,
                         close_after_save=True,
                         strict=True,
+                        user_requested_close=True,
                     )
                 else:
                     raise ValueError("save_path is required for an unsaved document")
@@ -479,6 +595,7 @@ def create_app(
                     save=False,
                     close_mode=0,
                     strict=True,
+                    user_requested=True,
                 )
             return {
                 "ok": True,
@@ -610,45 +727,11 @@ def create_app(
                 raise HTTPException(status_code=409, detail="confirm_write=true is required")
             if module.kind in {"chain_sprocket", "silent_chain_sprocket", "camshaft_lobe"}:
                 managed_pulley_plan(module.kind, request.model_dump(exclude_none=True))
-            job_id = uuid4().hex
-            now = time.time()
-            with cad_jobs_lock:
-                finished_jobs = [
-                    item
-                    for item in cad_jobs.values()
-                    if item.get("status") in {"completed", "failed", "cancelled"}
-                ]
-                for expired in sorted(
-                    finished_jobs,
-                    key=lambda item: float(item.get("finished_at") or 0.0),
-                )[:-99]:
-                    expired_id = str(expired["id"])
-                    cad_jobs.pop(expired_id, None)
-                    cad_cancel_events.pop(expired_id, None)
-                cad_jobs[job_id] = {
-                    "id": job_id,
-                    "status": "queued",
-                    "stage": "queued",
-                    "created_at": now,
-                    "started_at": None,
-                    "finished_at": None,
-                    "result": None,
-                    "error": None,
-                }
-                cad_cancel_events[job_id] = threading.Event()
-            worker = threading.Thread(
-                target=run_cad_job,
-                args=(
-                    job_id,
+            return submit_cad_job(run_cad_job, (
                     module.kind,
                     request.model_dump(exclude_none=True),
                     str(payload.get("name") or ("Geomwright cam" if kind == "camshaft_lobe" else "Geomwright pulley")),
-                ),
-                name=f"geomwright-cad-{job_id[:8]}",
-                daemon=True,
-            )
-            worker.start()
-            return job_snapshot(job_id)
+                ))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValidationError as exc:
@@ -672,36 +755,14 @@ def create_app(
                 raise HTTPException(status_code=422, detail="document_id and block_id are required")
             if payload.get("confirm_write") is not True:
                 raise HTTPException(status_code=409, detail="confirm_write=true is required")
-            job_id = uuid4().hex
-            now = time.time()
-            with cad_jobs_lock:
-                cad_jobs[job_id] = {
-                    "id": job_id,
-                    "status": "queued",
-                    "stage": "queued",
-                    "created_at": now,
-                    "started_at": None,
-                    "finished_at": None,
-                    "result": None,
-                    "error": None,
-                }
-                cad_cancel_events[job_id] = threading.Event()
-            worker = threading.Thread(
-                target=run_update_job,
-                args=(
-                    job_id,
+            return submit_cad_job(run_update_job, (
                     module.kind,
                     request.model_dump(exclude_none=True),
                     previous_request.model_dump(exclude_none=True),
                     str(payload.get("name") or "Geomwright pulley"),
                     document_id,
                     block_id,
-                ),
-                name=f"geomwright-update-{job_id[:8]}",
-                daemon=True,
-            )
-            worker.start()
-            return job_snapshot(job_id)
+                ))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValidationError as exc:
@@ -718,17 +779,14 @@ def create_app(
 
     @app.post("/cad/jobs/{job_id}/cancel")
     def cancel_cad_job(job_id: str) -> dict[str, Any]:
-        try:
-            snapshot = job_snapshot(job_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="CAD job was not found") from exc
-        if snapshot.get("status") in {"completed", "failed", "cancelled"}:
-            return snapshot
-        cancel_event = cad_cancel_events.get(job_id)
-        if cancel_event is not None:
-            cancel_event.set()
-        update_job(job_id, stage="cancelling")
-        return job_snapshot(job_id)
+        with cad_jobs_lock:
+            job = cad_jobs.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="CAD job was not found")
+            if job["status"] not in {"completed", "failed", "cancelled"}:
+                cad_cancel_events[job_id].set()
+                job["stage"] = "cancelling"
+            return dict(job)
 
     return app
 
